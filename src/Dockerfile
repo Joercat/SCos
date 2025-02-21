@@ -19,7 +19,7 @@ WORKDIR /scos
 
 # Copy CMakeLists.txt first to leverage Docker cache
 COPY CMakeLists.txt .
-COPY src/
+COPY src/ src/
 
 # Create build directory and build project
 RUN mkdir -p build && \
