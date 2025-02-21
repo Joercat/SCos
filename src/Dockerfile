@@ -1,25 +1,31 @@
-FROM ubuntu:latest
+# Use a more specific base image with Vulkan support
+FROM nvidia/opengl:1.2-glvnd-runtime-ubuntu20.04
 
-# Install dependencies
-RUN apt-get update && apt-get install -y \
+# Install dependencies with specific versions
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential \
-    cmake \
+    cmake=3.16.3-1ubuntu1 \
     libvulkan-dev \
     vulkan-tools \
     libglfw3-dev \
     libglm-dev \
-    git
+    git \
+    pkg-config \
+    python3 \
+    ninja-build
 
 # Set working directory
-WORKDIR /src
+WORKDIR /scos
 
-# Copy source code
-COPY . .
+# Copy CMakeLists.txt first to leverage Docker cache
+COPY CMakeLists.txt .
+COPY src/ src/
 
-# Build the project
-RUN mkdir build && cd build && \
-    cmake .. && \
-    make -j$(nproc)
+# Create build directory and build project
+RUN mkdir -p build && \
+    cd build && \
+    cmake -GNinja .. && \
+    ninja
 
-# Set entry point
-ENTRYPOINT ["./build/scos"]
+# Set the executable as entry point
+CMD ["./build/scos"]
