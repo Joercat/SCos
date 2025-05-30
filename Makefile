@@ -12,9 +12,11 @@ SRCDIR = .
 OBJDIR = obj
 
 SOURCES_C = 
+
 SOURCES_CXX = kernel/main.cpp \
               ui/desktop.cpp \
               ui/window_manager.cpp \
+              ui/app_launcher.cpp \
               apps/terminal.cpp \
               apps/shell.cpp \
               apps/notepad.cpp \
@@ -34,7 +36,6 @@ SOURCES_ASM = bootloader.asm \
 OBJECTS_C = $(SOURCES_C:%.c=$(OBJDIR)/%.o)
 OBJECTS_CXX = $(SOURCES_CXX:%.cpp=$(OBJDIR)/%.o)
 OBJECTS_ASM = $(SOURCES_ASM:%.asm=$(OBJDIR)/%.o)
-
 OBJECTS = $(OBJECTS_C) $(OBJECTS_CXX) $(OBJECTS_ASM)
 
 .PHONY: all clean
