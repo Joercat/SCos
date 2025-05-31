@@ -1,5 +1,5 @@
 #include <stdint.h>
-#include <cstring>
+#include "../include/string.h"
 
 // VGA text mode constants
 #define VGA_BUFFER ((volatile char*)0xB8000)
@@ -177,7 +177,7 @@ void openAboutAdvanced() {
     center_text(23, "ESC: Exit | F1: Help | F5: Refresh", MAKE_COLOR(COLOR_DARK_GRAY, COLOR_BLACK));
 }
 #include <stdint.h>
-#include <cstring>
+#include "../include/string.h"
 
 // VGA text mode constants
 #define VGA_BUFFER ((volatile char*)0xB8000)

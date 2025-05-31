@@ -1,6 +1,6 @@
 #include "desktop.hpp"
 #include "window_manager.hpp"
-#include <cstring>
+#include "../include/string.h"
 #include "../apps/terminal.hpp"
 #include "../apps/notepad.hpp"
 #include "../apps/calendar.hpp"
@@ -10,25 +10,6 @@
 #include "../fs/ramfs.hpp"
 #include "../drivers/keyboard.hpp"
 #include "../include/string.h"
-
-// Utility function implementations
-
-char* strstr(const char* haystack, const char* needle) {
-    if (!*needle) return (char*)haystack;
-
-    for (const char* h = haystack; *h; h++) {
-        const char* h_temp = h;
-        const char* n_temp = needle;
-
-        while (*h_temp && *n_temp && *h_temp == *n_temp) {
-            h_temp++;
-            n_temp++;
-        }
-
-        if (!*n_temp) return (char*)h;
-    }
-    return (char*)0;
-}
 
 // Desktop state
 static bool desktop_initialized = false;
@@ -321,6 +302,6 @@ void Desktop::passInputToApplication(int window_id, uint8_t key) {
     // Add more application input handlers as needed
 }
 void Desktop::launchCalculator() {
-    // Placeholder for calculator launch logic
-    // In a real implementation, you would create and run the calculator app here.
+    extern void launchCalculator();
+    launchCalculator();
 }
