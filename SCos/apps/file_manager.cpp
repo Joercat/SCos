@@ -1,4 +1,5 @@
 
+#include "file_manager.hpp"
 #include <stdint.h>
 
 // VGA text mode constants
@@ -63,6 +64,23 @@ void openFileManager() {
     vga_put_string(4, 18, "5 items | 2 folders, 3 files", MAKE_COLOR(COLOR_LIGHT_GRAY, COLOR_WHITE));
 }
 
-void FileManager::handleInput(char key) {
+void FileManager::handleInput(uint8_t key) {
     // Handle file manager input
+    switch (key) {
+        case 0x01: // Escape
+            // Close file manager
+            break;
+        case 0x48: // Up arrow
+            // Navigate up
+            break;
+        case 0x50: // Down arrow
+            // Navigate down
+            break;
+        case 0x1C: // Enter
+            // Open selected item
+            break;
+        default:
+            // Handle other keys
+            break;
+    }
 }
