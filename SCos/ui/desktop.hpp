@@ -21,27 +21,28 @@ enum AppType {
 class Desktop {
 public:
     // Main desktop functions
-    static void init();
+    static bool init();
     static void run();
-    
+
     // Desktop rendering
     static void drawDesktopBackground();
     static void drawTaskbar();
     static void drawActiveApps();
-    
+
     // Window management
     static void setupDefaultWindows();
     static void switchToNextWindow();
     static void launchApplication(AppType app);
     static void closeActiveWindow();
-    
+
     // Input handling
     static void handleInput();
     static void passInputToApplication(int window_id, uint8_t key);
-    
+	static void handle_events();
     // Desktop updates
     static void updateDesktop();
-    
+	static void update();
+
 private:
     // Internal state management
     static void refreshTaskbar();

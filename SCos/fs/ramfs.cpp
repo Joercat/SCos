@@ -9,8 +9,9 @@ struct File {
 static File files[4];
 static int fileCount = 0;
 
-void initFS() {
+bool initFS() {
     writeFile("home/welcome.txt", "Welcome to SCos Notepad!");
+    return true;
 }
 
 const char* readFile(const char* path) {

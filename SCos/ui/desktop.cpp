@@ -15,30 +15,39 @@ static int taskbar_height = 2;
 static int desktop_windows[MAX_DESKTOP_APPS];
 static int desktop_window_count = 0;
 
-void Desktop::init() {
-    if (desktop_initialized) return;
-    
+bool Desktop::init() {
+    if (desktop_initialized) return true;
+
     // Initialize window manager
     WindowManager::init();
-    
+
     // Draw desktop background
     drawDesktopBackground();
-    
+
     // Create taskbar
     drawTaskbar();
-    
+
     // Create initial desktop windows
     setupDefaultWindows();
-    
+
     desktop_initialized = true;
-    
+
     // Start main desktop loop
     run();
+    return true;
+}
+
+void Desktop::handle_events() {
+    // Handle desktop events
+}
+
+void Desktop::update() {
+    // Update desktop state
 }
 
 void Desktop::drawDesktopBackground() {
     WindowManager::clearScreen();
-    
+
     // Draw desktop pattern or wallpaper
     volatile char* video = (volatile char*)0xB8000;
     for (int y = 0; y < 23; ++y) { // Leave space for taskbar
@@ -57,7 +66,7 @@ void Desktop::drawDesktopBackground() {
 
 void Desktop::drawTaskbar() {
     volatile char* video = (volatile char*)0xB8000;
-    
+
     // Draw taskbar background
     for (int y = 23; y < 25; ++y) {
         for (int x = 0; x < 80; ++x) {
@@ -66,7 +75,7 @@ void Desktop::drawTaskbar() {
             video[idx + 1] = 0x70; // White on black
         }
     }
-    
+
     // Draw SCos logo/button
     const char* os_name = "SCos";
     for (int i = 0; i < 4; ++i) {
@@ -74,7 +83,7 @@ void Desktop::drawTaskbar() {
         video[idx] = os_name[i];
         video[idx + 1] = 0x4F; // White on red
     }
-    
+
     // Draw time (placeholder)
     const char* time_str = "12:34";
     for (int i = 0; i < 5; ++i) {
@@ -82,7 +91,7 @@ void Desktop::drawTaskbar() {
         video[idx] = time_str[i];
         video[idx + 1] = 0x70;
     }
-    
+
     // Draw active application indicators
     drawActiveApps();
 }
@@ -90,7 +99,7 @@ void Desktop::drawTaskbar() {
 void Desktop::drawActiveApps() {
     volatile char* video = (volatile char*)0xB8000;
     int app_start = 10;
-    
+
     for (int i = 0; i < desktop_window_count; ++i) {
         Window* win = WindowManager::getWindow(desktop_windows[i]);
         if (win && win->visible) {
@@ -114,21 +123,21 @@ void Desktop::setupDefaultWindows() {
         desktop_windows[desktop_window_count++] = notepad_id;
         openNotepad(readFile("home/welcome.txt"));
     }
-    
+
     // Create terminal window
     int terminal_id = WindowManager::createWindow("Terminal", 20, 8, 45, 12);
     if (terminal_id >= 0) {
         desktop_windows[desktop_window_count++] = terminal_id;
         runTerminal();
     }
-    
+
     // Create file manager
     int fm_id = WindowManager::createWindow("File Manager", 2, 2, 35, 18);
     if (fm_id >= 0) {
         desktop_windows[desktop_window_count++] = fm_id;
         openFileManager();
     }
-    
+
     // Set terminal as active by default
     if (terminal_id >= 0) {
         WindowManager::setActiveWindow(terminal_id);
@@ -139,7 +148,7 @@ void Desktop::run() {
     while (true) {
         handleInput();
         updateDesktop();
-        
+
         // Simple delay loop
         for (volatile int i = 0; i < 100000; ++i) {}
     }
@@ -149,7 +158,7 @@ void Desktop::handleInput() {
     // Check for keyboard input
     if (Keyboard::hasKey()) {
         uint8_t key = Keyboard::getKey();
-        
+
         // Handle desktop shortcuts
         if (key == KEY_ALT) {
             // Alt+Tab for window switching
@@ -185,10 +194,10 @@ void Desktop::updateDesktop() {
 
 void Desktop::switchToNextWindow() {
     if (desktop_window_count <= 1) return;
-    
+
     int current = WindowManager::getActiveWindow();
     int next_index = 0;
-    
+
     // Find current window in desktop list
     for (int i = 0; i < desktop_window_count; ++i) {
         if (desktop_windows[i] == current) {
@@ -196,7 +205,7 @@ void Desktop::switchToNextWindow() {
             break;
         }
     }
-    
+
     // Find next visible window
     for (int i = 0; i < desktop_window_count; ++i) {
         int try_index = (next_index + i) % desktop_window_count;
@@ -210,41 +219,41 @@ void Desktop::switchToNextWindow() {
 
 void Desktop::launchApplication(AppType app) {
     int window_id = -1;
-    
+
     switch (app) {
         case APP_TERMINAL:
             window_id = WindowManager::createWindow("Terminal", 10 + (desktop_window_count * 3), 
                                                    5 + (desktop_window_count * 2), 45, 12);
             if (window_id >= 0) runTerminal();
             break;
-            
+
         case APP_NOTEPAD:
             window_id = WindowManager::createWindow("Notepad", 15 + (desktop_window_count * 3), 
                                                    4 + (desktop_window_count * 2), 50, 15);
             if (window_id >= 0) openNotepad("");
             break;
-            
+
         case APP_CALENDAR:
             window_id = WindowManager::createWindow("Calendar", 25, 6, 30, 16);
             if (window_id >= 0) openCalendar();
             break;
-            
+
         case APP_SETTINGS:
             window_id = WindowManager::createWindow("Settings", 20, 5, 40, 18);
             if (window_id >= 0) openSettings();
             break;
-            
+
         case APP_ABOUT:
             window_id = WindowManager::createWindow("About SCos", 30, 8, 35, 10);
             if (window_id >= 0) openAbout();
             break;
-            
+
         case APP_FILE_MANAGER:
             window_id = WindowManager::createWindow("File Manager", 5, 3, 35, 18);
             if (window_id >= 0) openFileManager();
             break;
     }
-    
+
     if (window_id >= 0 && desktop_window_count < MAX_DESKTOP_APPS) {
         desktop_windows[desktop_window_count++] = window_id;
         WindowManager::setActiveWindow(window_id);
@@ -255,7 +264,7 @@ void Desktop::closeActiveWindow() {
     int active = WindowManager::getActiveWindow();
     if (active >= 0) {
         WindowManager::closeWindow(active);
-        
+
         // Remove from desktop windows list
         for (int i = 0; i < desktop_window_count; ++i) {
             if (desktop_windows[i] == active) {
@@ -266,7 +275,7 @@ void Desktop::closeActiveWindow() {
                 break;
             }
         }
-        
+
         drawTaskbar(); // Refresh taskbar
     }
 }
@@ -274,7 +283,7 @@ void Desktop::closeActiveWindow() {
 void Desktop::passInputToApplication(int window_id, uint8_t key) {
     Window* win = WindowManager::getWindow(window_id);
     if (!win) return;
-    
+
     // Route input based on window title/type
     if (strstr(win->title, "Terminal")) {
         Terminal::handleInput(key);

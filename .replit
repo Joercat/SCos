@@ -14,10 +14,12 @@ modules = ["cpp-clang14"]
 channel = "stable-21_11"
 packages = [
   "nasm",
-  "glibc_multi",
+  "glibc_multi", 
   "gcc_multi",
   "binutils",
-  "qemu"
+  "qemu",
+  "glibc.dev",
+  "gcc.cc"
 ]
 
 [env]
