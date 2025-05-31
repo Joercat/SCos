@@ -1,12 +1,12 @@
-CC = i686-elf-gcc
-CXX = i686-elf-g++
+CC = gcc
+CXX = g++
 AS = nasm
-LD = i686-elf-ld
+LD = ld
 
-CFLAGS = -m32 -ffreestanding -O2 -Wall -Wextra -fno-exceptions -fno-rtti -I./include
+CFLAGS = -m32 -ffreestanding -O2 -Wall -Wextra -fno-exceptions -fno-rtti -I./include -nostdlib -nostartfiles -nodefaultlibs
 CXXFLAGS = $(CFLAGS)
 ASFLAGS = -f elf32
-LDFLAGS = -T linker.ld -m elf_i386
+LDFLAGS = -T linker.ld -m elf_i386 -nostdlib
 
 SRCDIR = .
 OBJDIR = obj
