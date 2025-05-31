@@ -59,7 +59,4 @@ private:
   static const char *readFile(const char *path);
 };
 
-// Utility functions
-char *strstr(const char *haystack, const char *needle);
-
 #endif
