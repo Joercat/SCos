@@ -1,35 +1,11 @@
 
 #include "file_manager.hpp"
+#include "../ui/window_manager.hpp"
 #include <stdint.h>
 
-// VGA text mode constants
-#define VGA_BUFFER ((volatile char*)0xB8000)
-#define VGA_WIDTH 80
-#define VGA_HEIGHT 25
-#define VGA_BYTES_PER_CHAR 2
+// VGA constants are now in window_manager.hpp
 
-// Color attributes
-#define COLOR_BLACK 0x00
-#define COLOR_BLUE 0x01
-#define COLOR_WHITE 0x0F
-#define COLOR_LIGHT_GRAY 0x07
-#define COLOR_YELLOW 0x0E
-
-#define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
-
-static void vga_put_char(int x, int y, char c, uint8_t color) {
-    if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
-        volatile char* pos = VGA_BUFFER + (y * VGA_WIDTH + x) * VGA_BYTES_PER_CHAR;
-        pos[0] = c;
-        pos[1] = color;
-    }
-}
-
-static void vga_put_string(int x, int y, const char* str, uint8_t color) {
-    for (int i = 0; str[i] && (x + i) < VGA_WIDTH; i++) {
-        vga_put_char(x + i, y, str[i], color);
-    }
-}
+// VGA functions are now declared in window_manager.hpp and defined in window_manager.cpp
 
 // Local string function implementations for freestanding environment
 static int fm_strlen(const char* str) {

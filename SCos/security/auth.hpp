@@ -4,6 +4,14 @@
 
 #include <stdint.h>
 
+// Authentication modes
+enum AuthMode {
+    AUTH_NONE = 0,
+    AUTH_PIN = 1,
+    AUTH_PASSWORD = 2,
+    AUTH_PIN_PASSWORD = 3
+};
+
 #define MAX_PIN_LENGTH 8
 #define MAX_PASSWORD_LENGTH 32
 #define MAX_USERNAME_LENGTH 16

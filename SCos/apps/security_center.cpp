@@ -2,6 +2,19 @@
 #include "../security/auth.hpp"
 #include "../ui/window_manager.hpp"
 
+// Forward declaration for SecurityManager if not in auth.hpp
+class SecurityManager {
+public:
+    static bool isAuthenticated();
+    static AuthMode getAuthMode();
+    static void setAuthMode(AuthMode mode);
+    static int getFailedAttempts();
+    static bool changePin(const char* old_pin, const char* new_pin);
+    static void lockSystem();
+    static void showLoginScreen();
+    static void resetFailedAttempts();
+};
+
 // Security center state
 static int security_window_id = -1;
 static int selected_option = 0;
@@ -10,8 +23,8 @@ static char input_buffer[64];
 static int input_pos = 0;
 static bool input_mode = false;
 
-// VGA functions
-static void vga_put_char(int x, int y, char c, uint8_t color) {
+// VGA functions (remove static to match header declarations)
+void vga_put_char(int x, int y, char c, uint8_t color) {
     if (x >= 0 && x < 80 && y >= 0 && y < 25) {
         volatile char* pos = (volatile char*)0xB8000 + (y * 80 + x) * 2;
         pos[0] = c;
@@ -19,7 +32,7 @@ static void vga_put_char(int x, int y, char c, uint8_t color) {
     }
 }
 
-static void vga_put_string(int x, int y, const char* str, uint8_t color) {
+void vga_put_string(int x, int y, const char* str, uint8_t color) {
     for (int i = 0; str[i] && (x + i) < 80; i++) {
         vga_put_char(x + i, y, str[i], color);
     }
@@ -128,7 +141,7 @@ void openSecurityCenter() {
     }
 }
 
-void SecurityCenter::handleInput(uint8_t key) {
+static void handleSecurityInput(uint8_t key) {
     if (security_window_id < 0) return;
     
     if (input_mode) {
@@ -257,12 +270,7 @@ void SecurityCenter::handleInput(uint8_t key) {
     }
 }
 
-// Security center class for compatibility
-class SecurityCenter {
-public:
-    static void handleInput(uint8_t key);
-};
-
+// Security center class implementation
 void SecurityCenter::handleInput(uint8_t key) {
-    ::SecurityCenter::handleInput(key);
+    handleSecurityInput(key);
 }

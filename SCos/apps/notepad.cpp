@@ -1,3 +1,5 @@
+#include "notepad.hpp"
+#include "../ui/window_manager.hpp"
 #include <stdint.h>
 
 // VGA text mode constants
@@ -146,16 +148,16 @@ static void int_to_string(int value, char* buffer) {
         buffer[1] = '\0';
         return;
     }
-    
+
     int i = 0;
     int temp = value;
-    
+
     while (temp > 0) {
         buffer[i++] = '0' + (temp % 10);
         temp /= 10;
     }
     buffer[i] = '\0';
-    
+
     // Reverse the string
     for (int j = 0; j < i / 2; j++) {
         char tmp = buffer[j];
@@ -167,18 +169,18 @@ static void int_to_string(int value, char* buffer) {
 // Text manipulation functions
 static void text_insert_char(char c) {
     if (notepad.text_length >= MAX_TEXT_SIZE - 1) return;
-    
+
     int cursor_pos = notepad.cursor_y * VGA_WIDTH + notepad.cursor_x;
-    
+
     // Shift text right
     for (int i = notepad.text_length; i > cursor_pos; i--) {
         notepad.text[i] = notepad.text[i - 1];
     }
-    
+
     notepad.text[cursor_pos] = c;
     notepad.text_length++;
     notepad.modified = 1;
-    
+
     // Move cursor
     if (c == '\n') {
         notepad.cursor_x = 0;
@@ -194,10 +196,10 @@ static void text_insert_char(char c) {
 
 static void text_delete_char() {
     if (notepad.text_length == 0) return;
-    
+
     int cursor_pos = notepad.cursor_y * VGA_WIDTH + notepad.cursor_x;
     if (cursor_pos == 0) return;
-    
+
     // Move cursor back
     if (notepad.cursor_x > 0) {
         notepad.cursor_x--;
@@ -210,14 +212,14 @@ static void text_delete_char() {
             cursor_pos--;
         }
     }
-    
+
     cursor_pos = notepad.cursor_y * VGA_WIDTH + notepad.cursor_x;
-    
+
     // Shift text left
     for (int i = cursor_pos; i < notepad.text_length - 1; i++) {
         notepad.text[i] = notepad.text[i + 1];
     }
-    
+
     notepad.text_length--;
     notepad.modified = 1;
 }
@@ -233,7 +235,7 @@ static int count_lines() {
 static int count_words() {
     int words = 0;
     int in_word = 0;
-    
+
     for (int i = 0; i < notepad.text_length; i++) {
         char c = notepad.text[i];
         if (c == ' ' || c == '\t' || c == '\n') {
@@ -249,14 +251,14 @@ static int count_words() {
 // Drawing functions
 static void draw_menu_bar() {
     uint8_t menu_color = MAKE_COLOR(COLOR_BLACK, COLOR_LIGHT_GRAY);
-    
+
     vga_clear_line(0, menu_color);
-    
+
     vga_put_string(2, 0, "File", menu_color);
     vga_put_string(8, 0, "Edit", menu_color);
     vga_put_string(14, 0, "View", menu_color);
     vga_put_string(20, 0, "Help", menu_color);
-    
+
     // File modified indicator
     if (notepad.modified) {
         vga_put_char(70, 0, '*', MAKE_COLOR(COLOR_RED, COLOR_LIGHT_GRAY));
@@ -266,31 +268,31 @@ static void draw_menu_bar() {
 static void draw_title_bar() {
     uint8_t title_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLUE);
     vga_clear_line(1, title_color);
-    
+
     char title[60];
     int pos = 0;
-    
+
     // Build title string
     for (int i = 0; notepad.filename[i] && pos < 30; i++) {
         title[pos++] = notepad.filename[i];
     }
-    
+
     if (notepad.modified) {
         title[pos++] = '*';
     }
-    
+
     title[pos++] = ' ';
     title[pos++] = '-';
     title[pos++] = ' ';
-    
+
     const char* app_name = "SCos Notepad";
     for (int i = 0; app_name[i] && pos < 59; i++) {
         title[pos++] = app_name[i];
     }
     title[pos] = '\0';
-    
+
     vga_put_string(2, 1, title, title_color);
-    
+
     // Window controls
     vga_put_string(74, 1, "- [] X", title_color);
 }
@@ -298,7 +300,7 @@ static void draw_title_bar() {
 static void draw_toolbar() {
     uint8_t toolbar_color = MAKE_COLOR(COLOR_BLACK, COLOR_LIGHT_GRAY);
     vga_clear_line(2, toolbar_color);
-    
+
     // Toolbar buttons
     vga_put_string(2, 2, "[New]", toolbar_color);
     vga_put_string(8, 2, "[Open]", toolbar_color);
@@ -309,7 +311,7 @@ static void draw_toolbar() {
     vga_put_string(37, 2, "[Paste]", toolbar_color);
     vga_put_string(45, 2, "|", MAKE_COLOR(COLOR_DARK_GRAY, COLOR_LIGHT_GRAY));
     vga_put_string(47, 2, "[Find]", toolbar_color);
-    
+
     // Insert/Overwrite mode
     const char* mode = notepad.insert_mode ? "INS" : "OVR";
     vga_put_string(70, 2, mode, MAKE_COLOR(COLOR_BLUE, COLOR_LIGHT_GRAY));
@@ -318,20 +320,20 @@ static void draw_toolbar() {
 static void draw_content_area() {
     uint8_t text_color = MAKE_COLOR(COLOR_BLACK, COLOR_WHITE);
     uint8_t selected_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLUE);
-    
+
     // Clear content area
     for (int y = CONTENT_START_Y; y < CONTENT_START_Y + CONTENT_HEIGHT; y++) {
         vga_clear_line(y, text_color);
     }
-    
+
     // Draw text content
     int text_pos = notepad.scroll_offset * VGA_WIDTH;
     int screen_y = CONTENT_START_Y;
     int screen_x = 0;
-    
+
     for (int i = text_pos; i < notepad.text_length && screen_y < CONTENT_START_Y + CONTENT_HEIGHT; i++) {
         char c = notepad.text[i];
-        
+
         if (c == '\n') {
             screen_y++;
             screen_x = 0;
@@ -343,7 +345,7 @@ static void draw_content_area() {
             }
         } else if (c >= 32 && c <= 126) { // Printable characters
             uint8_t char_color = text_color;
-            
+
             // Check if character is selected
             if (notepad.selection_start != -1 && notepad.selection_end != -1) {
                 int start = (notepad.selection_start < notepad.selection_end) ? notepad.selection_start : notepad.selection_end;
@@ -352,17 +354,17 @@ static void draw_content_area() {
                     char_color = selected_color;
                 }
             }
-            
+
             vga_put_char(screen_x, screen_y, c, char_color);
             screen_x++;
-            
+
             if (screen_x >= VGA_WIDTH) {
                 screen_y++;
                 screen_x = 0;
             }
         }
     }
-    
+
     // Draw cursor
     if (notepad.cursor_y >= notepad.scroll_offset && 
         notepad.cursor_y < notepad.scroll_offset + CONTENT_HEIGHT) {
@@ -374,13 +376,13 @@ static void draw_content_area() {
 static void draw_status_bar() {
     uint8_t status_color = MAKE_COLOR(COLOR_BLACK, COLOR_LIGHT_GRAY);
     vga_clear_line(STATUS_BAR_Y, status_color);
-    
+
     // Line and column info
     char line_info[20];
     char col_str[8], line_str[8];
     int_to_string(notepad.cursor_y + 1, line_str);
     int_to_string(notepad.cursor_x + 1, col_str);
-    
+
     int pos = 0;
     const char* ln_text = "Ln ";
     for (int i = 0; ln_text[i]; i++) line_info[pos++] = ln_text[i];
@@ -391,9 +393,9 @@ static void draw_status_bar() {
     for (int i = 0; col_text[i]; i++) line_info[pos++] = col_text[i];
     for (int i = 0; col_str[i]; i++) line_info[pos++] = col_str[i];
     line_info[pos] = '\0';
-    
+
     vga_put_string(2, STATUS_BAR_Y, line_info, status_color);
-    
+
     // Character count
     char char_info[20];
     char char_str[8];
@@ -403,9 +405,9 @@ static void draw_status_bar() {
     const char* chars_text = " chars";
     for (int i = 0; chars_text[i]; i++) char_info[pos++] = chars_text[i];
     char_info[pos] = '\0';
-    
+
     vga_put_string(20, STATUS_BAR_Y, char_info, status_color);
-    
+
     // Word count
     char word_info[15];
     char word_str[8];
@@ -415,9 +417,9 @@ static void draw_status_bar() {
     const char* words_text = " words";
     for (int i = 0; words_text[i]; i++) word_info[pos++] = words_text[i];
     word_info[pos] = '\0';
-    
+
     vga_put_string(35, STATUS_BAR_Y, word_info, status_color);
-    
+
     // Encoding and mode info
     vga_put_string(55, STATUS_BAR_Y, "UTF-8", status_color);
     vga_put_string(65, STATUS_BAR_Y, notepad.word_wrap ? "Wrap" : "NoWrap", status_color);
@@ -431,10 +433,10 @@ void openNotepad(const char* content) {
         notepad.text_length = notepad_strlen(content);
         notepad.modified = 0;
     }
-    
+
     // Clear screen
     vga_clear_screen(MAKE_COLOR(COLOR_BLACK, COLOR_WHITE));
-    
+
     // Draw interface
     draw_menu_bar();
     draw_title_bar();
@@ -537,7 +539,7 @@ void notepad_save() {
     // In a real OS, this would write to filesystem
     notepad.modified = 0;
     draw_title_bar();
-    
+
     // Show save confirmation
     uint8_t msg_color = MAKE_COLOR(COLOR_BLACK, COLOR_LIGHT_GREEN);
     vga_put_string(50, STATUS_BAR_Y, "File saved!", msg_color);
@@ -559,15 +561,15 @@ void notepad_select_all() {
 // Simple notepad (backward compatible)
 void openNotepadSimple(const char* content) {
     vga_clear_screen(MAKE_COLOR(COLOR_BLACK, COLOR_WHITE));
-    
+
     uint8_t header_color = MAKE_COLOR(COLOR_LIGHT_CYAN, COLOR_WHITE);
     vga_put_string(5, 2, "SCos Notepad", header_color);
-    
+
     if (content) {
         uint8_t text_color = MAKE_COLOR(COLOR_BLACK, COLOR_WHITE);
         int y = 4;
         int x = 5;
-        
+
         for (int i = 0; content[i] && y < 20; i++) {
             if (content[i] == '\n') {
                 y++;
@@ -582,6 +584,6 @@ void openNotepadSimple(const char* content) {
             }
         }
     }
-    
+
     vga_put_string(5, 22, "Use openNotepad() for full editor", MAKE_COLOR(COLOR_LIGHT_GRAY, COLOR_WHITE));
 }
