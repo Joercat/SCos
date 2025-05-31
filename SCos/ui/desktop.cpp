@@ -336,6 +336,8 @@ void Desktop::passInputToApplication(int window_id, uint8_t key) {
     Notepad::handleInput(key);
   } else if (custom_strstr(win->title, "File Manager")) {
     FileManager::handleInput(key);
+  } else if (custom_strstr(win->title, "Calendar")) {
+    Calendar::handleInput(key);
   }
   // Add more application input handlers as needed
 }
