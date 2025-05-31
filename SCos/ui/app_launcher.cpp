@@ -25,7 +25,7 @@ void AppLauncher::init() {
     registerApp("Terminal", "[T]", 45, 12, []() { Desktop::launchApplication(APP_TERMINAL); });
     registerApp("Notepad", "[N]", 50, 15, []() { Desktop::launchApplication(APP_NOTEPAD); });
     registerApp("File Manager", "[F]", 35, 18, []() { Desktop::launchApplication(APP_FILE_MANAGER); });
-    registerApp("Calculator", "[C]", 25, 15, []() { launchCalculator(); });
+    registerApp("Calculator", "[C]", 25, 15, []() { Desktop::launchApplication(APP_CALCULATOR); });
     registerApp("Calendar", "[A]", 30, 16, []() { Desktop::launchApplication(APP_CALENDAR); });
     registerApp("Settings", "[S]", 40, 18, []() { Desktop::launchApplication(APP_SETTINGS); });
     registerApp("About", "[?]", 35, 10, []() { Desktop::launchApplication(APP_ABOUT); });

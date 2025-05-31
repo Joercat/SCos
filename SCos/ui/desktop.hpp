@@ -18,7 +18,8 @@ enum AppType {
     APP_CALENDAR,
     APP_SETTINGS,
     APP_ABOUT,
-    APP_FILE_MANAGER
+    APP_FILE_MANAGER,
+    APP_CALCULATOR
 };
 
 // Keyboard key constants
