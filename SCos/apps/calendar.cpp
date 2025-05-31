@@ -324,7 +324,6 @@ static void draw_sidebar() {
     for (unsigned int i = 0; i < NUM_EVENTS && event_line < 22; i++) {
         if (events[i].month == view_date.month && events[i].year == view_date.year) {
             char event_str[12];
-            char event_day_str[4];
             char event_day_str[12];
             int_to_string(events[i].day, event_day_str);
             
