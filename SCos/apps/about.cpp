@@ -175,3 +175,57 @@ void openAboutAdvanced() {
     // Footer
     center_text(23, "ESC: Exit | F1: Help | F5: Refresh", MAKE_COLOR(COLOR_DARK_GRAY, COLOR_BLACK));
 }
+#include <stdint.h>
+
+// VGA text mode constants
+#define VGA_BUFFER ((volatile char*)0xB8000)
+#define VGA_WIDTH 80
+#define VGA_HEIGHT 25
+#define VGA_BYTES_PER_CHAR 2
+
+// Color attributes
+#define COLOR_BLACK 0x00
+#define COLOR_BLUE 0x01
+#define COLOR_WHITE 0x0F
+#define COLOR_LIGHT_CYAN 0x0B
+#define COLOR_YELLOW 0x0E
+
+#define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
+
+static void vga_put_char(int x, int y, char c, uint8_t color) {
+    if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
+        volatile char* pos = VGA_BUFFER + (y * VGA_WIDTH + x) * VGA_BYTES_PER_CHAR;
+        pos[0] = c;
+        pos[1] = color;
+    }
+}
+
+static void vga_put_string(int x, int y, const char* str, uint8_t color) {
+    for (int i = 0; str[i] && (x + i) < VGA_WIDTH; i++) {
+        vga_put_char(x + i, y, str[i], color);
+    }
+}
+
+void openAbout() {
+    uint8_t header_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLUE);
+    uint8_t text_color = MAKE_COLOR(COLOR_BLACK, COLOR_WHITE);
+    uint8_t accent_color = MAKE_COLOR(COLOR_LIGHT_CYAN, COLOR_WHITE);
+    
+    // Clear area and draw about dialog
+    for (int y = 8; y < 18; y++) {
+        for (int x = 30; x < 65; x++) {
+            vga_put_char(x, y, ' ', text_color);
+        }
+    }
+    
+    vga_put_string(40, 9, "About SCos", header_color);
+    vga_put_string(32, 11, "SCos Operating System", accent_color);
+    vga_put_string(35, 12, "Version 1.0.0", text_color);
+    vga_put_string(32, 13, "Built with C++ and Assembly", text_color);
+    vga_put_string(32, 15, "A simple 32-bit operating system", text_color);
+    vga_put_string(35, 16, "for educational purposes", text_color);
+}
+
+void About::handleInput(char key) {
+    // Handle about input
+}

@@ -389,3 +389,62 @@ void openSettingsSimple() {
     center_text(12, theme_line, info_color);
     center_text(14, "Use openSettings() for full interface", MAKE_COLOR(get_accent_color(), get_bg_color()));
 }
+#include <stdint.h>
+
+// VGA text mode constants
+#define VGA_BUFFER ((volatile char*)0xB8000)
+#define VGA_WIDTH 80
+#define VGA_HEIGHT 25
+#define VGA_BYTES_PER_CHAR 2
+
+// Color attributes
+#define COLOR_BLACK 0x00
+#define COLOR_BLUE 0x01
+#define COLOR_WHITE 0x0F
+#define COLOR_LIGHT_GRAY 0x07
+
+#define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
+
+static void vga_put_char(int x, int y, char c, uint8_t color) {
+    if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
+        volatile char* pos = VGA_BUFFER + (y * VGA_WIDTH + x) * VGA_BYTES_PER_CHAR;
+        pos[0] = c;
+        pos[1] = color;
+    }
+}
+
+static void vga_put_string(int x, int y, const char* str, uint8_t color) {
+    for (int i = 0; str[i] && (x + i) < VGA_WIDTH; i++) {
+        vga_put_char(x + i, y, str[i], color);
+    }
+}
+
+void openSettings() {
+    uint8_t header_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLUE);
+    uint8_t text_color = MAKE_COLOR(COLOR_BLACK, COLOR_WHITE);
+    
+    // Clear area and draw settings
+    for (int y = 5; y < 22; y++) {
+        for (int x = 20; x < 60; x++) {
+            vga_put_char(x, y, ' ', text_color);
+        }
+    }
+    
+    vga_put_string(30, 6, "SCos Settings", header_color);
+    vga_put_string(22, 8, "Display Settings:", text_color);
+    vga_put_string(24, 9, "[ ] Dark Mode", text_color);
+    vga_put_string(24, 10, "[X] Show Taskbar", text_color);
+    vga_put_string(24, 11, "[X] Desktop Icons", text_color);
+    
+    vga_put_string(22, 13, "System Settings:", text_color);
+    vga_put_string(24, 14, "Memory: 16MB Available", text_color);
+    vga_put_string(24, 15, "CPU: x86 Compatible", text_color);
+    
+    vga_put_string(22, 17, "Sound Settings:", text_color);
+    vga_put_string(24, 18, "[ ] System Beep", text_color);
+    vga_put_string(24, 19, "Volume: [====------]", text_color);
+}
+
+void Settings::handleInput(char key) {
+    // Handle settings input
+}

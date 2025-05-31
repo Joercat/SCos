@@ -9,6 +9,30 @@
 #include "../fs/ramfs.hpp"
 #include "../drivers/keyboard.hpp"
 
+// Utility function implementations
+int strlen(const char* str) {
+    int len = 0;
+    while (str[len]) len++;
+    return len;
+}
+
+char* strstr(const char* haystack, const char* needle) {
+    if (!*needle) return (char*)haystack;
+    
+    for (const char* h = haystack; *h; h++) {
+        const char* h_temp = h;
+        const char* n_temp = needle;
+        
+        while (*h_temp && *n_temp && *h_temp == *n_temp) {
+            h_temp++;
+            n_temp++;
+        }
+        
+        if (!*n_temp) return (char*)h;
+    }
+    return nullptr;
+}
+
 // Desktop state
 static bool desktop_initialized = false;
 static int taskbar_height = 2;

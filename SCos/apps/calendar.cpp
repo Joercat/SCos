@@ -457,3 +457,63 @@ void openCalendarSimple() {
     center_text(14, "Today: Friday, May 30", MAKE_COLOR(COLOR_LIGHT_GREEN, COLOR_BLACK));
     center_text(16, "Use openCalendar() for full interface", MAKE_COLOR(COLOR_LIGHT_CYAN, COLOR_BLACK));
 }
+#include <stdint.h>
+
+// VGA text mode constants
+#define VGA_BUFFER ((volatile char*)0xB8000)
+#define VGA_WIDTH 80
+#define VGA_HEIGHT 25
+#define VGA_BYTES_PER_CHAR 2
+
+// Color attributes
+#define COLOR_BLACK 0x00
+#define COLOR_BLUE 0x01
+#define COLOR_GREEN 0x02
+#define COLOR_CYAN 0x03
+#define COLOR_RED 0x04
+#define COLOR_MAGENTA 0x05
+#define COLOR_BROWN 0x06
+#define COLOR_LIGHT_GRAY 0x07
+#define COLOR_WHITE 0x0F
+
+#define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
+
+static void vga_put_char(int x, int y, char c, uint8_t color) {
+    if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
+        volatile char* pos = VGA_BUFFER + (y * VGA_WIDTH + x) * VGA_BYTES_PER_CHAR;
+        pos[0] = c;
+        pos[1] = color;
+    }
+}
+
+static void vga_put_string(int x, int y, const char* str, uint8_t color) {
+    for (int i = 0; str[i] && (x + i) < VGA_WIDTH; i++) {
+        vga_put_char(x + i, y, str[i], color);
+    }
+}
+
+void openCalendar() {
+    uint8_t header_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLUE);
+    uint8_t text_color = MAKE_COLOR(COLOR_BLACK, COLOR_WHITE);
+    
+    // Clear area and draw calendar
+    for (int y = 5; y < 20; y++) {
+        for (int x = 25; x < 55; x++) {
+            vga_put_char(x, y, ' ', text_color);
+        }
+    }
+    
+    vga_put_string(30, 6, "Calendar - December 2024", header_color);
+    vga_put_string(27, 8, "Su Mo Tu We Th Fr Sa", text_color);
+    vga_put_string(27, 9, " 1  2  3  4  5  6  7", text_color);
+    vga_put_string(27, 10, " 8  9 10 11 12 13 14", text_color);
+    vga_put_string(27, 11, "15 16 17 18 19 20 21", text_color);
+    vga_put_string(27, 12, "22 23 24 25 26 27 28", text_color);
+    vga_put_string(27, 13, "29 30 31", text_color);
+    
+    vga_put_string(27, 16, "Today: December 15, 2024", MAKE_COLOR(COLOR_GREEN, COLOR_WHITE));
+}
+
+void Calendar::handleInput(char key) {
+    // Handle calendar input
+}
