@@ -70,6 +70,11 @@ bool init_subsystems() {
     return true;
 }
 
+#include "../include/kernel.h"
+#include "../include/memory.h"
+#include "../debug/serial.hpp"
+#include "../ui/desktop.hpp"
+
 void show_memory_info() {
     serial_printf("Kernel loaded at: 0x1000\n");
     serial_printf("Kernel end: 0x%x\n", (uint32_t)&_kernel_end);
