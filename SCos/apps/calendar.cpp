@@ -325,6 +325,7 @@ static void draw_sidebar() {
         if (events[i].month == view_date.month && events[i].year == view_date.year) {
             char event_str[12];
             char event_day_str[4];
+            char event_day_str[12];
             int_to_string(events[i].day, event_day_str);
             
             int pos = 0;

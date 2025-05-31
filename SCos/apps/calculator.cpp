@@ -1,6 +1,7 @@
 #include "calculator.hpp"
 #include "../ui/window_manager.hpp"
 #include <stdint.h>
+#include <stdbool.h>
 
 // Local math and string functions for freestanding environment
 static int calc_strlen(const char* str) {
@@ -106,7 +107,7 @@ static int strlen(const char* str) {
 
 #define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
 
-static void vga_put_char(int x, int y, char c, uint8_t color) {
+void vga_put_char(int x, int y, char c, uint8_t color) {
     if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
         volatile char* video = (volatile char*)0xB8000;
         int idx = 2 * (y * VGA_WIDTH + x);
@@ -115,7 +116,7 @@ static void vga_put_char(int x, int y, char c, uint8_t color) {
     }
 }
 
-static void vga_put_string(int x, int y, const char* str, uint8_t color) {
+void vga_put_string(int x, int y, const char* str, uint8_t color) {
     for (int i = 0; str[i] && (x + i) < VGA_WIDTH; i++) {
         vga_put_char(x + i, y, str[i], color);
     }
@@ -201,7 +202,7 @@ void inputDigit(int digit) {
 }
 
 // Helper function to convert char digit to int
-static void inputDigit(char digit_char) {
+static void inputDigitChar(char digit_char) {
     int digit = digit_char - '0';
     inputDigit(digit);
 }
@@ -290,7 +291,7 @@ void handleCalculatorInput(uint8_t key) {
         case 0x07: case 0x08: case 0x09: case 0x0A: case 0x0B: // Number keys 1-0
             {
                 char digit = (key == 0x0B) ? '0' : ('0' + key - 1);
-                inputDigit(digit);
+                inputDigitChar(digit);
             }
             break;
         case 0x0D: // = (Enter)

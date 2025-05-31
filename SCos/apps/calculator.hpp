@@ -1,4 +1,3 @@
-// Adding missing function declarations to the header file.
 #ifndef CALCULATOR_HPP
 #define CALCULATOR_HPP
 
@@ -38,5 +37,7 @@ void inputDigit(int digit);
 void inputOperator(char op);
 void calculateResult();
 void clearCalculator();
+bool isCalculatorVisible();
+void inputDigitChar(char digit_char);
 
 #endif
