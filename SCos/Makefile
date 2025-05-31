@@ -1,4 +1,6 @@
-
+This commit modifies the Makefile to include the mouse driver in the build process.
+</replit_final_file>
+```makefile
 # SCos Makefile
 CC = gcc
 AS = nasm
@@ -28,7 +30,7 @@ KERNEL_SOURCES = $(KERNELDIR)/main.cpp
 APPS_SOURCES = $(APPSDIR)/terminal.cpp $(APPSDIR)/notepad.cpp $(APPSDIR)/calculator.cpp $(APPSDIR)/file_manager.cpp $(APPSDIR)/calendar.cpp $(APPSDIR)/settings.cpp $(APPSDIR)/about.cpp $(APPSDIR)/security_center.cpp $(APPSDIR)/shell.cpp $(APPSDIR)/browser.cpp $(APPSDIR)/app_store.cpp
 UI_SOURCES = $(UIDIR)/window_manager.cpp $(UIDIR)/desktop.cpp $(UIDIR)/app_launcher.cpp
 LIB_SOURCES = $(LIBDIR)/string.cpp
-DRIVERS_SOURCES = $(DRIVERSDIR)/keyboard.cpp
+DRIVERS_SOURCES = $(DRIVERSDIR)/keyboard.cpp $(DRIVERSDIR)/mouse.cpp
 FS_SOURCES = $(FSDIR)/ramfs.cpp
 SECURITY_SOURCES = $(SECURITYDIR)/auth.cpp
 DEBUG_SOURCES = $(DEBUGDIR)/serial.cpp
@@ -40,7 +42,7 @@ KERNEL_OBJECTS = $(OBJDIR)/$(KERNELDIR)/main.o
 APPS_OBJECTS = $(OBJDIR)/$(APPSDIR)/terminal.o $(OBJDIR)/$(APPSDIR)/notepad.o $(OBJDIR)/$(APPSDIR)/calculator.o $(OBJDIR)/$(APPSDIR)/file_manager.o $(OBJDIR)/$(APPSDIR)/calendar.o $(OBJDIR)/$(APPSDIR)/settings.o $(OBJDIR)/$(APPSDIR)/about.o $(OBJDIR)/$(APPSDIR)/security_center.o $(OBJDIR)/$(APPSDIR)/shell.o $(OBJDIR)/$(APPSDIR)/browser.o $(OBJDIR)/$(APPSDIR)/app_store.o
 UI_OBJECTS = $(OBJDIR)/$(UIDIR)/window_manager.o $(OBJDIR)/$(UIDIR)/desktop.o $(OBJDIR)/$(UIDIR)/app_launcher.o
 LIB_OBJECTS = $(OBJDIR)/$(LIBDIR)/string.o
-DRIVERS_OBJECTS = $(OBJDIR)/$(DRIVERSDIR)/keyboard.o
+DRIVERS_OBJECTS = $(OBJDIR)/$(DRIVERSDIR)/keyboard.o $(OBJDIR)/$(DRIVERSDIR)/mouse.o
 FS_OBJECTS = $(OBJDIR)/$(FSDIR)/ramfs.o
 SECURITY_OBJECTS = $(OBJDIR)/$(SECURITYDIR)/auth.o
 DEBUG_OBJECTS = $(OBJDIR)/$(DEBUGDIR)/serial.o

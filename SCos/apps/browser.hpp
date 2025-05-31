@@ -1,4 +1,4 @@
-
+// Adding mouse support to the browser class by including the handleMouseClick function.
 #pragma once
 #include "../ui/window_manager.hpp"
 #include <stdint.h>
@@ -27,7 +27,9 @@ public:
     static void hide();
     static bool isVisible();
     static void handleInput(uint8_t key);
-    
+    static void handleMouseClick(int x, int y);
+    static void navigateToUrl(const char* url);
+
 private:
     static void drawBrowser();
     static void drawAddressBar();

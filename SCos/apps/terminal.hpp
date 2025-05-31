@@ -1,5 +1,15 @@
+
 #pragma once
 #include "../include/stddef.h"
+#include <stdint.h>
+
+// Terminal functions
+void runTerminal();
+void closeTerminal();
+bool isTerminalVisible();
+void drawTerminalContent();
+void executeCommand();
+void handleTerminalInput(uint8_t key);
 
 class Terminal {
 private:
@@ -38,5 +48,3 @@ public:
     void run();
     static void handleInput(uint8_t key);
 };
-
-void runTerminal();

@@ -160,6 +160,34 @@ void AppStore::handleInput(uint8_t key) {
     }
 }
 
+void AppStore::handleMouseClick(int x, int y) {
+    if (!store_visible || store_window_id < 0) return;
+
+    Window* win = WindowManager::getWindow(store_window_id);
+    if (!win) return;
+
+    // Check if click is within window
+    if (x < win->x || x >= win->x + win->width || 
+        y < win->y || y >= win->y + win->height) return;
+
+    int start_x = win->x + 2;
+    int start_y = win->y + 2;
+
+    // Check if clicked on an app
+    int rel_y = y - (start_y + 2);
+    if (rel_y >= 0 && rel_y < app_count) {
+        selected_app = rel_y;
+        
+        // Check if clicked on status button area
+        int status_x = start_x + 22;
+        if (x >= status_x && x < status_x + 12) {
+            toggleAppInstallation();
+        } else {
+            drawAppStore();
+        }
+    }
+}
+
 void AppStore::toggleAppInstallation() {
     if (selected_app >= 0 && selected_app < app_count) {
         available_apps[selected_app].installed = !available_apps[selected_app].installed;

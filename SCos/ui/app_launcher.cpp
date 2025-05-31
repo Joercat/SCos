@@ -223,6 +223,40 @@ void AppLauncher::launchApp(int app_index) {
     }
 }
 
+void AppLauncher::handleMouseClick(int x, int y) {
+    if (!launcher_visible || launcher_window_id < 0) return;
+    
+    Window* win = WindowManager::getWindow(launcher_window_id);
+    if (!win) return;
+    
+    // Check if click is within launcher window
+    if (x < win->x || x >= win->x + win->width || 
+        y < win->y || y >= win->y + win->height) return;
+    
+    int start_x = win->x + 2;
+    int start_y = win->y + 2;
+    
+    // Calculate which app was clicked
+    int apps_per_row = 4;
+    int app_width = 12;
+    int app_height = 3;
+    
+    int rel_x = x - start_x;
+    int rel_y = y - (start_y + 3);
+    
+    if (rel_x >= 0 && rel_y >= 0) {
+        int col = rel_x / app_width;
+        int row = rel_y / app_height;
+        int app_index = row * apps_per_row + col;
+        
+        if (app_index >= 0 && app_index < app_count) {
+            selected_app = app_index;
+            launchApp(app_index);
+            hideLauncher();
+        }
+    }
+}
+
 void AppLauncher::launchAppByName(const char* name) {
     for (int i = 0; i < app_count; ++i) {
         if (custom_strcmp(registered_apps[i].name, name) == 0) {

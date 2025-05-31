@@ -1,4 +1,3 @@
-
 #include "browser.hpp"
 #include "../ui/window_manager.hpp"
 #include <stdint.h>
@@ -32,7 +31,7 @@ void Browser::init() {
 
 void Browser::show() {
     if (browser_visible) return;
-    
+
     browser_window_id = WindowManager::createWindow("SCos Browser", 5, 2, 70, 20);
     if (browser_window_id >= 0) {
         browser_visible = true;
@@ -44,7 +43,7 @@ void Browser::show() {
 
 void Browser::hide() {
     if (!browser_visible || browser_window_id < 0) return;
-    
+
     WindowManager::closeWindow(browser_window_id);
     browser_visible = false;
     browser_window_id = -1;
@@ -56,10 +55,10 @@ bool Browser::isVisible() {
 
 void Browser::drawBrowser() {
     if (!browser_visible || browser_window_id < 0) return;
-    
+
     Window* win = WindowManager::getWindow(browser_window_id);
     if (!win) return;
-    
+
     drawNavigation();
     drawAddressBar();
     drawContent();
@@ -68,11 +67,11 @@ void Browser::drawBrowser() {
 void Browser::drawNavigation() {
     Window* win = WindowManager::getWindow(browser_window_id);
     if (!win) return;
-    
+
     volatile char* video = (volatile char*)0xB8000;
     int nav_y = win->y + 1;
     int start_x = win->x + 1;
-    
+
     // Navigation buttons
     const char* nav_text = "[<] [>] [R] [H] [B]";
     for (int i = 0; nav_text[i] && i < win->width - 2; ++i) {
@@ -85,18 +84,18 @@ void Browser::drawNavigation() {
 void Browser::drawAddressBar() {
     Window* win = WindowManager::getWindow(browser_window_id);
     if (!win) return;
-    
+
     volatile char* video = (volatile char*)0xB8000;
     int addr_y = win->y + 2;
     int start_x = win->x + 1;
-    
+
     // Address bar background
     for (int i = 0; i < win->width - 2; ++i) {
         int idx = 2 * (addr_y * 80 + start_x + i);
         video[idx] = ' ';
         video[idx + 1] = 0x70; // Black on white
     }
-    
+
     // URL text
     for (int i = 0; current_url[i] && i < win->width - 4; ++i) {
         int idx = 2 * (addr_y * 80 + start_x + 1 + i);
@@ -108,11 +107,11 @@ void Browser::drawAddressBar() {
 void Browser::drawContent() {
     Window* win = WindowManager::getWindow(browser_window_id);
     if (!win) return;
-    
+
     volatile char* video = (volatile char*)0xB8000;
     int content_start_y = win->y + 4;
     int start_x = win->x + 2;
-    
+
     // Clear content area
     for (int y = content_start_y; y < win->y + win->height - 1; ++y) {
         for (int x = start_x; x < win->x + win->width - 2; ++x) {
@@ -121,7 +120,7 @@ void Browser::drawContent() {
             video[idx + 1] = 0x1F; // Blue background
         }
     }
-    
+
     // Draw page content
     int line = 0;
     int col = 0;
@@ -140,7 +139,7 @@ void Browser::drawContent() {
 
 void Browser::showHomePage() {
     browser_strcpy(current_url, "scos://home");
-    
+
     const char* home_content = 
         "Welcome to SCos Browser!\n\n"
         "Quick Links:\n"
@@ -150,13 +149,13 @@ void Browser::showHomePage() {
         "- scos://settings - System settings\n\n"
         "This is a simple text-based browser\n"
         "for the SCos operating system.";
-    
+
     browser_strcpy(page_content, home_content);
 }
 
 void Browser::handleInput(uint8_t key) {
     if (!browser_visible) return;
-    
+
     switch (key) {
         case 0x01: // Escape
             hide();
@@ -173,4 +172,24 @@ void Browser::handleInput(uint8_t key) {
             drawBrowser();
             break;
     }
+}
+
+void Browser::handleMouseClick(int x, int y) {
+    if (!browser_visible || browser_window_id < 0) return;
+
+    Window* win = WindowManager::getWindow(browser_window_id);
+    if (!win) return;
+
+    // Check if click is within window
+    if (x < win->x || x >= win->x + win->width || 
+        y < win->y || y >= win->y + win->height) return;
+
+    // Simple click handling - could be expanded for buttons, links, etc.
+    drawBrowser();
+}
+
+void Browser::navigateToUrl(const char* url) {
+    // Simple URL navigation simulation
+    store_strcpy(current_url, url);
+    drawBrowser();
 }

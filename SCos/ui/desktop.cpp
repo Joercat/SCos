@@ -13,6 +13,7 @@
 #include "../apps/browser.hpp"
 #include "../apps/app_store.hpp"
 #include "../drivers/keyboard.hpp"
+#include "../drivers/mouse.hpp"
 
 static bool desktop_initialized = false;
 static bool running = true;
@@ -28,6 +29,9 @@ bool Desktop::init() {
     AppLauncher::init();
     Browser::init();
     AppStore::init();
+    
+    // Initialize mouse
+    Mouse::init();
     
     // Draw desktop
     drawDesktopBackground();
@@ -221,38 +225,35 @@ void Desktop::openSecurityCenter() {
 
 void Desktop::handleInput() {
     uint8_t key = Keyboard::getLastKey();
-    if (key == 0) return;
-    
-    // Check for Alt+Tab (application launcher)
-    static bool alt_pressed = false;
-    
-    if (key == KEY_ALT) {
-        alt_pressed = true;
-        return;
-    }
-    
-    if (alt_pressed && key == KEY_TAB) {
-        if (AppLauncher::isVisible()) {
-            AppLauncher::hideLauncher();
-        } else {
-            AppLauncher::showLauncher();
+    if (key != 0) {
+        // Check for Alt+Tab (application launcher)
+        static bool alt_pressed = false;
+        
+        if (key == KEY_ALT) {
+            alt_pressed = true;
+        } else if (alt_pressed && key == KEY_TAB) {
+            if (AppLauncher::isVisible()) {
+                AppLauncher::hideLauncher();
+            } else {
+                AppLauncher::showLauncher();
+            }
+            alt_pressed = false;
+        } else if (key != KEY_ALT) {
+            alt_pressed = false;
         }
-        alt_pressed = false;
-        return;
+        
+        // Pass input to active applications
+        if (AppLauncher::isVisible()) {
+            AppLauncher::handleInput(key);
+        } else if (Browser::isVisible()) {
+            Browser::handleInput(key);
+        } else if (AppStore::isVisible()) {
+            AppStore::handleInput(key);
+        }
     }
     
-    if (key != KEY_ALT) {
-        alt_pressed = false;
-    }
-    
-    // Pass input to active applications
-    if (AppLauncher::isVisible()) {
-        AppLauncher::handleInput(key);
-    } else if (Browser::isVisible()) {
-        Browser::handleInput(key);
-    } else if (AppStore::isVisible()) {
-        AppStore::handleInput(key);
-    }
+    // Handle mouse input
+    handleMouseInput();
 }
 
 void Desktop::handle_events() {
@@ -297,12 +298,66 @@ char Desktop::getAppIcon(const char* title) {
     return '*'; // Default icon
 }
 
+void Desktop::handleMouseInput() {
+    Mouse::update();
+    
+    if (Mouse::wasLeftButtonClicked()) {
+        int mouse_x = Mouse::getX();
+        int mouse_y = Mouse::getY();
+        
+        // Check if clicked on taskbar
+        if (mouse_y == 24) {
+            // Check if clicked on start button
+            if (mouse_x >= 0 && mouse_x <= 6) {
+                if (AppLauncher::isVisible()) {
+                    AppLauncher::hideLauncher();
+                } else {
+                    AppLauncher::showLauncher();
+                }
+                return;
+            }
+            
+            // Check if clicked on app icons in taskbar
+            handleTaskbarClick(mouse_x);
+            return;
+        }
+        
+        // Pass mouse click to active applications
+        if (AppLauncher::isVisible()) {
+            AppLauncher::handleMouseClick(mouse_x, mouse_y);
+        } else if (Browser::isVisible()) {
+            Browser::handleMouseClick(mouse_x, mouse_y);
+        } else if (AppStore::isVisible()) {
+            AppStore::handleMouseClick(mouse_x, mouse_y);
+        }
+    }
+}
+
+void Desktop::handleTaskbarClick(int x) {
+    // Handle clicks on taskbar app icons
+    int current_x = 7;
+    
+    for (int i = 0; i < MAX_WINDOWS; ++i) {
+        Window* win = WindowManager::getWindow(i);
+        if (win && win->visible && current_x < 60) {
+            if (x >= current_x && x < current_x + 2) {
+                WindowManager::setActiveWindow(i);
+                return;
+            }
+            current_x += 2;
+        }
+    }
+}
+
 void Desktop::updateDesktop() {
     // Refresh all windows
     WindowManager::refreshAll();
     
     // Update taskbar if needed
     drawTaskbar();
+    
+    // Update mouse
+    Mouse::update();
 }
 
 const char* Desktop::readFile(const char* path) {

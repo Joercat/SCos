@@ -25,6 +25,7 @@ public:
     // Launcher UI
     static void drawLauncher();
     static void handleInput(uint8_t key);
+    static void handleMouseClick(int x, int y);
     static void selectNextApp();
     static void selectPrevApp();
     

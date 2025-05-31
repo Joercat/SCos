@@ -2,6 +2,11 @@
 #include "../ui/window_manager.hpp"
 #include <stdint.h>
 
+// Forward declarations
+void drawTerminalContent();
+void executeCommand();
+void handleTerminalInput(uint8_t key);
+
 // Local string function implementations for freestanding environment
 static int terminal_strlen(const char* str) {
     int len = 0;

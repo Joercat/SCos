@@ -76,15 +76,24 @@ char getFromKeyboardBuffer() {
     if (isKeyboardBufferEmpty()) {
         return 0;
     }
-    
+
     char key = keyboardBuffer[bufferTail];
     bufferTail = (bufferTail + 1) % KEYBOARD_BUFFER_SIZE;
     return key;
 }
 
 bool Keyboard::isPressed(char key) {
-    // Simple implementation - check if key is currently in buffer
-    return hasKey();
+    // Implementation would check current key state
+    return false;
+}
+
+uint8_t Keyboard::getLastKey() {
+    // Return the last pressed key scancode
+    static uint8_t last_key = 0;
+    if (hasKey()) {
+        last_key = (uint8_t)getKey();
+    }
+    return last_key;
 }
 
 void handleSpecialKeys(uint8_t scancode, bool keyPressed) {
@@ -111,10 +120,10 @@ char scancodeToChar(uint8_t scancode) {
     if (scancode >= 128) {
         return 0;
     }
-    
+
     char ascii;
     bool useShift = shiftPressed;
-    
+
     // Handle caps lock for letters
     if (scancode >= 0x10 && scancode <= 0x19) { // Q-P row
         useShift = shiftPressed ^ capsLock;
@@ -123,13 +132,13 @@ char scancodeToChar(uint8_t scancode) {
     } else if (scancode >= 0x2C && scancode <= 0x32) { // Z-M row
         useShift = shiftPressed ^ capsLock;
     }
-    
+
     if (useShift) {
         ascii = scancodeToAsciiShift[scancode];
     } else {
         ascii = scancodeToAscii[scancode];
     }
-    
+
     return ascii;
 }
 
@@ -137,10 +146,10 @@ extern "C" void keyboard_handler() {
     uint8_t scancode = readScancode();
     bool keyPressed = !(scancode & KEY_RELEASE);
     uint8_t actualScancode = scancode & ~KEY_RELEASE;
-    
+
     // Handle modifier keys
     handleSpecialKeys(actualScancode, keyPressed);
-    
+
     // Only process key press events for regular keys
     if (keyPressed) {
         char ascii = scancodeToChar(actualScancode);
@@ -151,11 +160,11 @@ extern "C" void keyboard_handler() {
             } else if (ctrlPressed && ascii >= 'A' && ascii <= 'Z') {
                 ascii = ascii - 'A' + 1; // Convert to control character
             }
-            
+
             addToKeyboardBuffer(ascii);
         }
     }
-    
+
     // EOI is now handled in the assembly wrapper
 }
 
@@ -163,21 +172,21 @@ bool init_keyboard() {
     // Initialize buffer pointers
     bufferHead = 0;
     bufferTail = 0;
-    
+
     // Initialize modifier key states
     shiftPressed = false;
     ctrlPressed = false;
     altPressed = false;
     capsLock = false;
-    
+
     // Clear keyboard buffer
     for (int i = 0; i < KEYBOARD_BUFFER_SIZE; i++) {
         keyboardBuffer[i] = 0;
     }
-    
+
     // Basic keyboard initialization
     // The interrupt setup is now handled in idt.cpp
-    
+
     return true;
 }
 

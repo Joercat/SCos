@@ -35,7 +35,9 @@ public:
   static bool init();
   static void handle_events();
   static void update();
-  static void launchApplication(AppType app);
+  static void handleMouseInput();
+  static void handleTaskbarClick(int x);
+  static const char *readFile(const char *path);
 
 private:
   static void drawDesktopBackground();
@@ -62,13 +64,13 @@ private:
   static void openAppStore();
 
   // File system functions
-  static const char *readFile(const char *path);
-  
+
+
   // Taskbar functions
   static void drawOpenAppIcons(int start_x, int y);
   static char getAppIcon(const char* title);
-  
-  
+
+
 };
 
 #endif
