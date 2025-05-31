@@ -4,8 +4,21 @@
 
 #include <stdint.h>
 
+#define MAX_WINDOWS 10
+#define MAX_TITLE_LENGTH 32
+
+struct Window {
+    int id;
+    int x, y;
+    int width, height;
+    bool visible;
+    bool focused;
+    char title[MAX_TITLE_LENGTH];
+};
+
 class WindowManager {
 public:
+    static void init();
     static void clearScreen();
     static int createWindow(const char* title, int x, int y, int width, int height);
     static void drawWindow(int id);
@@ -14,11 +27,11 @@ public:
     static void resizeWindow(int id, int width, int height);
     static void setActiveWindow(int id);
     static int getActiveWindow();
+    static Window* getWindow(int id);
+    static void refreshAll();
     
 private:
-    static const int MAX_WINDOWS = 10;
-    static int window_count;
-    static int active_window;
+    static void clearWindowArea(int x, int y, int width, int height);
 };
 
 // VGA text mode functions
