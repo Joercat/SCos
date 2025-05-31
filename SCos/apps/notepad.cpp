@@ -68,7 +68,7 @@ typedef struct {
     int enabled;
 } MenuItem;
 
-static MenuItem file_menu[] = {
+static MenuItem file_menu[] __attribute__((unused)) = {
     {"New", 'N', 1},
     {"Open", 'O', 1},
     {"Save", 'S', 1},
@@ -77,7 +77,7 @@ static MenuItem file_menu[] = {
     {"Exit", 'X', 1}
 };
 
-static MenuItem edit_menu[] = {
+static MenuItem edit_menu[] __attribute__((unused)) = {
     {"Undo", 'Z', 0},
     {"---", 0, 0},
     {"Cut", 'X', 1},
@@ -88,7 +88,7 @@ static MenuItem edit_menu[] = {
     {"Find", 'F', 1}
 };
 
-static MenuItem view_menu[] = {
+static MenuItem view_menu[] __attribute__((unused)) = {
     {"Word Wrap", 'W', 1},
     {"Status Bar", 'B', 1},
     {"---", 0, 0},

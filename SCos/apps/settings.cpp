@@ -465,7 +465,7 @@ public:
     void removeWindow(Window* window);
     void draw();
     void handleInput(int key);
-    
+
 private:
     int width_;
     int height_;
@@ -640,6 +640,7 @@ public:
 #endif
 // settings.cpp
 #include "settings.hpp"
+#include "../ui/desktop.hpp"
 
 // Local string function implementations for freestanding environment
 static int settings_strlen(const char* str) {
