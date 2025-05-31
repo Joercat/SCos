@@ -494,7 +494,7 @@ private:
 
 #endif
 // desktop.cpp
-#include "desktop.hpp"
+#include "../ui/desktop.hpp"
 #include "window.hpp"
 #include <cstring> // Include for strstr
 #include <iostream>
@@ -566,7 +566,7 @@ void Desktop::handleInput(int key) {
 #ifndef WINDOW_MANAGER_HPP
 #define WINDOW_MANAGER_HPP
 
-#include "desktop.hpp"
+#include "../ui/desktop.hpp"
 #include "window.hpp"
 
 class WindowManager {
