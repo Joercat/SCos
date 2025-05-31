@@ -1,4 +1,4 @@
-
+// Adding lock screen function declarations and methods to the AuthSystem class.
 #ifndef AUTH_HPP
 #define AUTH_HPP
 
@@ -57,7 +57,7 @@ public:
     static int getFailedAttempts();
     static void setAuthMode(AuthMode mode);
     static AuthMode getAuthMode();
-    
+
 private:
     static void drawLoginScreen();
     static void clearLoginInput();
@@ -67,3 +67,4 @@ private:
 };
 
 #endif
+`

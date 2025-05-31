@@ -12,6 +12,7 @@
 #include "../apps/security_center.hpp"
 #include "../apps/browser.hpp"
 #include "../apps/app_store.hpp"
+#include "../security/auth.hpp"
 #include "../drivers/keyboard.hpp"
 #include "../drivers/mouse.hpp"
 
@@ -21,7 +22,10 @@ static bool running = true;
 bool Desktop::init() {
     if (desktop_initialized) return true;
     
-    // Initialize theme manager first
+    // Initialize security system first
+    AuthSystem::init();
+    
+    // Initialize theme manager
     ThemeManager::init();
     ThemeManager::setTheme(THEME_MATRIX_GREEN);
     
@@ -226,6 +230,12 @@ void Desktop::openSecurityCenter() {
 void Desktop::handleInput() {
     uint8_t key = Keyboard::getLastKey();
     if (key != 0) {
+        // Handle lock screen input first
+        if (AuthSystem::isLockScreenVisible()) {
+            AuthSystem::handleLockScreenInput(key);
+            return;
+        }
+        
         // Check for Alt+Tab (application launcher)
         static bool alt_pressed = false;
         

@@ -38,6 +38,6 @@ void inputOperator(char op);
 void calculateResult();
 void clearCalculator();
 bool isCalculatorVisible();
-void inputDigitChar(char digit_char);
+static void inputDigitChar(char digit_char);
 
 #endif
