@@ -4,6 +4,11 @@
 #include "../include/string.h"
 #include <stdint.h>
 
+// Add missing strstr declaration
+extern "C" {
+    char* strstr(const char* haystack, const char* needle);
+}
+
 // Calculator state
 static char display[32] = "0";
 static double current_value = 0.0;
