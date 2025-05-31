@@ -48,17 +48,17 @@ typedef struct {
 } NotepadState;
 
 static NotepadState notepad = {
-    .text = {0},
-    .cursor_x = 0,
-    .cursor_y = 0,
-    .scroll_offset = 0,
-    .text_length = 0,
-    .modified = 0,
-    .filename = "Untitled.txt",
-    .insert_mode = 1,
-    .selection_start = -1,
-    .selection_end = -1,
-    .word_wrap = 1
+    {0},        // text
+    0,          // cursor_x
+    0,          // cursor_y
+    0,          // scroll_offset
+    0,          // text_length
+    0,          // modified
+    "Untitled.txt", // filename
+    1,          // insert_mode
+    -1,         // selection_start
+    -1,         // selection_end
+    1           // word_wrap
 };
 
 // Menu system
@@ -249,7 +249,6 @@ static int count_words() {
 // Drawing functions
 static void draw_menu_bar() {
     uint8_t menu_color = MAKE_COLOR(COLOR_BLACK, COLOR_LIGHT_GRAY);
-    uint8_t shortcut_color = MAKE_COLOR(COLOR_RED, COLOR_LIGHT_GRAY);
     
     vga_clear_line(0, menu_color);
     
@@ -482,7 +481,6 @@ void notepad_cursor_up() {
 }
 
 #include <stdint.h>
-#include <cstring>
 
 void notepad_cursor_down() {
     int max_lines = count_lines();

@@ -57,6 +57,14 @@ private:
 
   // File system functions
   static const char *readFile(const char *path);
+  
+  // Function declarations for applications
+  static void openNotepad(const char *content);
+  static void runTerminal();
+  static void openFileManager();
+  static void openCalendar();
+  static void openSettings();
+  static void openAbout();
 };
 
 #endif

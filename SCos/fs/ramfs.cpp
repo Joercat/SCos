@@ -1,5 +1,12 @@
 
-#include <string.h>
+// Custom string comparison for freestanding environment
+static int custom_strcmp(const char* str1, const char* str2) {
+    while (*str1 && (*str1 == *str2)) {
+        str1++;
+        str2++;
+    }
+    return *(unsigned char*)str1 - *(unsigned char*)str2;
+}
 
 struct File {
     const char* path;
@@ -16,7 +23,7 @@ bool initFS() {
 
 const char* readFile(const char* path) {
     for (int i = 0; i < fileCount; ++i) {
-        if (strcmp(files[i].path, path) == 0)
+        if (custom_strcmp(files[i].path, path) == 0)
             return files[i].content;
     }
     return "(file not found)";
@@ -24,7 +31,7 @@ const char* readFile(const char* path) {
 
 bool writeFile(const char* path, const char* data) {
     for (int i = 0; i < fileCount; ++i) {
-        if (strcmp(files[i].path, path) == 0) {
+        if (custom_strcmp(files[i].path, path) == 0) {
             files[i].content = data;
             return true;
         }

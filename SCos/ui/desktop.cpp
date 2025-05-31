@@ -108,8 +108,9 @@ void Desktop::drawActiveApps() {
       // Draw app indicator
       int pos = app_start + i * 8;
       if (pos < 70) {
-        for (int j = 0; j < 6 && j < static_cast<int>(::strlen(win->title));
-             ++j) {
+        int title_len = 0;
+        while (win->title[title_len] && title_len < 80) title_len++;
+        for (int j = 0; j < 6 && j < title_len; ++j) {
           int idx = 2 * (24 * 80 + pos + j);
           video[idx] = win->title[j];
           video[idx + 1] = win->focused ? 0x1F : 0x70;
@@ -338,6 +339,37 @@ void Desktop::passInputToApplication(int window_id, uint8_t key) {
   }
   // Add more application input handlers as needed
 }
+// Application launcher functions
+void Desktop::openNotepad(const char *content) {
+  extern void openNotepad(const char*);
+  openNotepad(content);
+}
+
+void Desktop::runTerminal() {
+  extern void runTerminal();
+  runTerminal();
+}
+
+void Desktop::openFileManager() {
+  extern void openFileManager();
+  openFileManager();
+}
+
+void Desktop::openCalendar() {
+  extern void openCalendar();
+  openCalendar();
+}
+
+void Desktop::openSettings() {
+  extern void openSettings();
+  openSettings();
+}
+
+void Desktop::openAbout() {
+  extern void openAbout();
+  openAbout();
+}
+
 void Desktop::launchCalculator() {
   extern void launchCalculator();
   launchCalculator();

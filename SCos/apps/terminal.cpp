@@ -214,7 +214,7 @@ void Terminal::handle_input() {
     if (scancode == 0) return;
     
     static bool shift_pressed = false;
-    static bool ctrl_pressed = false;
+    static bool ctrl_pressed __attribute__((unused)) = false;
     
     if (scancode == 0x2A || scancode == 0x36) {
         shift_pressed = true;
