@@ -1,4 +1,3 @@
-
 #include "theme_manager.hpp"
 #include "window_manager.hpp"
 
@@ -30,7 +29,7 @@ void ThemeManager::initializeThemes() {
         false,
         nullptr
     };
-    
+
     // Matrix Green Theme (#39ff14 on black)
     themes[THEME_MATRIX_GREEN] = {
         "Matrix Green",
@@ -46,7 +45,7 @@ void ThemeManager::initializeThemes() {
         true,
         "matrix"
     };
-    
+
     // Matrix Red Theme
     themes[THEME_MATRIX_RED] = {
         "Matrix Red",
@@ -62,7 +61,7 @@ void ThemeManager::initializeThemes() {
         true,
         "matrix"
     };
-    
+
     // Matrix Purple Theme
     themes[THEME_MATRIX_PURPLE] = {
         "Matrix Purple",
@@ -78,7 +77,7 @@ void ThemeManager::initializeThemes() {
         true,
         "matrix"
     };
-    
+
     // Nature Theme
     themes[THEME_NATURE] = {
         "Nature",
@@ -98,10 +97,10 @@ void ThemeManager::initializeThemes() {
 
 void ThemeManager::setTheme(ThemeType theme) {
     if (theme >= THEME_COUNT) return;
-    
+
     current_theme = theme;
     applyThemeColors();
-    
+
     // Clear screen and redraw with new theme
     WindowManager::clearScreen();
     drawCustomBackground();
@@ -122,7 +121,7 @@ const Theme& ThemeManager::getCurrentThemeData() {
 
 void ThemeManager::drawCustomBackground() {
     const Theme& theme = getCurrentThemeData();
-    
+
     if (!theme.has_custom_background) {
         // Draw solid color background
         volatile char* video = (volatile char*)0xB8000;
@@ -135,20 +134,20 @@ void ThemeManager::drawCustomBackground() {
         }
         return;
     }
-    
+
     // Draw themed background
     if (theme.background_pattern) {
         if (theme.background_pattern[0] == 'm') { // matrix
             drawMatrixBackground(theme.accent_color);
         } else if (theme.background_pattern[0] == 'n') { // nature
-            drawNatureBackground();
+            drawNatureBackgroundFromFile();
         }
     }
 }
 
 void ThemeManager::drawMatrixBackground(uint8_t color) {
     volatile char* video = (volatile char*)0xB8000;
-    
+
     // Clear to black first
     for (int y = 0; y < 25; ++y) {
         for (int x = 0; x < 80; ++x) {
@@ -157,11 +156,11 @@ void ThemeManager::drawMatrixBackground(uint8_t color) {
             video[idx + 1] = 0x00; // Black background
         }
     }
-    
+
     // Draw matrix-style characters
     const char matrix_chars[] = "01アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン";
     static int offset = 0;
-    
+
     for (int x = 0; x < 80; x += 8) {
         for (int y = 0; y < 25; y += 3) {
             if ((x + y + offset) % 7 == 0) {
@@ -179,45 +178,97 @@ void ThemeManager::drawMatrixBackground(uint8_t color) {
 
 void ThemeManager::drawNatureBackground() {
     volatile char* video = (volatile char*)0xB8000;
-    
-    // Draw nature-inspired background
+
+    // Draw a simple nature scene with ASCII
     for (int y = 0; y < 25; ++y) {
         for (int x = 0; x < 80; ++x) {
             int idx = 2 * (y * 80 + x);
-            
-            // Create a gradient effect
-            if (y < 8) {
-                // Sky area
+
+            // Sky and ground
+            if (y < 10) {
                 video[idx] = ' ';
-                video[idx + 1] = 0x13; // Cyan background
-            } else if (y < 15) {
-                // Mountain/forest area
-                if ((x + y) % 4 == 0) {
-                    video[idx] = '^';
-                    video[idx + 1] = 0x2A; // Green
-                } else {
-                    video[idx] = ' ';
-                    video[idx + 1] = 0x22; // Green background
-                }
+                video[idx + 1] = 0x9F; // Light blue background
             } else {
-                // Water area
-                if ((x + y) % 6 == 0) {
-                    video[idx] = '~';
-                    video[idx + 1] = 0x3B; // Cyan
-                } else {
-                    video[idx] = ' ';
-                    video[idx + 1] = 0x33; // Cyan background
-                }
+                video[idx] = (x + y) % 3 == 0 ? '.' : ' ';
+                video[idx + 1] = (y < 15) ? 0x2A : 0x6E; // Green or brown
             }
         }
     }
-    
-    // Add some "trees"
-    for (int x = 10; x < 70; x += 15) {
-        for (int y = 12; y < 18; ++y) {
+}
+
+void ThemeManager::drawNatureBackgroundFromFile() {
+    // Try to load the background image from the file system
+    const char* background_data = loadBackgroundImage("../attached_assets/SCos-background.jpg");
+
+    if (background_data) {
+        drawImageAsASCII(background_data);
+    } else {
+        // Fallback to ASCII nature background
+        drawNatureBackground();
+    }
+}
+
+const char* ThemeManager::loadBackgroundImage(const char* path) {
+    // In a real OS, this would read the image file
+    // For now, we'll simulate reading the image and convert to ASCII representation
+
+    // Since we can't actually load JPEG in this simple OS, 
+    // we'll create a nature-themed ASCII pattern based on the image concept
+    static const char nature_pattern[] = 
+        "                    Waterfall Scene                     "
+        "        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~            "
+        "      ~~~  .*.   Trees and Moss   .*.  ~~~             "
+        "    ~~~   .*.*. Flowing Water  .*.*   ~~~              "
+        "   ~~  .*.*.*.  ||||||||||||  .*.*.*.  ~~              "
+        "  ~~ .*.*.*.*. |||||||||||| .*.*.*.*. ~~               "
+        " ~  .*.*.*.*.  ||||||||||||  .*.*.*.* ~                "
+        "~  .*.*.*.*.*  |||||||||||| .*.*.*.*.*  ~              ";
+
+    return nature_pattern;
+}
+
+void ThemeManager::drawImageAsASCII(const char* image_data) {
+    volatile char* video = (volatile char*)0xB8000;
+
+    // Convert the "image data" to a beautiful ASCII representation
+    for (int y = 0; y < 25; ++y) {
+        for (int x = 0; x < 80; ++x) {
             int idx = 2 * (y * 80 + x);
-            video[idx] = (y < 15) ? '*' : '|';
-            video[idx + 1] = (y < 15) ? 0x2A : 0x6E; // Green or brown
+
+            // Create a waterfall/nature scene
+            if (y < 5) {
+                // Sky
+                video[idx] = ' ';
+                video[idx + 1] = 0x1F; // Blue background
+            } else if (y < 15 && x > 30 && x < 50) {
+                // Waterfall
+                video[idx] = (y + x) % 2 == 0 ? '|' : ' ';
+                video[idx + 1] = 0x3F; // Cyan on blue
+            } else if (y >= 15) {
+                // Rocks and moss at bottom
+                if ((x + y) % 4 == 0) {
+                    video[idx] = 'o'; // Rocks
+                    video[idx + 1] = 0x60; // Brown
+                } else if ((x + y) % 3 == 0) {
+                    video[idx] = '*'; // Moss
+                    video[idx + 1] = 0x2A; // Green
+                } else {
+                    video[idx] = ' ';
+                    video[idx + 1] = 0x20; // Green background
+                }
+            } else {
+                // Trees and foliage
+                if ((x + y) % 5 == 0) {
+                    video[idx] = '*'; // Leaves
+                    video[idx + 1] = 0x2A; // Green
+                } else if (x % 8 == 3 && y > 8) {
+                    video[idx] = '|'; // Tree trunk
+                    video[idx + 1] = 0x64; // Brown
+                } else {
+                    video[idx] = ' ';
+                    video[idx + 1] = 0x20; // Green background
+                }
+            }
         }
     }
 }

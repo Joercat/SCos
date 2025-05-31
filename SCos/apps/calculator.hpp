@@ -1,4 +1,4 @@
-
+// Adding missing function declarations to the header file.
 #ifndef CALCULATOR_HPP
 #define CALCULATOR_HPP
 
@@ -12,7 +12,7 @@ public:
     static void draw();
     static void clear();
     static void calculate();
-    
+
 private:
     static void drawDisplay();
     static void drawButtons();
@@ -20,7 +20,7 @@ private:
     static void processOperator(char op);
     static void processEquals();
     static void processClear();
-    
+
     static char display[32];
     static double current_value;
     static double stored_value;
@@ -31,5 +31,12 @@ private:
 
 // Standalone function for desktop integration
 void launchCalculator();
+void handleCalculatorInput(uint8_t key);
+void closeCalculator();
+void drawCalculator();
+void inputDigit(int digit);
+void inputOperator(char op);
+void calculateResult();
+void clearCalculator();
 
 #endif

@@ -1,4 +1,3 @@
-
 #pragma once
 #include <stdint.h>
 
@@ -35,12 +34,15 @@ public:
     static const Theme& getCurrentThemeData();
     static void drawCustomBackground();
     static void applyThemeColors();
-    
+
     // Background management
     static void setCustomBackground(const char* pattern);
     static void drawNatureBackground();
     static void drawMatrixBackground(uint8_t color);
-    
+    static void drawNatureBackgroundFromFile();
+    static const char* loadBackgroundImage(const char* path);
+    static void drawImageAsASCII(const char* image_data);
+
 private:
     static void initializeThemes();
 };

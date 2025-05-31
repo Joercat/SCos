@@ -1,4 +1,3 @@
-
 #include "calculator.hpp"
 #include "../ui/window_manager.hpp"
 #include <stdint.h>
@@ -29,17 +28,17 @@ static int calc_atoi(const char* str) {
     int result = 0;
     int sign = 1;
     int i = 0;
-    
+
     if (str[0] == '-') {
         sign = -1;
         i = 1;
     }
-    
+
     while (str[i] >= '0' && str[i] <= '9') {
         result = result * 10 + (str[i] - '0');
         i++;
     }
-    
+
     return sign * result;
 }
 
@@ -49,26 +48,26 @@ static void int_to_str(int num, char* str) {
         str[1] = '\0';
         return;
     }
-    
+
     bool negative = false;
     if (num < 0) {
         negative = true;
         num = -num;
     }
-    
+
     char temp[32];
     int i = 0;
-    
+
     while (num > 0) {
         temp[i++] = '0' + (num % 10);
         num /= 10;
     }
-    
+
     int j = 0;
     if (negative) {
         str[j++] = '-';
     }
-    
+
     while (i > 0) {
         str[j++] = temp[--i];
     }
@@ -84,28 +83,127 @@ static char operator_char = '\0';
 static int stored_number = 0;
 static bool new_number = true;
 
+void drawCalculator() {
+    uint8_t header_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLUE);
+    uint8_t text_color = MAKE_COLOR(COLOR_BLACK, COLOR_WHITE);
+    uint8_t button_color = MAKE_COLOR(COLOR_BLACK, COLOR_LIGHT_GRAY);
+
+    // Clear calculator area
+    for (int y = 2; y < 20; y++) {
+        for (int x = 2; x < 27; x++) {
+            vga_put_char(x, y, ' ', text_color);
+        }
+    }
+
+    vga_put_string(8, 3, "Calculator", header_color);
+
+    // Draw display
+    for (int x = 4; x < 25; x++) {
+        vga_put_char(x, 5, ' ', MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
+    }
+
+    // Display current number
+    char display_str[32];
+    sprintf(display_str, "%.2f", display_value);
+    vga_put_string(24 - strlen(display_str), 5, display_str, MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
+
+    // Draw buttons
+    const char* buttons[4][4] = {
+        {"7", "8", "9", "/"},
+        {"4", "5", "6", "*"},
+        {"1", "2", "3", "-"},
+        {"0", ".", "=", "+"}
+    };
+
+    for (int row = 0; row < 4; row++) {
+        for (int col = 0; col < 4; col++) {
+            int x = 4 + col * 5;
+            int y = 7 + row * 2;
+
+            vga_put_char(x, y, '[', button_color);
+            vga_put_char(x + 1, y, buttons[row][col][0], button_color);
+            vga_put_char(x + 2, y, ']', button_color);
+        }
+    }
+
+    // Instructions
+    vga_put_string(4, 16, "Use number keys and operators", MAKE_COLOR(COLOR_LIGHT_GRAY, COLOR_WHITE));
+    vga_put_string(4, 17, "Press Enter for result", MAKE_COLOR(COLOR_LIGHT_GRAY, COLOR_WHITE));
+    vga_put_string(4, 18, "Press Esc to exit", MAKE_COLOR(COLOR_LIGHT_GRAY, COLOR_WHITE));
+}
+
+void inputDigit(int digit) {
+    if (just_calculated) {
+        display_value = 0;
+        just_calculated = false;
+    }
+    display_value = display_value * 10 + digit;
+}
+
+void inputOperator(char op) {
+    if (has_operand && !just_calculated) {
+        calculateResult();
+    }
+    stored_value = display_value;
+    current_operator = op;
+    has_operand = true;
+    just_calculated = false;
+    display_value = 0;
+}
+
+void calculateResult() {
+    if (!has_operand) return;
+
+    switch (current_operator) {
+        case '+':
+            display_value = stored_value + display_value;
+            break;
+        case '-':
+            display_value = stored_value - display_value;
+            break;
+        case '*':
+            display_value = stored_value * display_value;
+            break;
+        case '/':
+            if (display_value != 0) {
+                display_value = stored_value / display_value;
+            }
+            break;
+    }
+
+    has_operand = false;
+    just_calculated = true;
+}
+
+void clearCalculator() {
+    display_value = 0;
+    stored_value = 0;
+    current_operator = 0;
+    has_operand = false;
+    just_calculated = false;
+}
+
 void launchCalculator() {
-    if (calc_visible) return;
-    
-    // Initialize calculator
-    calc_strcpy(display, "0");
-    calc_strcpy(current_number, "");
-    operator_char = '\0';
-    stored_number = 0;
-    new_number = true;
-    
-    // Create calculator window
-    calc_window_id = WindowManager::createWindow("Calculator", 30, 10, 25, 15);
-    if (calc_window_id >= 0) {
-        calc_visible = true;
-        WindowManager::setActiveWindow(calc_window_id);
-        drawCalculator();
+    clearCalculator();
+    drawCalculator();
+
+    // Enter calculation loop
+    uint8_t key;
+    while (true) {
+        key = getLastKey();
+        if (key != 0) {
+            if (key == 0x01) { // Escape
+                break;
+            }
+            handleCalculatorInput(key);
+            drawCalculator();
+        }
     }
 }
 
 void closeCalculator() {
     if (!calc_visible || calc_window_id < 0) return;
-    
+
     WindowManager::closeWindow(calc_window_id);
     calc_visible = false;
     calc_window_id = -1;
@@ -115,78 +213,9 @@ bool isCalculatorVisible() {
     return calc_visible;
 }
 
-void drawCalculator() {
-    if (!calc_visible || calc_window_id < 0) return;
-    
-    Window* win = WindowManager::getWindow(calc_window_id);
-    if (!win) return;
-    
-    volatile char* video = (volatile char*)0xB8000;
-    int start_x = win->x + 2;
-    int start_y = win->y + 2;
-    
-    // Clear content area
-    for (int y = start_y; y < win->y + win->height - 1; ++y) {
-        for (int x = start_x; x < win->x + win->width - 2; ++x) {
-            int idx = 2 * (y * 80 + x);
-            video[idx] = ' ';
-            video[idx + 1] = 0x1F; // Blue background
-        }
-    }
-    
-    // Draw display
-    int display_y = start_y;
-    for (int i = 0; i < win->width - 6; ++i) {
-        int idx = 2 * (display_y * 80 + start_x + i);
-        video[idx] = ' ';
-        video[idx + 1] = 0x70; // Black on white
-    }
-    
-    // Display number (right-aligned)
-    int display_len = calc_strlen(display);
-    int display_start = start_x + win->width - 6 - display_len;
-    for (int i = 0; display[i]; ++i) {
-        int idx = 2 * (display_y * 80 + display_start + i);
-        video[idx] = display[i];
-        video[idx + 1] = 0x70;
-    }
-    
-    // Draw button layout
-    const char* buttons[] = {
-        "C", "+/-", "%", "/",
-        "7", "8", "9", "*",
-        "4", "5", "6", "-",
-        "1", "2", "3", "+",
-        "0", ".", "=", ""
-    };
-    
-    int button_y = start_y + 2;
-    for (int row = 0; row < 5; ++row) {
-        for (int col = 0; col < 4 && buttons[row * 4 + col][0]; ++col) {
-            int btn_x = start_x + col * 4;
-            int btn_y = button_y + row;
-            
-            if (btn_y < win->y + win->height - 1) {
-                // Button background
-                for (int i = 0; i < 3; ++i) {
-                    int idx = 2 * (btn_y * 80 + btn_x + i);
-                    video[idx] = ' ';
-                    video[idx + 1] = 0x17; // Grey
-                }
-                
-                // Button text
-                const char* btn_text = buttons[row * 4 + col];
-                int idx = 2 * (btn_y * 80 + btn_x + 1);
-                video[idx] = btn_text[0];
-                video[idx + 1] = 0x17;
-            }
-        }
-    }
-}
-
 void handleCalculatorInput(uint8_t key) {
     if (!calc_visible) return;
-    
+
     switch (key) {
         case 0x01: // Escape
             closeCalculator();
@@ -217,75 +246,4 @@ void handleCalculatorInput(uint8_t key) {
             clearCalculator();
             break;
     }
-}
-
-void inputDigit(char digit) {
-    if (new_number) {
-        calc_strcpy(display, "");
-        new_number = false;
-    }
-    
-    if (calc_strlen(display) < 15) {
-        if (display[0] == '0' && calc_strlen(display) == 1) {
-            display[0] = digit;
-        } else {
-            char temp[2] = {digit, '\0'};
-            calc_strcat(display, temp);
-        }
-        drawCalculator();
-    }
-}
-
-void inputOperator(char op) {
-    if (operator_char != '\0') {
-        calculateResult();
-    }
-    
-    stored_number = calc_atoi(display);
-    operator_char = op;
-    new_number = true;
-}
-
-void calculateResult() {
-    if (operator_char == '\0') return;
-    
-    int current = calc_atoi(display);
-    int result = stored_number;
-    
-    switch (operator_char) {
-        case '+':
-            result = stored_number + current;
-            break;
-        case '-':
-            result = stored_number - current;
-            break;
-        case '*':
-            result = stored_number * current;
-            break;
-        case '/':
-            if (current != 0) {
-                result = stored_number / current;
-            } else {
-                calc_strcpy(display, "Error");
-                operator_char = '\0';
-                new_number = true;
-                drawCalculator();
-                return;
-            }
-            break;
-    }
-    
-    int_to_str(result, display);
-    operator_char = '\0';
-    new_number = true;
-    drawCalculator();
-}
-
-void clearCalculator() {
-    calc_strcpy(display, "0");
-    calc_strcpy(current_number, "");
-    operator_char = '\0';
-    stored_number = 0;
-    new_number = true;
-    drawCalculator();
 }
