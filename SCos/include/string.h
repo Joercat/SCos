@@ -15,6 +15,7 @@ char* strcpy(char* dest, const char* src);
 char* strncpy(char* dest, const char* src, size_t n);
 char* strcat(char* dest, const char* src);
 char* strstr(const char* haystack, const char* needle);
+char* strrchr(const char* str, int c);
 int snprintf(char* buffer, size_t size, const char* format, ...);
 int sscanf(const char* str, const char* format, ...);
 

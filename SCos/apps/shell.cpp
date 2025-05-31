@@ -69,7 +69,7 @@ void Shell::parse_command(const char* input, char* command, char* args) {
     args[j] = '\0';
 }
 
-bool Shell::cmd_ls(const char* args, char* output, size_t output_size) {
+bool Shell::cmd_ls(const char* args, char* output, size_t) {
     const char* path = (strlen(args) > 0) ? args : current_directory;
     
     // Simple file listing implementation

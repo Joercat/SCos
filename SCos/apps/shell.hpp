@@ -24,6 +24,3 @@ public:
     bool execute_command(const char* cmd, char* output, size_t output_size);
     const char* get_current_directory() const;
 };
-
-int snprintf(char* str, size_t size, const char* format, ...);
-int sscanf(const char* str, const char* format, ...);
