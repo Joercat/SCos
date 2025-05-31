@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "../include/string.h"
+#include "about.hpp"
 
 // VGA text mode constants
 #define VGA_BUFFER ((volatile char*)0xB8000)
@@ -107,127 +108,12 @@ void openAbout() {
     center_text(14, "Boot Mode: Protected Mode", info_color);
     center_text(15, "Display: VGA Text Mode 80x25", info_color);
 
-
-
     // Copyright notice at bottom
     uint8_t copyright_color = MAKE_COLOR(COLOR_DARK_GRAY, COLOR_BLUE);
     center_text(23, "(c) 2025 SCos Project", copyright_color);
 }
 
-// Enhanced version with system info detection
-void openAboutAdvanced() {
-    // Clear screen
-    uint8_t bg_color = MAKE_COLOR(COLOR_BLACK, COLOR_BLACK);
-    for (int y = 0; y < VGA_HEIGHT; y++) {
-        vga_clear_line(y, bg_color);
-    }
-
-    // Gradient-like effect for title area
-    for (int y = 0; y < 5; y++) {
-        uint8_t gradient_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLUE + y % 3);
-        vga_clear_line(y, gradient_color);
-    }
-
-    // Main content area
-    for (int y = 5; y < 20; y++) {
-        vga_clear_line(y, MAKE_COLOR(COLOR_LIGHT_GRAY, COLOR_BLACK));
-    }
-
-    // Bottom status bar
-    for (int y = 20; y < VGA_HEIGHT; y++) {
-        vga_clear_line(y, MAKE_COLOR(COLOR_BLACK, COLOR_LIGHT_GRAY));
-    }
-
-    // Title section
-    center_text(1, "S C o s", MAKE_COLOR(COLOR_WHITE, COLOR_BLUE));
-    center_text(2, "SCos Operating System", MAKE_COLOR(COLOR_YELLOW, COLOR_BLUE));
-
-    // Main info section
-    vga_put_string(10, 6, "Version:", MAKE_COLOR(COLOR_CYAN, COLOR_BLACK));
-    vga_put_string(25, 6, "1.3.0 (Stable)", MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
-
-    vga_put_string(10, 7, "Kernel:", MAKE_COLOR(COLOR_CYAN, COLOR_BLACK));
-    vga_put_string(25, 7, "Monolithic", MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
-
-    vga_put_string(10, 8, "Architecture:", MAKE_COLOR(COLOR_CYAN, COLOR_BLACK));
-    vga_put_string(25, 8, "Intel x86 (32-bit)", MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
-
-    vga_put_string(10, 9, "Memory:", MAKE_COLOR(COLOR_CYAN, COLOR_BLACK));
-    vga_put_string(25, 9, "Protected Mode", MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
-
-    vga_put_string(10, 10, "Graphics:", MAKE_COLOR(COLOR_CYAN, COLOR_BLACK));
-    vga_put_string(25, 10, "VGA Compatible", MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
-
-    vga_put_string(10, 11, "File System:", MAKE_COLOR(COLOR_CYAN, COLOR_BLACK));
-    vga_put_string(25, 11, "Custom FS", MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
-
-    // Features section
-    center_text(13, "Key Features:", MAKE_COLOR(COLOR_LIGHT_MAGENTA, COLOR_BLACK));
-    vga_put_string(15, 14, "* Preemptive Multitasking", MAKE_COLOR(COLOR_GREEN, COLOR_BLACK));
-    vga_put_string(15, 15, "* Memory Protection", MAKE_COLOR(COLOR_GREEN, COLOR_BLACK));
-    vga_put_string(15, 16, "* Device Driver Framework", MAKE_COLOR(COLOR_GREEN, COLOR_BLACK));
-    vga_put_string(15, 17, "* System Call Interface", MAKE_COLOR(COLOR_GREEN, COLOR_BLACK));
-
-    // Status bar
-    vga_put_string(2, 21, "Status: Running", MAKE_COLOR(COLOR_BLACK, COLOR_LIGHT_GRAY));
-    vga_put_string(25, 21, "Uptime: 00:02:34", MAKE_COLOR(COLOR_BLACK, COLOR_LIGHT_GRAY));
-    vga_put_string(50, 21, "Memory: unknown", MAKE_COLOR(COLOR_BLACK, COLOR_LIGHT_GRAY));
-
-    // Footer
-    center_text(23, "ESC: Exit | F1: Help | F5: Refresh", MAKE_COLOR(COLOR_DARK_GRAY, COLOR_BLACK));
-}
-#include <stdint.h>
-#include "../include/string.h"
-
-// VGA text mode constants
-#define VGA_BUFFER ((volatile char*)0xB8000)
-#define VGA_WIDTH 80
-#define VGA_HEIGHT 25
-#define VGA_BYTES_PER_CHAR 2
-
-// Color attributes
-#define COLOR_BLACK 0x00
-#define COLOR_BLUE 0x01
-#define COLOR_WHITE 0x0F
-#define COLOR_LIGHT_CYAN 0x0B
-#define COLOR_YELLOW 0x0E
-
-#define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
-
-static void vga_put_char(int x, int y, char c, uint8_t color) {
-    if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
-        volatile char* pos = VGA_BUFFER + (y * VGA_WIDTH + x) * VGA_BYTES_PER_CHAR;
-        pos[0] = c;
-        pos[1] = color;
-    }
-}
-
-static void vga_put_string(int x, int y, const char* str, uint8_t color) {
-    for (int i = 0; str[i] && (x + i) < VGA_WIDTH; i++) {
-        vga_put_char(x + i, y, str[i], color);
-    }
-}
-
-void openAbout() {
-    uint8_t header_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLUE);
-    uint8_t text_color = MAKE_COLOR(COLOR_BLACK, COLOR_WHITE);
-    uint8_t accent_color = MAKE_COLOR(COLOR_LIGHT_CYAN, COLOR_WHITE);
-
-    // Clear area and draw about dialog
-    for (int y = 8; y < 18; y++) {
-        for (int x = 30; x < 65; x++) {
-            vga_put_char(x, y, ' ', text_color);
-        }
-    }
-
-    vga_put_string(40, 9, "About SCos", header_color);
-    vga_put_string(32, 11, "SCos Operating System", accent_color);
-    vga_put_string(35, 12, "Version 1.0.0", text_color);
-    vga_put_string(32, 13, "Built with C++ and Assembly", text_color);
-    vga_put_string(32, 15, "A simple 32-bit operating system", text_color);
-    vga_put_string(35, 16, "for educational purposes", text_color);
-}
-
 void About::handleInput(char key) {
-    // Handle about input
+    // Handle about input - placeholder for future implementation
+    // Can add navigation or close functionality here
 }
