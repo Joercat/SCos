@@ -1,7 +1,12 @@
+
 {pkgs}: {
   deps = [
     pkgs.qemu_full
     pkgs.binutils-unwrapped
-    pkgs.rPackages.matrixcalc
+    pkgs.nasm
+    pkgs.glibc_multi
+    pkgs.gcc_multi
+    pkgs.glibc.dev
+    pkgs.gcc.cc
   ];
 }
