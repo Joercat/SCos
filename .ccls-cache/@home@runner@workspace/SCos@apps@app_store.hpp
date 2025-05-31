@@ -1,4 +1,3 @@
-
 #pragma once
 #include "../ui/window_manager.hpp"
 #include <stdint.h>
@@ -38,7 +37,8 @@ public:
     static void hide();
     static bool isVisible();
     static void handleInput(uint8_t key);
-    
+    static void handleMouseClick(int x, int y);
+
 private:
     static void drawStore();
     static void drawHeader();
