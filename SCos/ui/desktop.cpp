@@ -267,6 +267,26 @@ void Desktop::launchApplication(AppType app) {
     }
 }
 
+// Local string function implementations for freestanding environment
+static char* strstr(const char* haystack, const char* needle) {
+    if (!*needle) return (char*)haystack;
+    
+    while (*haystack) {
+        const char* h = haystack;
+        const char* n = needle;
+        
+        while (*h && *n && (*h == *n)) {
+            h++;
+            n++;
+        }
+        
+        if (!*n) return (char*)haystack;
+        haystack++;
+    }
+    
+    return nullptr;
+}
+
 void Desktop::closeActiveWindow() {
     int active = WindowManager::getActiveWindow();
     if (active >= 0) {

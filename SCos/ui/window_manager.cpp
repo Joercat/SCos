@@ -1,6 +1,12 @@
 #include "window_manager.hpp"
 #include <stdint.h>
-#include <cstring>
+
+// Local string function implementations for freestanding environment
+static int strlen(const char* str) {
+    int len = 0;
+    while (str[len]) len++;
+    return len;
+}
 
 // VGA text mode constants
 const int VGA_WIDTH = 80;

@@ -4,7 +4,32 @@
 #include "../apps/notepad.hpp"
 #include "../apps/calculator.hpp"
 #include "../apps/file_manager.hpp"
-#include <string.h>
+
+// Local string function implementations for freestanding environment
+static int strlen(const char* str) {
+    int len = 0;
+    while (str[len]) len++;
+    return len;
+}
+
+static char* strstr(const char* haystack, const char* needle) {
+    if (!*needle) return (char*)haystack;
+    
+    while (*haystack) {
+        const char* h = haystack;
+        const char* n = needle;
+        
+        while (*h && *n && (*h == *n)) {
+            h++;
+            n++;
+        }
+        
+        if (!*n) return (char*)haystack;
+        haystack++;
+    }
+    
+    return nullptr;
+}
 
 #define MAX_APPS 16
 #define LAUNCHER_WIDTH 60

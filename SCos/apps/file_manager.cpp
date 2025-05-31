@@ -30,6 +30,13 @@ static void vga_put_string(int x, int y, const char* str, uint8_t color) {
     }
 }
 
+// Local string function implementations for freestanding environment
+static int strlen(const char* str) {
+    int len = 0;
+    while (str[len]) len++;
+    return len;
+}
+
 void openFileManager() {
     uint8_t header_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLUE);
     uint8_t text_color = MAKE_COLOR(COLOR_BLACK, COLOR_WHITE);

@@ -4,9 +4,36 @@
 #include "../include/string.h"
 #include <stdint.h>
 
-// Add missing strstr declaration
-extern "C" {
-    char* strstr(const char* haystack, const char* needle);
+// Local string function implementations for freestanding environment
+static int strlen(const char* str) {
+    int len = 0;
+    while (str[len]) len++;
+    return len;
+}
+
+static char* strcpy(char* dest, const char* src) {
+    char* orig_dest = dest;
+    while ((*dest++ = *src++));
+    return orig_dest;
+}
+
+static char* strstr(const char* haystack, const char* needle) {
+    if (!*needle) return (char*)haystack;
+    
+    while (*haystack) {
+        const char* h = haystack;
+        const char* n = needle;
+        
+        while (*h && *n && (*h == *n)) {
+            h++;
+            n++;
+        }
+        
+        if (!*n) return (char*)haystack;
+        haystack++;
+    }
+    
+    return nullptr;
 }
 
 // Calculator state

@@ -640,16 +640,19 @@ public:
 #endif
 // settings.cpp
 #include "settings.hpp"
-#include <iostream> // Add missing include
-#include <cstring>
+
+// Local string function implementations for freestanding environment
+static int strlen(const char* str) {
+    int len = 0;
+    while (str[len]) len++;
+    return len;
+}
 void Settings::openSettings() {
-    std::cout << "Opening Settings" << std::endl;
-    // Implement settings display logic here
+    // Implement settings display logic here - no std::cout in freestanding environment
 }
 
 void Settings::handleInput(char key) {
-    std::cout << "Settings Handle Input: " << key << std::endl;
-    // Implement settings input handling logic here
+    // Implement settings input handling logic here - no std::cout in freestanding environment
 }
 // about.hpp
 #ifndef ABOUT_HPP
@@ -666,15 +669,13 @@ public:
 #include <iostream> // Add missing include
 #include <cstring>
 void About::openAbout() {
-    std::cout << "Opening About" << std::endl;
-    // Implement about display logic here
+    // Implement about display logic here - no std::cout in freestanding environment
 }
 // main.cpp
 #include "window_manager.hpp"
 #include "terminal.hpp"
 #include "settings.hpp"
 #include "about.hpp"
-#include <iostream>
 
 int main() {
     WindowManager wm(80, 25); // VGA text mode dimensions
