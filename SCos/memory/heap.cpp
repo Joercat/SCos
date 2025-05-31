@@ -1,9 +1,11 @@
 #include "heap.hpp"
 #include "../include/stddef.h"
 #include "../debug/serial.hpp"
+#include "../include/memory.h"
 
 extern "C" {
     extern uint32_t _kernel_end;
+    void* memcpy(void* dest, const void* src, size_t size);
 }
 
 static uint32_t heap_start;
@@ -32,6 +34,35 @@ bool init_heap() {
                   heap_start, heap_end, (heap_end - heap_start) / 1024);
     
     return true;
+}
+
+void* kmalloc(size_t size) {
+    if (size == 0) return nullptr;
+    
+    // Align size to 4 bytes
+    size = (size + 3) & ~3;
+    
+    heap_block* current = first_block;
+    while (current) {
+        if (!current->used && current->size >= size) {
+            // Split block if it's larger than needed
+            if (current->size > size + sizeof(heap_block) + 4) {
+                heap_block* new_block = (heap_block*)((uint8_t*)current + sizeof(heap_block) + size);
+                new_block->size = current->size - size - sizeof(heap_block);
+                new_block->used = false;
+                new_block->next = current->next;
+                
+                current->size = size;
+                current->next = new_block;
+            }
+            
+            current->used = true;
+            return (uint8_t*)current + sizeof(heap_block);
+        }
+        current = current->next;
+    }
+    
+    return nullptr;
 }
 
 void* kmalloc(size_t size) {
