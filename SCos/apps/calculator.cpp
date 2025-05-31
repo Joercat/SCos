@@ -74,6 +74,59 @@ static void int_to_str(int num, char* str) {
     str[j] = '\0';
 }
 
+// Missing function implementations
+static void sprintf(char* dest, const char* format, double value) {
+    // Simple implementation for %.2f format
+    int integer_part = (int)value;
+    int decimal_part = (int)((value - integer_part) * 100);
+    
+    int_to_str(integer_part, dest);
+    
+    // Find end of string
+    while (*dest) dest++;
+    
+    *dest++ = '.';
+    if (decimal_part < 10) {
+        *dest++ = '0';
+    }
+    int_to_str(decimal_part, dest);
+}
+
+static int strlen(const char* str) {
+    return calc_strlen(str);
+}
+
+// VGA constants and functions
+#define VGA_WIDTH 80
+#define VGA_HEIGHT 25
+#define COLOR_BLACK 0
+#define COLOR_WHITE 15
+#define COLOR_LIGHT_GRAY 7
+#define COLOR_BLUE 1
+
+#define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
+
+static void vga_put_char(int x, int y, char c, uint8_t color) {
+    if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
+        volatile char* video = (volatile char*)0xB8000;
+        int idx = 2 * (y * VGA_WIDTH + x);
+        video[idx] = c;
+        video[idx + 1] = color;
+    }
+}
+
+static void vga_put_string(int x, int y, const char* str, uint8_t color) {
+    for (int i = 0; str[i] && (x + i) < VGA_WIDTH; i++) {
+        vga_put_char(x + i, y, str[i], color);
+    }
+}
+
+// Stub for getLastKey - this would normally come from keyboard driver
+static uint8_t getLastKey() {
+    // This is a stub - in a real OS this would interface with the keyboard driver
+    return 0;
+}
+
 // Calculator state
 static int calc_window_id = -1;
 static bool calc_visible = false;
@@ -82,6 +135,13 @@ static char current_number[32] = "";
 static char operator_char = '\0';
 static int stored_number = 0;
 static bool new_number = true;
+
+// Missing calculator variables
+static double display_value = 0.0;
+static double stored_value = 0.0;
+static char current_operator = '\0';
+static bool has_operand = false;
+static bool just_calculated = false;
 
 void drawCalculator() {
     uint8_t header_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLUE);
@@ -138,6 +198,12 @@ void inputDigit(int digit) {
         just_calculated = false;
     }
     display_value = display_value * 10 + digit;
+}
+
+// Helper function to convert char digit to int
+static void inputDigit(char digit_char) {
+    int digit = digit_char - '0';
+    inputDigit(digit);
 }
 
 void inputOperator(char op) {
