@@ -8,6 +8,7 @@
 #include "../drivers/keyboard.hpp"
 #include "../fs/ramfs.hpp"
 #include "../include/string.h"
+#include "../security/auth.hpp"
 #include "window_manager.hpp"
 
 // Desktop state
@@ -19,6 +20,9 @@ static int desktop_window_count = 0;
 bool Desktop::init() {
   if (desktop_initialized)
     return true;
+
+  // Initialize security system
+  AuthSystem::init();
 
   // Initialize window manager
   WindowManager::init();
@@ -165,6 +169,27 @@ void Desktop::handleInput() {
   // Check for keyboard input
   if (Keyboard::hasKey()) {
     uint8_t key = Keyboard::getKey();
+
+    // Check for security lock combination (Ctrl+Alt+L)
+    if (key == KEY_CTRL) {
+      if (Keyboard::isPressed(KEY_ALT) && Keyboard::isPressed('l')) {
+        AuthSystem::lockSystem();
+        AuthSystem::showLoginScreen();
+        return;
+      }
+    }
+
+    // If system is locked, route input to security system
+    if (AuthSystem::isSystemLocked()) {
+      AuthSystem::handleSecurityInput(key);
+      return;
+    }
+
+    // Check for security screen (Ctrl+S)
+    if (key == KEY_CTRL && Keyboard::isPressed('s')) {
+      AuthSystem::showPinScreen();
+      return;
+    }
 
     // Handle desktop shortcuts
     if (key == KEY_ALT) {
