@@ -22,7 +22,7 @@ bool Desktop::init() {
     return true;
 
   // Initialize security system
-  AuthSystem::init();
+  SecurityManager::init();
 
   // Initialize window manager
   WindowManager::init();
@@ -170,25 +170,19 @@ void Desktop::handleInput() {
   if (Keyboard::hasKey()) {
     uint8_t key = Keyboard::getKey();
 
-    // Check for security lock combination (Ctrl+Alt+L)
+    // If system is locked, handle login input
+    if (SecurityManager::isSystemLocked()) {
+      SecurityManager::handleLoginInput(key);
+      return;
+    }
+
+    // Security shortcut - Ctrl+L to lock system
     if (key == KEY_CTRL) {
-      if (Keyboard::isPressed(KEY_ALT) && Keyboard::isPressed('l')) {
-        AuthSystem::lockSystem();
-        AuthSystem::showLoginScreen();
+      if (Keyboard::isPressed('l') || Keyboard::isPressed('L')) {
+        SecurityManager::lockSystem();
+        SecurityManager::showLoginScreen();
         return;
       }
-    }
-
-    // If system is locked, route input to security system
-    if (AuthSystem::isSystemLocked()) {
-      AuthSystem::handleSecurityInput(key);
-      return;
-    }
-
-    // Check for security screen (Ctrl+S)
-    if (key == KEY_CTRL && Keyboard::isPressed('s')) {
-      AuthSystem::showPinScreen();
-      return;
     }
 
     // Handle desktop shortcuts

@@ -492,3 +492,386 @@ void AuthSystem::showSecurityLog() {
         video[idx + 1] = 0x70; // Black on gray
     }
 }
+#include "auth.hpp"
+#include "../ui/window_manager.hpp"
+#include "../drivers/keyboard.hpp"
+
+// Security state
+static bool system_locked = false;
+static bool authenticated = false;
+static AuthMode current_auth_mode = AUTH_PIN;
+static UserProfile current_user;
+static int login_window_id = -1;
+static bool login_screen_active = false;
+static char login_input[MAX_PASSWORD_LENGTH];
+static int login_input_pos = 0;
+static int failed_login_attempts = 0;
+static bool input_hidden = true;
+
+// Default credentials
+static const char DEFAULT_PIN[] = "1234";
+static const char DEFAULT_PASSWORD_HASH[] = "5d41402abc4b2a76b9719d911017c592"; // "hello"
+
+// VGA functions
+static void vga_put_char(int x, int y, char c, uint8_t color) {
+    if (x >= 0 && x < 80 && y >= 0 && y < 25) {
+        volatile char* pos = (volatile char*)0xB8000 + (y * 80 + x) * 2;
+        pos[0] = c;
+        pos[1] = color;
+    }
+}
+
+static void vga_put_string(int x, int y, const char* str, uint8_t color) {
+    for (int i = 0; str[i] && (x + i) < 80; i++) {
+        vga_put_char(x + i, y, str[i], color);
+    }
+}
+
+static void center_text(int y, const char* text, uint8_t color) {
+    int len = 0;
+    while (text[len]) len++;
+    int x = (80 - len) / 2;
+    vga_put_string(x, y, text, color);
+}
+
+bool SecurityManager::init() {
+    // Initialize default user profile
+    const char* default_username = "admin";
+    for (int i = 0; i < MAX_USERNAME_LENGTH - 1 && default_username[i]; i++) {
+        current_user.username[i] = default_username[i];
+    }
+    current_user.username[MAX_USERNAME_LENGTH - 1] = '\0';
+    
+    // Set default PIN
+    for (int i = 0; i < MAX_PIN_LENGTH && DEFAULT_PIN[i]; i++) {
+        current_user.pin[i] = DEFAULT_PIN[i];
+    }
+    current_user.pin[MAX_PIN_LENGTH] = '\0';
+    
+    // Set default password hash
+    for (int i = 0; i < 32 && DEFAULT_PASSWORD_HASH[i]; i++) {
+        current_user.password_hash[i] = DEFAULT_PASSWORD_HASH[i];
+    }
+    current_user.password_hash[32] = '\0';
+    
+    current_user.is_admin = true;
+    current_user.failed_attempts = 0;
+    current_user.locked = false;
+    current_user.last_login_time = 0;
+    
+    system_locked = true; // System starts locked
+    authenticated = false;
+    login_input[0] = '\0';
+    login_input_pos = 0;
+    
+    return true;
+}
+
+bool SecurityManager::authenticate(const char* input, AuthMode mode) {
+    if (current_user.locked) {
+        return false;
+    }
+    
+    bool result = false;
+    
+    switch (mode) {
+        case AUTH_PIN: {
+            int i = 0;
+            while (i < MAX_PIN_LENGTH && input[i] && current_user.pin[i]) {
+                if (input[i] != current_user.pin[i]) {
+                    break;
+                }
+                i++;
+            }
+            result = (input[i] == '\0' && current_user.pin[i] == '\0');
+            break;
+        }
+        case AUTH_PASSWORD:
+            result = verifyHash(input, current_user.password_hash);
+            break;
+        case AUTH_BOTH:
+            // For now, just check PIN (could be extended)
+            result = authenticate(input, AUTH_PIN);
+            break;
+        default:
+            result = true; // No auth
+            break;
+    }
+    
+    if (result) {
+        authenticated = true;
+        system_locked = false;
+        failed_login_attempts = 0;
+        current_user.failed_attempts = 0;
+    } else {
+        failed_login_attempts++;
+        current_user.failed_attempts++;
+        
+        if (failed_login_attempts >= 3) {
+            current_user.locked = true;
+        }
+    }
+    
+    return result;
+}
+
+void SecurityManager::lockSystem() {
+    system_locked = true;
+    authenticated = false;
+}
+
+void SecurityManager::unlockSystem() {
+    if (authenticated) {
+        system_locked = false;
+    }
+}
+
+bool SecurityManager::isSystemLocked() {
+    return system_locked;
+}
+
+bool SecurityManager::isAuthenticated() {
+    return authenticated;
+}
+
+void SecurityManager::logout() {
+    authenticated = false;
+    system_locked = true;
+    clearLoginInput();
+}
+
+void SecurityManager::showLoginScreen() {
+    login_window_id = WindowManager::createWindow("System Security", 20, 6, 40, 14);
+    if (login_window_id >= 0) {
+        login_screen_active = true;
+        WindowManager::setActiveWindow(login_window_id);
+        drawLoginScreen();
+    }
+}
+
+void SecurityManager::drawLoginScreen() {
+    if (!login_screen_active || login_window_id < 0) return;
+    
+    Window* win = WindowManager::getWindow(login_window_id);
+    if (!win) return;
+    
+    volatile char* video = (volatile char*)0xB8000;
+    
+    // Clear window area
+    for (int y = win->y + 1; y < win->y + win->height - 1; y++) {
+        for (int x = win->x + 1; x < win->x + win->width - 1; x++) {
+            vga_put_char(x, y, ' ', 0x07);
+        }
+    }
+    
+    int start_x = win->x + 2;
+    int start_y = win->y + 2;
+    
+    // Title
+    vga_put_string(start_x + 8, start_y, "SCos Security Login", 0x4F);
+    
+    // Security status
+    if (current_user.locked) {
+        vga_put_string(start_x + 5, start_y + 2, "ACCOUNT LOCKED", 0x4E);
+        vga_put_string(start_x + 2, start_y + 3, "Contact administrator", 0x07);
+        return;
+    }
+    
+    // Username display
+    vga_put_string(start_x, start_y + 3, "User: ", 0x07);
+    vga_put_string(start_x + 6, start_y + 3, current_user.username, 0x0F);
+    
+    // Auth mode display
+    const char* mode_text = "PIN";
+    if (current_auth_mode == AUTH_PASSWORD) mode_text = "Password";
+    else if (current_auth_mode == AUTH_BOTH) mode_text = "PIN + Password";
+    
+    vga_put_string(start_x, start_y + 5, "Mode: ", 0x07);
+    vga_put_string(start_x + 6, start_y + 5, mode_text, 0x0E);
+    
+    // Input prompt
+    if (current_auth_mode == AUTH_PIN) {
+        vga_put_string(start_x, start_y + 7, "Enter PIN: ", 0x07);
+    } else {
+        vga_put_string(start_x, start_y + 7, "Enter Password: ", 0x07);
+    }
+    
+    // Input field (hidden)
+    int input_x = start_x + (current_auth_mode == AUTH_PIN ? 11 : 16);
+    for (int i = 0; i < login_input_pos; i++) {
+        vga_put_char(input_x + i, start_y + 7, '*', 0x0F);
+    }
+    
+    // Cursor
+    vga_put_char(input_x + login_input_pos, start_y + 7, '_', 0x0F);
+    
+    // Failed attempts warning
+    if (failed_login_attempts > 0) {
+        char attempts_msg[32];
+        attempts_msg[0] = 'F'; attempts_msg[1] = 'a'; attempts_msg[2] = 'i'; attempts_msg[3] = 'l';
+        attempts_msg[4] = 'e'; attempts_msg[5] = 'd'; attempts_msg[6] = ' '; attempts_msg[7] = 'a';
+        attempts_msg[8] = 't'; attempts_msg[9] = 't'; attempts_msg[10] = 'e'; attempts_msg[11] = 'm';
+        attempts_msg[12] = 'p'; attempts_msg[13] = 't'; attempts_msg[14] = 's'; attempts_msg[15] = ':';
+        attempts_msg[16] = ' '; attempts_msg[17] = '0' + failed_login_attempts; attempts_msg[18] = '/';
+        attempts_msg[19] = '3'; attempts_msg[20] = '\0';
+        
+        vga_put_string(start_x, start_y + 9, attempts_msg, 0x4E);
+    }
+    
+    // Instructions
+    vga_put_string(start_x, start_y + 11, "Enter: Login | Esc: Cancel", 0x08);
+}
+
+void SecurityManager::handleLoginInput(uint8_t key) {
+    if (!login_screen_active) return;
+    
+    switch (key) {
+        case 0x01: // Escape
+            if (login_window_id >= 0) {
+                WindowManager::closeWindow(login_window_id);
+                login_screen_active = false;
+                login_window_id = -1;
+                clearLoginInput();
+            }
+            break;
+            
+        case 0x0E: // Backspace
+            if (login_input_pos > 0) {
+                login_input_pos--;
+                login_input[login_input_pos] = '\0';
+                drawLoginScreen();
+            }
+            break;
+            
+        case 0x1C: // Enter
+            login_input[login_input_pos] = '\0';
+            if (authenticate(login_input, current_auth_mode)) {
+                // Success
+                if (login_window_id >= 0) {
+                    WindowManager::closeWindow(login_window_id);
+                    login_screen_active = false;
+                    login_window_id = -1;
+                }
+                clearLoginInput();
+            } else {
+                // Failed
+                clearLoginInput();
+                drawLoginScreen();
+            }
+            break;
+            
+        default:
+            // Regular character input
+            if (key >= 0x02 && key <= 0x0D) { // Number keys 1-0
+                char digit = '1' + (key - 0x02);
+                if (key == 0x0B) digit = '0'; // Special case for 0
+                
+                if (login_input_pos < (current_auth_mode == AUTH_PIN ? MAX_PIN_LENGTH : MAX_PASSWORD_LENGTH) - 1) {
+                    login_input[login_input_pos] = digit;
+                    login_input_pos++;
+                    login_input[login_input_pos] = '\0';
+                    drawLoginScreen();
+                }
+            }
+            // Add letter support for passwords
+            else if (current_auth_mode != AUTH_PIN && key >= 0x10 && key <= 0x32) {
+                char letter = 'a';
+                // Simple scancode to letter mapping
+                if (key >= 0x10 && key <= 0x19) letter = 'q' + (key - 0x10);
+                else if (key >= 0x1E && key <= 0x26) letter = 'a' + (key - 0x1E);
+                else if (key >= 0x2C && key <= 0x32) letter = 'z' + (key - 0x2C);
+                
+                if (login_input_pos < MAX_PASSWORD_LENGTH - 1) {
+                    login_input[login_input_pos] = letter;
+                    login_input_pos++;
+                    login_input[login_input_pos] = '\0';
+                    drawLoginScreen();
+                }
+            }
+            break;
+    }
+}
+
+void SecurityManager::clearLoginInput() {
+    login_input[0] = '\0';
+    login_input_pos = 0;
+}
+
+bool SecurityManager::changePin(const char* old_pin, const char* new_pin) {
+    if (!authenticated) return false;
+    
+    // Verify old PIN
+    if (!authenticate(old_pin, AUTH_PIN)) {
+        return false;
+    }
+    
+    // Set new PIN
+    int i;
+    for (i = 0; i < MAX_PIN_LENGTH && new_pin[i]; i++) {
+        current_user.pin[i] = new_pin[i];
+    }
+    current_user.pin[i] = '\0';
+    
+    return true;
+}
+
+bool SecurityManager::changePassword(const char* old_password, const char* new_password) {
+    if (!authenticated) return false;
+    
+    // Verify old password
+    if (!verifyHash(old_password, current_user.password_hash)) {
+        return false;
+    }
+    
+    // Hash new password (simple hash)
+    uint32_t hash = simpleHash(new_password);
+    
+    // Convert hash to string (simplified)
+    for (int i = 0; i < 32; i++) {
+        current_user.password_hash[i] = '0' + ((hash >> (i % 32)) & 1);
+    }
+    current_user.password_hash[32] = '\0';
+    
+    return true;
+}
+
+uint32_t SecurityManager::simpleHash(const char* str) {
+    uint32_t hash = 5381;
+    int c;
+    while ((c = *str++)) {
+        hash = ((hash << 5) + hash) + c;
+    }
+    return hash;
+}
+
+bool SecurityManager::verifyHash(const char* input, const char* stored_hash) {
+    uint32_t input_hash = simpleHash(input);
+    uint32_t stored = 0;
+    
+    // Simple hash comparison (in real system, use proper crypto)
+    for (int i = 0; i < 32; i++) {
+        if (stored_hash[i] >= '0' && stored_hash[i] <= '9') {
+            stored = (stored << 1) | (stored_hash[i] - '0');
+        }
+    }
+    
+    return input_hash == stored;
+}
+
+void SecurityManager::resetFailedAttempts() {
+    failed_login_attempts = 0;
+    current_user.failed_attempts = 0;
+    current_user.locked = false;
+}
+
+int SecurityManager::getFailedAttempts() {
+    return failed_login_attempts;
+}
+
+void SecurityManager::setAuthMode(AuthMode mode) {
+    current_auth_mode = mode;
+}
+
+AuthMode SecurityManager::getAuthMode() {
+    return current_auth_mode;
+}

@@ -43,6 +43,7 @@ void AppLauncher::init() {
     registerApp("Calculator", "[C]", 25, 15, []() { Desktop::launchApplication(APP_CALCULATOR); });
     registerApp("Calendar", "[A]", 30, 16, []() { Desktop::launchApplication(APP_CALENDAR); });
     registerApp("Settings", "[S]", 40, 18, []() { Desktop::launchApplication(APP_SETTINGS); });
+    registerApp("Security", "[X]", 50, 16, []() { Desktop::launchApplication(APP_SECURITY); });
     registerApp("About", "[?]", 35, 10, []() { Desktop::launchApplication(APP_ABOUT); });
 }
 

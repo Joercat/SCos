@@ -19,7 +19,8 @@ enum AppType {
   APP_SETTINGS,
   APP_ABOUT,
   APP_FILE_MANAGER,
-  APP_CALCULATOR
+  APP_CALCULATOR,
+  APP_SECURITY
 };
 
 // Keyboard key constants
@@ -54,6 +55,7 @@ private:
   static void openSettings();
   static void openAbout();
   static void launchCalculator();
+  static void openSecurityCenter();
 
   // File system functions
   static const char *readFile(const char *path);
