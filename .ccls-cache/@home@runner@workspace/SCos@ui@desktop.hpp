@@ -32,6 +32,7 @@ public:
   static bool init();
   static void handle_events();
   static void update();
+  static void launchApplication(AppType app);
 
 private:
   static void drawDesktopBackground();
@@ -42,7 +43,6 @@ private:
   static void handleInput();
   static void updateDesktop();
   static void switchToNextWindow();
-  static void launchApplication(AppType app);
   static void closeActiveWindow();
   static void passInputToApplication(int window_id, uint8_t key);
 
