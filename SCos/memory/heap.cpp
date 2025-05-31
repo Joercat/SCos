@@ -3,7 +3,7 @@
 #include "../debug/serial.hpp"
 
 extern "C" {
-    extern char _kernel_end;
+    extern uint32_t _kernel_end;
 }
 
 static uint32_t heap_start;
@@ -19,7 +19,7 @@ struct heap_block {
 static heap_block* first_block = nullptr;
 
 bool init_heap() {
-    heap_start = ((uint32_t)&_kernel_end + 0xFFF) & ~0xFFF;
+    heap_start = (_kernel_end + 0xFFF) & ~0xFFF;
     heap_end = heap_start + (4 * 1024 * 1024);
     heap_current = heap_start;
     

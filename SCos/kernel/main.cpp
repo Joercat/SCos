@@ -9,7 +9,7 @@
 extern "C" {
     extern void* __CTOR_LIST__;
     extern void* __CTOR_END__;
-    extern char _kernel_end;
+    extern uint32_t _kernel_end;
 
     typedef void (*constructor)();
 
@@ -77,8 +77,8 @@ extern "C" {
 
 void show_memory_info() {
     serial_printf("Kernel loaded at: 0x1000\n");
-    serial_printf("Kernel end: 0x%x\n", (uint32_t)&_kernel_end);
-    serial_printf("Available memory starts at: 0x%x\n", (uint32_t)&_kernel_end);
+    serial_printf("Kernel end: 0x%x\n", _kernel_end);
+    serial_printf("Available memory starts at: 0x%x\n", _kernel_end);
 }
 
 extern "C" void _start() {
