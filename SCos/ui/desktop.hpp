@@ -64,6 +64,10 @@ private:
   // File system functions
   static const char *readFile(const char *path);
   
+  // Taskbar functions
+  static void drawOpenAppIcons(int start_x, int y);
+  static char getAppIcon(const char* title);
+  
   
 };
 

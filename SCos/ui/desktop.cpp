@@ -89,8 +89,21 @@ void Desktop::drawTaskbar() {
         video[idx + 1] = 0x4F; // White on red
     }
     
+    // Draw open application icons
+    int app_start_x = 7;
+    drawOpenAppIcons(app_start_x, taskbar_y);
+    
+    // Draw calendar date (simplified)
+    const char* date_text = "Dec 15";
+    int date_x = 80 - 12;
+    for (int i = 0; date_text[i]; ++i) {
+        int idx = 2 * (taskbar_y * 80 + date_x + i);
+        video[idx] = date_text[i];
+        video[idx + 1] = 0x17; // Grey on white
+    }
+    
     // Draw time (simplified)
-    const char* time_text = "12:00";
+    const char* time_text = "12:45";
     int time_x = 80 - 5;
     for (int i = 0; time_text[i]; ++i) {
         int idx = 2 * (taskbar_y * 80 + time_x + i);
@@ -248,6 +261,40 @@ void Desktop::handle_events() {
 
 void Desktop::update() {
     updateDesktop();
+}
+
+void Desktop::drawOpenAppIcons(int start_x, int y) {
+    volatile char* video = (volatile char*)0xB8000;
+    int current_x = start_x;
+    
+    // Check which applications are currently open and draw their icons
+    for (int i = 0; i < MAX_WINDOWS; ++i) {
+        Window* win = WindowManager::getWindow(i);
+        if (win && win->visible && current_x < 60) { // Leave space for date/time
+            // Draw app icon based on window title
+            char icon = getAppIcon(win->title);
+            int idx = 2 * (y * 80 + current_x);
+            video[idx] = icon;
+            video[idx + 1] = win->focused ? 0x1F : 0x17; // Blue if focused, grey otherwise
+            
+            current_x += 2; // Space between icons
+        }
+    }
+}
+
+char Desktop::getAppIcon(const char* title) {
+    // Return appropriate icon based on application title
+    if (title[0] == 'T' && title[1] == 'e') return 'T'; // Terminal
+    if (title[0] == 'N' && title[1] == 'o') return 'N'; // Notepad
+    if (title[0] == 'C' && title[1] == 'a' && title[2] == 'l' && title[3] == 'c') return 'C'; // Calculator
+    if (title[0] == 'F' && title[1] == 'i') return 'F'; // File Manager
+    if (title[0] == 'B' && title[1] == 'r') return 'B'; // Browser
+    if (title[0] == 'A' && title[1] == 'p' && title[2] == 'p') return 'S'; // App Store
+    if (title[0] == 'S' && title[1] == 'e') return 'G'; // Settings
+    if (title[0] == 'A' && title[1] == 'b') return '?'; // About
+    if (title[0] == 'C' && title[1] == 'a' && title[2] == 'l' && title[3] == 'e') return 'D'; // Calendar
+    if (title[0] == 'S' && title[1] == 'e' && title[2] == 'c') return 'X'; // Security
+    return '*'; // Default icon
 }
 
 void Desktop::updateDesktop() {

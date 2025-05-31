@@ -3,10 +3,6 @@
 #include "../ui/window_manager.hpp"
 #include <stdint.h>
 
-// VGA constants are now in window_manager.hpp
-
-// VGA functions are now declared in window_manager.hpp and defined in window_manager.cpp
-
 // Local string function implementations for freestanding environment
 static int fm_strlen(const char* str) {
     int len = 0;
