@@ -1,8 +1,25 @@
+
 #include "terminal.hpp"
 #include "../drivers/keyboard.hpp"
 #include "../memory/heap.hpp"
 #include "../debug/serial.hpp"
 #include "../include/stddef.h"
+
+// Add strncmp function since it's not available in our custom environment
+extern "C" {
+int strncmp(const char* str1, const char* str2, size_t n) {
+    while (n && *str1 && (*str1 == *str2)) {
+        ++str1;
+        ++str2;
+        --n;
+    }
+    if (n == 0) {
+        return 0;
+    } else {
+        return (*(unsigned char*)str1 - *(unsigned char*)str2);
+    }
+}
+}
 
 Terminal::Terminal() {
     screen = (volatile char*)0xB8000;
@@ -280,4 +297,5 @@ void Terminal::run() {
 void Terminal::handleInput(uint8_t key) {
     // Static method for external input handling
     // For now, just ignore - proper implementation would need global terminal instance
+    (void)key; // Suppress unused parameter warning
 }
