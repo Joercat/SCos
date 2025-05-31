@@ -92,7 +92,8 @@ static void double_to_str(double value, char* buffer, int buffer_size) {
 }
 
 void Calculator::init() {
-    strcpy(display, "0");
+    display[0] = '0';
+    display[1] = '\0';
     current_value = 0.0;
     stored_value = 0.0;
     current_operator = '\0';
@@ -127,8 +128,9 @@ void Calculator::draw() {
         video[idx + 1] = 0x70; // Black on white
     }
     
-    // Show current display value
-    int len = strlen(display);
+    // Show current display value - use local length calculation
+    int len = 0;
+    while (display[len]) len++;
     for (int i = 0; i < len && i < 20; ++i) {
         int idx = 2 * (display_y * 80 + display_x + i);
         video[idx] = display[i];
@@ -202,14 +204,17 @@ void Calculator::handleInput(uint8_t key) {
 void Calculator::processNumber(char digit) {
     if (new_number) {
         if (digit == '.') {
-            strcpy(display, "0.");
+            display[0] = '0';
+            display[1] = '.';
+            display[2] = '\0';
         } else {
             display[0] = digit;
             display[1] = '\0';
         }
         new_number = false;
     } else {
-        int len = strlen(display);
+        int len = 0;
+        while (display[len]) len++;
         if (len < 30) {
             display[len] = digit;
             display[len + 1] = '\0';
@@ -250,7 +255,12 @@ void Calculator::processEquals() {
             if (operand != 0.0) {
                 current_value = stored_value / operand;
             } else {
-                strcpy(display, "Error");
+                display[0] = 'E';
+                display[1] = 'r';
+                display[2] = 'r';
+                display[3] = 'o';
+                display[4] = 'r';
+                display[5] = '\0';
                 new_number = true;
                 current_operator = '\0';
                 return;
@@ -264,7 +274,8 @@ void Calculator::processEquals() {
 }
 
 void Calculator::processClear() {
-    strcpy(display, "0");
+    display[0] = '0';
+    display[1] = '\0';
     current_value = 0.0;
     stored_value = 0.0;
     current_operator = '\0';
