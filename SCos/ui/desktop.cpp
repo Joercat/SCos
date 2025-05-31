@@ -8,13 +8,9 @@
 #include "../apps/file_manager.hpp"
 #include "../fs/ramfs.hpp"
 #include "../drivers/keyboard.hpp"
+#include "../include/string.h"
 
 // Utility function implementations
-int strlen(const char* str) {
-    int len = 0;
-    while (str[len]) len++;
-    return len;
-}
 
 char* strstr(const char* haystack, const char* needle) {
     if (!*needle) return (char*)haystack;
@@ -30,7 +26,7 @@ char* strstr(const char* haystack, const char* needle) {
         
         if (!*n_temp) return (char*)h;
     }
-    return nullptr;
+    return (char*)0;
 }
 
 // Desktop state

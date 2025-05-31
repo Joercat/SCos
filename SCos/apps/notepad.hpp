@@ -31,3 +31,16 @@ public:
 };
 
 #endif
+#ifndef NOTEPAD_HPP
+#define NOTEPAD_HPP
+
+#include <stdint.h>
+
+class Notepad {
+public:
+    static void handleInput(uint8_t key);
+};
+
+void openNotepad(const char* content);
+
+#endif

@@ -276,3 +276,8 @@ void Terminal::run() {
         handle_input();
     }
 }
+
+void Terminal::handleInput(uint8_t key) {
+    // Static method for external input handling
+    // For now, just ignore - proper implementation would need global terminal instance
+}

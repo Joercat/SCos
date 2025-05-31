@@ -24,4 +24,11 @@ bool isCapsLockOn();
 bool isKeyboardBufferEmpty();
 bool isKeyboardBufferFull();
 
+class Keyboard {
+public:
+    static bool hasKey() { return ::hasKey(); }
+    static char getKey() { return ::getKey(); }
+    static bool isPressed(char key);
+};
+
 #endif // KEYBOARD_HPP

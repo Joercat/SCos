@@ -36,6 +36,7 @@ public:
     Terminal();
     ~Terminal();
     void run();
+    static void handleInput(uint8_t key);
 };
 
 void runTerminal();

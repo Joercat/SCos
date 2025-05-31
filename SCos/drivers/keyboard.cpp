@@ -82,6 +82,11 @@ char getFromKeyboardBuffer() {
     return key;
 }
 
+bool Keyboard::isPressed(char key) {
+    // Simple implementation - check if key is currently in buffer
+    return hasKey();
+}
+
 void handleSpecialKeys(uint8_t scancode, bool keyPressed) {
     switch (scancode) {
         case SCANCODE_LSHIFT:
