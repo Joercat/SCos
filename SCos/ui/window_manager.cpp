@@ -1,6 +1,6 @@
 #include "window_manager.hpp"
 #include <stdint.h>
-#include <string.h>
+#include <cstring>
 
 // VGA text mode constants
 const int VGA_WIDTH = 80;

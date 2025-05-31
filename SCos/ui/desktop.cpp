@@ -1,5 +1,6 @@
 #include "desktop.hpp"
 #include "window_manager.hpp"
+#include <cstring>
 #include "../apps/terminal.hpp"
 #include "../apps/notepad.hpp"
 #include "../apps/calendar.hpp"

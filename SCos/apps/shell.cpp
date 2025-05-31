@@ -2,6 +2,7 @@
 #include "../fs/ramfs.hpp"
 #include "../debug/serial.hpp"
 #include "../include/stddef.h"
+#include <cstring>
 
 Shell::Shell() {
     current_directory[0] = '/';

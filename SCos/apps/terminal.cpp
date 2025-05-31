@@ -4,6 +4,7 @@
 #include "../memory/heap.hpp"
 #include "../debug/serial.hpp"
 #include "../include/stddef.h"
+#include <cstring>
 
 // Add strncmp function since it's not available in our custom environment
 extern "C" {

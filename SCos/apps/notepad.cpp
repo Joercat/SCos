@@ -481,6 +481,9 @@ void notepad_cursor_up() {
     draw_status_bar();
 }
 
+#include <stdint.h>
+#include <cstring>
+
 void notepad_cursor_down() {
     int max_lines = count_lines();
     if (notepad.cursor_y < max_lines - 1) {
