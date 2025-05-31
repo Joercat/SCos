@@ -31,7 +31,7 @@ static void vga_put_string(int x, int y, const char* str, uint8_t color) {
 }
 
 // Local string function implementations for freestanding environment
-static int strlen(const char* str) {
+static int fm_strlen(const char* str) {
     int len = 0;
     while (str[len]) len++;
     return len;

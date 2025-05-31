@@ -74,7 +74,7 @@ static Event events[] = {
 #define NUM_EVENTS (sizeof(events) / sizeof(events[0]))
 
 // Utility functions
-static int strlen_custom(const char* str) {
+static int calendar_strlen(const char* str) {
     int len = 0;
     while (str[len]) len++;
     return len;
@@ -103,7 +103,7 @@ static void vga_clear_screen(uint8_t color) {
 }
 
 static void center_text(int y, const char* text, uint8_t color) {
-    int len = strlen_custom(text);
+    int len = calendar_strlen(text);
     int x = (VGA_WIDTH - len) / 2;
     vga_put_string(x, y, text, color);
 }

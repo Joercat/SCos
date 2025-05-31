@@ -1,34 +1,24 @@
 #include "app_launcher.hpp"
 #include "desktop.hpp"
+#include "window_manager.hpp"
 #include "../apps/terminal.hpp"
 #include "../apps/notepad.hpp"
 #include "../apps/calculator.hpp"
 #include "../apps/file_manager.hpp"
 
 // Local string function implementations for freestanding environment
-static int strlen(const char* str) {
+static int custom_strlen(const char* str) {
     int len = 0;
     while (str[len]) len++;
     return len;
 }
 
-static char* strstr(const char* haystack, const char* needle) {
-    if (!*needle) return (char*)haystack;
-    
-    while (*haystack) {
-        const char* h = haystack;
-        const char* n = needle;
-        
-        while (*h && *n && (*h == *n)) {
-            h++;
-            n++;
-        }
-        
-        if (!*n) return (char*)haystack;
-        haystack++;
+static int custom_strcmp(const char* str1, const char* str2) {
+    while (*str1 && (*str1 == *str2)) {
+        str1++;
+        str2++;
     }
-    
-    return nullptr;
+    return *(unsigned char*)str1 - *(unsigned char*)str2;
 }
 
 #define MAX_APPS 16
@@ -155,7 +145,7 @@ void AppLauncher::drawAppIcon(int x, int y, const AppInfo& app, bool selected) {
     }
     
     // Draw icon
-    int icon_len = strlen(app.icon);
+    int icon_len = custom_strlen(app.icon);
     for (int i = 0; i < icon_len && i < 10; ++i) {
         int idx = 2 * (y * 80 + x + i);
         video[idx] = app.icon[i];
@@ -163,7 +153,7 @@ void AppLauncher::drawAppIcon(int x, int y, const AppInfo& app, bool selected) {
     }
     
     // Draw name
-    int name_len = strlen(app.name);
+    int name_len = custom_strlen(app.name);
     for (int i = 0; i < name_len && i < 10; ++i) {
         int idx = 2 * ((y + 1) * 80 + x + i);
         video[idx] = app.name[i];
@@ -232,7 +222,7 @@ void AppLauncher::launchApp(int app_index) {
 
 void AppLauncher::launchAppByName(const char* name) {
     for (int i = 0; i < app_count; ++i) {
-        if (strcmp(registered_apps[i].name, name) == 0) {
+        if (custom_strcmp(registered_apps[i].name, name) == 0) {
             launchApp(i);
             return;
         }

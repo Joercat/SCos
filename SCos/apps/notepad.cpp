@@ -97,7 +97,7 @@ static MenuItem view_menu[] = {
 };
 
 // Utility functions
-static int strlen_custom(const char* str) {
+static int notepad_strlen(const char* str) {
     int len = 0;
     while (str[len]) len++;
     return len;
@@ -429,7 +429,7 @@ void openNotepad(const char* content) {
     // Initialize with content if provided
     if (content) {
         strcpy_custom(notepad.text, content);
-        notepad.text_length = strlen_custom(content);
+        notepad.text_length = notepad_strlen(content);
         notepad.modified = 0;
     }
     

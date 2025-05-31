@@ -642,7 +642,7 @@ public:
 #include "settings.hpp"
 
 // Local string function implementations for freestanding environment
-static int strlen(const char* str) {
+static int settings_strlen(const char* str) {
     int len = 0;
     while (str[len]) len++;
     return len;

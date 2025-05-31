@@ -28,7 +28,7 @@
 #define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
 
 // Utility functions
-static int strlen_custom(const char* str) {
+static int about_strlen(const char* str) {
     int len = 0;
     while (str[len]) len++;
     return len;
@@ -43,7 +43,7 @@ static void vga_put_char(int x, int y, char c, uint8_t color) {
 }
 
 static void vga_put_string(int x, int y, const char* str, uint8_t color) {
-    for (int i = 0; i < strlen_custom(str) && (x + i) < VGA_WIDTH; i++) {
+    for (int i = 0; i < about_strlen(str) && (x + i) < VGA_WIDTH; i++) {
         vga_put_char(x + i, y, str[i], color);
     }
 }
@@ -75,7 +75,7 @@ static void vga_draw_box(int x, int y, int width, int height, uint8_t color) {
 }
 
 static void center_text(int y, const char* text, uint8_t color) {
-    int len = strlen_custom(text);
+    int len = about_strlen(text);
     int x = (VGA_WIDTH - len) / 2;
     vga_put_string(x, y, text, color);
 }
