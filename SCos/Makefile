@@ -3,8 +3,8 @@ CXX = g++
 AS = nasm
 LD = ld
 
-CFLAGS = -m32 -ffreestanding -O2 -Wall -Wextra -fno-exceptions -fno-rtti -I./include -nostdlib -nostartfiles -nodefaultlibs
-CXXFLAGS = $(CFLAGS)
+CFLAGS = -m32 -ffreestanding -O2 -Wall -Wextra -I./include -nostdlib -nostartfiles -nodefaultlibs -fno-stack-protector -fno-pic
+CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
 ASFLAGS = -f elf32
 LDFLAGS = -T linker.ld -m elf_i386 -nostdlib
 
