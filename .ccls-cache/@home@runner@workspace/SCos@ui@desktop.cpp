@@ -109,7 +109,8 @@ void Desktop::drawActiveApps() {
       int pos = app_start + i * 8;
       if (pos < 70) {
         int title_len = 0;
-        while (win->title[title_len] && title_len < 80) title_len++;
+        while (win->title[title_len] && title_len < 80)
+          title_len++;
         for (int j = 0; j < 6 && j < title_len; ++j) {
           int idx = 2 * (24 * 80 + pos + j);
           video[idx] = win->title[j];
@@ -336,12 +337,14 @@ void Desktop::passInputToApplication(int window_id, uint8_t key) {
     Notepad::handleInput(key);
   } else if (custom_strstr(win->title, "File Manager")) {
     FileManager::handleInput(key);
+  } else if (custom_strstr(win->title, "Calendar")) {
+    Calendar::handleInput(key);
   }
   // Add more application input handlers as needed
 }
 // Application launcher functions
 void Desktop::openNotepad(const char *content) {
-  extern void openNotepad(const char*);
+  extern void openNotepad(const char *);
   openNotepad(content);
 }
 
