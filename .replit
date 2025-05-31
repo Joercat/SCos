@@ -12,6 +12,7 @@ modules = ["cpp-clang14"]
 # Specifies which nix channel to use when building the environment.
 [nix]
 channel = "stable-21_11"
+packages = ["nasm"]
 
 [env]
 
