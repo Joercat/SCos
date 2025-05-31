@@ -1,36 +1,3 @@
-
-#ifndef NOTEPAD_HPP
-#define NOTEPAD_HPP
-
-// Function declarations for notepad application
-void openNotepad(const char* content);
-void openNotepadSimple(const char* content);
-
-// Navigation and editing functions
-void notepad_cursor_left();
-void notepad_cursor_right();
-void notepad_cursor_up();
-void notepad_cursor_down();
-void notepad_insert_char(char c);
-void notepad_backspace();
-void notepad_enter();
-void notepad_tab();
-
-// File operations
-void notepad_new();
-void notepad_save();
-
-// Advanced features
-void notepad_toggle_word_wrap();
-void notepad_select_all();
-
-// Notepad class for input handling
-class Notepad {
-public:
-    static void handleInput(char key);
-};
-
-#endif
 #ifndef NOTEPAD_HPP
 #define NOTEPAD_HPP
 
@@ -41,6 +8,23 @@ public:
     static void handleInput(uint8_t key);
 };
 
+// Function declarations for notepad application
 void openNotepad(const char* content);
+void closeNotepad();
+bool isNotepadVisible();
+void drawNotepadContent();
+void handleNotepadInput(uint8_t key);
+
+// VGA helper functions
+void vga_put_char(int x, int y, char c, uint8_t color);
+void vga_put_string(int x, int y, const char* str, uint8_t color);
+void vga_clear_screen(uint8_t color);
+void vga_clear_line(int y, uint8_t color);
+
+// Color constants
+#define COLOR_BLACK 0
+#define COLOR_WHITE 15
+#define COLOR_LIGHT_GRAY 7
+#define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
 
 #endif
