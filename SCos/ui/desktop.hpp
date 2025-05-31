@@ -4,6 +4,12 @@
 #include "window_manager.hpp"
 #include <stdint.h>
 
+// Forward declarations for application classes
+class Terminal;
+class Notepad;
+class FileManager;
+class Keyboard;
+
 #define MAX_DESKTOP_APPS 10
 
 enum AppType {
@@ -38,6 +44,18 @@ private:
     static void launchApplication(AppType app);
     static void closeActiveWindow();
     static void passInputToApplication(int window_id, uint8_t key);
+    
+    // Application launchers
+    static void openNotepad(const char* content);
+    static void runTerminal();
+    static void openFileManager();
+    static void openCalendar();
+    static void openSettings();
+    static void openAbout();
+    static void launchCalculator();
+    
+    // File system functions
+    static const char* readFile(const char* path);
 };
 
 // Utility functions

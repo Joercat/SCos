@@ -31,7 +31,7 @@ char* strstr(const char* haystack, const char* needle) {
 
 // Desktop state
 static bool desktop_initialized = false;
-static int taskbar_height = 2;
+// taskbar_height removed as it was unused
 static int desktop_windows[MAX_DESKTOP_APPS];
 static int desktop_window_count = 0;
 
@@ -126,7 +126,7 @@ void Desktop::drawActiveApps() {
             // Draw app indicator
             int pos = app_start + i * 8;
             if (pos < 70) {
-                for (int j = 0; j < 6 && j < strlen(win->title); ++j) {
+                for (int j = 0; j < 6 && j < static_cast<int>(strlen(win->title)); ++j) {
                     int idx = 2 * (24 * 80 + pos + j);
                     video[idx] = win->title[j];
                     video[idx + 1] = win->focused ? 0x1F : 0x70;

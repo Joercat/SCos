@@ -3,8 +3,8 @@
 #include <string.h>
 
 // VGA text mode constants
-static const int VGA_WIDTH = 80;
-static const int VGA_HEIGHT = 25;
+const int VGA_WIDTH = 80;
+const int VGA_HEIGHT = 25;
 static volatile char* video_memory = (volatile char*)0xB8000;
 
 // Window management
@@ -168,7 +168,7 @@ void WindowManager::clearWindowArea(int x, int y, int width, int height) {
 }
 
 Window* WindowManager::getWindow(int window_id) {
-    if (window_id < 0 || window_id >= window_count) return nullptr;
+    if (window_id < 0 || window_id >= window_count) return static_cast<Window*>(nullptr);
     return &windows[window_id];
 }
 

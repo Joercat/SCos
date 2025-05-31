@@ -63,8 +63,8 @@ void draw_horizontal_line(int y, int x1, int x2, char c, uint8_t color);
 
 #define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
 
-// Screen dimensions
-#define VGA_WIDTH  80
-#define VGA_HEIGHT 25
+// Screen dimensions (defined as constants in cpp file)
+extern const int VGA_WIDTH;
+extern const int VGA_HEIGHT;
 
 #endif

@@ -24,24 +24,24 @@ bool init_heap() {
     heap_start = (_kernel_end + 0xFFF) & ~0xFFF;
     heap_end = heap_start + (4 * 1024 * 1024);
     heap_current = heap_start;
-    
+
     first_block = (heap_block*)heap_start;
     first_block->size = heap_end - heap_start - sizeof(heap_block);
     first_block->used = false;
     first_block->next = nullptr;
-    
+
     serial_printf("Heap initialized: 0x%x - 0x%x (%d KB)\n", 
                   heap_start, heap_end, (heap_end - heap_start) / 1024);
-    
+
     return true;
 }
 
 void* kmalloc(size_t size) {
-    if (size == 0) return nullptr;
-    
+    if (size == 0) return static_cast<void*>(nullptr);
+
     // Align size to 4 bytes
     size = (size + 3) & ~3;
-    
+
     heap_block* current = first_block;
     while (current) {
         if (!current->used && current->size >= size) {
@@ -51,52 +51,26 @@ void* kmalloc(size_t size) {
                 new_block->size = current->size - size - sizeof(heap_block);
                 new_block->used = false;
                 new_block->next = current->next;
-                
+
                 current->size = size;
                 current->next = new_block;
             }
-            
+
             current->used = true;
             return (uint8_t*)current + sizeof(heap_block);
         }
         current = current->next;
     }
-    
-    return nullptr;
-}
 
-void* kmalloc(size_t size) {
-    if (size == 0) return nullptr;
-    
-    size = (size + 3) & ~3;
-    
-    heap_block* current = first_block;
-    while (current) {
-        if (!current->used && current->size >= size) {
-            if (current->size > size + sizeof(heap_block)) {
-                heap_block* new_block = (heap_block*)((uint8_t*)current + sizeof(heap_block) + size);
-                new_block->size = current->size - size - sizeof(heap_block);
-                new_block->used = false;
-                new_block->next = current->next;
-                
-                current->size = size;
-                current->next = new_block;
-            }
-            current->used = true;
-            return (void*)((uint8_t*)current + sizeof(heap_block));
-        }
-        current = current->next;
-    }
-    
-    return nullptr;
+    return static_cast<void*>(nullptr);
 }
 
 void kfree(void* ptr) {
     if (!ptr) return;
-    
+
     heap_block* block = (heap_block*)((uint8_t*)ptr - sizeof(heap_block));
     block->used = false;
-    
+
     heap_block* current = first_block;
     while (current) {
         if (!current->used && current->next && !current->next->used) {
@@ -111,14 +85,14 @@ void* krealloc(void* ptr, size_t size) {
     if (!ptr) return kmalloc(size);
     if (size == 0) {
         kfree(ptr);
-        return nullptr;
+        return static_cast<void*>(nullptr);
     }
-    
+
     heap_block* block = (heap_block*)((uint8_t*)ptr - sizeof(heap_block));
     if (block->size >= size) {
         return ptr;
     }
-    
+
     void* new_ptr = kmalloc(size);
     if (new_ptr) {
         memcpy(new_ptr, ptr, block->size < size ? block->size : size);
@@ -133,7 +107,7 @@ void heap_stats() {
     uint32_t free_blocks = 0;
     uint32_t used_memory = 0;
     uint32_t free_memory = 0;
-    
+
     heap_block* current = first_block;
     while (current) {
         total_blocks++;
@@ -146,7 +120,7 @@ void heap_stats() {
         }
         current = current->next;
     }
-    
+
     serial_printf("Heap Stats - Blocks: %d total, %d used, %d free\n", 
                   total_blocks, used_blocks, free_blocks);
     serial_printf("Memory: %d KB used, %d KB free\n", 

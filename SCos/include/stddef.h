@@ -14,7 +14,12 @@ typedef int int32_t;
 typedef long long int64_t;
 
 #define NULL ((void*)0)
+
+#ifdef __cplusplus
+// Use built-in nullptr in C++
+#else
 #define nullptr NULL
+#endif
 
 #ifdef __cplusplus
 extern "C" {
