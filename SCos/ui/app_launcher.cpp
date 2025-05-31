@@ -44,6 +44,8 @@ void AppLauncher::init() {
     registerApp("Calendar", "[A]", 30, 16, []() { Desktop::launchApplication(APP_CALENDAR); });
     registerApp("Settings", "[S]", 40, 18, []() { Desktop::launchApplication(APP_SETTINGS); });
     registerApp("Security", "[X]", 50, 16, []() { Desktop::launchApplication(APP_SECURITY); });
+    registerApp("Browser", "[B]", 70, 20, []() { Desktop::launchApplication(APP_BROWSER); });
+    registerApp("App Store", "[P]", 74, 22, []() { Desktop::launchApplication(APP_APP_STORE); });
     registerApp("About", "[?]", 35, 10, []() { Desktop::launchApplication(APP_ABOUT); });
 }
 
