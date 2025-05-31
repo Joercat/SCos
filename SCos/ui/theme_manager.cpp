@@ -2,7 +2,7 @@
 #include "theme_manager.hpp"
 #include "window_manager.hpp"
 
-static ThemeType current_theme = THEME_DEFAULT_BLUE;
+static ThemeType current_theme = THEME_MATRIX_GREEN;
 static Theme themes[THEME_COUNT];
 static bool themes_initialized = false;
 
@@ -11,7 +11,7 @@ void ThemeManager::init() {
         initializeThemes();
         themes_initialized = true;
     }
-    setTheme(THEME_DEFAULT_BLUE);
+    setTheme(THEME_MATRIX_GREEN);
 }
 
 void ThemeManager::initializeThemes() {
@@ -31,17 +31,17 @@ void ThemeManager::initializeThemes() {
         nullptr
     };
     
-    // Matrix Green Theme
+    // Matrix Green Theme (#39ff14 on black)
     themes[THEME_MATRIX_GREEN] = {
         "Matrix Green",
         0x00,  // Black background
-        0x0A,  // Bright green on black
-        0x02,  // Dark green background
+        0x0A,  // Bright green (#39ff14) on black
+        0x00,  // Black window background
         0x0A,  // Bright green text
-        0x20,  // Green on black taskbar
-        0x2F,  // White on green accent
-        0x2F,  // Green selection
-        0x02,  // Dark green
+        0x00,  // Black taskbar background
+        0x0A,  // Bright green on black
+        0x0A,  // Green selection
+        0x0A,  // Bright green
         0x0A,  // Bright green accent
         true,
         "matrix"

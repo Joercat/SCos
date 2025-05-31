@@ -1,14 +1,13 @@
-
-#ifndef SECURITY_CENTER_HPP
-#define SECURITY_CENTER_HPP
-
+#pragma once
 #include <stdint.h>
-
-void openSecurityCenter();
 
 class SecurityCenter {
 public:
+    static void init();
+    static void show();
+    static void hide();
+    static bool isVisible();
+    static void drawSecurityCenter();
     static void handleInput(uint8_t key);
+    static void handleMouseClick(int x, int y);
 };
-
-#endif

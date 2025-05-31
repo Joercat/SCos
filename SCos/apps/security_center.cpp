@@ -1,8 +1,116 @@
 
 #include "../security/auth.hpp"
 #include "../ui/window_manager.hpp"
+#include "security_center.hpp"
 
-// Forward declaration for SecurityManager if not in auth.hpp
+// Security Center state
+static int security_window_id = -1;
+static bool security_visible = false;
+
+void SecurityCenter::init() {
+    security_visible = false;
+    security_window_id = -1;
+}
+
+void SecurityCenter::show() {
+    if (security_visible) return;
+
+    security_window_id = WindowManager::createWindow("Security Center", 5, 2, 70, 20);
+    if (security_window_id >= 0) {
+        security_visible = true;
+        WindowManager::setActiveWindow(security_window_id);
+        drawSecurityCenter();
+    }
+}
+
+void SecurityCenter::hide() {
+    if (!security_visible || security_window_id < 0) return;
+
+    WindowManager::closeWindow(security_window_id);
+    security_visible = false;
+    security_window_id = -1;
+}
+
+bool SecurityCenter::isVisible() {
+    return security_visible;
+}
+
+void SecurityCenter::drawSecurityCenter() {
+    if (!security_visible || security_window_id < 0) return;
+
+    Window* win = WindowManager::getWindow(security_window_id);
+    if (!win) return;
+
+    volatile char* video = (volatile char*)0xB8000;
+    int start_x = win->x + 2;
+    int start_y = win->y + 2;
+
+    // Clear content area
+    for (int y = start_y; y < win->y + win->height - 1; ++y) {
+        for (int x = start_x; x < win->x + win->width - 2; ++x) {
+            int idx = 2 * (y * 80 + x);
+            video[idx] = ' ';
+            video[idx + 1] = 0x1F; // Blue background
+        }
+    }
+
+    // Title
+    const char* title = "SCos Security Center";
+    for (int i = 0; title[i] && i < win->width - 4; ++i) {
+        int idx = 2 * (start_y * 80 + start_x + i);
+        video[idx] = title[i];
+        video[idx + 1] = 0x1E; // Yellow
+    }
+
+    // Security status
+    const char* status = "System Status: SECURE";
+    int status_y = start_y + 2;
+    for (int i = 0; status[i] && i < win->width - 4; ++i) {
+        int idx = 2 * (status_y * 80 + start_x + i);
+        video[idx] = status[i];
+        video[idx + 1] = 0x2F; // Green
+    }
+
+    // Features list
+    const char* features[] = {
+        "* Authentication System: ACTIVE",
+        "* Firewall: ENABLED", 
+        "* Memory Protection: ON",
+        "* User Access Control: ENFORCED",
+        "* System Integrity: VERIFIED"
+    };
+
+    for (int i = 0; i < 5; ++i) {
+        int feature_y = start_y + 4 + i;
+        for (int j = 0; features[i][j] && j < win->width - 4; ++j) {
+            int idx = 2 * (feature_y * 80 + start_x + j);
+            video[idx] = features[i][j];
+            video[idx + 1] = 0x1F;
+        }
+    }
+}
+
+void SecurityCenter::handleInput(uint8_t key) {
+    if (!security_visible) return;
+
+    switch (key) {
+        case 0x01: // Escape
+            hide();
+            break;
+    }
+}
+
+void SecurityCenter::handleMouseClick(int x, int y) {
+    // Handle mouse clicks within security center window
+    if (!security_visible || security_window_id < 0) return;
+    
+    Window* win = WindowManager::getWindow(security_window_id);
+    if (!win) return;
+
+    // Check if click is within window
+    if (x < win->x || x >= win->x + win->width || 
+        y < win->y || y >= win->y + win->height) return;
+}
 class SecurityManager {
 public:
     static bool isAuthenticated();

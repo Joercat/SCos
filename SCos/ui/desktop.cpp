@@ -23,6 +23,7 @@ bool Desktop::init() {
     
     // Initialize theme manager first
     ThemeManager::init();
+    ThemeManager::setTheme(THEME_MATRIX_GREEN);
     
     // Initialize window manager
     WindowManager::init();

@@ -84,3 +84,7 @@ clean:
 
 run: scos.bin
 	qemu-system-i386 -drive format=raw,file=scos.bin
+
+# NOTE: To change the theme, modify the source files related to the UI (e.g., ui/theme_manager.cpp).
+# Set the background color to black and the text/secondary color to #39ff14.
+# Ensure that these changes are applied consistently across all UI elements.
