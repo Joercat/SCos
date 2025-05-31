@@ -108,7 +108,7 @@ void Desktop::drawActiveApps() {
       // Draw app indicator
       int pos = app_start + i * 8;
       if (pos < 70) {
-        for (int j = 0; j < 6 && j < static_cast<int>(strlen(win->title));
+        for (int j = 0; j < 6 && j < static_cast<int>(::strlen(win->title));
              ++j) {
           int idx = 2 * (24 * 80 + pos + j);
           video[idx] = win->title[j];
@@ -282,7 +282,7 @@ void Desktop::launchApplication(AppType app) {
 }
 
 // Local string function implementations for freestanding environment
-char *strstr(const char *haystack, const char *needle) {
+char *custom_strstr(const char *haystack, const char *needle) {
   if (!*needle)
     return (char *)haystack;
 
@@ -329,11 +329,11 @@ void Desktop::passInputToApplication(int window_id, uint8_t key) {
     return;
 
   // Route input based on window title/type
-  if (strstr(win->title, "Terminal")) {
+  if (custom_strstr(win->title, "Terminal")) {
     Terminal::handleInput(key);
-  } else if (strstr(win->title, "Notepad")) {
+  } else if (custom_strstr(win->title, "Notepad")) {
     Notepad::handleInput(key);
-  } else if (strstr(win->title, "File Manager")) {
+  } else if (custom_strstr(win->title, "File Manager")) {
     FileManager::handleInput(key);
   }
   // Add more application input handlers as needed
