@@ -21,6 +21,9 @@ static bool running = true;
 bool Desktop::init() {
     if (desktop_initialized) return true;
     
+    // Initialize theme manager first
+    ThemeManager::init();
+    
     // Initialize window manager
     WindowManager::init();
     WindowManager::clearScreen();
@@ -44,16 +47,11 @@ bool Desktop::init() {
 void Desktop::drawDesktopBackground() {
     WindowManager::clearScreen();
     
-    volatile char* video = (volatile char*)0xB8000;
+    // Use theme manager to draw background
+    ThemeManager::drawCustomBackground();
     
-    // Draw desktop background pattern
-    for (int y = 0; y < 25; ++y) {
-        for (int x = 0; x < 80; ++x) {
-            int idx = 2 * (y * 80 + x);
-            video[idx] = ' ';
-            video[idx + 1] = 0x11; // Blue background
-        }
-    }
+    volatile char* video = (volatile char*)0xB8000;
+    const Theme& theme = ThemeManager::getCurrentThemeData();
     
     // Draw desktop title
     const char* title = "SCos Desktop Environment";
@@ -61,28 +59,29 @@ void Desktop::drawDesktopBackground() {
     for (int i = 0; title[i]; ++i) {
         int idx = 2 * (2 * 80 + title_x + i);
         video[idx] = title[i];
-        video[idx + 1] = 0x1F; // White on blue
+        video[idx + 1] = theme.window_fg_color;
     }
     
     // Draw welcome message
-    const char* welcome = "Press Alt+Tab to open Application Launcher";
-    int welcome_x = (80 - 43) / 2;
-    for (int i = 0; welcome[i]; ++i) {
+    const char* welcome = "Press Alt+Tab to open Application Launcher, F1-F4 for themes";
+    int welcome_x = (80 - 58) / 2;
+    for (int i = 0; welcome[i] && i < 58; ++i) {
         int idx = 2 * (12 * 80 + welcome_x + i);
         video[idx] = welcome[i];
-        video[idx + 1] = 0x17; // Grey on blue
+        video[idx + 1] = theme.foreground_color;
     }
 }
 
 void Desktop::drawTaskbar() {
     volatile char* video = (volatile char*)0xB8000;
     int taskbar_y = 24;
+    const Theme& theme = ThemeManager::getCurrentThemeData();
     
     // Draw taskbar background
     for (int x = 0; x < 80; ++x) {
         int idx = 2 * (taskbar_y * 80 + x);
         video[idx] = ' ';
-        video[idx + 1] = 0x70; // Black on white
+        video[idx + 1] = theme.taskbar_bg_color;
     }
     
     // Draw start button
@@ -90,7 +89,7 @@ void Desktop::drawTaskbar() {
     for (int i = 0; start_text[i]; ++i) {
         int idx = 2 * (taskbar_y * 80 + i);
         video[idx] = start_text[i];
-        video[idx + 1] = 0x4F; // White on red
+        video[idx + 1] = theme.selected_bg_color;
     }
     
     // Draw open application icons
@@ -103,7 +102,7 @@ void Desktop::drawTaskbar() {
     for (int i = 0; date_text[i]; ++i) {
         int idx = 2 * (taskbar_y * 80 + date_x + i);
         video[idx] = date_text[i];
-        video[idx + 1] = 0x17; // Grey on white
+        video[idx + 1] = theme.foreground_color;
     }
     
     // Draw time (simplified)
@@ -112,7 +111,7 @@ void Desktop::drawTaskbar() {
     for (int i = 0; time_text[i]; ++i) {
         int idx = 2 * (taskbar_y * 80 + time_x + i);
         video[idx] = time_text[i];
-        video[idx + 1] = 0x70; // Black on white
+        video[idx + 1] = theme.taskbar_fg_color;
     }
 }
 
@@ -240,6 +239,35 @@ void Desktop::handleInput() {
             alt_pressed = false;
         } else if (key != KEY_ALT) {
             alt_pressed = false;
+        }
+        
+        // Theme switching with function keys
+        switch (key) {
+            case 0x3B: // F1
+                ThemeManager::setTheme(THEME_MATRIX_GREEN);
+                drawDesktopBackground();
+                drawTaskbar();
+                break;
+            case 0x3C: // F2
+                ThemeManager::setTheme(THEME_MATRIX_RED);
+                drawDesktopBackground();
+                drawTaskbar();
+                break;
+            case 0x3D: // F3
+                ThemeManager::setTheme(THEME_MATRIX_PURPLE);
+                drawDesktopBackground();
+                drawTaskbar();
+                break;
+            case 0x3E: // F4
+                ThemeManager::setTheme(THEME_NATURE);
+                drawDesktopBackground();
+                drawTaskbar();
+                break;
+            case 0x3F: // F5
+                ThemeManager::setTheme(THEME_DEFAULT_BLUE);
+                drawDesktopBackground();
+                drawTaskbar();
+                break;
         }
         
         // Pass input to active applications

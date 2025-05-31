@@ -28,7 +28,6 @@ public:
     static bool isVisible();
     static void handleInput(uint8_t key);
     static void handleMouseClick(int x, int y);
-    static void navigateToUrl(const char* url);
 
 private:
     static void drawBrowser();

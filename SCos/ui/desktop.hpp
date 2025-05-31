@@ -2,6 +2,7 @@
 #define DESKTOP_HPP
 
 #include "window_manager.hpp"
+#include "theme_manager.hpp"
 #include <stdint.h>
 
 // Forward declarations for application classes
@@ -38,6 +39,7 @@ public:
   static void handleMouseInput();
   static void handleTaskbarClick(int x);
   static const char *readFile(const char *path);
+  static void launchApplication(AppType app);
 
 private:
   static void drawDesktopBackground();
