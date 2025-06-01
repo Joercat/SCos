@@ -44,14 +44,25 @@ public:
     static void handleClick(int x, int y);
     static void executeJS(const char* function_name);
     static void reset();
+    static HTMLElement* getElementById(const char* id);
+    static void updateElementContent(const char* id, const char* new_content);
+    static void toggleElementVisibility(const char* id);
 
 private:
-    static void parseHTMLElement(const char* element_text, int parent_id);
+    static int parseHTMLElement(const char* element_text, int parent_id);
     static void applyCSSRules();
     static void renderElement(HTMLElement* element, int window_id);
     static void calculateLayout();
     static uint8_t parseColor(const char* color_name);
     static void parseAttributes(const char* attrs, HTMLElement* element);
+    static void parseInlineStyle(const char* style, HTMLElement* element);
+    static void applyCSSProperty(HTMLElement* element, const char* property, const char* value);
+    static bool matchesSelector(HTMLElement* element, const char* selector);
+    static void extractTagName(const char* element_text, char* tag_name);
+    static bool isVoidElement(const char* tag_name);
+    static void setDefaultElementProperties(HTMLElement* element);
+    static int getElementSpacing(HTMLElement* element);
+    static void flashScreen();
     static int findElementById(const char* id);
     static int findElementByTag(const char* tag);
 };
