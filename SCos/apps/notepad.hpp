@@ -14,6 +14,7 @@ public:
     static bool isVisible();
     static void handleInput(uint8_t key);
     static void handleMouseClick(int x, int y);
+    static void updateDisplay();
 
 private:
     static void drawNotepad();
@@ -21,5 +22,4 @@ private:
     static void deleteChar();
     static void newLine();
     static void moveCursor(int dx, int dy);
-    static void updateDisplay();
 };
