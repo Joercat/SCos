@@ -59,3 +59,23 @@ private:
     static void custom_strcpy(char* dest, const char* src);
     static int custom_strcmp(const char* str1, const char* str2);
 };
+#ifndef APP_STORE_HPP
+#define APP_STORE_HPP
+
+#include <stdint.h>
+
+class AppStore {
+public:
+    static void init();
+    static void show();
+    static void hide();
+    static bool isVisible();
+    static void handleInput(uint8_t key);
+    static void handleMouseClick(int x, int y);
+
+private:
+    static void drawAppStore();
+    static void toggleAppInstallation();
+};
+
+#endif

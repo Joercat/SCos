@@ -48,3 +48,24 @@ private:
     static void custom_strcpy(char* dest, const char* src);
     static int custom_strcmp(const char* str1, const char* str2);
 };
+#ifndef BROWSER_HPP
+#define BROWSER_HPP
+
+#include <stdint.h>
+
+class Browser {
+public:
+    static void init();
+    static void show();
+    static void hide();
+    static bool isVisible();
+    static void handleInput(uint8_t key);
+    static void handleMouseClick(int x, int y);
+
+private:
+    static void drawBrowser();
+    static void navigate(const char* url);
+    static void refreshPage();
+};
+
+#endif

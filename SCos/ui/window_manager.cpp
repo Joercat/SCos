@@ -35,7 +35,7 @@ int WindowManager::createWindow(const char* title, int x, int y, int width, int 
     if (window_count >= MAX_WINDOWS) {
         return -1; // No more windows available
     }
-    
+
     int id = window_count++;
     windows[id].id = id;
     windows[id].x = x;
@@ -44,7 +44,7 @@ int WindowManager::createWindow(const char* title, int x, int y, int width, int 
     windows[id].height = height;
     windows[id].visible = true;
     windows[id].focused = false;
-    
+
     // Copy title
     int i = 0;
     while (title[i] && i < MAX_TITLE_LENGTH - 1) {
@@ -52,45 +52,33 @@ int WindowManager::createWindow(const char* title, int x, int y, int width, int 
         i++;
     }
     windows[id].title[i] = '\0';
-    
+
     drawWindow(id);
     return id;
 }
 
 void WindowManager::drawWindow(int window_id) {
     if (window_id < 0 || window_id >= window_count) return;
-    
+
     Window& win = windows[window_id];
     if (!win.visible) return;
-    
-    // Choose colors based on focus
-    uint8_t border_color = win.focused ? 0x1F : 0x17; // Blue or grey
-    uint8_t title_color = win.focused ? 0x1E : 0x17;  // Yellow or grey
-    uint8_t bg_color = 0x1F; // Blue background
-    
+
+    uint8_t border_color = win.focused ? 0x4F : 0x70; // Red if focused, grey otherwise
+    uint8_t bg_color = 0x17; // Grey background
+    uint8_t title_color = 0x4F; // Red on white for title
+
     // Draw window border and background
     for (int j = 0; j < win.height; ++j) {
         for (int i = 0; i < win.width; ++i) {
             int screen_x = win.x + i;
             int screen_y = win.y + j;
-            
+
             if (screen_x >= VGA_WIDTH || screen_y >= VGA_HEIGHT) continue;
-            
+
             int idx = 2 * (screen_y * VGA_WIDTH + screen_x);
-            
-            // Draw border
+
             if (i == 0 || i == win.width - 1 || j == 0 || j == win.height - 1) {
-                if (j == 0 && i > 0 && i < win.width - 1) {
-                    video_memory[idx] = '-'; // Top border
-                } else if (j == win.height - 1 && i > 0 && i < win.width - 1) {
-                    video_memory[idx] = '-'; // Bottom border
-                } else if (i == 0 && j > 0 && j < win.height - 1) {
-                    video_memory[idx] = '|'; // Left border
-                } else if (i == win.width - 1 && j > 0 && j < win.height - 1) {
-                    video_memory[idx] = '|'; // Right border
-                } else {
-                    video_memory[idx] = '+'; // Corners
-                }
+                video_memory[idx] = (i == 0 || i == win.width - 1) ? '|' : '-'; // Border
                 video_memory[idx + 1] = border_color;
             } else {
                 video_memory[idx] = ' '; // Interior
@@ -98,7 +86,7 @@ void WindowManager::drawWindow(int window_id) {
             }
         }
     }
-    
+
     // Draw title
     int title_len = strlen(win.title);
     int title_start = win.x + 2;
@@ -109,49 +97,57 @@ void WindowManager::drawWindow(int window_id) {
     }
 }
 
-void WindowManager::moveWindow(int window_id, int new_x, int new_y) {
+void WindowManager::closeWindow(int window_id) {
     if (window_id < 0 || window_id >= window_count) return;
-    
+
+    windows[window_id].visible = false;
+    clearWindowArea(windows[window_id].x, windows[window_id].y, 
+                   windows[window_id].width, windows[window_id].height);
+
+    if (active_window == window_id) {
+        active_window = -1;
+    }
+}
+
+void WindowManager::moveWindow(int window_id, int x, int y) {
+    if (window_id < 0 || window_id >= window_count) return;
+
     // Clear old position
-    Window& win = windows[window_id];
-    clearWindowArea(win.x, win.y, win.width, win.height);
-    
+    clearWindowArea(windows[window_id].x, windows[window_id].y,
+                   windows[window_id].width, windows[window_id].height);
+
     // Update position
-    win.x = new_x;
-    win.y = new_y;
-    
+    windows[window_id].x = x;
+    windows[window_id].y = y;
+
     // Redraw
     drawWindow(window_id);
 }
 
-void WindowManager::closeWindow(int window_id) {
+void WindowManager::resizeWindow(int window_id, int width, int height) {
     if (window_id < 0 || window_id >= window_count) return;
-    
-    Window& win = windows[window_id];
-    clearWindowArea(win.x, win.y, win.width, win.height);
-    win.visible = false;
-    
-    // If this was the active window, find another
-    if (active_window == window_id) {
-        active_window = -1;
-        for (int i = 0; i < window_count; ++i) {
-            if (windows[i].visible) {
-                setActiveWindow(i);
-                break;
-            }
-        }
-    }
+
+    // Clear old window
+    clearWindowArea(windows[window_id].x, windows[window_id].y,
+                   windows[window_id].width, windows[window_id].height);
+
+    // Update size
+    windows[window_id].width = width;
+    windows[window_id].height = height;
+
+    // Redraw
+    drawWindow(window_id);
 }
 
 void WindowManager::setActiveWindow(int window_id) {
     if (window_id < 0 || window_id >= window_count) return;
-    
+
     // Unfocus previous window
-    if (active_window >= 0) {
+    if (active_window >= 0 && active_window < window_count) {
         windows[active_window].focused = false;
         drawWindow(active_window);
     }
-    
+
     // Focus new window
     active_window = window_id;
     windows[window_id].focused = true;
@@ -163,9 +159,9 @@ void WindowManager::clearWindowArea(int x, int y, int width, int height) {
         for (int i = 0; i < width; ++i) {
             int screen_x = x + i;
             int screen_y = y + j;
-            
+
             if (screen_x >= VGA_WIDTH || screen_y >= VGA_HEIGHT) continue;
-            
+
             int idx = 2 * (screen_y * VGA_WIDTH + screen_x);
             video_memory[idx] = ' ';
             video_memory[idx + 1] = 0x07; // Default color
@@ -202,7 +198,7 @@ void vga_clear_screen(uint8_t color) {
 
 void vga_clear_line(int y, uint8_t color) {
     if (y >= 25 || y < 0) return;
-    
+
     volatile char* video = (volatile char*)0xB8000;
     for (int x = 0; x < 80; ++x) {
         int idx = 2 * (y * 80 + x);
@@ -213,7 +209,7 @@ void vga_clear_line(int y, uint8_t color) {
 
 void vga_put_char(int x, int y, char c, uint8_t color) {
     if (x >= 80 || y >= 25 || x < 0 || y < 0) return;
-    
+
     volatile char* video = (volatile char*)0xB8000;
     int idx = 2 * (y * 80 + x);
     video[idx] = c;
@@ -232,13 +228,13 @@ void vga_draw_box(int x, int y, int width, int height, uint8_t color) {
         vga_put_char(x + i, y, '-', color);
         vga_put_char(x + i, y + height - 1, '-', color);
     }
-    
+
     // Draw left and right borders
     for (int i = 0; i < height; ++i) {
         vga_put_char(x, y + i, '|', color);
         vga_put_char(x + width - 1, y + i, '|', color);
     }
-    
+
     // Draw corners
     vga_put_char(x, y, '+', color);
     vga_put_char(x + width - 1, y, '+', color);

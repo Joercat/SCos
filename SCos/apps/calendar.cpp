@@ -9,25 +9,7 @@
 #define VGA_HEIGHT 25
 #define VGA_BYTES_PER_CHAR 2
 
-// Color attributes
-#define COLOR_BLACK 0x00
-#define COLOR_BLUE 0x01
-#define COLOR_GREEN 0x02
-#define COLOR_CYAN 0x03
-#define COLOR_RED 0x04
-#define COLOR_MAGENTA 0x05
-#define COLOR_BROWN 0x06
-#define COLOR_LIGHT_GRAY 0x07
-#define COLOR_DARK_GRAY 0x08
-#define COLOR_LIGHT_BLUE 0x09
-#define COLOR_LIGHT_GREEN 0x0A
-#define COLOR_LIGHT_CYAN 0x0B
-#define COLOR_LIGHT_RED 0x0C
-#define COLOR_LIGHT_MAGENTA 0x0D
-#define COLOR_YELLOW 0x0E
-#define COLOR_WHITE 0x0F
-
-#define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
+// Use color definitions from window_manager.hpp
 
 // Date structure
 typedef struct {
@@ -83,7 +65,7 @@ static int calendar_strlen(const char* str) {
     return len;
 }
 
-static void vga_put_char(int x, int y, char c, uint8_t color) {
+void vga_put_char(int x, int y, char c, uint8_t color) {
     if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
         volatile char* pos = VGA_BUFFER + (y * VGA_WIDTH + x) * VGA_BYTES_PER_CHAR;
         pos[0] = c;
@@ -91,13 +73,13 @@ static void vga_put_char(int x, int y, char c, uint8_t color) {
     }
 }
 
-static void vga_put_string(int x, int y, const char* str, uint8_t color) {
+void vga_put_string(int x, int y, const char* str, uint8_t color) {
     for (int i = 0; str[i] && (x + i) < VGA_WIDTH; i++) {
         vga_put_char(x + i, y, str[i], color);
     }
 }
 
-static void vga_clear_screen(uint8_t color) {
+void vga_clear_screen(uint8_t color) {
     for (int y = 0; y < VGA_HEIGHT; y++) {
         for (int x = 0; x < VGA_WIDTH; x++) {
             vga_put_char(x, y, ' ', color);
@@ -105,7 +87,7 @@ static void vga_clear_screen(uint8_t color) {
     }
 }
 
-static void center_text(int y, const char* text, uint8_t color) {
+void center_text(int y, const char* text, uint8_t color) {
     int len = calendar_strlen(text);
     int x = (VGA_WIDTH - len) / 2;
     vga_put_string(x, y, text, color);
