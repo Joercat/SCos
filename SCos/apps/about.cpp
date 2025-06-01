@@ -55,7 +55,7 @@ static void vga_clear_line(int y, uint8_t color) {
     }
 }
 
-static void vga_draw_box(int x, int y, int width, int height, uint8_t color) {
+void vga_draw_box(int x, int y, int width, int height, uint8_t color) {
     // Top and bottom borders
     for (int i = 0; i < width; i++) {
         vga_put_char(x + i, y, '-', color);
@@ -75,7 +75,7 @@ static void vga_draw_box(int x, int y, int width, int height, uint8_t color) {
     vga_put_char(x + width - 1, y + height - 1, '+', color);
 }
 
-static void center_text(int y, const char* text, uint8_t color) {
+void center_text(int y, const char* text, uint8_t color) {
     int len = about_strlen(text);
     int x = (VGA_WIDTH - len) / 2;
     vga_put_string(x, y, text, color);
@@ -113,7 +113,7 @@ void openAbout() {
     center_text(23, "(c) 2025 SCos Project", copyright_color);
 }
 
-void About::handleInput(char key) {
+void About::handleInput(uint8_t key) {
     // Handle about input - placeholder for future implementation
     // Can add navigation or close functionality here
 }

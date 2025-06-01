@@ -3,6 +3,9 @@
 #include "../ui/window_manager.hpp"
 #include <stdint.h>
 
+// Forward declaration of the openAbout function
+void openAbout();
+
 class About {
 public:
     static void init();
