@@ -1,4 +1,3 @@
-
 #include "desktop.hpp"
 #include "app_launcher.hpp"
 #include "window_manager.hpp"
@@ -21,43 +20,43 @@ static bool running = true;
 
 bool Desktop::init() {
     if (desktop_initialized) return true;
-    
+
     // Initialize security system first
     AuthSystem::init();
-    
+
     // Initialize theme manager
     ThemeManager::init();
     ThemeManager::setTheme(THEME_MATRIX_GREEN);
-    
+
     // Initialize window manager
     WindowManager::init();
     WindowManager::clearScreen();
-    
+
     // Initialize applications
     AppLauncher::init();
     Browser::init();
     AppStore::init();
-    
+
     // Initialize mouse
     Mouse::init();
-    
+
     // Draw desktop
     drawDesktopBackground();
     drawTaskbar();
-    
+
     desktop_initialized = true;
     return true;
 }
 
 void Desktop::drawDesktopBackground() {
     WindowManager::clearScreen();
-    
+
     // Use theme manager to draw background
     ThemeManager::drawCustomBackground();
-    
+
     volatile char* video = (volatile char*)0xB8000;
     const Theme& theme = ThemeManager::getCurrentThemeData();
-    
+
     // Draw desktop title
     const char* title = "SCos Desktop Environment";
     int title_x = (80 - 25) / 2;
@@ -66,7 +65,7 @@ void Desktop::drawDesktopBackground() {
         video[idx] = title[i];
         video[idx + 1] = theme.window_fg_color;
     }
-    
+
     // Draw welcome message
     const char* welcome = "Press Alt+Tab to open Application Launcher, F1-F4 for themes";
     int welcome_x = (80 - 58) / 2;
@@ -81,14 +80,14 @@ void Desktop::drawTaskbar() {
     volatile char* video = (volatile char*)0xB8000;
     int taskbar_y = 24;
     const Theme& theme = ThemeManager::getCurrentThemeData();
-    
+
     // Draw taskbar background
     for (int x = 0; x < 80; ++x) {
         int idx = 2 * (taskbar_y * 80 + x);
         video[idx] = ' ';
         video[idx + 1] = theme.taskbar_bg_color;
     }
-    
+
     // Draw start button
     const char* start_text = " SCos ";
     for (int i = 0; start_text[i]; ++i) {
@@ -96,11 +95,11 @@ void Desktop::drawTaskbar() {
         video[idx] = start_text[i];
         video[idx + 1] = theme.selected_bg_color;
     }
-    
+
     // Draw open application icons
     int app_start_x = 7;
     drawOpenAppIcons(app_start_x, taskbar_y);
-    
+
     // Draw calendar date (simplified)
     const char* date_text = "Dec 15";
     int date_x = 80 - 12;
@@ -109,7 +108,7 @@ void Desktop::drawTaskbar() {
         video[idx] = date_text[i];
         video[idx + 1] = theme.foreground_color;
     }
-    
+
     // Draw time (simplified)
     const char* time_text = "12:45";
     int time_x = 80 - 5;
@@ -235,10 +234,10 @@ void Desktop::handleInput() {
             AuthSystem::handleLockScreenInput(key);
             return;
         }
-        
+
         // Check for Alt+Tab (application launcher)
         static bool alt_pressed = false;
-        
+
         if (key == KEY_ALT) {
             alt_pressed = true;
         } else if (alt_pressed && key == KEY_TAB) {
@@ -251,7 +250,7 @@ void Desktop::handleInput() {
         } else if (key != KEY_ALT) {
             alt_pressed = false;
         }
-        
+
         // Theme switching with function keys
         switch (key) {
             case 0x3B: // F1
@@ -280,7 +279,7 @@ void Desktop::handleInput() {
                 drawTaskbar();
                 break;
         }
-        
+
         // Pass input to active applications
         if (AppLauncher::isVisible()) {
             AppLauncher::handleInput(key);
@@ -290,7 +289,7 @@ void Desktop::handleInput() {
             AppStore::handleInput(key);
         }
     }
-    
+
     // Handle mouse input
     handleMouseInput();
 }
@@ -306,7 +305,7 @@ void Desktop::update() {
 void Desktop::drawOpenAppIcons(int start_x, int y) {
     volatile char* video = (volatile char*)0xB8000;
     int current_x = start_x;
-    
+
     // Check which applications are currently open and draw their icons
     for (int i = 0; i < MAX_WINDOWS; ++i) {
         Window* win = WindowManager::getWindow(i);
@@ -316,7 +315,7 @@ void Desktop::drawOpenAppIcons(int start_x, int y) {
             int idx = 2 * (y * 80 + current_x);
             video[idx] = icon;
             video[idx + 1] = win->focused ? 0x1F : 0x17; // Blue if focused, grey otherwise
-            
+
             current_x += 2; // Space between icons
         }
     }
@@ -339,11 +338,11 @@ char Desktop::getAppIcon(const char* title) {
 
 void Desktop::handleMouseInput() {
     Mouse::update();
-    
+
     if (Mouse::wasLeftButtonClicked()) {
         int mouse_x = Mouse::getX();
         int mouse_y = Mouse::getY();
-        
+
         // Check if clicked on taskbar
         if (mouse_y == 24) {
             // Check if clicked on start button
@@ -355,12 +354,12 @@ void Desktop::handleMouseInput() {
                 }
                 return;
             }
-            
+
             // Check if clicked on app icons in taskbar
             handleTaskbarClick(mouse_x);
             return;
         }
-        
+
         // Pass mouse click to active applications
         if (AppLauncher::isVisible()) {
             AppLauncher::handleMouseClick(mouse_x, mouse_y);
@@ -375,7 +374,7 @@ void Desktop::handleMouseInput() {
 void Desktop::handleTaskbarClick(int x) {
     // Handle clicks on taskbar app icons
     int current_x = 7;
-    
+
     for (int i = 0; i < MAX_WINDOWS; ++i) {
         Window* win = WindowManager::getWindow(i);
         if (win && win->visible && current_x < 60) {
@@ -391,10 +390,10 @@ void Desktop::handleTaskbarClick(int x) {
 void Desktop::updateDesktop() {
     // Refresh all windows
     WindowManager::refreshAll();
-    
+
     // Update taskbar if needed
     drawTaskbar();
-    
+
     // Update mouse
     Mouse::update();
 }
@@ -402,4 +401,55 @@ void Desktop::updateDesktop() {
 const char* Desktop::readFile(const char* path) {
     // Simplified file reading - would integrate with actual filesystem
     return "File content placeholder";
+}
+
+// Search functions
+void Desktop::performSearch(const char* query) {
+    // Implement search functionality here
+    // This could involve searching through installed applications, files, etc.
+}
+
+char Desktop::getCharFromScancode(uint8_t scancode) {
+    // Convert scancode to ASCII character
+    // This is a simplified version and may not cover all scancodes
+    switch (scancode) {
+        case 0x02: return '1';
+        case 0x03: return '2';
+        case 0x04: return '3';
+        case 0x05: return '4';
+        case 0x06: return '5';
+        case 0x07: return '6';
+        case 0x08: return '7';
+        case 0x09: return '8';
+        case 0x0A: return '9';
+        case 0x0B: return '0';
+        case 0x1E: return 'a';
+        case 0x30: return 'b';
+        case 0x2E: return 'c';
+        case 0x20: return 'd';
+        case 0x12: return 'e';
+        case 0x21: return 'f';
+        case 0x22: return 'g';
+        case 0x23: return 'h';
+        case 0x17: return 'i';
+        case 0x24: return 'j';
+        case 0x25: return 'k';
+        case 0x26: return 'l';
+        case 0x32: return 'm';
+        case 0x31: return 'n';
+        case 0x18: return 'o';
+        case 0x19: return 'p';
+        case 0x10: return 'q';
+        case 0x13: return 'r';
+        case 0x1F: return 's';
+        case 0x14: return 't';
+        case 0x16: return 'u';
+        case 0x2F: return 'v';
+        case 0x11: return 'w';
+        case 0x2D: return 'x';
+        case 0x15: return 'y';
+        case 0x2C: return 'z';
+        case 0x39: return ' ';
+        default: return 0; // Return 0 for unknown scancodes
+    }
 }

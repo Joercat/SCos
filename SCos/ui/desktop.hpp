@@ -71,6 +71,10 @@ private:
   // Taskbar functions
   static void drawOpenAppIcons(int start_x, int y);
   static char getAppIcon(const char* title);
+  
+  // Search functions
+  static void performSearch(const char* query);
+  static char getCharFromScancode(uint8_t scancode);
 
 
 };
