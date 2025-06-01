@@ -42,39 +42,43 @@ extern "C" {
     bool init_subsystems() {
         serial_printf("Initializing kernel subsystems...\n");
 
-        if (!init_serial()) {
-            return false;
-        }
+        // Skip serial init since we already did it
         serial_printf("Serial: OK\n");
 
+        serial_printf("Initializing IDT...\n");
         if (!init_idt()) {
             serial_printf("IDT: FAILED\n");
             return false;
         }
         serial_printf("IDT: OK\n");
 
+        serial_printf("Initializing Heap...\n");
         if (!init_heap()) {
             serial_printf("Heap: FAILED\n");
             return false;
         }
         serial_printf("Heap: OK\n");
 
+        serial_printf("Initializing Keyboard...\n");
         if (!init_keyboard()) {
             serial_printf("Keyboard: FAILED\n");
             return false;
         }
         serial_printf("Keyboard: OK\n");
 
+        serial_printf("Initializing Filesystem...\n");
         if (!initFS()) {
             serial_printf("Filesystem: FAILED\n");
             return false;
         }
         serial_printf("Filesystem: OK\n");
 
+        serial_printf("Initializing Network Driver...\n");
         // Initialize network drivers
         NetworkDriver::init();
         serial_printf("Network Driver: OK\n");
 
+        serial_printf("Initializing Bluetooth Driver...\n");
         // Initialize bluetooth
         BluetoothDriver::init();
         serial_printf("Bluetooth Driver: OK\n");
@@ -105,13 +109,44 @@ extern "C" void _start() {
         video[i * 2 + 1] = 0x0F; // Bright white on black
     }
     
+    // Show early boot message immediately
+    const char* boot_msg = "Kernel loaded successfully!";
+    for (int i = 0; boot_msg[i] != '\0'; i++) {
+        video[160 + i * 2] = boot_msg[i]; // Second line
+        video[160 + i * 2 + 1] = 0x0A; // Green on black
+    }
+    
+    // Initialize serial first for debugging
+    if (!init_serial()) {
+        const char* serial_error = "CRITICAL: Serial initialization failed!";
+        for (int i = 0; serial_error[i] != '\0'; i++) {
+            video[320 + i * 2] = serial_error[i]; // Third line
+            video[320 + i * 2 + 1] = 0x0C; // Red on black
+        }
+        // Continue without serial
+    }
+    
     serial_printf("SCos Kernel Starting...\n");
     serial_printf("Version: 0.1.0\n");
 
     show_memory_info();
 
+    // Show memory info on screen
+    const char* mem_msg = "Memory initialized";
+    for (int i = 0; mem_msg[i] != '\0'; i++) {
+        video[480 + i * 2] = mem_msg[i]; // Fourth line
+        video[480 + i * 2 + 1] = 0x0E; // Yellow on black
+    }
+
     call_constructors();
     serial_printf("Global constructors called\n");
+    
+    // Show constructors completed
+    const char* ctor_msg = "Global constructors completed";
+    for (int i = 0; ctor_msg[i] != '\0'; i++) {
+        video[640 + i * 2] = ctor_msg[i]; // Fifth line
+        video[640 + i * 2 + 1] = 0x0B; // Cyan on black
+    }
 
     if (!init_subsystems()) {
         // Show error on screen
@@ -152,14 +187,39 @@ extern "C" void _start() {
 
     asm volatile("sti");
 
+    // Show final success message
+    const char* success_msg = "SCos boot complete - System ready!";
+    for (int i = 0; success_msg[i] != '\0'; i++) {
+        video[800 + i * 2] = success_msg[i]; // Sixth line
+        video[800 + i * 2 + 1] = 0x0F; // Bright white on black
+    }
+
     uint32_t tick_count = 0;
+    uint32_t heartbeat_interval = 100000; // Faster heartbeat for debugging
+    
     while (1) {
-        desktop.handle_events();
-        desktop.update();
+        // Try desktop operations with error handling
+        try {
+            desktop.handle_events();
+            desktop.update();
+        } catch (...) {
+            // If desktop fails, show error but continue
+            const char* error_msg = "Desktop error - continuing...";
+            for (int i = 0; error_msg[i] != '\0'; i++) {
+                video[960 + i * 2] = error_msg[i]; // Seventh line
+                video[960 + i * 2 + 1] = 0x0C; // Red on black
+            }
+        }
 
         tick_count++;
-        if (tick_count % 1000000 == 0) {
-            serial_printf("Kernel heartbeat: %d\n", tick_count / 1000000);
+        if (tick_count % heartbeat_interval == 0) {
+            serial_printf("Kernel heartbeat: %d\n", tick_count / heartbeat_interval);
+            
+            // Visual heartbeat indicator
+            static char heartbeat_char = '|';
+            video[1920] = heartbeat_char; // Bottom right corner
+            video[1921] = 0x0F;
+            heartbeat_char = (heartbeat_char == '|') ? '-' : '|';
         }
 
         asm volatile("hlt");
