@@ -30,7 +30,7 @@ static void sprintf(char* buffer, const char* format, double value) {
     // Simple implementation for "%.2f" format
     int integer_part = (int)value;
     int decimal_part = (int)((value - integer_part) * 100);
-    
+
     // Convert integer part
     char temp[32];
     int i = 0;
@@ -50,13 +50,13 @@ static void sprintf(char* buffer, const char* format, double value) {
             temp[i - 1 - (j - start)] = t;
         }
     }
-    
+
     // Copy to buffer
     int buf_idx = 0;
     for (int j = 0; j < i; j++) {
         buffer[buf_idx++] = temp[j];
     }
-    
+
     // Add decimal point and decimal part
     buffer[buf_idx++] = '.';
     buffer[buf_idx++] = '0' + (decimal_part / 10);
@@ -136,32 +136,22 @@ static void int_to_str(int num, char* str) {
     str[j] = '\0';
 }
 
-static int strlen(const char* str) {
-    int len = 0;
-    while (str[len]) len++;
-    return len;
-}
-
 // Missing function implementations
 static void sprintf(char* dest, const char* format, double value) {
     // Simple implementation for %.2f format
     int integer_part = (int)value;
     int decimal_part = (int)((value - integer_part) * 100);
-    
+
     int_to_str(integer_part, dest);
-    
+
     // Find end of string
     while (*dest) dest++;
-    
+
     *dest++ = '.';
     if (decimal_part < 10) {
         *dest++ = '0';
     }
     int_to_str(decimal_part, dest);
-}
-
-static int strlen(const char* str) {
-    return calc_strlen(str);
 }
 
 // VGA constants and functions
@@ -372,13 +362,13 @@ void Calculator::handleInput(uint8_t key) {
 void Calculator::handleMouseClick(int x, int y) {
     // Basic mouse click handling for calculator buttons
     if (!calc_visible) return;
-    
+
     // Check if click is within calculator area
     if (x >= 4 && x <= 23 && y >= 7 && y <= 14) {
         // Determine which button was clicked
         int col = (x - 4) / 5;
         int row = (y - 7) / 2;
-        
+
         if (col >= 0 && col < 4 && row >= 0 && row < 4) {
             const char* buttons[4][4] = {
                 {"7", "8", "9", "/"},
@@ -386,7 +376,7 @@ void Calculator::handleMouseClick(int x, int y) {
                 {"1", "2", "3", "-"},
                 {"0", ".", "=", "+"}
             };
-            
+
             char button = buttons[row][col][0];
             if (button >= '0' && button <= '9') {
                 inputDigitChar(button);
