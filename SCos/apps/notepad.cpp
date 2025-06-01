@@ -1,24 +1,23 @@
+
 #include "notepad.hpp"
 #include "../ui/window_manager.hpp"
 #include <stdint.h>
 
-// Remove duplicate color definitions - they're already in window_manager.hpp
-
 // Local string function implementations for freestanding environment
-static int strlen(const char* str) {
+static int calc_strlen(const char* str) {
     int len = 0;
     while (str[len]) len++;
     return len;
 }
 
-static void strcpy(char* dest, const char* src) {
+static void calc_strcpy(char* dest, const char* src) {
     while (*src) {
         *dest++ = *src++;
     }
     *dest = '\0';
 }
 
-static void strcat(char* dest, const char* src) {
+static void calc_strcat(char* dest, const char* src) {
     while (*dest) dest++;
     while (*src) {
         *dest++ = *src++;
@@ -26,7 +25,7 @@ static void strcat(char* dest, const char* src) {
     *dest = '\0';
 }
 
-static void memset(void* ptr, int value, int size) {
+static void calc_memset(void* ptr, int value, int size) {
     char* p = (char*)ptr;
     for (int i = 0; i < size; i++) {
         p[i] = value;
@@ -34,20 +33,26 @@ static void memset(void* ptr, int value, int size) {
 }
 
 // Notepad state
-static char notepad_buffer[4096];
+static char notepad_buffer[MAX_NOTEPAD_LINES * MAX_NOTEPAD_LINE_LENGTH];
 static int cursor_x = 0;
 static int cursor_y = 0;
 static int notepad_window_id = -1;
 static bool notepad_visible = false;
+static int current_line = 0;
+static int current_col = 0;
 
-void openNotepad(const char* initial_content) {
+void Notepad::init() {
+    calc_memset(notepad_buffer, 0, sizeof(notepad_buffer));
+    cursor_x = 0;
+    cursor_y = 0;
+    notepad_window_id = -1;
+    notepad_visible = false;
+    current_line = 0;
+    current_col = 0;
+}
+
+void Notepad::show() {
     if (notepad_visible) return;
-
-    // Initialize buffer
-    memset(notepad_buffer, 0, sizeof(notepad_buffer));
-    if (initial_content) {
-        strcpy(notepad_buffer, initial_content);
-    }
 
     // Create window
     notepad_window_id = WindowManager::createWindow("Notepad", 15, 3, 50, 18);
@@ -56,11 +61,13 @@ void openNotepad(const char* initial_content) {
         WindowManager::setActiveWindow(notepad_window_id);
         cursor_x = 2;
         cursor_y = 2;
-        drawNotepadContent();
+        current_line = 0;
+        current_col = 0;
+        drawNotepad();
     }
 }
 
-void closeNotepad() {
+void Notepad::hide() {
     if (!notepad_visible || notepad_window_id < 0) return;
 
     WindowManager::closeWindow(notepad_window_id);
@@ -68,11 +75,78 @@ void closeNotepad() {
     notepad_window_id = -1;
 }
 
-bool isNotepadVisible() {
+bool Notepad::isVisible() {
     return notepad_visible;
 }
 
-void drawNotepadContent() {
+void Notepad::handleInput(uint8_t key) {
+    if (!notepad_visible) return;
+
+    Window* win = WindowManager::getWindow(notepad_window_id);
+    if (!win) return;
+
+    switch (key) {
+        case 0x01: // Escape
+            hide();
+            break;
+        case 0x0E: // Backspace
+            deleteChar();
+            break;
+        case 0x1C: // Enter
+            newLine();
+            break;
+        default:
+            // Handle printable characters
+            if (key >= 0x02 && key <= 0x35) { // Various keys
+                char c = 0;
+                if (key >= 0x02 && key <= 0x0B) { // Number keys 1-9, 0
+                    c = (key == 0x0B) ? '0' : ('1' + key - 0x02);
+                } else if (key >= 0x10 && key <= 0x19) { // QWERTY row
+                    const char qwerty[] = "qwertyuiop";
+                    c = qwerty[key - 0x10];
+                } else if (key >= 0x1E && key <= 0x26) { // ASDF row
+                    const char asdf[] = "asdfghjkl";
+                    c = asdf[key - 0x1E];
+                } else if (key >= 0x2C && key <= 0x32) { // ZXCV row
+                    const char zxcv[] = "zxcvbnm";
+                    c = zxcv[key - 0x2C];
+                } else if (key == 0x39) { // Space
+                    c = ' ';
+                }
+                
+                if (c != 0) {
+                    insertChar(c);
+                }
+            }
+            break;
+    }
+}
+
+void Notepad::handleMouseClick(int x, int y) {
+    if (!notepad_visible || notepad_window_id < 0) return;
+
+    Window* win = WindowManager::getWindow(notepad_window_id);
+    if (!win) return;
+
+    // Check if click is within notepad content area
+    if (x >= win->x + 1 && x < win->x + win->width - 1 &&
+        y >= win->y + 1 && y < win->y + win->height - 1) {
+        
+        // Move cursor to clicked position
+        int new_col = x - (win->x + 2);
+        int new_line = y - (win->y + 2);
+        
+        if (new_line >= 0 && new_line < MAX_NOTEPAD_LINES) {
+            current_line = new_line;
+            if (new_col >= 0 && new_col < MAX_NOTEPAD_LINE_LENGTH) {
+                current_col = new_col;
+            }
+            updateDisplay();
+        }
+    }
+}
+
+void Notepad::drawNotepad() {
     if (!notepad_visible || notepad_window_id < 0) return;
 
     Window* win = WindowManager::getWindow(notepad_window_id);
@@ -86,69 +160,84 @@ void drawNotepadContent() {
     }
 
     // Draw text content
-    int line = 0;
-    int col = 0;
-    int content_start_x = win->x + 2;
-    int content_start_y = win->y + 2;
+    int display_lines = (win->height - 4 < MAX_NOTEPAD_LINES) ? win->height - 4 : MAX_NOTEPAD_LINES;
+    int display_cols = (win->width - 4 < MAX_NOTEPAD_LINE_LENGTH) ? win->width - 4 : MAX_NOTEPAD_LINE_LENGTH;
 
-    for (int i = 0; notepad_buffer[i] && line < win->height - 4; i++) {
-        if (notepad_buffer[i] == '\n') {
-            line++;
-            col = 0;
-        } else if (col < win->width - 4) {
-            vga_put_char(content_start_x + col, content_start_y + line, 
-                        notepad_buffer[i], MAKE_COLOR(COLOR_BLACK, COLOR_WHITE));
-            col++;
+    for (int line = 0; line < display_lines; line++) {
+        for (int col = 0; col < display_cols; col++) {
+            int buffer_idx = line * MAX_NOTEPAD_LINE_LENGTH + col;
+            if (notepad_buffer[buffer_idx] != 0) {
+                vga_put_char(win->x + 2 + col, win->y + 2 + line, 
+                           notepad_buffer[buffer_idx], MAKE_COLOR(COLOR_BLACK, COLOR_WHITE));
+            }
         }
     }
 
     // Draw cursor
-    vga_put_char(content_start_x + cursor_x - 2, content_start_y + cursor_y - 2, 
+    vga_put_char(win->x + 2 + current_col, win->y + 2 + current_line, 
                 '_', MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
 }
 
-void handleNotepadInput(uint8_t key) {
-    if (!notepad_visible) return;
+void Notepad::insertChar(char c) {
+    if (current_line >= MAX_NOTEPAD_LINES || current_col >= MAX_NOTEPAD_LINE_LENGTH - 1) return;
 
-    Window* win = WindowManager::getWindow(notepad_window_id);
-    if (!win) return;
+    int buffer_idx = current_line * MAX_NOTEPAD_LINE_LENGTH + current_col;
+    notepad_buffer[buffer_idx] = c;
+    
+    current_col++;
+    if (current_col >= MAX_NOTEPAD_LINE_LENGTH - 1) {
+        newLine();
+    }
+    
+    updateDisplay();
+}
 
-    switch (key) {
-        case 0x01: // Escape
-            closeNotepad();
-            break;
-        case 0x0E: // Backspace
-            if (strlen(notepad_buffer) > 0) {
-                notepad_buffer[strlen(notepad_buffer) - 1] = '\0';
-                if (cursor_x > 2) cursor_x--;
-                drawNotepadContent();
-            }
-            break;
-        case 0x1C: // Enter
-            if (strlen(notepad_buffer) < sizeof(notepad_buffer) - 1) {
-                strcat(notepad_buffer, "\n");
-                cursor_y++;
-                cursor_x = 2;
-                drawNotepadContent();
-            }
-            break;
-        default:
-            // Handle printable characters
-            if (key >= 0x02 && key <= 0x0D) { // Number keys
-                char c = '0' + (key - 1);
-                if (key == 0x0B) c = '0';
-                if (strlen(notepad_buffer) < sizeof(notepad_buffer) - 1) {
-                    char temp[2] = {c, '\0'};
-                    strcat(notepad_buffer, temp);
-                    cursor_x++;
-                    drawNotepadContent();
-                }
-            }
-            break;
+void Notepad::deleteChar() {
+    if (current_col > 0) {
+        current_col--;
+        int buffer_idx = current_line * MAX_NOTEPAD_LINE_LENGTH + current_col;
+        notepad_buffer[buffer_idx] = 0;
+    } else if (current_line > 0) {
+        current_line--;
+        current_col = MAX_NOTEPAD_LINE_LENGTH - 1;
+        // Find the actual end of the line
+        while (current_col > 0) {
+            int buffer_idx = current_line * MAX_NOTEPAD_LINE_LENGTH + current_col - 1;
+            if (notepad_buffer[buffer_idx] != 0) break;
+            current_col--;
+        }
+    }
+    updateDisplay();
+}
+
+void Notepad::newLine() {
+    if (current_line < MAX_NOTEPAD_LINES - 1) {
+        current_line++;
+        current_col = 0;
+        updateDisplay();
     }
 }
 
-// VGA function implementations - remove static keyword
+void Notepad::moveCursor(int dx, int dy) {
+    int new_col = current_col + dx;
+    int new_line = current_line + dy;
+    
+    if (new_col >= 0 && new_col < MAX_NOTEPAD_LINE_LENGTH) {
+        current_col = new_col;
+    }
+    
+    if (new_line >= 0 && new_line < MAX_NOTEPAD_LINES) {
+        current_line = new_line;
+    }
+    
+    updateDisplay();
+}
+
+void Notepad::updateDisplay() {
+    drawNotepad();
+}
+
+// VGA function implementations
 void vga_put_char(int x, int y, char c, uint8_t color) {
     if (x >= 80 || y >= 25 || x < 0 || y < 0) return;
 
@@ -181,4 +270,32 @@ void vga_clear_line(int y, uint8_t color) {
         video[idx] = ' ';
         video[idx + 1] = color;
     }
+}
+
+// Legacy function support for compatibility
+void openNotepad(const char* initial_content) {
+    Notepad::init();
+    if (initial_content && calc_strlen(initial_content) > 0) {
+        // Copy initial content to buffer
+        for (int i = 0; i < calc_strlen(initial_content) && i < sizeof(notepad_buffer) - 1; i++) {
+            notepad_buffer[i] = initial_content[i];
+        }
+    }
+    Notepad::show();
+}
+
+void closeNotepad() {
+    Notepad::hide();
+}
+
+bool isNotepadVisible() {
+    return Notepad::isVisible();
+}
+
+void drawNotepadContent() {
+    Notepad::updateDisplay();
+}
+
+void handleNotepadInput(uint8_t key) {
+    Notepad::handleInput(key);
 }
