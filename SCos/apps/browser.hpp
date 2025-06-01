@@ -50,7 +50,5 @@ private:
     static void loadCSSFile(const char* filepath);
     static void loadJSFile(const char* filepath);
     static void renderHTMLPage();
-    static int custom_strlen(const char* str);
-    static void custom_strcpy(char* dest, const char* src);
-    static int custom_strcmp(const char* str1, const char* str2);
+    
 };

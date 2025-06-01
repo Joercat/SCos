@@ -22,6 +22,14 @@ static void browser_strcpy(char* dest, const char* src) {
     *dest = '\0';
 }
 
+static int browser_strcmp(const char* str1, const char* str2) {
+    while (*str1 && (*str1 == *str2)) {
+        str1++;
+        str2++;
+    }
+    return *(unsigned char*)str1 - *(unsigned char*)str2;
+}
+
 void Browser::init() {
     browser_visible = false;
     browser_window_id = -1;

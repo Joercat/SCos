@@ -56,6 +56,213 @@ void HTMLInterpreter::reset() {
     js_function_count = 0;
     
     for (int i = 0; i < MAX_DOM_ELEMENTS; i++) {
+        dom_elements[i].active = false;
+    }
+    
+    for (int i = 0; i < MAX_CSS_RULES; i++) {
+        css_rules[i].active = false;
+    }
+    
+    for (int i = 0; i < MAX_JS_FUNCTIONS; i++) {
+        js_functions[i].active = false;
+    }
+}
+
+bool HTMLInterpreter::parseHTML(const char* html_content) {
+    // Simple HTML parser implementation
+    const char* pos = html_content;
+    
+    while (*pos && element_count < MAX_DOM_ELEMENTS) {
+        if (*pos == '<' && *(pos + 1) != '/') {
+            pos++; // Skip <
+            
+            // Get tag name
+            const char* tag_start = pos;
+            while (*pos && *pos != ' ' && *pos != '>') pos++;
+            
+            HTMLElement* element = &dom_elements[element_count];
+            
+            int tag_len = pos - tag_start;
+            if (tag_len > 31) tag_len = 31;
+            for (int i = 0; i < tag_len; i++) {
+                element->tag[i] = tag_start[i];
+            }
+            element->tag[tag_len] = '\0';
+            
+            // Parse attributes
+            while (*pos && *pos != '>') {
+                while (*pos && *pos == ' ') pos++; // Skip spaces
+                
+                if (*pos == 'i' && html_strstr(pos, "id=")) {
+                    pos += 3; // Skip "id="
+                    if (*pos == '"') pos++; // Skip quote
+                    
+                    const char* id_start = pos;
+                    while (*pos && *pos != '"' && *pos != ' ' && *pos != '>') pos++;
+                    
+                    int id_len = pos - id_start;
+                    if (id_len > 31) id_len = 31;
+                    for (int i = 0; i < id_len; i++) {
+                        element->id[i] = id_start[i];
+                    }
+                    element->id[id_len] = '\0';
+                    
+                    if (*pos == '"') pos++; // Skip closing quote
+                }
+                
+                if (*pos && *pos != '>') pos++;
+            }
+            
+            if (*pos == '>') pos++; // Skip >
+            
+            // Set default values
+            element->x = 0;
+            element->y = element_count * 2;
+            element->width = 40;
+            element->height = 1;
+            element->color = 0x1F; // White on blue
+            element->active = true;
+            
+            element_count++;
+        } else {
+            pos++;
+        }
+    }
+    
+    return true;
+}
+
+bool HTMLInterpreter::parseCSS(const char* css_content) {
+    const char* pos = css_content;
+    
+    while (*pos && css_rule_count < MAX_CSS_RULES) {
+        // Skip whitespace
+        while (*pos && (*pos == ' ' || *pos == '\n' || *pos == '\t')) pos++;
+        
+        if (!*pos) break;
+        
+        // Get selector
+        const char* selector_start = pos;
+        while (*pos && *pos != '{' && *pos != ' ') pos++;
+        
+        CSSRule* rule = &css_rules[css_rule_count];
+        
+        int selector_len = pos - selector_start;
+        if (selector_len > 31) selector_len = 31;
+        for (int i = 0; i < selector_len; i++) {
+            rule->selector[i] = selector_start[i];
+        }
+        rule->selector[selector_len] = '\0';
+        
+        // Skip to opening brace
+        while (*pos && *pos != '{') pos++;
+        if (*pos == '{') pos++;
+        
+        // Parse properties
+        while (*pos && *pos != '}') {
+            while (*pos && (*pos == ' ' || *pos == '\n' || *pos == '\t')) pos++; // Skip whitespace
+            
+            if (*pos == '}') break;
+            
+            // Get property
+            const char* prop_start = pos;
+            while (*pos && *pos != ':') pos++;
+            
+            int prop_len = pos - prop_start;
+            if (prop_len > 31) prop_len = 31;
+            for (int i = 0; i < prop_len; i++) {
+                rule->property[i] = prop_start[i];
+            }
+            rule->property[prop_len] = '\0';
+            
+            if (*pos == ':') pos++;
+            while (*pos && *pos == ' ') pos++; // Skip spaces
+            
+            // Get value
+            const char* value_start = pos;
+            while (*pos && *pos != ';' && *pos != '}') pos++;
+            
+            int value_len = pos - value_start;
+            if (value_len > 31) value_len = 31;
+            for (int i = 0; i < value_len; i++) {
+                rule->value[i] = value_start[i];
+            }
+            rule->value[value_len] = '\0';
+            
+            if (*pos == ';') pos++;
+            
+            rule->active = true;
+            css_rule_count++;
+            break; // One property per rule for simplicity
+        }
+        
+        // Skip to closing brace
+        while (*pos && *pos != '}') pos++;
+        if (*pos == '}') pos++;
+    }
+    
+    return true;
+}
+
+int HTMLInterpreter::parseColor(const char* color_str) {
+    if (html_strcmp(color_str, "red") == 0) return 0x4F;
+    if (html_strcmp(color_str, "green") == 0) return 0x2F;
+    if (html_strcmp(color_str, "blue") == 0) return 0x1F;
+    if (html_strcmp(color_str, "yellow") == 0) return 0x6F;
+    if (html_strcmp(color_str, "white") == 0) return 0x7F;
+    return 0x1F; // Default to white on blue
+}
+
+void HTMLInterpreter::renderPage(int window_id) {
+    Window* win = WindowManager::getWindow(window_id);
+    if (!win) return;
+    
+    volatile char* video = (volatile char*)0xB8000;
+    int start_x = win->x + 2;
+    int start_y = win->y + 4; // Start below address bar
+    
+    // Apply CSS rules first
+    applyCSSRules();
+    
+    // Render elements
+    for (int i = 0; i < element_count; i++) {
+        HTMLElement* element = &dom_elements[i];
+        if (!element->active) continue;
+        
+        int y = start_y + element->y;
+        int x = start_x + element->x;
+        
+        // Render element content based on tag
+        const char* content = element->tag;
+        if (html_strcmp(element->tag, "h1") == 0) {
+            content = "Main Title";
+        } else if (html_strcmp(element->tag, "p") == 0) {
+            content = "Paragraph text";
+        } else if (html_strcmp(element->tag, "button") == 0) {
+            content = "[Button]";
+        }
+        
+        // Draw the content
+        for (int j = 0; content[j] && j < element->width; j++) {
+            if (x + j < win->x + win->width - 2 && y < win->y + win->height - 2) {
+                int idx = 2 * (y * 80 + x + j);
+                video[idx] = content[j];
+                video[idx + 1] = element->color;
+            }
+        }
+        
+        // Update element position for click detection
+        element->x = x - start_x;
+        element->y = y - start_y;
+    }
+}
+
+void HTMLInterpreter::reset() {
+    element_count = 0;
+    css_rule_count = 0;
+    js_function_count = 0;
+    
+    for (int i = 0; i < MAX_DOM_ELEMENTS; i++) {
         dom_elements[i].tag[0] = '\0';
         dom_elements[i].visible = false;
         dom_elements[i].child_count = 0;
@@ -313,6 +520,16 @@ bool HTMLInterpreter::parseJS(const char* js_content) {
             for (int i = 0; i < body_len; i++) {
                 func->body[i] = body_start[i];
             }
+            func->body[body_len] = '\0';
+            func->active = true;
+            js_function_count++;
+        }
+        
+        if (*pos) pos++; // Skip closing brace
+    }
+    
+    return true;
+}
             func->body[body_len] = '\0';
             
             func->active = true;
