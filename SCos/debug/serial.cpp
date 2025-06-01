@@ -1,4 +1,5 @@
 #include "serial.hpp"
+#include <stdint.h>
 #include <stdarg.h>
 
 #define SERIAL_PORT 0x3f8
