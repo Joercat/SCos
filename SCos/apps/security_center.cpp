@@ -111,20 +111,7 @@ void SecurityCenter::handleMouseClick(int x, int y) {
     if (x < win->x || x >= win->x + win->width || 
         y < win->y || y >= win->y + win->height) return;
 }
-class SecurityManager {
-public:
-    static bool isAuthenticated();
-    static AuthMode getAuthMode();
-    static void setAuthMode(AuthMode mode);
-    static int getFailedAttempts();
-    static bool changePin(const char* old_pin, const char* new_pin);
-    static void lockSystem();
-    static void showLoginScreen();
-    static void resetFailedAttempts();
-};
-
 // Security center state
-static int security_window_id = -1;
 static int selected_option = 0;
 static int current_menu = 0; // 0=main, 1=change_pin, 2=change_password, 3=settings
 static char input_buffer[64];

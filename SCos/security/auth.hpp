@@ -1,4 +1,4 @@
-// Adding lock screen function declarations and methods to the AuthSystem class.
+
 #ifndef AUTH_HPP
 #define AUTH_HPP
 
@@ -15,13 +15,6 @@ enum AuthMode {
 #define MAX_PIN_LENGTH 8
 #define MAX_PASSWORD_LENGTH 32
 #define MAX_USERNAME_LENGTH 16
-
-enum AuthMode {
-    AUTH_NONE = 0,
-    AUTH_PIN = 1,
-    AUTH_PASSWORD = 2,
-    AUTH_BOTH = 3
-};
 
 enum AuthResult {
     AUTH_SUCCESS = 0,
@@ -67,4 +60,3 @@ private:
 };
 
 #endif
-`

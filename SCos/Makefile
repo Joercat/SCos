@@ -7,7 +7,7 @@ LDFLAGS = -m elf_i386 -T linker.ld
 
 # Object files
 KERNEL_OBJS = obj/kernel/main.o
-APP_OBJS = obj/apps/terminal.o obj/apps/calculator.o obj/apps/notepad.o obj/apps/file_manager.o obj/apps/calendar.o obj/apps/settings.o obj/apps/about.o obj/apps/security_center.o obj/apps/browser.o obj/apps/app_store.o obj/apps/shell.o obj/apps/terminal_wrapper.o
+APP_OBJS = obj/apps/terminal.o obj/apps/calculator.o obj/apps/notepad.o obj/apps/file_manager.o obj/apps/calendar.o obj/apps/settings.o obj/apps/about.o obj/apps/updates.o obj/apps/security_center.o obj/apps/browser.o obj/apps/app_store.o obj/apps/shell.o obj/apps/terminal_wrapper.o
 UI_OBJS = obj/ui/desktop.o obj/ui/window_manager.o obj/ui/app_launcher.o obj/ui/theme_manager.o
 DRIVER_OBJS = obj/drivers/keyboard.o obj/drivers/mouse.o
 LIB_OBJS = obj/lib/string.o
