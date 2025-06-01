@@ -91,6 +91,20 @@ void show_memory_info() {
 }
 
 extern "C" void _start() {
+    // Clear screen and show startup message
+    volatile char* video = (volatile char*)0xB8000;
+    for (int i = 0; i < 80 * 25 * 2; i += 2) {
+        video[i] = ' ';
+        video[i + 1] = 0x07; // White on black
+    }
+    
+    // Display startup message on screen
+    const char* msg = "SCos Kernel Starting... Version 0.1.0";
+    for (int i = 0; msg[i] != '\0'; i++) {
+        video[i * 2] = msg[i];
+        video[i * 2 + 1] = 0x0F; // Bright white on black
+    }
+    
     serial_printf("SCos Kernel Starting...\n");
     serial_printf("Version: 0.1.0\n");
 
@@ -100,12 +114,37 @@ extern "C" void _start() {
     serial_printf("Global constructors called\n");
 
     if (!init_subsystems()) {
+        // Show error on screen
+        const char* error_msg = "CRITICAL: Subsystem initialization failed!";
+        for (int i = 0; error_msg[i] != '\0'; i++) {
+            video[160 + i * 2] = error_msg[i]; // Second line
+            video[160 + i * 2 + 1] = 0x0C; // Red on black
+        }
         kernel_panic("Critical subsystem initialization failed");
+    }
+
+    // Show subsystems OK message
+    const char* ok_msg = "All subsystems initialized successfully";
+    for (int i = 0; ok_msg[i] != '\0'; i++) {
+        video[160 + i * 2] = ok_msg[i]; // Second line
+        video[160 + i * 2 + 1] = 0x0A; // Green on black
     }
 
     Desktop desktop;
     if (!desktop.init()) {
+        const char* desktop_error = "CRITICAL: Desktop initialization failed!";
+        for (int i = 0; desktop_error[i] != '\0'; i++) {
+            video[320 + i * 2] = desktop_error[i]; // Third line
+            video[320 + i * 2 + 1] = 0x0C; // Red on black
+        }
         kernel_panic("Desktop environment initialization failed");
+    }
+
+    // Show desktop ready message
+    const char* desktop_msg = "Desktop environment ready - SCos loaded!";
+    for (int i = 0; desktop_msg[i] != '\0'; i++) {
+        video[320 + i * 2] = desktop_msg[i]; // Third line
+        video[320 + i * 2 + 1] = 0x0E; // Yellow on black
     }
 
     serial_printf("Desktop environment loaded successfully\n");
