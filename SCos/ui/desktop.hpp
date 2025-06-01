@@ -1,6 +1,19 @@
 #ifndef DESKTOP_HPP
 #define DESKTOP_HPP
 
+#include <stdint.h>
+
+// Forward declarations
+class ThemeManager;
+class WindowManager;
+class AppLauncher;
+class Mouse;
+class Browser;
+class AppStore;
+struct Window;
+
+#define MAX_WINDOWS 10
+
 #include "window_manager.hpp"
 #include "theme_manager.hpp"
 #include <stdint.h>
@@ -71,7 +84,7 @@ private:
   // Taskbar functions
   static void drawOpenAppIcons(int start_x, int y);
   static char getAppIcon(const char* title);
-  
+
   // Search functions
   static void performSearch(const char* query);
   static char getCharFromScancode(uint8_t scancode);

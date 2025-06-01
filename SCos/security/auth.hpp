@@ -59,4 +59,15 @@ private:
     static void drawSecurityStatus();
 };
 
+// AuthSystem class for desktop compatibility
+class AuthSystem {
+public:
+    static bool init() { return SecurityManager::init(); }
+    static bool isLockScreenVisible() { return SecurityManager::isSystemLocked(); }
+    static void handleLockScreenInput(uint8_t key) { SecurityManager::handleLoginInput(key); }
+    static bool isAuthenticated() { return SecurityManager::isAuthenticated(); }
+    static void lockSystem() { SecurityManager::lockSystem(); }
+    static void unlockSystem() { SecurityManager::unlockSystem(); }
+};
+
 #endif
