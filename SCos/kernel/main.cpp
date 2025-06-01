@@ -198,18 +198,9 @@ extern "C" void _start() {
     uint32_t heartbeat_interval = 100000; // Faster heartbeat for debugging
     
     while (1) {
-        // Try desktop operations with error handling
-        try {
-            desktop.handle_events();
-            desktop.update();
-        } catch (...) {
-            // If desktop fails, show error but continue
-            const char* error_msg = "Desktop error - continuing...";
-            for (int i = 0; error_msg[i] != '\0'; i++) {
-                video[960 + i * 2] = error_msg[i]; // Seventh line
-                video[960 + i * 2 + 1] = 0x0C; // Red on black
-            }
-        }
+        // Handle desktop operations with simple error checking
+        desktop.handle_events();
+        desktop.update();
 
         tick_count++;
         if (tick_count % heartbeat_interval == 0) {

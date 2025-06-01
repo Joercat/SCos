@@ -1,7 +1,7 @@
 # SCos Makefile
 CC = gcc
 ASM = nasm
-CFLAGS = -m32 -nostdlib -nostdinc -fno-builtin -fno-stack-protector -nostartfiles -nodefaultlibs -ffreestanding -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -fno-pic -fno-pie
+CFLAGS = -m32 -nostdlib -nostdinc -fno-builtin -fno-stack-protector -nostartfiles -nodefaultlibs -ffreestanding -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -fno-pic -fno-pie -fno-exceptions -fno-rtti -fno-unwind-tables
 INCLUDES = -I./include
 LDFLAGS = -m elf_i386 -T linker.ld
 
