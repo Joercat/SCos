@@ -27,4 +27,3 @@ void inputOperator(char op);
 void calculateResult();
 void clearCalculator();
 bool isCalculatorVisible();
-#endif

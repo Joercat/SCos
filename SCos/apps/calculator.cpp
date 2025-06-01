@@ -3,6 +3,67 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// VGA constants
+#define VGA_WIDTH 80
+#define VGA_HEIGHT 25
+#define COLOR_BLACK 0
+#define COLOR_BLUE 1
+#define COLOR_GREEN 2
+#define COLOR_CYAN 3
+#define COLOR_RED 4
+#define COLOR_MAGENTA 5
+#define COLOR_BROWN 6
+#define COLOR_LIGHT_GRAY 7
+#define COLOR_DARK_GRAY 8
+#define COLOR_LIGHT_BLUE 9
+#define COLOR_LIGHT_GREEN 10
+#define COLOR_LIGHT_CYAN 11
+#define COLOR_LIGHT_RED 12
+#define COLOR_LIGHT_MAGENTA 13
+#define COLOR_YELLOW 14
+#define COLOR_WHITE 15
+
+#define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
+
+// Simple sprintf implementation for freestanding environment
+static void sprintf(char* buffer, const char* format, double value) {
+    // Simple implementation for "%.2f" format
+    int integer_part = (int)value;
+    int decimal_part = (int)((value - integer_part) * 100);
+    
+    // Convert integer part
+    char temp[32];
+    int i = 0;
+    if (integer_part == 0) {
+        temp[i++] = '0';
+    } else {
+        int num = integer_part;
+        int start = i;
+        while (num > 0) {
+            temp[i++] = '0' + (num % 10);
+            num /= 10;
+        }
+        // Reverse the digits
+        for (int j = start; j < (start + i) / 2; j++) {
+            char t = temp[j];
+            temp[j] = temp[i - 1 - (j - start)];
+            temp[i - 1 - (j - start)] = t;
+        }
+    }
+    
+    // Copy to buffer
+    int buf_idx = 0;
+    for (int j = 0; j < i; j++) {
+        buffer[buf_idx++] = temp[j];
+    }
+    
+    // Add decimal point and decimal part
+    buffer[buf_idx++] = '.';
+    buffer[buf_idx++] = '0' + (decimal_part / 10);
+    buffer[buf_idx++] = '0' + (decimal_part % 10);
+    buffer[buf_idx] = '\0';
+}
+
 // Local math and string functions for freestanding environment
 static int calc_strlen(const char* str) {
     int len = 0;
@@ -73,6 +134,12 @@ static void int_to_str(int num, char* str) {
         str[j++] = temp[--i];
     }
     str[j] = '\0';
+}
+
+static int strlen(const char* str) {
+    int len = 0;
+    while (str[len]) len++;
+    return len;
 }
 
 // Missing function implementations
@@ -278,6 +345,87 @@ void closeCalculator() {
 
 bool isCalculatorVisible() {
     return calc_visible;
+}
+
+// Calculator class method implementations
+void Calculator::init() {
+    clearCalculator();
+}
+
+void Calculator::show() {
+    calc_visible = true;
+    drawCalculator();
+}
+
+void Calculator::hide() {
+    calc_visible = false;
+}
+
+bool Calculator::isVisible() {
+    return calc_visible;
+}
+
+void Calculator::handleInput(uint8_t key) {
+    handleCalculatorInput(key);
+}
+
+void Calculator::handleMouseClick(int x, int y) {
+    // Basic mouse click handling for calculator buttons
+    if (!calc_visible) return;
+    
+    // Check if click is within calculator area
+    if (x >= 4 && x <= 23 && y >= 7 && y <= 14) {
+        // Determine which button was clicked
+        int col = (x - 4) / 5;
+        int row = (y - 7) / 2;
+        
+        if (col >= 0 && col < 4 && row >= 0 && row < 4) {
+            const char* buttons[4][4] = {
+                {"7", "8", "9", "/"},
+                {"4", "5", "6", "*"},
+                {"1", "2", "3", "-"},
+                {"0", ".", "=", "+"}
+            };
+            
+            char button = buttons[row][col][0];
+            if (button >= '0' && button <= '9') {
+                inputDigitChar(button);
+            } else if (button == '+' || button == '-' || button == '*' || button == '/') {
+                inputOperator(button);
+            } else if (button == '=') {
+                calculateResult();
+            } else if (button == '.') {
+                // Handle decimal point if needed
+            }
+            drawCalculator();
+        }
+    }
+}
+
+void Calculator::drawCalculator() {
+    ::drawCalculator();
+}
+
+void Calculator::processInput(char input) {
+    if (input >= '0' && input <= '9') {
+        inputDigitChar(input);
+    } else if (input == '+' || input == '-' || input == '*' || input == '/') {
+        inputOperator(input);
+    } else if (input == '=' || input == '\r' || input == '\n') {
+        calculateResult();
+    }
+}
+
+void Calculator::calculate() {
+    calculateResult();
+}
+
+void Calculator::clearDisplay() {
+    clearCalculator();
+}
+
+void Calculator::updateDisplay() {
+    drawCalculator();
 }
 
 void handleCalculatorInput(uint8_t key) {
