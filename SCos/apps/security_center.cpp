@@ -103,8 +103,6 @@ void SecurityCenter::handleMouseClick(int x, int y) {
     if (x < win->x || x >= win->x + win->width || 
         y < win->y || y >= win->y + win->height) return;
 }
-// Security center state
-static int selected_option = 0;
 static int current_menu = 0; // 0=main, 1=change_pin, 2=change_password, 3=settings
 static char input_buffer[64];
 static int input_pos = 0;
