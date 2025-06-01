@@ -90,15 +90,7 @@ void SecurityCenter::drawSecurityCenter() {
     }
 }
 
-void SecurityCenter::handleInput(uint8_t key) {
-    if (!security_visible) return;
 
-    switch (key) {
-        case 0x01: // Escape
-            hide();
-            break;
-    }
-}
 
 void SecurityCenter::handleMouseClick(int x, int y) {
     // Handle mouse clicks within security center window

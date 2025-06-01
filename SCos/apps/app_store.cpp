@@ -3,13 +3,13 @@
 #include <stdint.h>
 
 // Local string function implementations for freestanding environment
-static int store_strlen(const char* str) {
+static int app_store_strlen(const char* str) {
     int len = 0;
     while (str[len]) len++;
     return len;
 }
 
-static void store_strcpy(char* dest, const char* src) {
+static void app_store_strcpy(char* dest, const char* src) {
     while (*src) {
         *dest++ = *src++;
     }

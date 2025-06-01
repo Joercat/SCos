@@ -65,6 +65,14 @@ extern "C" {
         }
         serial_printf("Filesystem: OK\n");
 
+        // Initialize network drivers
+        NetworkDriver::init();
+        serial_printf("Network Driver: OK\n");
+        
+        // Initialize bluetooth
+        BluetoothDriver::init();
+        serial_printf("Bluetooth Driver: OK\n");
+
         serial_printf("All subsystems initialized successfully\n");
         return true;
     }
@@ -74,6 +82,8 @@ extern "C" {
 #include "../include/memory.h"
 #include "../debug/serial.hpp"
 #include "../ui/desktop.hpp"
+#include "../drivers/network.hpp"
+#include "../drivers/bluetooth.hpp"
 
 void show_memory_info() {
     serial_printf("Kernel loaded at: 0x1000\n");

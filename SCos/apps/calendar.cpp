@@ -1,5 +1,6 @@
 
 #include "calendar.hpp"
+#include "../ui/window_manager.hpp"
 #include <stdint.h>
 
 // VGA text mode constants

@@ -10,6 +10,8 @@
 #include "../apps/about.hpp"
 #include "../apps/app_store.hpp"
 #include "../apps/updates.hpp"
+#include "../apps/security_center.hpp"
+#include "../apps/network_settings.hpp"
 
 // Local string function implementations for freestanding environment
 static int custom_strlen(const char* str) {
@@ -53,6 +55,7 @@ void AppLauncher::init() {
     registerApp("App Store", "[P]", 74, 22, []() { Desktop::launchApplication(APP_APP_STORE); });
     registerApp("About", "[?]", 35, 10, []() { Desktop::launchApplication(APP_ABOUT); });
     registerApp("Updates", "[U]", 45, 12, []() { Desktop::launchApplication(APP_UPDATES); });
+    registerApp("Network", "[I]", 45, 12, []() { Desktop::launchApplication(APP_NETWORK_SETTINGS); });
 }
 
 void AppLauncher::registerApp(const char* name, const char* icon, 
