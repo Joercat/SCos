@@ -13,31 +13,40 @@ start:
     sti
 
 load_kernel:
+    ; Save boot drive number that BIOS gave us
+    mov [boot_drive], dl
+    
     ; Reset disk system first
     mov ah, 0x00
-    mov dl, 0x80
+    mov dl, [boot_drive]
+    int 0x13
+    jc disk_error
+    
+    ; Try to get drive parameters to ensure drive is accessible
+    mov ah, 0x08
+    mov dl, [boot_drive]
     int 0x13
     jc disk_error
     
     ; Load kernel - read more sectors to ensure we get the full kernel
     mov bx, KERNEL_OFFSET
     mov ah, 0x02        ; Read sectors function
-    mov al, 50          ; Read 50 sectors (25KB) - increased from 20
+    mov al, 50          ; Read 50 sectors (25KB) 
     mov ch, 0           ; Cylinder 0
     mov cl, 2           ; Start from sector 2 (after bootloader)
     mov dh, 0           ; Head 0
-    mov dl, 0x80        ; First hard drive
+    mov dl, [boot_drive] ; Use the boot drive BIOS gave us
     int 0x13
     
     jc disk_error
     
-    ; Verify kernel was loaded by checking for a signature
+    ; Verify we actually read something
     mov ax, KERNEL_OFFSET
     mov es, ax
     mov bx, 0
-    mov al, [es:bx]
-    cmp al, 0
-    je disk_error       ; If first byte is 0, kernel probably wasn't loaded
+    mov ax, [es:bx]     ; Read first word instead of byte
+    cmp ax, 0
+    je disk_error       ; If first word is 0, kernel probably wasn't loaded
 
 switch_to_32bit:
     cli
@@ -52,7 +61,13 @@ switch_to_32bit:
 disk_error:
     mov si, disk_error_msg
     call print_string
-    jmp $
+    
+    ; Wait for keypress
+    mov ah, 0x00
+    int 0x16
+    
+    ; Retry loading
+    jmp load_kernel
 
 print_string:
     lodsb
@@ -107,7 +122,8 @@ gdt_descriptor:
 CODE_SEG equ gdt_code - gdt_start
 DATA_SEG equ gdt_data - gdt_start
 
-disk_error_msg db 'Disk read error!', 0
+boot_drive db 0
+disk_error_msg db 'Disk read error! Press any key to retry...', 0
 
 times 510 - ($ - $$) db 0
 dw 0xAA55
