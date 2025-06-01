@@ -62,12 +62,33 @@ private:
 // AuthSystem class for desktop compatibility
 class AuthSystem {
 public:
-    static bool init() { return SecurityManager::init(); }
-    static bool isLockScreenVisible() { return SecurityManager::isSystemLocked(); }
-    static void handleLockScreenInput(uint8_t key) { SecurityManager::handleLoginInput(key); }
-    static bool isAuthenticated() { return SecurityManager::isAuthenticated(); }
-    static void lockSystem() { SecurityManager::lockSystem(); }
-    static void unlockSystem() { SecurityManager::unlockSystem(); }
+    static void init();
+    static bool isLockScreenVisible();
+    static void handleLockScreenInput(uint8_t key);
+    static bool isAuthenticated();
+    static void lockSystem();
+    static void unlockSystem();
+    static bool isSystemLocked();
+    static bool showLockScreen();
+    static bool showLoginScreen();
+    static bool showPinScreen();
+    static void handleSecurityInput(uint8_t key);
+    
+    // Additional methods for full AuthSystem functionality
+    static void hashPassword(const char* password, char* hash);
+    static bool verifyPassword(const char* password, const char* stored_hash);
+    static uint32_t getCurrentTime();
+    static void* findUser(const char* username);
+    static bool isUserLocked(const char* username);
+    static int authenticateUser(const char* username, const char* credential);
+    static int authenticatePin(const char* pin);
+    static bool createUser(const char* username, const char* password, const char* pin, bool is_admin);
+    static void clearFailedAttempts(const char* username);
+    static void logSecurityEvent(const char* event, const char* username);
+    static bool hasAdminPrivileges(const char* username);
+    static int getSystemSecurityLevel();
+    static void setSystemSecurityLevel(int level);
+    static void showSecurityLog();
 };
 
 #endif

@@ -836,13 +836,12 @@ void AuthSystem::showSecurityLog() {
     // Implementation for security log display
     int log_window_id = WindowManager::createWindow("Security Log", 5, 2, 70, 20);
 if (log_window_id < 0) return;
-    
+
     WindowManager::setActiveWindow(log_window_id);
-    
+
     volatile char* video = (volatile char*)0xB8000;
     Window* win = WindowManager::getWindow(log_window_id);
-    if (!win) return;
-    
+    if (!win) return;```cpp
     // Clear window
     for (int y = win->y; y < win->y + win->height; y++) {
         for (int x = win->x; x < win->x + win->width; x++) {
@@ -851,7 +850,7 @@ if (log_window_id < 0) return;
             video[idx + 1] = 0x17; // Gray on black
         }
     }
-    
+
     // Title
     const char* title = "Security Event Log";
     int title_len = custom_strlen(title);
@@ -861,23 +860,23 @@ if (log_window_id < 0) return;
         video[idx] = title[i];
         video[idx + 1] = 0x4F; // White on red
     }
-    
+
     // Log entries
     int display_count = (log_count < 15) ? log_count : 15;
     int start_entry = (log_count > 15) ? log_count - 15 : 0;
-    
+
     for (int i = 0; i < display_count; i++) {
         const char* entry = security_log[start_entry + i];
         int entry_len = custom_strlen(entry);
         int max_len = (entry_len < win->width - 4) ? entry_len : win->width - 4;
-        
+
         for (int j = 0; j < max_len; j++) {
             int idx = 2 * ((win->y + 3 + i) * 80 + win->x + 2 + j);
             video[idx] = entry[j];
             video[idx + 1] = 0x1F; // White on blue
         }
     }
-    
+
     // Footer
     const char* footer = "Press any key to close";
     int footer_len = custom_strlen(footer);
