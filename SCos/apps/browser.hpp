@@ -1,5 +1,6 @@
 #pragma once
 #include "../ui/window_manager.hpp"
+#include "html_interpreter.hpp"
 #include <stdint.h>
 
 #define MAX_URL_LENGTH 256
@@ -45,6 +46,10 @@ private:
     static void refresh();
     static void showHomePage();
     static void processUrl();
+    static void loadHTMLFile(const char* filepath);
+    static void loadCSSFile(const char* filepath);
+    static void loadJSFile(const char* filepath);
+    static void renderHTMLPage();
     static int custom_strlen(const char* str);
     static void custom_strcpy(char* dest, const char* src);
     static int custom_strcmp(const char* str1, const char* str2);

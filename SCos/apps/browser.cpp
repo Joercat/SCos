@@ -27,6 +27,7 @@ void Browser::init() {
     browser_window_id = -1;
     browser_strcpy(current_url, "scos://home");
     browser_strcpy(address_bar, "scos://home");
+    HTMLInterpreter::init();
 }
 
 void Browser::show() {
@@ -189,15 +190,128 @@ void Browser::handleMouseClick(int x, int y) {
             // Refresh button clicked
             refreshPage();
         }
+    } else {
+        // Pass click to HTML interpreter for interactive elements
+        HTMLInterpreter::handleClick(x - win->x, y - win->y);
     }
 }
 
 void Browser::navigate(const char* url) {
     browser_strcpy(current_url, url);
     browser_strcpy(address_bar, url);
-    drawBrowser();
+    
+    // Check if URL points to an HTML file
+    int url_len = browser_strlen(url);
+    if (url_len > 5 && browser_strcmp(url + url_len - 5, ".html") == 0) {
+        loadHTMLFile(url);
+    } else if (url_len > 4 && browser_strcmp(url + url_len - 4, ".htm") == 0) {
+        loadHTMLFile(url);
+    } else {
+        drawBrowser();
+    }
 }
 
 void Browser::refreshPage() {
     drawBrowser();
+}
+
+void Browser::loadHTMLFile(const char* filepath) {
+    // For now, create sample HTML content - in full implementation would read from filesystem
+    const char* sample_html = 
+        "<html>"
+        "<head><title>SCos Browser</title></head>"
+        "<body>"
+        "<h1 id='title' class='header'>Welcome to SCos Browser</h1>"
+        "<p>This browser now supports HTML, CSS, and JavaScript!</p>"
+        "<button id='click_me' onclick='alert()'>Click Me</button>"
+        "<div class='content'>"
+        "<p>Features:</p>"
+        "<ul>"
+        "<li>HTML parsing</li>"
+        "<li>CSS styling</li>"
+        "<li>JavaScript execution</li>"
+        "<li>Interactive elements</li>"
+        "</ul>"
+        "</div>"
+        "</body>"
+        "</html>";
+    
+    const char* sample_css = 
+        "h1 { color: red; width: 40; }"
+        ".header { color: yellow; }"
+        ".content { color: green; }"
+        "button { color: white; }"
+        "p { color: blue; }";
+    
+    const char* sample_js = 
+        "function alert() {"
+        "  // Simple alert simulation"
+        "}"
+        "function click_me_click() {"
+        "  // Button click handler"
+        "}";
+    
+    HTMLInterpreter::reset();
+    HTMLInterpreter::parseHTML(sample_html);
+    HTMLInterpreter::parseCSS(sample_css);
+    HTMLInterpreter::parseJS(sample_js);
+    
+    renderHTMLPage();
+}
+
+void Browser::loadCSSFile(const char* filepath) {
+    // Implementation for loading CSS files from filesystem
+    // Would read actual CSS file content in full implementation
+}
+
+void Browser::loadJSFile(const char* filepath) {
+    // Implementation for loading JavaScript files from filesystem
+    // Would read actual JS file content in full implementation
+}
+
+void Browser::renderHTMLPage() {
+    if (!browser_visible || browser_window_id < 0) return;
+    
+    Window* win = WindowManager::getWindow(browser_window_id);
+    if (!win) return;
+    
+    volatile char* video = (volatile char*)0xB8000;
+    int start_x = win->x + 2;
+    int start_y = win->y + 2;
+    
+    // Clear content area
+    for (int y = start_y; y < win->y + win->height - 1; ++y) {
+        for (int x = start_x; x < win->x + win->width - 2; ++x) {
+            int idx = 2 * (y * 80 + x);
+            video[idx] = ' ';
+            video[idx + 1] = 0x1F; // Blue background
+        }
+    }
+    
+    // Draw address bar
+    const char* addr_label = "Address: ";
+    for (int i = 0; addr_label[i] && i < 10; ++i) {
+        int idx = 2 * (start_y * 80 + start_x + i);
+        video[idx] = addr_label[i];
+        video[idx + 1] = 0x1E; // Yellow
+    }
+    
+    // Show URL
+    for (int i = 0; address_bar[i] && i < 50; ++i) {
+        int idx = 2 * (start_y * 80 + start_x + 9 + i);
+        video[idx] = address_bar[i];
+        video[idx + 1] = 0x1F; // White on blue
+    }
+    
+    // Render HTML content using interpreter
+    HTMLInterpreter::renderPage(browser_window_id);
+    
+    // Instructions
+    const char* instructions = "HTML/CSS/JS enabled - Use Tab/Enter to interact, Esc to exit";
+    int instr_y = win->y + win->height - 2;
+    for (int i = 0; instructions[i] && i < win->width - 4; ++i) {
+        int idx = 2 * (instr_y * 80 + start_x + i);
+        video[idx] = instructions[i];
+        video[idx + 1] = 0x17; // Grey
+    }
 }
