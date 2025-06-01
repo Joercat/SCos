@@ -1,7 +1,21 @@
 #ifndef DESKTOP_HPP
 #define DESKTOP_HPP
 
+#include <stdint.h>
+
+// Forward declarations
+class ThemeManager;
+class WindowManager;
+class AppLauncher;
+class Mouse;
+class Browser;
+class AppStore;
+struct Window;
+
+#define MAX_WINDOWS 10
+
 #include "window_manager.hpp"
+#include "theme_manager.hpp"
 #include <stdint.h>
 
 // Forward declarations for application classes
@@ -19,7 +33,12 @@ enum AppType {
   APP_SETTINGS,
   APP_ABOUT,
   APP_FILE_MANAGER,
-  APP_CALCULATOR
+  APP_CALCULATOR,
+  APP_SECURITY,
+  APP_BROWSER,
+  APP_APP_STORE,
+  APP_UPDATES,
+  APP_NETWORK_SETTINGS
 };
 
 // Keyboard key constants
@@ -32,6 +51,9 @@ public:
   static bool init();
   static void handle_events();
   static void update();
+  static void handleMouseInput();
+  static void handleTaskbarClick(int x);
+  static const char *readFile(const char *path);
   static void launchApplication(AppType app);
 
 private:
@@ -54,11 +76,23 @@ private:
   static void openSettings();
   static void openAbout();
   static void launchCalculator();
+  static void openSecurityCenter();
+  static void openBrowser();
+  static void openAppStore();
 
   // File system functions
-  static const char *readFile(const char *path);
-  
-  
+
+
+  // Taskbar functions
+  static void drawOpenAppIcons(int start_x, int y);
+  static char getAppIcon(const char* title);
+
+  // Search functions
+  static void performSearch(const char* query);
+  static char getCharFromScancode(uint8_t scancode);
+
 };
+
+// Application type constants moved to single enum above
 
 #endif
