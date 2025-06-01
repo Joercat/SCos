@@ -47,12 +47,70 @@ void serial_printf(const char* format, ...) {
     
     int i = 0;
     while (*format && i < 255) {
-        if (*format == '%' && *(format + 1) == 's') {
-            const char* str = va_arg(args, const char*);
-            while (*str && i < 255) {
-                buffer[i++] = *str++;
+        if (*format == '%' && *(format + 1)) {
+            format++; // Skip '%'
+            switch (*format) {
+                case 's': {
+                    const char* str = va_arg(args, const char*);
+                    while (*str && i < 255) {
+                        buffer[i++] = *str++;
+                    }
+                    break;
+                }
+                case 'd': {
+                    int num = va_arg(args, int);
+                    char temp[16];
+                    int len = 0;
+                    if (num == 0) {
+                        temp[len++] = '0';
+                    } else {
+                        int tmp = num;
+                        while (tmp > 0 && len < 15) {
+                            temp[len++] = '0' + (tmp % 10);
+                            tmp /= 10;
+                        }
+                        // Reverse
+                        for (int j = 0; j < len / 2; j++) {
+                            char c = temp[j];
+                            temp[j] = temp[len - 1 - j];
+                            temp[len - 1 - j] = c;
+                        }
+                    }
+                    for (int j = 0; j < len && i < 255; j++) {
+                        buffer[i++] = temp[j];
+                    }
+                    break;
+                }
+                case 'x': {
+                    uint32_t num = va_arg(args, uint32_t);
+                    char temp[16];
+                    int len = 0;
+                    if (num == 0) {
+                        temp[len++] = '0';
+                    } else {
+                        while (num > 0 && len < 15) {
+                            int digit = num % 16;
+                            temp[len++] = digit < 10 ? '0' + digit : 'a' + digit - 10;
+                            num /= 16;
+                        }
+                        // Reverse
+                        for (int j = 0; j < len / 2; j++) {
+                            char c = temp[j];
+                            temp[j] = temp[len - 1 - j];
+                            temp[len - 1 - j] = c;
+                        }
+                    }
+                    for (int j = 0; j < len && i < 255; j++) {
+                        buffer[i++] = temp[j];
+                    }
+                    break;
+                }
+                default:
+                    buffer[i++] = '%';
+                    buffer[i++] = *format;
+                    break;
             }
-            format += 2;
+            format++;
         } else {
             buffer[i++] = *format++;
         }

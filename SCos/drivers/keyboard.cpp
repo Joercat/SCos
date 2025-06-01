@@ -39,6 +39,122 @@ static const char scancodeToAsciiShift[128] = {
     0, 0, 0, 0, 0, 0, 0, 0
 };
 
+// Port I/O functions
+static inline uint8_t inb(uint16_t port) {
+    uint8_t result;
+    asm volatile("inb %1, %0" : "=a"(result) : "Nd"(port));
+    return result;
+}
+
+static inline void outb(uint16_t port, uint8_t data) {
+    asm volatile("outb %0, %1" : : "a"(data), "Nd"(port));
+}
+
+bool init_keyboard() {
+    // Clear keyboard buffer
+    bufferHead = 0;
+    bufferTail = 0;
+    
+    // Reset modifier states
+    shiftPressed = false;
+    ctrlPressed = false;
+    altPressed = false;
+    capsLock = false;
+    
+    return true;
+}
+
+extern "C" void keyboard_handler() {
+    uint8_t scancode = inb(0x60);
+    
+    // Handle key releases (bit 7 set)
+    if (scancode & 0x80) {
+        scancode &= 0x7F; // Remove release bit
+        
+        // Handle modifier key releases
+        switch (scancode) {
+            case 0x2A: // Left Shift
+            case 0x36: // Right Shift
+                shiftPressed = false;
+                break;
+            case 0x1D: // Left Ctrl
+                ctrlPressed = false;
+                break;
+            case 0x38: // Left Alt
+                altPressed = false;
+                break;
+        }
+        return;
+    }
+    
+    // Handle special keys
+    switch (scancode) {
+        case 0x2A: // Left Shift
+        case 0x36: // Right Shift
+            shiftPressed = true;
+            return;
+        case 0x1D: // Left Ctrl
+            ctrlPressed = true;
+            return;
+        case 0x38: // Left Alt
+            altPressed = true;
+            return;
+        case 0x3A: // Caps Lock
+            capsLock = !capsLock;
+            return;
+    }
+    
+    // Convert scancode to ASCII
+    char ascii = 0;
+    if (scancode < 128) {
+        if (shiftPressed) {
+            ascii = scancodeToAsciiShift[scancode];
+        } else {
+            ascii = scancodeToAscii[scancode];
+            
+            // Handle caps lock for letters
+            if (capsLock && ascii >= 'a' && ascii <= 'z') {
+                ascii = ascii - 'a' + 'A';
+            }
+        }
+    }
+    
+    // Add to buffer if valid ASCII
+    if (ascii != 0) {
+        uint16_t nextHead = (bufferHead + 1) % KEYBOARD_BUFFER_SIZE;
+        if (nextHead != bufferTail) { // Buffer not full
+            keyboardBuffer[bufferHead] = ascii;
+            bufferHead = nextHead;
+        }
+    }
+}
+
+char getchar() {
+    if (bufferHead == bufferTail) {
+        return 0; // No key available
+    }
+    
+    char c = keyboardBuffer[bufferTail];
+    bufferTail = (bufferTail + 1) % KEYBOARD_BUFFER_SIZE;
+    return c;
+}
+
+bool kbhit() {
+    return bufferHead != bufferTail;
+}
+
+static const char scancodeToAsciiShift[128] = {
+    0,  27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b',
+    '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',
+    0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~',
+    0, '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0,
+    '*', 0, ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0
+};
+
 // Special key scancodes
 #define SCANCODE_LSHIFT     0x2A
 #define SCANCODE_RSHIFT     0x36

@@ -15,7 +15,7 @@ SECURITY_OBJS = obj/security/auth.o
 FS_OBJS = obj/fs/ramfs.o
 DEBUG_OBJS = obj/debug/serial.o
 MEMORY_OBJS = obj/memory/heap.o
-INTERRUPT_OBJS = obj/interrupt/idt.o
+INTERRUPT_OBJS = obj/interrupt/idt.o obj/interrupt/idt_asm.o
 
 ALL_OBJS = $(KERNEL_OBJS) $(APP_OBJS) $(UI_OBJS) $(DRIVER_OBJS) $(LIB_OBJS) $(SECURITY_OBJS) $(FS_OBJS) $(DEBUG_OBJS) $(MEMORY_OBJS) $(INTERRUPT_OBJS)
 
@@ -72,11 +72,11 @@ obj/memory/%.o: memory/%.cpp
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # Interrupt objects
-obj/interrupt/%.o: interrupt/%.cpp
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+obj/interrupt/idt.o: interrupt/idt.cpp
+	$(CC) $(CFLAGS) $(INCLUDES) -c interrupt/idt.cpp -o obj/interrupt/idt.o
 
-obj/interrupt/idt.o: interrupt/idt.asm
-	$(ASM) -f elf32 interrupt/idt.asm -o obj/interrupt/idt.o
+obj/interrupt/idt_asm.o: interrupt/idt.asm
+	$(ASM) -f elf32 interrupt/idt.asm -o obj/interrupt/idt_asm.o
 
 clean:
 	rm -rf obj
