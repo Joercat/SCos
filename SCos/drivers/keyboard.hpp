@@ -3,6 +3,13 @@
 
 #include <stdint.h>
 
+// Port I/O functions
+static inline uint8_t inb(uint16_t port) {
+    uint8_t result;
+    asm volatile("inb %1, %0" : "=a"(result) : "Nd"(port));
+    return result;
+}
+
 // Key constants
 #define KEY_ESC     0x01
 #define KEY_TAB     0x0F
@@ -39,12 +46,18 @@ bool isCapsLockOn();
 bool isKeyboardBufferEmpty();
 bool isKeyboardBufferFull();
 
+// Forward declaration
+namespace KeyboardNamespace {
+    bool isPressed(char key);
+    uint8_t getLastKey();
+}
+
 class Keyboard {
 public:
     static bool hasKey() { return ::hasKey(); }
     static char getKey() { return ::getKey(); }
-    static uint8_t getLastKey();
-    static bool isPressed(char key);
+    static uint8_t getLastKey() { return KeyboardNamespace::getLastKey(); }
+    static bool isPressed(char key) { return KeyboardNamespace::isPressed(key); }
 };
 
 #endif // KEYBOARD_HPP

@@ -245,7 +245,7 @@ char readScancode() {
 }
 
 // Keyboard class methods for compatibility
-namespace Keyboard {
+namespace KeyboardNamespace {
     bool isPressed(char key) {
         // Implementation would check current key state
         return false;
