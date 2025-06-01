@@ -59,11 +59,7 @@ static int calendar_strlen(const char* str) {
     return len;
 }
 
-void center_text(int y, const char* text, uint8_t color) {
-    int len = calendar_strlen(text);
-    int x = (VGA_WIDTH - len) / 2;
-    vga_put_string(x, y, text, color);
-}
+// center_text function is now provided by vga_utils.hpp
 
 static void int_to_string(int value, char* buffer) {
     if (value == 0) {

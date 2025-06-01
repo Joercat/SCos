@@ -1,4 +1,6 @@
+
 #include "idt.hpp"
+#include "../debug/serial.hpp"
 
 static idt_entry idt[256];
 static idt_ptr idtp;
@@ -83,6 +85,8 @@ void disable_irq(uint8_t irq) {
 }
 
 bool init_idt() {
+    serial_printf("IDT initialization started\n");
+    
     // Set up IDT pointer
     idtp.limit = (sizeof(idt_entry) * 256) - 1;
     idtp.base = (uint32_t)&idt;
@@ -108,14 +112,6 @@ bool init_idt() {
     // Enable keyboard IRQ (IRQ1)
     enable_irq(1);
     
-    return true;
-}
-#include "idt.hpp"
-#include "../debug/serial.hpp"
-
-bool init_idt() {
-    serial_printf("IDT initialization started\n");
-    // Basic IDT initialization - can be expanded later
     serial_printf("IDT initialization completed\n");
     return true;
 }
