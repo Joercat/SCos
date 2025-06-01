@@ -15,6 +15,14 @@ extern "C" void keyboard_handler();
 bool init_keyboard();
 char readScancode();
 
+// Public API
+char getKey();
+bool hasKey();
+void handleKeyboardInterrupt();
+
+// C wrapper
+extern "C" void keyboard_handler();
+
 // Buffer management
 char getKey();
 bool hasKey();

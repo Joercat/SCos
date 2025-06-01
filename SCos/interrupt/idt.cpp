@@ -5,6 +5,7 @@ static idt_ptr idtp;
 
 extern "C" void idt_load(uint32_t);
 extern "C" void keyboard_interrupt_wrapper();
+extern "C" void keyboard_handler();
 
 void set_idt_gate(int n, uint32_t handler) {
     idt[n].offset_low = handler & 0xFFFF;
