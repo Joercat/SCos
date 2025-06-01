@@ -84,7 +84,7 @@ void disable_irq(uint8_t irq) {
     outb(port, value);
 }
 
-bool init_idt() {
+extern "C" bool init_idt() {
     serial_printf("IDT initialization started\n");
     
     // Set up IDT pointer

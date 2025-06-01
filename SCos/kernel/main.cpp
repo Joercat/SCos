@@ -5,6 +5,8 @@
 #include "../drivers/bluetooth.hpp"
 #include "../memory/heap.hpp"
 #include "../interrupt/idt.hpp"
+
+extern "C" bool init_idt();
 #include "../debug/serial.hpp"
 #include <stddef.h>
 
