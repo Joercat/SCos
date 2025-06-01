@@ -1,14 +1,29 @@
 
-#ifndef SETTINGS_HPP
-#define SETTINGS_HPP
+#pragma once
+#include "../ui/window_manager.hpp"
+#include <stdint.h>
 
-// Function declarations for settings application
-void openSettings();
-
-// Settings class for input handling
-class Settings {
-public:
-    static void handleInput(char key);
+enum SettingsCategory {
+    SETTINGS_DISPLAY,
+    SETTINGS_AUDIO,
+    SETTINGS_NETWORK,
+    SETTINGS_SECURITY,
+    SETTINGS_SYSTEM
 };
 
-#endif
+class Settings {
+public:
+    static void init();
+    static void show();
+    static void hide();
+    static bool isVisible();
+    static void handleInput(uint8_t key);
+    static void handleMouseClick(int x, int y);
+
+private:
+    static void drawSettings();
+    static void drawCategory(SettingsCategory category);
+    static void selectCategory(SettingsCategory category);
+    static void adjustSetting(int direction);
+    static void updateDisplay();
+};

@@ -1,30 +1,25 @@
-#ifndef NOTEPAD_HPP
-#define NOTEPAD_HPP
 
+#pragma once
+#include "../ui/window_manager.hpp"
 #include <stdint.h>
+
+#define MAX_NOTEPAD_LINES 15
+#define MAX_NOTEPAD_LINE_LENGTH 50
 
 class Notepad {
 public:
+    static void init();
+    static void show();
+    static void hide();
+    static bool isVisible();
     static void handleInput(uint8_t key);
+    static void handleMouseClick(int x, int y);
+
+private:
+    static void drawNotepad();
+    static void insertChar(char c);
+    static void deleteChar();
+    static void newLine();
+    static void moveCursor(int dx, int dy);
+    static void updateDisplay();
 };
-
-// Function declarations for notepad application
-void openNotepad(const char* content);
-void closeNotepad();
-bool isNotepadVisible();
-void drawNotepadContent();
-void handleNotepadInput(uint8_t key);
-
-// VGA helper functions
-void vga_put_char(int x, int y, char c, uint8_t color);
-void vga_put_string(int x, int y, const char* str, uint8_t color);
-void vga_clear_screen(uint8_t color);
-void vga_clear_line(int y, uint8_t color);
-
-// Color constants
-#define COLOR_BLACK 0
-#define COLOR_WHITE 15
-#define COLOR_LIGHT_GRAY 7
-#define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
-
-#endif

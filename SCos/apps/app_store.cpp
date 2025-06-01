@@ -21,14 +21,14 @@ static int store_window_id = -1;
 static bool store_visible = false;
 static int selected_app = 0;
 
-struct StoreApp {
+struct SimpleStoreApp {
     const char* name;
     const char* description;
     const char* version;
     bool installed;
 };
 
-static StoreApp available_apps[] = {
+static SimpleStoreApp available_apps[] = {
     {"Text Editor Pro", "Advanced text editing", "v2.1", false},
     {"Math Calculator", "Scientific calculator", "v1.5", true},
     {"Image Viewer", "View image files", "v1.0", false},
