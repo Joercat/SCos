@@ -3,13 +3,13 @@
 #include <stdint.h>
 
 // Local string function implementations for freestanding environment
-static int store_strlen(const char* str) {
+static int app_store_strlen(const char* str) {
     int len = 0;
     while (str[len]) len++;
     return len;
 }
 
-static void store_strcpy(char* dest, const char* src) {
+static void app_store_strcpy(char* dest, const char* src) {
     while (*src) {
         *dest++ = *src++;
     }
@@ -21,14 +21,14 @@ static int store_window_id = -1;
 static bool store_visible = false;
 static int selected_app = 0;
 
-struct StoreApp {
+struct SimpleStoreApp {
     const char* name;
     const char* description;
     const char* version;
     bool installed;
 };
 
-static StoreApp available_apps[] = {
+static SimpleStoreApp available_apps[] = {
     {"Text Editor Pro", "Advanced text editing", "v2.1", false},
     {"Math Calculator", "Scientific calculator", "v1.5", true},
     {"Image Viewer", "View image files", "v1.0", false},

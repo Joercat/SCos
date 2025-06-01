@@ -1,14 +1,23 @@
 
-#ifndef ABOUT_HPP
-#define ABOUT_HPP
+#pragma once
+#include "../ui/window_manager.hpp"
+#include <stdint.h>
 
-// Function declarations for about application
+// Forward declaration of the openAbout function
 void openAbout();
 
-// About class for input handling
 class About {
 public:
-    static void handleInput(char key);
-};
+    static void init();
+    static void show();
+    static void hide();
+    static bool isVisible();
+    static void handleInput(uint8_t key);
+    static void handleMouseClick(int x, int y);
 
-#endif
+private:
+    static void drawAbout();
+    static void drawSystemInfo();
+    static void drawCredits();
+    static void updateDisplay();
+};

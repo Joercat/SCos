@@ -412,4 +412,3 @@ void handleCalculatorInput(uint8_t key) {
             break;
     }
 }
-`
