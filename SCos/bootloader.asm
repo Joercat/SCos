@@ -16,37 +16,54 @@ load_kernel:
     ; Save boot drive number that BIOS gave us
     mov [boot_drive], dl
     
-    ; Reset disk system first
+    ; Reset disk system first with retries
+    mov cx, 3           ; Try 3 times
+reset_loop:
     mov ah, 0x00
     mov dl, [boot_drive]
     int 0x13
-    jc disk_error
+    jnc reset_ok
+    loop reset_loop
+    jmp disk_error
     
-    ; Try to get drive parameters to ensure drive is accessible
-    mov ah, 0x08
-    mov dl, [boot_drive]
+reset_ok:
+    ; Load kernel in smaller chunks to be more reliable
+    mov bx, KERNEL_OFFSET   ; Load address
+    mov cx, 50              ; Total sectors to read
+    mov dx, 2               ; Starting sector
+    
+read_loop:
+    push cx                 ; Save sector count
+    push dx                 ; Save current sector
+    
+    ; Read one sector at a time for reliability
+    mov ah, 0x02            ; Read sectors function
+    mov al, 1               ; Read 1 sector
+    mov ch, 0               ; Cylinder 0
+    mov cl, dl              ; Current sector
+    mov dh, 0               ; Head 0
+    mov dl, [boot_drive]    ; Drive
     int 0x13
-    jc disk_error
     
-    ; Load kernel - read more sectors to ensure we get the full kernel
-    mov bx, KERNEL_OFFSET
-    mov ah, 0x02        ; Read sectors function
-    mov al, 50          ; Read 50 sectors (25KB) 
-    mov ch, 0           ; Cylinder 0
-    mov cl, 2           ; Start from sector 2 (after bootloader)
-    mov dh, 0           ; Head 0
-    mov dl, [boot_drive] ; Use the boot drive BIOS gave us
-    int 0x13
+    jc read_error
     
-    jc disk_error
+    ; Move to next sector
+    pop dx                  ; Restore current sector
+    pop cx                  ; Restore sector count
+    inc dx                  ; Next sector
+    add bx, 512             ; Next memory location
+    loop read_loop
     
     ; Verify we actually read something
-    mov ax, KERNEL_OFFSET
-    mov es, ax
-    mov bx, 0
-    mov ax, [es:bx]     ; Read first word instead of byte
-    cmp ax, 0
-    je disk_error       ; If first word is 0, kernel probably wasn't loaded
+    mov bx, KERNEL_OFFSET
+    cmp word [bx], 0
+    je disk_error           ; If first word is 0, kernel probably wasn't loaded
+    jmp switch_to_32bit
+
+read_error:
+    pop dx                  ; Clean stack
+    pop cx
+    jmp disk_error
 
 switch_to_32bit:
     cli
