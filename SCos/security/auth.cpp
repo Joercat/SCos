@@ -665,7 +665,7 @@ void AuthSystem::lockSystem() {
 }
 
 bool AuthSystem::isUserLocked(const char* username) {
-    User* user = findUser(username);
+    User* user = (User*)findUser(username);
     if (!user) return true;
 
     if (user->failed_attempts >= LOCKOUT_ATTEMPTS) {
@@ -684,7 +684,7 @@ AuthResult AuthSystem::authenticateUser(const char* username, const char* creden
         return AUTH_SYSTEM_LOCKED;
     }
 
-    User* user = findUser(username);
+    User* user = (User*)findUser(username);
     if (!user || !user->is_active) {
         logSecurityEvent("Invalid user login attempt", username);
         return AUTH_INVALID_CREDENTIALS;
@@ -768,7 +768,7 @@ bool AuthSystem::createUser(const char* username, const char* password, const ch
 }
 
 void AuthSystem::clearFailedAttempts(const char* username) {
-    User* user = findUser(username);
+    User* user = (User*)findUser(username);
     if (user) {
         user->failed_attempts = 0;
         user->last_lockout_time = 0;
@@ -819,7 +819,7 @@ void AuthSystem::logSecurityEvent(const char* event, const char* username) {
 }
 
 bool AuthSystem::hasAdminPrivileges(const char* username) {
-    User* user = findUser(username);
+    User* user = (User*)findUser(username);
     return user && user->is_admin && is_authenticated;
 }
 
@@ -841,7 +841,7 @@ if (log_window_id < 0) return;
 
     volatile char* video = (volatile char*)0xB8000;
     Window* win = WindowManager::getWindow(log_window_id);
-    if (!win) return;```cpp
+    if (!win) return;
     // Clear window
     for (int y = win->y; y < win->y + win->height; y++) {
         for (int x = win->x; x < win->x + win->width; x++) {
@@ -899,3 +899,4 @@ bool AuthSystem::showPinScreen() {
 void AuthSystem::handleSecurityInput(uint8_t key) {
     handleLockScreenInput(key);
 }
+// The code has been fixed by applying type casting where necessary to avoid compilation errors.
