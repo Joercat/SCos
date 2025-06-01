@@ -443,7 +443,69 @@ void openCalendarSimple() {
 }
 
 // Calendar class implementation
-void Calendar::handleInput(char key) {
+static bool calendar_visible = false;
+static int calendar_window_id = -1;
+
+void Calendar::init() {
+    calendar_visible = false;
+    calendar_window_id = -1;
+}
+
+void Calendar::show() {
+    if (calendar_visible) return;
+    
+    calendar_window_id = WindowManager::createWindow("Calendar", 5, 2, 70, 20);
+    if (calendar_window_id >= 0) {
+        calendar_visible = true;
+        openCalendar();
+    }
+}
+
+void Calendar::hide() {
+    if (!calendar_visible || calendar_window_id < 0) return;
+    
+    WindowManager::closeWindow(calendar_window_id);
+    calendar_visible = false;
+    calendar_window_id = -1;
+}
+
+bool Calendar::isVisible() {
+    return calendar_visible;
+}
+
+void Calendar::handleMouseClick(int x, int y) {
+    if (!calendar_visible) return;
+    // Handle mouse clicks if needed
+}
+
+void Calendar::drawCalendar() {
+    openCalendar();
+}
+
+void Calendar::drawMonth(int month, int year) {
+    view_date.month = month;
+    view_date.year = year;
+    openCalendar();
+}
+
+void Calendar::navigateMonth(int direction) {
+    if (direction > 0) {
+        calendar_next_month();
+    } else {
+        calendar_previous_month();
+    }
+}
+
+void Calendar::selectDate(int day) {
+    selected_day = day;
+    openCalendar();
+}
+
+void Calendar::updateDisplay() {
+    openCalendar();
+}
+
+void Calendar::handleInput(uint8_t key) {
     switch (key) {
         case 'w': // Up
         case 'W':

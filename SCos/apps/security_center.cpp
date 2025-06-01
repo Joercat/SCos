@@ -1,11 +1,11 @@
-
+#include "security_center.hpp"
 #include "../security/auth.hpp"
 #include "../ui/window_manager.hpp"
-#include "security_center.hpp"
 
-// Security Center state
-static int security_window_id = -1;
+// Security center state
 static bool security_visible = false;
+static int security_window_id = -1;
+static int selected_option = 0;
 
 void SecurityCenter::init() {
     security_visible = false;
@@ -95,7 +95,7 @@ void SecurityCenter::drawSecurityCenter() {
 void SecurityCenter::handleMouseClick(int x, int y) {
     // Handle mouse clicks within security center window
     if (!security_visible || security_window_id < 0) return;
-    
+
     Window* win = WindowManager::getWindow(security_window_id);
     if (!win) return;
 
@@ -128,26 +128,26 @@ void vga_put_string(int x, int y, const char* str, uint8_t color) {
 static void draw_security_main_menu() {
     Window* win = WindowManager::getWindow(security_window_id);
     if (!win) return;
-    
+
     int start_x = win->x + 2;
     int start_y = win->y + 2;
-    
+
     // Clear window content area
     for (int y = win->y + 1; y < win->y + win->height - 1; y++) {
         for (int x = win->x + 1; x < win->x + win->width - 1; x++) {
             vga_put_char(x, y, ' ', 0x07);
         }
     }
-    
+
     // Title
     vga_put_string(start_x + 12, start_y, "Security Center", 0x4F);
-    
+
     // Security status
     const char* status = SecurityManager::isAuthenticated() ? "UNLOCKED" : "LOCKED";
     uint8_t status_color = SecurityManager::isAuthenticated() ? 0x2F : 0x4F;
     vga_put_string(start_x, start_y + 2, "System Status: ", 0x07);
     vga_put_string(start_x + 15, start_y + 2, status, status_color);
-    
+
     // Menu options
     const char* menu_items[] = {
         "Change PIN",
@@ -157,25 +157,25 @@ static void draw_security_main_menu() {
         "Reset Failed Attempts",
         "Security Settings"
     };
-    
+
     int num_items = 6;
-    
+
     vga_put_string(start_x, start_y + 4, "Security Options:", 0x0E);
-    
+
     for (int i = 0; i < num_items; i++) {
         uint8_t color = (i == selected_option) ? 0x70 : 0x07;
         char prefix = (i == selected_option) ? '>' : ' ';
-        
+
         vga_put_char(start_x + 2, start_y + 6 + i, prefix, color);
         vga_put_string(start_x + 4, start_y + 6 + i, menu_items[i], color);
     }
-    
+
     // Current auth mode
     const char* mode_names[] = {"None", "PIN", "Password", "PIN + Password"};
     AuthMode mode = SecurityManager::getAuthMode();
     vga_put_string(start_x, start_y + 13, "Auth Mode: ", 0x08);
     vga_put_string(start_x + 11, start_y + 13, mode_names[mode], 0x0F);
-    
+
     // Failed attempts
     int attempts = SecurityManager::getFailedAttempts();
     char attempts_str[32] = "Failed Attempts: ";
@@ -187,32 +187,32 @@ static void draw_security_main_menu() {
 static void draw_pin_change_screen() {
     Window* win = WindowManager::getWindow(security_window_id);
     if (!win) return;
-    
+
     int start_x = win->x + 2;
     int start_y = win->y + 2;
-    
+
     // Clear window content area
     for (int y = win->y + 1; y < win->y + win->height - 1; y++) {
         for (int x = win->x + 1; x < win->x + win->width - 1; x++) {
             vga_put_char(x, y, ' ', 0x07);
         }
     }
-    
+
     vga_put_string(start_x + 15, start_y, "Change PIN", 0x4F);
-    
+
     if (input_pos == 0) {
         vga_put_string(start_x, start_y + 3, "Enter current PIN:", 0x07);
     } else if (input_pos <= 8) {
         vga_put_string(start_x, start_y + 3, "Enter new PIN (4-8 digits):", 0x07);
     }
-    
+
     // Show masked input
     vga_put_string(start_x, start_y + 5, "PIN: ", 0x07);
     for (int i = 0; i < (input_pos > 8 ? input_pos - 8 : input_pos); i++) {
         vga_put_char(start_x + 5 + i, start_y + 5, '*', 0x0F);
     }
     vga_put_char(start_x + 5 + (input_pos > 8 ? input_pos - 8 : input_pos), start_y + 5, '_', 0x0F);
-    
+
     vga_put_string(start_x, start_y + 12, "Enter: Confirm | Esc: Cancel", 0x08);
 }
 
@@ -230,7 +230,7 @@ void openSecurityCenter() {
 
 static void handleSecurityInput(uint8_t key) {
     if (security_window_id < 0) return;
-    
+
     if (input_mode) {
         switch (key) {
             case 0x01: // Escape
@@ -239,7 +239,7 @@ static void handleSecurityInput(uint8_t key) {
                 input_pos = 0;
                 draw_security_main_menu();
                 break;
-                
+
             case 0x0E: // Backspace
                 if (input_pos > 0) {
                     input_pos--;
@@ -247,7 +247,7 @@ static void handleSecurityInput(uint8_t key) {
                     if (current_menu == 1) draw_pin_change_screen();
                 }
                 break;
-                
+
             case 0x1C: // Enter
                 input_buffer[input_pos] = '\0';
                 if (current_menu == 1) { // PIN change
@@ -263,12 +263,12 @@ static void handleSecurityInput(uint8_t key) {
                             old_pin[i] = input_buffer[i];
                         }
                         old_pin[i] = '\0';
-                        
+
                         for (i = 8; i < input_pos && input_buffer[i]; i++) {
                             new_pin[i-8] = input_buffer[i];
                         }
                         new_pin[i-8] = '\0';
-                        
+
                         if (SecurityManager::changePin(old_pin, new_pin)) {
                             // Success - return to main menu
                             input_mode = false;
@@ -283,7 +283,7 @@ static void handleSecurityInput(uint8_t key) {
                     }
                 }
                 break;
-                
+
             default:
                 // Number input for PIN
                 if (key >= 0x02 && key <= 0x0B && input_pos < 63) {
@@ -302,21 +302,21 @@ static void handleSecurityInput(uint8_t key) {
                     security_window_id = -1;
                 }
                 break;
-                
+
             case 0x48: // Up arrow
                 if (selected_option > 0) {
                     selected_option--;
                     draw_security_main_menu();
                 }
                 break;
-                
+
             case 0x50: // Down arrow
                 if (selected_option < 5) {
                     selected_option++;
                     draw_security_main_menu();
                 }
                 break;
-                
+
             case 0x1C: // Enter
                 switch (selected_option) {
                     case 0: // Change PIN
