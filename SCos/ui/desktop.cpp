@@ -11,6 +11,8 @@
 #include "../apps/security_center.hpp"
 #include "../apps/browser.hpp"
 #include "../apps/app_store.hpp"
+#include "../apps/updates.hpp"
+#include "../apps/network_settings.hpp"
 #include "../security/auth.hpp"
 #include "../drivers/keyboard.hpp"
 #include "../drivers/mouse.hpp"
@@ -149,7 +151,16 @@ void Desktop::launchApplication(AppType app) {
             openBrowser();
             break;
         case APP_APP_STORE:
-            openAppStore();
+            AppStore::show();
+            break;
+        case APP_UPDATES:
+            UpdatesManager::show();
+            break;
+        case APP_NETWORK_SETTINGS:
+            NetworkSettings::show();
+            break;
+        default:
+            // Unknown application type
             break;
     }
 }

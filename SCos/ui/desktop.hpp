@@ -89,7 +89,22 @@ private:
   static void performSearch(const char* query);
   static char getCharFromScancode(uint8_t scancode);
 
+};
 
+// Application type constants
+enum ApplicationType {
+    APP_TERMINAL = 0,
+    APP_NOTEPAD = 1,
+    APP_CALCULATOR = 2,
+    APP_FILE_MANAGER = 3,
+    APP_CALENDAR = 4,
+    APP_SETTINGS = 5,
+    APP_ABOUT = 6,
+    APP_SECURITY = 7,
+    APP_BROWSER = 8,
+    APP_APP_STORE = 9,
+    APP_UPDATES = 10,
+    APP_NETWORK_SETTINGS = 11
 };
 
 #endif
