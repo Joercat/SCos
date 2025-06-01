@@ -2,13 +2,7 @@
 #define KEYBOARD_HPP
 
 #include <stdint.h>
-
-// Port I/O functions
-static inline uint8_t inb(uint16_t port) {
-    uint8_t result;
-    asm volatile("inb %1, %0" : "=a"(result) : "Nd"(port));
-    return result;
-}
+#include "../include/io_utils.h"
 
 // Key constants
 #define KEY_ESC     0x01

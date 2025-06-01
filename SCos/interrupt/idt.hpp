@@ -3,6 +3,7 @@
 
 #pragma once
 #include <stdint.h>
+#include "../include/io_utils.h"
 
 struct idt_entry {
     uint16_t offset_low;
@@ -26,16 +27,7 @@ void init_pic();
 void enable_irq(uint8_t irq);
 void disable_irq(uint8_t irq);
 
-// I/O helper functions
-static inline uint8_t inb(uint16_t port) {
-    uint8_t result;
-    asm volatile("inb %1, %0" : "=a"(result) : "Nd"(port));
-    return result;
-}
 
-static inline void outb(uint16_t port, uint8_t data) {
-    asm volatile("outb %0, %1" : : "a"(data), "Nd"(port));
-}
 
 // External assembly functions
 extern "C" void keyboard_interrupt_wrapper();
