@@ -16,6 +16,20 @@ SECTIONS {
         *(.data)
     }
 
+    .ctors : {
+        __CTOR_LIST__ = .;
+        *(.ctors)
+        *(.init_array)
+        __CTOR_END__ = .;
+    }
+
+    .dtors : {
+        __DTOR_LIST__ = .;
+        *(.dtors)
+        *(.fini_array)
+        __DTOR_END__ = .;
+    }
+
     .bss : {
         *(.bss)
         *(COMMON)
