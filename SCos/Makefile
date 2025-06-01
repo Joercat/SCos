@@ -1,14 +1,14 @@
 # SCos Makefile
 CC = gcc
 ASM = nasm
-CFLAGS = -m32 -nostdlib -nostdinc -fno-builtin -fno-stack-protector -nostartfiles -nodefaultlibs -ffreestanding -mno-red-zone -mno-mmx -mno-sse -mno-sse2
+CFLAGS = -m32 -nostdlib -nostdinc -fno-builtin -fno-stack-protector -nostartfiles -nodefaultlibs -ffreestanding -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -fno-pic -fno-pie
 INCLUDES = -I./include
 LDFLAGS = -m elf_i386 -T linker.ld
 
 # Object files
 KERNEL_OBJS = obj/kernel/main.o
 APP_OBJS = obj/apps/terminal.o obj/apps/notepad.o obj/apps/calculator.o obj/apps/file_manager.o obj/apps/calendar.o obj/apps/settings.o obj/apps/about.o obj/apps/app_store.o obj/apps/security_center.o obj/apps/browser.o obj/apps/shell.o obj/apps/updates.o obj/apps/network_settings.o obj/apps/terminal_wrapper.o obj/apps/html_interpreter.o
-UI_OBJS = obj/ui/desktop.o obj/ui/window_manager.o obj/ui/app_launcher.o obj/ui/theme_manager.o
+UI_OBJS = obj/ui/desktop.o obj/ui/window_manager.o obj/ui/app_launcher.o obj/ui/theme_manager.o obj/ui/vga_utils.o
 DRIVER_OBJS = obj/drivers/keyboard.o obj/drivers/mouse.o obj/drivers/network.o obj/drivers/bluetooth.o
 LIB_OBJS = obj/lib/string.o
 SECURITY_OBJS = obj/security/auth.o

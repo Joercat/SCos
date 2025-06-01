@@ -1,6 +1,4 @@
 
 #include "terminal.hpp"
 
-void runTerminal() {
-    Terminal::show();
-}
+// Function moved to terminal.cpp to avoid duplication

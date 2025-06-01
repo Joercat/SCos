@@ -1,6 +1,8 @@
+// Replacing VGA function definitions with include for vga_utils.hpp and other error fixes.
 #include "security_center.hpp"
 #include "../security/auth.hpp"
 #include "../ui/window_manager.hpp"
+#include "../ui/vga_utils.hpp"
 
 // Security center state
 static bool security_visible = false;
@@ -107,21 +109,6 @@ static int current_menu = 0; // 0=main, 1=change_pin, 2=change_password, 3=setti
 static char input_buffer[64];
 static int input_pos = 0;
 static bool input_mode = false;
-
-// VGA functions (remove static to match header declarations)
-void vga_put_char(int x, int y, char c, uint8_t color) {
-    if (x >= 0 && x < 80 && y >= 0 && y < 25) {
-        volatile char* pos = (volatile char*)0xB8000 + (y * 80 + x) * 2;
-        pos[0] = c;
-        pos[1] = color;
-    }
-}
-
-void vga_put_string(int x, int y, const char* str, uint8_t color) {
-    for (int i = 0; str[i] && (x + i) < 80; i++) {
-        vga_put_char(x + i, y, str[i], color);
-    }
-}
 
 static void draw_security_main_menu() {
     Window* win = WindowManager::getWindow(security_window_id);
@@ -359,3 +346,4 @@ static void handleSecurityInput(uint8_t key) {
 void SecurityCenter::handleInput(uint8_t key) {
     handleSecurityInput(key);
 }
+`

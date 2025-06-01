@@ -1,3 +1,4 @@
+// Removing VGA function definitions and including header to resolve multiple definition errors.
 #include "calculator.hpp"
 #include "../ui/window_manager.hpp"
 #include <stdint.h>
@@ -136,22 +137,7 @@ static void int_to_str(int num, char* str) {
     str[j] = '\0';
 }
 
-// VGA functions
-
-void vga_put_char(int x, int y, char c, uint8_t color) {
-    if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
-        volatile char* video = (volatile char*)0xB8000;
-        int idx = 2 * (y * VGA_WIDTH + x);
-        video[idx] = c;
-        video[idx + 1] = color;
-    }
-}
-
-void vga_put_string(int x, int y, const char* str, uint8_t color) {
-    for (int i = 0; str[i] && (x + i) < VGA_WIDTH; i++) {
-        vga_put_char(x + i, y, str[i], color);
-    }
-}
+#include "../ui/vga_utils.hpp"
 
 // Stub for getLastKey - this would normally come from keyboard driver
 static uint8_t getLastKey() {
@@ -426,3 +412,4 @@ void handleCalculatorInput(uint8_t key) {
             break;
     }
 }
+`

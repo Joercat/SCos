@@ -1,6 +1,8 @@
+// Removed VGA function definitions and included vga_utils.hpp
 #include <stdint.h>
 #include "../include/string.h"
 #include "about.hpp"
+#include "../ui/vga_utils.hpp"
 
 // VGA text mode constants
 #define VGA_BUFFER ((volatile char*)0xB8000)
@@ -15,32 +17,6 @@ static int about_strlen(const char* str) {
     int len = 0;
     while (str[len]) len++;
     return len;
-}
-
-void vga_draw_box(int x, int y, int width, int height, uint8_t color) {
-    // Top and bottom borders
-    for (int i = 0; i < width; i++) {
-        vga_put_char(x + i, y, '-', color);
-        vga_put_char(x + i, y + height - 1, '-', color);
-    }
-
-    // Left and right borders
-    for (int i = 0; i < height; i++) {
-        vga_put_char(x, y + i, '|', color);
-        vga_put_char(x + width - 1, y + i, '|', color);
-    }
-
-    // Corners
-    vga_put_char(x, y, '+', color);
-    vga_put_char(x + width - 1, y, '+', color);
-    vga_put_char(x, y + height - 1, '+', color);
-    vga_put_char(x + width - 1, y + height - 1, '+', color);
-}
-
-void center_text(int y, const char* text, uint8_t color) {
-    int len = about_strlen(text);
-    int x = (VGA_WIDTH - len) / 2;
-    vga_put_string(x, y, text, color);
 }
 
 void openAbout() {
@@ -79,3 +55,4 @@ void About::handleInput(uint8_t key) {
     // Handle about input - placeholder for future implementation
     // Can add navigation or close functionality here
 }
+`

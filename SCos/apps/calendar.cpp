@@ -1,15 +1,9 @@
-
 #include "calendar.hpp"
 #include "../ui/window_manager.hpp"
 #include <stdint.h>
 
-// VGA text mode constants
-#define VGA_BUFFER ((volatile char*)0xB8000)
-#define VGA_WIDTH 80
-#define VGA_HEIGHT 25
-#define VGA_BYTES_PER_CHAR 2
-
 // Use color definitions from window_manager.hpp
+#include "../ui/vga_utils.hpp"
 
 // Date structure
 typedef struct {
@@ -65,28 +59,6 @@ static int calendar_strlen(const char* str) {
     return len;
 }
 
-void vga_put_char(int x, int y, char c, uint8_t color) {
-    if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
-        volatile char* pos = VGA_BUFFER + (y * VGA_WIDTH + x) * VGA_BYTES_PER_CHAR;
-        pos[0] = c;
-        pos[1] = color;
-    }
-}
-
-void vga_put_string(int x, int y, const char* str, uint8_t color) {
-    for (int i = 0; str[i] && (x + i) < VGA_WIDTH; i++) {
-        vga_put_char(x + i, y, str[i], color);
-    }
-}
-
-void vga_clear_screen(uint8_t color) {
-    for (int y = 0; y < VGA_HEIGHT; y++) {
-        for (int x = 0; x < VGA_WIDTH; x++) {
-            vga_put_char(x, y, ' ', color);
-        }
-    }
-}
-
 void center_text(int y, const char* text, uint8_t color) {
     int len = calendar_strlen(text);
     int x = (VGA_WIDTH - len) / 2;
@@ -99,16 +71,16 @@ static void int_to_string(int value, char* buffer) {
         buffer[1] = '\0';
         return;
     }
-    
+
     int i = 0;
     int temp = value;
-    
+
     while (temp > 0) {
         buffer[i++] = '0' + (temp % 10);
         temp /= 10;
     }
     buffer[i] = '\0';
-    
+
     // Reverse the string
     for (int j = 0; j < i / 2; j++) {
         char tmp = buffer[j];
@@ -134,17 +106,17 @@ static int get_first_day_of_month(int month, int year) {
     // Simple algorithm - in real OS you'd use a more sophisticated method
     // This is a simplified Zeller's congruence approximation
     int total_days = 0;
-    
+
     // Count days from year 1 to target year
     for (int y = 1; y < year; y++) {
         total_days += is_leap_year(y) ? 366 : 365;
     }
-    
+
     // Add days for months in target year
     for (int m = 1; m < month; m++) {
         total_days += get_days_in_month(m, year);
     }
-    
+
     // January 1, year 1 was a Monday, so adjust
     return (total_days + 1) % 7;
 }
@@ -162,12 +134,12 @@ static Event* find_event(int day, int month, int year) {
 static void draw_calendar_header() {
     uint8_t header_color = MAKE_COLOR(COLOR_YELLOW, COLOR_BLUE);
     uint8_t title_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLUE);
-    
+
     // Month and year title
     char title[50];
     char year_str[8];
     int_to_string(view_date.year, year_str);
-    
+
     // Build title string
     int pos = 0;
     const char* month_name = month_names[view_date.month - 1];
@@ -179,13 +151,13 @@ static void draw_calendar_header() {
         title[pos++] = year_str[i];
     }
     title[pos] = '\0';
-    
+
     center_text(1, title, title_color);
-    
+
     // Navigation hints
     vga_put_string(10, 1, "< Prev", header_color);
     vga_put_string(64, 1, "Next >", header_color);
-    
+
     // Day headers
     int start_x = 15;
     for (int i = 0; i < 7; i++) {
@@ -193,7 +165,7 @@ static void draw_calendar_header() {
                                                  MAKE_COLOR(COLOR_LIGHT_CYAN, COLOR_BLACK);
         vga_put_string(start_x + i * 8, 3, day_names[i], day_color);
     }
-    
+
     // Separator line
     for (int x = 10; x < 70; x++) {
         vga_put_char(x, 4, '-', MAKE_COLOR(COLOR_DARK_GRAY, COLOR_BLACK));
@@ -203,16 +175,16 @@ static void draw_calendar_header() {
 static void draw_calendar_grid() {
     int days_in_current_month = get_days_in_month(view_date.month, view_date.year);
     int first_day = get_first_day_of_month(view_date.month, view_date.year);
-    
+
     int start_x = 15;
     int start_y = 5;
     int current_day = 1;
-    
+
     for (int week = 0; week < 6; week++) {
         for (int day_of_week = 0; day_of_week < 7; day_of_week++) {
             int x = start_x + day_of_week * 8;
             int y = start_y + week * 2;
-            
+
             if (week == 0 && day_of_week < first_day) {
                 // Empty cell before month starts
                 vga_put_string(x, y, "  ", MAKE_COLOR(COLOR_DARK_GRAY, COLOR_BLACK));
@@ -226,11 +198,11 @@ static void draw_calendar_grid() {
                 } else {
                     int_to_string(current_day, day_str);
                 }
-                
+
                 // Determine color based on day type
                 uint8_t day_color;
                 Event* event = find_event(current_day, view_date.month, view_date.year);
-                
+
                 if (current_day == current_date.day && 
                     view_date.month == current_date.month && 
                     view_date.year == current_date.year) {
@@ -249,14 +221,14 @@ static void draw_calendar_grid() {
                     // Regular day
                     day_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLACK);
                 }
-                
+
                 vga_put_string(x, y, day_str, day_color);
-                
+
                 // Event indicator
                 if (event) {
                     vga_put_char(x + 2, y, '*', MAKE_COLOR(event->color, COLOR_BLACK));
                 }
-                
+
                 current_day++;
             } else {
                 // Empty cell after month ends
@@ -268,14 +240,14 @@ static void draw_calendar_grid() {
 
 static void draw_sidebar() {
     uint8_t sidebar_color = MAKE_COLOR(COLOR_LIGHT_CYAN, COLOR_BLACK);
-    
+
     // Current date info
     vga_put_string(2, 6, "Today:", sidebar_color);
     char today_str[15];
     char day_str[4];
     int_to_string(current_date.day, day_str);
     int pos = 0;
-    
+
     // Build today string
     for (int i = 0; day_str[i] && pos < 10; i++) {
         today_str[pos++] = day_str[i];
@@ -287,20 +259,20 @@ static void draw_sidebar() {
         today_str[pos++] = month_str[i];
     }
     today_str[pos] = '\0';
-    
+
     vga_put_string(2, 7, today_str, MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
-    
+
     // Selected date info
     vga_put_string(2, 9, "Selected:", sidebar_color);
     Event* selected_event = find_event(selected_day, view_date.month, view_date.year);
     char selected_str[4];
     int_to_string(selected_day, selected_str);
     vga_put_string(2, 10, selected_str, MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
-    
+
     if (selected_event) {
         vga_put_string(2, 11, selected_event->title, MAKE_COLOR(selected_event->color, COLOR_BLACK));
     }
-    
+
     // Upcoming events
     vga_put_string(2, 14, "Events:", sidebar_color);
     int event_line = 15;
@@ -309,20 +281,20 @@ static void draw_sidebar() {
             char event_str[12];
             char event_day_str[12];
             int_to_string(events[i].day, event_day_str);
-            
+
             int pos = 0;
             for (int j = 0; event_day_str[j] && pos < 3; j++) {
                 event_str[pos++] = event_day_str[j];
             }
             event_str[pos++] = ':';
             event_str[pos++] = ' ';
-            
+
             // Add first few chars of title
             for (int j = 0; events[i].title[j] && pos < 11; j++) {
                 event_str[pos++] = events[i].title[j];
             }
             event_str[pos] = '\0';
-            
+
             vga_put_string(2, event_line, event_str, MAKE_COLOR(events[i].color, COLOR_BLACK));
             event_line++;
         }
@@ -338,7 +310,7 @@ static void draw_footer() {
 void openCalendar() {
     // Clear screen with dark background
     vga_clear_screen(MAKE_COLOR(COLOR_LIGHT_GRAY, COLOR_BLACK));
-    
+
     draw_calendar_header();
     draw_calendar_grid();
     draw_sidebar();
@@ -348,7 +320,7 @@ void openCalendar() {
 // Calendar with analog clock
 void openCalendarWithClock() {
     openCalendar();
-    
+
     // Add a simple ASCII clock in the corner
     uint8_t clock_color = MAKE_COLOR(COLOR_YELLOW, COLOR_BLACK);
     vga_put_string(65, 6, "+-------+", clock_color);
@@ -356,7 +328,7 @@ void openCalendarWithClock() {
     vga_put_string(65, 8, "| 9  3  |", clock_color);
     vga_put_string(65, 9, "|   6   |", clock_color);
     vga_put_string(65, 10, "+-------+", clock_color);
-    
+
     // Current time (simplified - would get from RTC in real OS)
     vga_put_string(65, 12, "14:30:25", MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
     vga_put_string(65, 13, "Friday", MAKE_COLOR(COLOR_LIGHT_CYAN, COLOR_BLACK));
@@ -366,16 +338,16 @@ void openCalendarWithClock() {
 void draw_mini_calendar(int x, int y) {
     uint8_t mini_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLUE);
     uint8_t header_color = MAKE_COLOR(COLOR_YELLOW, COLOR_BLUE);
-    
+
     // Header
     vga_put_string(x, y, "May 2025", header_color);
     vga_put_string(x, y + 1, "SMTWTFS", mini_color);
-    
+
     // Simple grid (first few days)
     vga_put_string(x, y + 2, "    123", mini_color);
     vga_put_string(x, y + 3, "4567890", mini_color);
     vga_put_string(x, y + 4, "1112...", mini_color);
-    
+
     // Highlight today
     vga_put_char(x + 6, y + 4, '0', MAKE_COLOR(COLOR_BLACK, COLOR_LIGHT_GREEN));
 }
@@ -435,7 +407,7 @@ void calendar_next_month() {
 void openCalendarSimple() {
     uint8_t bg_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLACK);
     vga_clear_screen(bg_color);
-    
+
     center_text(10, "SCos Calendar", MAKE_COLOR(COLOR_YELLOW, COLOR_BLACK));
     center_text(12, "May 2025", MAKE_COLOR(COLOR_WHITE, COLOR_BLACK));
     center_text(14, "Today: Friday, May 30", MAKE_COLOR(COLOR_LIGHT_GREEN, COLOR_BLACK));
@@ -453,7 +425,7 @@ void Calendar::init() {
 
 void Calendar::show() {
     if (calendar_visible) return;
-    
+
     calendar_window_id = WindowManager::createWindow("Calendar", 5, 2, 70, 20);
     if (calendar_window_id >= 0) {
         calendar_visible = true;
@@ -463,7 +435,7 @@ void Calendar::show() {
 
 void Calendar::hide() {
     if (!calendar_visible || calendar_window_id < 0) return;
-    
+
     WindowManager::closeWindow(calendar_window_id);
     calendar_visible = false;
     calendar_window_id = -1;

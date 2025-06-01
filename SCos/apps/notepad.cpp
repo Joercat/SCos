@@ -1,7 +1,9 @@
-
 #include "notepad.hpp"
 #include "../ui/window_manager.hpp"
 #include <stdint.h>
+
+// Include VGA utils header
+#include "../ui/vga_utils.hpp"
 
 // Local string function implementations for freestanding environment
 static int calc_strlen(const char* str) {
@@ -113,7 +115,7 @@ void Notepad::handleInput(uint8_t key) {
                 } else if (key == 0x39) { // Space
                     c = ' ';
                 }
-                
+
                 if (c != 0) {
                     insertChar(c);
                 }
@@ -131,11 +133,11 @@ void Notepad::handleMouseClick(int x, int y) {
     // Check if click is within notepad content area
     if (x >= win->x + 1 && x < win->x + win->width - 1 &&
         y >= win->y + 1 && y < win->y + win->height - 1) {
-        
+
         // Move cursor to clicked position
         int new_col = x - (win->x + 2);
         int new_line = y - (win->y + 2);
-        
+
         if (new_line >= 0 && new_line < MAX_NOTEPAD_LINES) {
             current_line = new_line;
             if (new_col >= 0 && new_col < MAX_NOTEPAD_LINE_LENGTH) {
@@ -183,12 +185,12 @@ void Notepad::insertChar(char c) {
 
     int buffer_idx = current_line * MAX_NOTEPAD_LINE_LENGTH + current_col;
     notepad_buffer[buffer_idx] = c;
-    
+
     current_col++;
     if (current_col >= MAX_NOTEPAD_LINE_LENGTH - 1) {
         newLine();
     }
-    
+
     updateDisplay();
 }
 
@@ -221,55 +223,20 @@ void Notepad::newLine() {
 void Notepad::moveCursor(int dx, int dy) {
     int new_col = current_col + dx;
     int new_line = current_line + dy;
-    
+
     if (new_col >= 0 && new_col < MAX_NOTEPAD_LINE_LENGTH) {
         current_col = new_col;
     }
-    
+
     if (new_line >= 0 && new_line < MAX_NOTEPAD_LINES) {
         current_line = new_line;
     }
-    
+
     updateDisplay();
 }
 
 void Notepad::updateDisplay() {
     drawNotepad();
-}
-
-// VGA function implementations
-void vga_put_char(int x, int y, char c, uint8_t color) {
-    if (x >= 80 || y >= 25 || x < 0 || y < 0) return;
-
-    volatile char* video = (volatile char*)0xB8000;
-    int idx = 2 * (y * 80 + x);
-    video[idx] = c;
-    video[idx + 1] = color;
-}
-
-void vga_put_string(int x, int y, const char* str, uint8_t color) {
-    for (int i = 0; str[i]; ++i) {
-        vga_put_char(x + i, y, str[i], color);
-    }
-}
-
-void vga_clear_screen(uint8_t color) {
-    volatile char* video = (volatile char*)0xB8000;
-    for (int i = 0; i < 80 * 25 * 2; i += 2) {
-        video[i] = ' ';
-        video[i + 1] = color;
-    }
-}
-
-void vga_clear_line(int y, uint8_t color) {
-    if (y >= 25 || y < 0) return;
-
-    volatile char* video = (volatile char*)0xB8000;
-    for (int x = 0; x < 80; ++x) {
-        int idx = 2 * (y * 80 + x);
-        video[idx] = ' ';
-        video[idx + 1] = color;
-    }
 }
 
 // Legacy function support for compatibility

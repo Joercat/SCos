@@ -269,8 +269,10 @@ static void drawLockScreen() {
     }
 }
 
-// Simple hash function
-static uint32_t simpleHash(const char* str) {
+// Simple hash function implementations moved to SecurityManager class
+
+// SecurityManager implementation
+uint32_t SecurityManager::simpleHash(const char* str) {
     uint32_t hash = 5381;
     int len = custom_strlen(str);
     for (int i = 0; i < len; i++) {
@@ -279,7 +281,7 @@ static uint32_t simpleHash(const char* str) {
     return hash;
 }
 
-static bool verifyHash(const char* input, const char* stored_hash) {
+bool SecurityManager::verifyHash(const char* input, const char* stored_hash) {
     uint32_t input_hash = simpleHash(input);
     uint32_t stored = 0;
 
@@ -291,7 +293,6 @@ static bool verifyHash(const char* input, const char* stored_hash) {
     return input_hash == stored;
 }
 
-// SecurityManager implementation
 bool SecurityManager::init() {
     custom_memset(users, 0, sizeof(users));
     user_count = 0;

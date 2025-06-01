@@ -1,6 +1,9 @@
 #include "window_manager.hpp"
 #include <stdint.h>
 
+// Include the vga_utils header instead of defining the functions here.
+#include "vga_utils.hpp"
+
 // Local string function implementations for freestanding environment
 static int strlen(const char* str) {
     int len = 0;
@@ -184,73 +187,5 @@ void WindowManager::refreshAll() {
         if (windows[i].visible) {
             drawWindow(i);
         }
-    }
-}
-
-// VGA function implementations
-void vga_clear_screen(uint8_t color) {
-    volatile char* video = (volatile char*)0xB8000;
-    for (int i = 0; i < 80 * 25 * 2; i += 2) {
-        video[i] = ' ';
-        video[i + 1] = color;
-    }
-}
-
-void vga_clear_line(int y, uint8_t color) {
-    if (y >= 25 || y < 0) return;
-
-    volatile char* video = (volatile char*)0xB8000;
-    for (int x = 0; x < 80; ++x) {
-        int idx = 2 * (y * 80 + x);
-        video[idx] = ' ';
-        video[idx + 1] = color;
-    }
-}
-
-void vga_put_char(int x, int y, char c, uint8_t color) {
-    if (x >= 80 || y >= 25 || x < 0 || y < 0) return;
-
-    volatile char* video = (volatile char*)0xB8000;
-    int idx = 2 * (y * 80 + x);
-    video[idx] = c;
-    video[idx + 1] = color;
-}
-
-void vga_put_string(int x, int y, const char* str, uint8_t color) {
-    for (int i = 0; str[i]; ++i) {
-        vga_put_char(x + i, y, str[i], color);
-    }
-}
-
-void vga_draw_box(int x, int y, int width, int height, uint8_t color) {
-    // Draw top and bottom borders
-    for (int i = 0; i < width; ++i) {
-        vga_put_char(x + i, y, '-', color);
-        vga_put_char(x + i, y + height - 1, '-', color);
-    }
-
-    // Draw left and right borders
-    for (int i = 0; i < height; ++i) {
-        vga_put_char(x, y + i, '|', color);
-        vga_put_char(x + width - 1, y + i, '|', color);
-    }
-
-    // Draw corners
-    vga_put_char(x, y, '+', color);
-    vga_put_char(x + width - 1, y, '+', color);
-    vga_put_char(x, y + height - 1, '+', color);
-    vga_put_char(x + width - 1, y + height - 1, '+', color);
-}
-
-void center_text(int y, const char* text, uint8_t color) {
-    int len = 0;
-    while (text[len]) len++; // strlen
-    int x = (80 - len) / 2;
-    vga_put_string(x, y, text, color);
-}
-
-void draw_horizontal_line(int y, int x1, int x2, char c, uint8_t color) {
-    for (int x = x1; x <= x2; ++x) {
-        vga_put_char(x, y, c, color);
     }
 }
