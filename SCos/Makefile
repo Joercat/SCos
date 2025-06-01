@@ -27,7 +27,11 @@ $(shell mkdir -p obj/kernel obj/apps obj/ui obj/drivers obj/lib obj/security obj
 all: scos.bin
 
 scos.bin: bootloader.bin kernel.bin
-	cat bootloader.bin kernel.bin > scos.bin
+	# Pad kernel to ensure it's properly sized
+	cp kernel.bin kernel_padded.bin
+	truncate -s 25600 kernel_padded.bin  # Pad to 25KB (50 sectors * 512 bytes)
+	cat bootloader.bin kernel_padded.bin > scos.bin
+	rm kernel_padded.bin
 
 bootloader.bin: bootloader.asm
 	$(ASM) -f bin bootloader.asm -o bootloader.bin
@@ -80,10 +84,10 @@ obj/interrupt/idt_asm.o: interrupt/idt.asm
 
 clean:
 	rm -rf obj
-	rm -f *.bin
+	rm -f *.bin kernel_padded.bin
 
 run: scos.bin
-	qemu-system-i386 -drive format=raw,file=scos.bin
+	qemu-system-i386 -drive format=raw,file=scos.bin -m 32M -serial stdio -no-reboot -no-shutdown
 
 # NOTE: To change the theme, modify the source files related to the UI (e.g., ui/theme_manager.cpp).
 # Set the background color to black and the text/secondary color to #39ff14.

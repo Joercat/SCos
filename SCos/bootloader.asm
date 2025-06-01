@@ -13,16 +13,31 @@ start:
     sti
 
 load_kernel:
-    mov bx, KERNEL_OFFSET
-    mov ah, 0x02
-    mov al, 20
-    mov ch, 0
-    mov cl, 2
-    mov dh, 0
+    ; Reset disk system first
+    mov ah, 0x00
     mov dl, 0x80
+    int 0x13
+    jc disk_error
+    
+    ; Load kernel - read more sectors to ensure we get the full kernel
+    mov bx, KERNEL_OFFSET
+    mov ah, 0x02        ; Read sectors function
+    mov al, 50          ; Read 50 sectors (25KB) - increased from 20
+    mov ch, 0           ; Cylinder 0
+    mov cl, 2           ; Start from sector 2 (after bootloader)
+    mov dh, 0           ; Head 0
+    mov dl, 0x80        ; First hard drive
     int 0x13
     
     jc disk_error
+    
+    ; Verify kernel was loaded by checking for a signature
+    mov ax, KERNEL_OFFSET
+    mov es, ax
+    mov bx, 0
+    mov al, [es:bx]
+    cmp al, 0
+    je disk_error       ; If first byte is 0, kernel probably wasn't loaded
 
 switch_to_32bit:
     cli
