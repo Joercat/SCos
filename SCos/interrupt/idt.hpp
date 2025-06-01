@@ -1,3 +1,6 @@
+#ifndef IDT_HPP
+#define IDT_HPP
+
 #pragma once
 #include <stdint.h>
 
@@ -37,3 +40,5 @@ static inline void outb(uint16_t port, uint8_t data) {
 // External assembly functions
 extern "C" void keyboard_interrupt_wrapper();
 extern "C" void keyboard_handler();
+
+#endif // IDT_HPP
