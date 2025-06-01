@@ -1,6 +1,8 @@
 #include "../ui/desktop.hpp"
 #include "../fs/ramfs.hpp"
 #include "../drivers/keyboard.hpp"
+#include "../drivers/network.hpp"
+#include "../drivers/bluetooth.hpp"
 #include "../memory/heap.hpp"
 #include "../interrupt/idt.hpp"
 #include "../debug/serial.hpp"
@@ -80,10 +82,6 @@ extern "C" {
 
 #include "../include/kernel.h"
 #include "../include/memory.h"
-#include "../debug/serial.hpp"
-#include "../ui/desktop.hpp"
-#include "../drivers/network.hpp"
-#include "../drivers/bluetooth.hpp"
 
 void show_memory_info() {
     serial_printf("Kernel loaded at: 0x1000\n");
