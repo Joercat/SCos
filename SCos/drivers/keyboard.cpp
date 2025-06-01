@@ -5,81 +5,10 @@
 // Keyboard buffer
 #define KEYBOARD_BUFFER_SIZE 256
 static char keyboardBuffer[KEYBOARD_BUFFER_SIZE];
-static int bufferHead = 0;
-static int bufferTail = 0;
-
-// Modifier key states
-static bool shiftPressed = false;
-static bool ctrlPressed = false;
-static bool altPressed = false;
-static bool capsLock = false;
-
-// Scancode to ASCII lookup table (US QWERTY layout)
-static char scancodeTable[128] = {
-    0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
-    '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
-    0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
-    0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0,
-    '*', 0, ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-};
-
-// Shifted character lookup
-static char shiftedTable[128] = {
-    0, 27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b',
-    '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',
-    0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~',
-    0, '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0,
-    '*', 0, ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-};
-
-char scancodeToChar(uint8_t scancode) {
-    if (scancode >= 128) return 0;
-    
-    char c = scancodeTable[scancode];
-    if (c == 0) return 0;
-    
-    // Apply shift or caps lock
-    bool shouldShift = shiftPressed;
-    if (c >= 'a' && c <= 'z' && capsLock) {
-        shouldShift = !shouldShift;
-    }
-    
-    if (shouldShift && scancode < 128) {
-        char shifted = shiftedTable[scancode];
-        if (shifted != 0) return shifted;
-    }
-    
-    return c;
-}
-
-void addToKeyboardBuffer(char c) {
-    if (!isKeyboardBufferFull()) {
-        keyboardBuffer[bufferHead] = c;
-        bufferHead = (bufferHead + 1) % KEYBOARD_BUFFER_SIZE;
-    }
-}
-
-char getFromKeyboardBuffer() {
-    if (isKeyboardBufferEmpty()) {
-        return 0;
-    }
-    
-    char c = keyboardBuffer[bufferTail];
-    bufferTail = (bufferTail + 1) % KEYBOARD_BUFFER_SIZE;
-    return c;
-}
-
-// Keyboard buffer and state
-#define KEYBOARD_BUFFER_SIZE 256
-static char keyboardBuffer[KEYBOARD_BUFFER_SIZE];
 static uint16_t bufferHead = 0;
 static uint16_t bufferTail = 0;
+
+// Modifier key states
 static bool shiftPressed = false;
 static bool ctrlPressed = false;
 static bool altPressed = false;
@@ -216,70 +145,13 @@ char scancodeToChar(uint8_t scancode) {
     return ascii;
 }
 
-extern "C" void keyboard_handler() {
-    uint8_t scancode = readScancode();
-    bool keyPressed = !(scancode & KEY_RELEASE);
-    uint8_t actualScancode = scancode & ~KEY_RELEASE;
-
-    // Handle modifier keys
-    handleSpecialKeys(actualScancode, keyPressed);
-
-    // Only process key press events for regular keys
-    if (keyPressed) {
-        char ascii = scancodeToChar(actualScancode);
-        if (ascii != 0) {
-            // Handle control key combinations
-            if (ctrlPressed && ascii >= 'a' && ascii <= 'z') {
-                ascii = ascii - 'a' + 1; // Convert to control character
-            } else if (ctrlPressed && ascii >= 'A' && ascii <= 'Z') {
-                ascii = ascii - 'A' + 1; // Convert to control character
-            }
-
-            addToKeyboardBuffer(ascii);
-        }
-    }
-
-    // EOI is now handled in the assembly wrapper
-}
-
-bool init_keyboard() {
-    // Initialize buffer pointers
-    bufferHead = 0;
-    bufferTail = 0;
-
-    // Initialize modifier key states
-    shiftPressed = false;
-    ctrlPressed = false;
-    altPressed = false;
-    capsLock = false;
-
-    // Clear keyboard buffer
-    for (int i = 0; i < KEYBOARD_BUFFER_SIZE; i++) {
-        keyboardBuffer[i] = 0;
-    }
-
-    // Basic keyboard initialization
-    // The interrupt setup is now handled in idt.cpp
-
-    return true;
-}
-
-// Public API functions
-char getKey() {
-    return getFromKeyboardBuffer();
-}
-
-bool hasKey() {
-    return !isKeyboardBufferEmpty();
-}
-
 void handleKeyboardInterrupt() {
     uint8_t scancode = readScancode();
-    
+
     // Check if this is a key release (bit 7 set)
     bool keyPressed = !(scancode & KEY_RELEASE);
     uint8_t actualScancode = scancode & 0x7F;
-    
+
     // Handle modifier keys
     switch (actualScancode) {
         case SCANCODE_LSHIFT:
@@ -298,7 +170,7 @@ void handleKeyboardInterrupt() {
             }
             return;
     }
-    
+
     // Only process key press events for regular keys
     if (keyPressed) {
         char ascii = scancodeToChar(actualScancode);
@@ -315,9 +187,36 @@ void handleKeyboardInterrupt() {
     }
 }
 
-// C wrapper for the keyboard handler
 extern "C" void keyboard_handler() {
     handleKeyboardInterrupt();
+}
+
+bool init_keyboard() {
+    // Initialize buffer pointers
+    bufferHead = 0;
+    bufferTail = 0;
+
+    // Initialize modifier key states
+    shiftPressed = false;
+    ctrlPressed = false;
+    altPressed = false;
+    capsLock = false;
+
+    // Clear keyboard buffer
+    for (int i = 0; i < KEYBOARD_BUFFER_SIZE; i++) {
+        keyboardBuffer[i] = 0;
+    }
+
+    return true;
+}
+
+// Public API functions
+char getKey() {
+    return getFromKeyboardBuffer();
+}
+
+bool hasKey() {
+    return !isKeyboardBufferEmpty();
 }
 
 void clearKeyboardBuffer() {

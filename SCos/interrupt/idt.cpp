@@ -3,6 +3,17 @@
 static idt_entry idt[256];
 static idt_ptr idtp;
 
+// Port I/O functions
+static inline uint8_t inb(uint16_t port) {
+    uint8_t result;
+    asm volatile("inb %1, %0" : "=a"(result) : "Nd"(port));
+    return result;
+}
+
+static inline void outb(uint16_t port, uint8_t data) {
+    asm volatile("outb %0, %1" : : "a"(data), "Nd"(port));
+}
+
 extern "C" void idt_load(uint32_t);
 extern "C" void keyboard_interrupt_wrapper();
 extern "C" void keyboard_handler();
