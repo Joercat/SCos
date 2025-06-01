@@ -17,15 +17,14 @@ enum SecurityLevel {
     SECURITY_PASSWORD = 2
 };
 
-enum AuthResult {
-    AUTH_SUCCESS = 0,
-    AUTH_INVALID_CREDENTIALS = 1,
-    AUTH_ACCOUNT_LOCKED = 2,
-    AUTH_SYSTEM_LOCKED = 3,
-    AUTH_FAILED = 4,
-    AUTH_LOCKED = 5,
-    AUTH_TIMEOUT = 6
-};
+// AuthResult enum definitions
+#define AUTH_SUCCESS 0
+#define AUTH_INVALID_CREDENTIALS 1
+#define AUTH_ACCOUNT_LOCKED 2
+#define AUTH_SYSTEM_LOCKED 3
+#define AUTH_FAILED 4
+#define AUTH_LOCKED 5
+#define AUTH_TIMEOUT 6
 
 struct User {
     char username[MAX_USERNAME_LENGTH];
@@ -524,7 +523,7 @@ uint32_t AuthSystem::getCurrentTime() {
     return ++tick;
 }
 
-User* AuthSystem::findUser(const char* username) {
+struct User* AuthSystem::findUser(const char* username) {
     for (int i = 0; i < user_count; i++) {
         if (custom_strcmp(users[i].username, username) == 0) {
             return &users[i];
@@ -565,7 +564,7 @@ void AuthSystem::handleLockScreenInput(uint8_t key) {
         case 0x1C: // Enter
             if (login_input_pos > 0) {
                 login_input[login_input_pos] = '\0';
-                AuthResult result;
+                int result;
 
                 if (system_security_level == SECURITY_PIN) {
                     result = authenticatePin(login_input);
@@ -679,7 +678,7 @@ bool AuthSystem::isUserLocked(const char* username) {
     return false;
 }
 
-AuthResult AuthSystem::authenticateUser(const char* username, const char* credential) {
+int AuthSystem::authenticateUser(const char* username, const char* credential) {
     if (isSystemLocked()) {
         return AUTH_SYSTEM_LOCKED;
     }
@@ -719,7 +718,7 @@ AuthResult AuthSystem::authenticateUser(const char* username, const char* creden
     }
 }
 
-AuthResult AuthSystem::authenticatePin(const char* pin) {
+int AuthSystem::authenticatePin(const char* pin) {
     if (isSystemLocked()) {
         return AUTH_SYSTEM_LOCKED;
     }
@@ -823,11 +822,11 @@ bool AuthSystem::hasAdminPrivileges(const char* username) {
     return user && user->is_admin && is_authenticated;
 }
 
-SecurityLevel AuthSystem::getSystemSecurityLevel() {
+int AuthSystem::getSystemSecurityLevel() {
     return system_security_level;
 }
 
-void AuthSystem::setSystemSecurityLevel(SecurityLevel level) {
+void AuthSystem::setSystemSecurityLevel(int level) {
     system_security_level = level;
     logSecurityEvent("Security level changed", current_user);
 }

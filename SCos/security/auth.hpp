@@ -16,12 +16,7 @@ enum AuthMode {
 #define MAX_PASSWORD_LENGTH 32
 #define MAX_USERNAME_LENGTH 16
 
-enum AuthResult {
-    AUTH_SUCCESS = 0,
-    AUTH_FAILED = 1,
-    AUTH_LOCKED = 2,
-    AUTH_TIMEOUT = 3
-};
+// AuthResult enum moved to implementation file to avoid conflicts
 
 struct UserProfile {
     char username[MAX_USERNAME_LENGTH];
@@ -78,7 +73,7 @@ public:
     static void hashPassword(const char* password, char* hash);
     static bool verifyPassword(const char* password, const char* stored_hash);
     static uint32_t getCurrentTime();
-    static void* findUser(const char* username);
+    static struct User* findUser(const char* username);
     static bool isUserLocked(const char* username);
     static int authenticateUser(const char* username, const char* credential);
     static int authenticatePin(const char* pin);
