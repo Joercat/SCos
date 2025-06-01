@@ -827,7 +827,7 @@ int AuthSystem::getSystemSecurityLevel() {
 }
 
 void AuthSystem::setSystemSecurityLevel(int level) {
-    system_security_level = level;
+    system_security_level = (SecurityLevel)level;
     logSecurityEvent("Security level changed", current_user);
 }
 
