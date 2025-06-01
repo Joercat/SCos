@@ -36,7 +36,9 @@ enum AppType {
   APP_CALCULATOR,
   APP_SECURITY,
   APP_BROWSER,
-  APP_APP_STORE
+  APP_APP_STORE,
+  APP_UPDATES,
+  APP_NETWORK_SETTINGS
 };
 
 // Keyboard key constants
