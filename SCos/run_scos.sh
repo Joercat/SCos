@@ -21,7 +21,6 @@ fi
 echo "Build successful!"
 echo "Starting SCos..."
 
-# Run SCos - Replit will automatically detect and show VNC
 qemu-system-i386 \
     -drive format=raw,file=scos.img \
     -m 32M \
