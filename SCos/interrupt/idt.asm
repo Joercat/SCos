@@ -8,12 +8,12 @@ idt_load:
     lidt [eax]
     ret
 
-; Keyboard interrupt wrapper (IRQ1)
+
 keyboard_interrupt_wrapper:
-    pusha                    ; Save all registers
-    call keyboard_handler    ; Call C++ keyboard handler
-    ; Send EOI to PIC (End of Interrupt)
+    pusha                    
+    call keyboard_handler   
+    
     mov al, 0x20
     out 0x20, al
-    popa                     ; Restore all registers
-    iret                     ; Return from interrupt
+    popa                     
+    iret                     
