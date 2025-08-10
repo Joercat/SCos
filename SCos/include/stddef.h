@@ -1,7 +1,7 @@
 
 #pragma once
 
-// Include stdint.h first to get the basic integer types
+
 #include "stdint.h"
 
 typedef unsigned int size_t;
@@ -12,7 +12,7 @@ typedef uint32_t uintptr_t;
 #define NULL ((void*)0)
 
 #ifdef __cplusplus
-// Use built-in nullptr in C++
+
 #else
 #define nullptr NULL
 #endif
