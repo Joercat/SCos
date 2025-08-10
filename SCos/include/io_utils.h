@@ -35,4 +35,4 @@ static inline void outl(uint16_t port, uint32_t data) {
     asm volatile("outl %0, %1" : : "a"(data), "Nd"(port));
 }
 
-#endif // IO_UTILS_H
+#endif
