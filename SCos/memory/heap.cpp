@@ -21,20 +21,15 @@ struct heap_block {
 static heap_block* first_block = nullptr;
 
 bool init_heap() {
-    // Ensure we start well after the kernel end with more conservative alignment
-    heap_start = (_kernel_end + 0x1000) & ~0xFFF;  // Add 4KB buffer
-    
-    // Use smaller heap size to avoid conflicts (1MB instead of 4MB)
+    heap_start = (_kernel_end + 0x1000) & ~0xFFF;
     heap_end = heap_start + (1 * 1024 * 1024);
     heap_current = heap_start;
 
-    // Validate memory range
-    if (heap_start >= 0x1000000) {  // Don't go beyond 16MB
+    if (heap_start >= 0x1000000) {
         serial_printf("ERROR: Heap start too high: 0x%x\n", heap_start);
         return false;
     }
 
-    // Clear the heap memory area first
     uint8_t* clear_ptr = (uint8_t*)heap_start;
     for (uint32_t i = 0; i < (heap_end - heap_start); i++) {
         clear_ptr[i] = 0;
@@ -56,19 +51,16 @@ bool init_heap() {
 void* kmalloc(size_t size) {
     if (size == 0) return static_cast<void*>(nullptr);
     
-    // Prevent excessive allocations that could cause issues
-    if (size > (512 * 1024)) {  // Limit to 512KB per allocation
+    if (size > (512 * 1024)) {
         serial_printf("WARNING: Large allocation requested: %d bytes\n", size);
         return static_cast<void*>(nullptr);
     }
 
-    // Align size to 4 bytes
     size = (size + 3) & ~3;
 
     heap_block* current = first_block;
     while (current) {
         if (!current->used && current->size >= size) {
-            // Split block if it's larger than needed
             if (current->size > size + sizeof(heap_block) + 4) {
                 heap_block* new_block = (heap_block*)((uint8_t*)current + sizeof(heap_block) + size);
                 new_block->size = current->size - size - sizeof(heap_block);
@@ -91,7 +83,6 @@ void* kmalloc(size_t size) {
 void kfree(void* ptr) {
     if (!ptr) return;
 
-    // Validate pointer is within heap range
     if ((uint32_t)ptr < heap_start || (uint32_t)ptr >= heap_end) {
         serial_printf("ERROR: Invalid free - ptr 0x%x outside heap 0x%x-0x%x\n", 
                      (uint32_t)ptr, heap_start, heap_end);
@@ -100,7 +91,6 @@ void kfree(void* ptr) {
 
     heap_block* block = (heap_block*)((uint8_t*)ptr - sizeof(heap_block));
     
-    // Validate block header
     if ((uint32_t)block < heap_start || (uint32_t)block >= heap_end) {
         serial_printf("ERROR: Invalid block header at 0x%x\n", (uint32_t)block);
         return;
