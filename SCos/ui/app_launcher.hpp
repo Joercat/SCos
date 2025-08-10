@@ -16,13 +16,13 @@ public:
     static void hideLauncher();
     static bool isVisible();
     
-    // Application management
+    
     static void registerApp(const char* name, const char* icon, 
                            int width, int height, void (*launch_func)());
     static void launchApp(int app_index);
     static void launchAppByName(const char* name);
     
-    // Launcher UI
+    
     static void drawLauncher();
     static void handleInput(uint8_t key);
     static void handleMouseClick(int x, int y);
