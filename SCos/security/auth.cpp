@@ -3,7 +3,6 @@
 #include "../drivers/keyboard.hpp"
 #include "../debug/serial.hpp"
 
-// Additional types needed for the implementation
 #define MAX_USERS 10
 #define LOCKOUT_ATTEMPTS 3
 #define LOCKOUT_TIME 300
@@ -17,7 +16,6 @@ enum SecurityLevel {
     SECURITY_PASSWORD = 2
 };
 
-// AuthResult enum definitions
 #define AUTH_SUCCESS 0
 #define AUTH_INVALID_CREDENTIALS 1
 #define AUTH_ACCOUNT_LOCKED 2
@@ -28,7 +26,7 @@ enum SecurityLevel {
 
 struct User {
     char username[MAX_USERNAME_LENGTH];
-    char password[33]; // Hash
+    char password[33];
     char pin[MAX_PIN_LENGTH + 1];
     SecurityLevel security_level;
     bool is_admin;
@@ -37,7 +35,6 @@ struct User {
     uint32_t last_lockout_time;
 };
 
-// Global state
 static User users[MAX_USERS];
 static int user_count = 0;
 static bool system_locked = true;
@@ -46,12 +43,10 @@ static SecurityLevel system_security_level = SECURITY_PIN;
 static char current_user[16] = "Administrator";
 static bool is_authenticated = false;
 
-// Security log
 #define MAX_LOG_ENTRIES 50
 static char security_log[MAX_LOG_ENTRIES][80];
 static int log_count = 0;
 
-// Lock screen UI state
 static bool lock_screen_visible = false;
 static char login_input[MAX_PASSWORD_LENGTH + 1];
 static int login_input_pos = 0;
@@ -59,14 +54,12 @@ static bool show_password_field = false;
 static bool caps_lock_on = false;
 static char user_avatar = 'A';
 
-// SecurityManager implementation
 static AuthMode current_auth_mode = AUTH_PIN;
 static char stored_pin[MAX_PIN_LENGTH + 1] = "1234";
 static char stored_password_hash[33] = "";
 static int failed_login_attempts = 0;
 static bool security_authenticated = false;
 
-// Utility functions
 static int custom_strlen(const char* str) {
     int len = 0;
     while (str[len]) len++;
@@ -95,7 +88,6 @@ static void custom_memset(void* ptr, int value, int size) {
     }
 }
 
-// Background pattern for lock screen
 static void drawBackgroundPattern() {
     volatile char* video = (volatile char*)0xB8000;
 
@@ -103,7 +95,7 @@ static void drawBackgroundPattern() {
         for (int x = 0; x < 80; x++) {
             int idx = 2 * (y * 80 + x);
             char pattern_char = ' ';
-            uint8_t bg_color = 0x10; // Dark blue base
+            uint8_t bg_color = 0x10;
 
             if ((x + y) % 4 == 0) {
                 bg_color = 0x11;
@@ -150,7 +142,6 @@ static void drawLockScreen() {
     volatile char* video = (volatile char*)0xB8000;
     int center_x = 40;
 
-    // Draw SCos logo/title at top
     const char* title = "SCos";
     int title_x = center_x - 2;
     for (int i = 0; title[i]; i++) {
@@ -159,11 +150,9 @@ static void drawLockScreen() {
         video[idx + 1] = 0x1F;
     }
 
-    // Draw user avatar
     int avatar_y = 8;
     drawUserAvatar(center_x, avatar_y);
 
-    // Draw username below avatar
     int username_y = avatar_y + 4;
     int username_len = custom_strlen(current_user);
     int username_x = center_x - (username_len / 2);
@@ -173,19 +162,16 @@ static void drawLockScreen() {
         video[idx + 1] = 0x1F;
     }
 
-    // Draw password/PIN input field
     int input_y = username_y + 3;
     int input_width = 24;
     int input_x = center_x - (input_width / 2);
 
-    // Input field background
     for (int i = 0; i < input_width; i++) {
         int idx = 2 * (input_y * 80 + input_x + i);
         video[idx] = ' ';
         video[idx + 1] = 0x70;
     }
 
-    // Input field border
     for (int i = -1; i <= input_width; i++) {
         if (input_x + i >= 0 && input_x + i < 80) {
             int idx = 2 * ((input_y - 1) * 80 + input_x + i);
@@ -198,7 +184,6 @@ static void drawLockScreen() {
         }
     }
 
-    // Side borders
     int idx = 2 * (input_y * 80 + input_x - 1);
     video[idx] = '|';
     video[idx + 1] = 0x1F;
@@ -207,21 +192,18 @@ static void drawLockScreen() {
     video[idx] = '|';
     video[idx + 1] = 0x1F;
 
-    // Show input (as dots for security)
     for (int i = 0; i < login_input_pos && i < input_width - 2; i++) {
         int idx = 2 * (input_y * 80 + input_x + 1 + i);
         video[idx] = (current_auth_mode == AUTH_PIN) ? '*' : '*';
         video[idx + 1] = 0x70;
     }
 
-    // Cursor
     if (login_input_pos < input_width - 2) {
         int idx = 2 * (input_y * 80 + input_x + 1 + login_input_pos);
         video[idx] = '_';
         video[idx + 1] = 0x70;
     }
 
-    // Instructions
     const char* instruction = (current_auth_mode == AUTH_PIN) ? 
                               "Enter your PIN" : "Enter your password";
     int instr_len = custom_strlen(instruction);
@@ -233,7 +215,6 @@ static void drawLockScreen() {
         video[idx + 1] = 0x1E;
     }
 
-    // Show caps lock status
     if (caps_lock_on) {
         const char* caps_msg = "Caps Lock is on";
         int caps_len = custom_strlen(caps_msg);
@@ -246,7 +227,6 @@ static void drawLockScreen() {
         }
     }
 
-    // Bottom instructions
     const char* bottom_help = "Press Enter to sign in | ESC to switch user";
     int help_len = custom_strlen(bottom_help);
     int help_x = center_x - (help_len / 2);
@@ -257,7 +237,6 @@ static void drawLockScreen() {
         video[idx + 1] = 0x17;
     }
 
-    // Date and time (simplified)
     const char* datetime = "Monday, December 15  12:45 PM";
     int dt_len = custom_strlen(datetime);
     int dt_x = 80 - dt_len - 2;
@@ -269,9 +248,6 @@ static void drawLockScreen() {
     }
 }
 
-// Simple hash function implementations moved to SecurityManager class
-
-// SecurityManager implementation
 uint32_t SecurityManager::simpleHash(const char* str) {
     uint32_t hash = 5381;
     int len = custom_strlen(str);
@@ -285,7 +261,6 @@ bool SecurityManager::verifyHash(const char* input, const char* stored_hash) {
     uint32_t input_hash = simpleHash(input);
     uint32_t stored = 0;
 
-    // Convert stored hash string back to number for comparison
     for (int i = 0; stored_hash[i]; i++) {
         stored = stored * 10 + (stored_hash[i] - '0');
     }
@@ -303,7 +278,6 @@ bool SecurityManager::init() {
     failed_login_attempts = 0;
     current_auth_mode = AUTH_PIN;
 
-    // Initialize stored password hash
     uint32_t hash = simpleHash("admin123");
     for (int i = 7; i >= 0; i--) {
         stored_password_hash[i] = '0' + (hash % 10);
@@ -344,7 +318,6 @@ void SecurityManager::unlockSystem() {
     system_locked = false;
     lock_screen_visible = false;
 
-    // Clear screen for desktop
     volatile char* video = (volatile char*)0xB8000;
     for (int i = 0; i < 80 * 25 * 2; i += 2) {
         video[i] = ' ';
@@ -388,14 +361,13 @@ void SecurityManager::handleLoginInput(uint8_t key) {
     if (!lock_screen_visible) return;
 
     switch (key) {
-        case 0x1C: // Enter
+        case 0x1C:
             if (login_input_pos > 0) {
                 login_input[login_input_pos] = '\0';
 
                 if (authenticate(login_input, current_auth_mode)) {
                     unlockSystem();
                 } else {
-                    // Show error and reset
                     login_input_pos = 0;
                     custom_memset(login_input, 0, sizeof(login_input));
                     drawLockScreen();
@@ -403,14 +375,14 @@ void SecurityManager::handleLoginInput(uint8_t key) {
             }
             break;
 
-        case 0x01: // Escape - Switch auth mode
+        case 0x01:
             current_auth_mode = (current_auth_mode == AUTH_PIN) ? AUTH_PASSWORD : AUTH_PIN;
             login_input_pos = 0;
             custom_memset(login_input, 0, sizeof(login_input));
             drawLockScreen();
             break;
 
-        case 0x0E: // Backspace
+        case 0x0E:
             if (login_input_pos > 0) {
                 login_input_pos--;
                 login_input[login_input_pos] = '\0';
@@ -418,35 +390,34 @@ void SecurityManager::handleLoginInput(uint8_t key) {
             }
             break;
 
-        case 0x3A: // Caps Lock
+        case 0x3A:
             caps_lock_on = !caps_lock_on;
             drawLockScreen();
             break;
 
         default:
-            // Handle alphanumeric input
-            if (key >= 0x02 && key <= 0x0D) { // Numbers 1-0
+            if (key >= 0x02 && key <= 0x0D) {
                 if (login_input_pos < MAX_PIN_LENGTH) {
                     char c = '1' + (key - 0x02);
-                    if (key == 0x0B) c = '0'; // Handle 0 key
+                    if (key == 0x0B) c = '0';
                     login_input[login_input_pos++] = c;
                     drawLockScreen();
                 }
-            } else if (key >= 0x10 && key <= 0x19) { // Letters Q-P
+            } else if (key >= 0x10 && key <= 0x19) {
                 if (current_auth_mode == AUTH_PASSWORD && login_input_pos < MAX_PASSWORD_LENGTH) {
                     char c = 'q' + (key - 0x10);
                     if (caps_lock_on) c = c - 'a' + 'A';
                     login_input[login_input_pos++] = c;
                     drawLockScreen();
                 }
-            } else if (key >= 0x1E && key <= 0x26) { // Letters A-L
+            } else if (key >= 0x1E && key <= 0x26) {
                 if (current_auth_mode == AUTH_PASSWORD && login_input_pos < MAX_PASSWORD_LENGTH) {
                     char c = 'a' + (key - 0x1E);
                     if (caps_lock_on) c = c - 'a' + 'A';
                     login_input[login_input_pos++] = c;
                     drawLockScreen();
                 }
-            } else if (key >= 0x2C && key <= 0x32) { // Letters Z-M
+            } else if (key >= 0x2C && key <= 0x32) {
                 if (current_auth_mode == AUTH_PASSWORD && login_input_pos < MAX_PASSWORD_LENGTH) {
                     char c = 'z' + (key - 0x2C);
                     if (caps_lock_on) c = c - 'a' + 'A';
@@ -493,7 +464,6 @@ void SecurityManager::clearLoginInput() {
 }
 
 void SecurityManager::drawSecurityStatus() {
-    // Implementation for security status display
 }
 
 void AuthSystem::hashPassword(const char* password, char* hash) {
@@ -504,7 +474,6 @@ void AuthSystem::hashPassword(const char* password, char* hash) {
         h = ((h << 5) + h) + password[i];
     }
 
-    // Convert to string representation
     for (int i = 0; i < 8; i++) {
         hash[i] = '0' + ((h >> (i * 4)) & 0xF);
         if (hash[i] > '9') hash[i] = 'A' + (hash[i] - '9' - 1);
@@ -519,7 +488,6 @@ bool AuthSystem::verifyPassword(const char* password, const char* stored_hash) {
 }
 
 uint32_t AuthSystem::getCurrentTime() {
-    // Simple tick counter (in real system, use proper RTC)
     static uint32_t tick = 0;
     return ++tick;
 }
@@ -540,10 +508,8 @@ void AuthSystem::init() {
     is_authenticated = false;
     lock_screen_visible = true;
 
-    // Create default admin user
     createUser("Administrator", ADMIN_DEFAULT_PASSWORD, ADMIN_DEFAULT_PIN, true);
 
-    // Set default user avatar
     user_avatar = current_user[0];
 
     logSecurityEvent("System initialized", "SYSTEM");
@@ -562,7 +528,7 @@ void AuthSystem::handleLockScreenInput(uint8_t key) {
     if (!lock_screen_visible) return;
 
     switch (key) {
-        case 0x1C: // Enter
+        case 0x1C:
             if (login_input_pos > 0) {
                 login_input[login_input_pos] = '\0';
                 int result;
@@ -576,14 +542,12 @@ void AuthSystem::handleLockScreenInput(uint8_t key) {
                 if (result == AUTH_SUCCESS) {
                     lock_screen_visible = false;
                     system_locked = false;
-                    // Clear screen for desktop
                     volatile char* video = (volatile char*)0xB8000;
                     for (int i = 0; i < 80 * 25 * 2; i += 2) {
                         video[i] = ' ';
                         video[i + 1] = 0x07;
                     }
                 } else {
-                    // Show error and reset
                     login_input_pos = 0;
                     custom_memset(login_input, 0, sizeof(login_input));
                     drawLockScreen();
@@ -591,8 +555,7 @@ void AuthSystem::handleLockScreenInput(uint8_t key) {
             }
             break;
 
-        case 0x01: // Escape - Switch user (simplified)
-            // For now, just toggle between PIN and password mode
+        case 0x01:
             system_security_level = (system_security_level == SECURITY_PIN) ? 
                                    SECURITY_PASSWORD : SECURITY_PIN;
             login_input_pos = 0;
@@ -600,7 +563,7 @@ void AuthSystem::handleLockScreenInput(uint8_t key) {
             drawLockScreen();
             break;
 
-        case 0x0E: // Backspace
+        case 0x0E:
             if (login_input_pos > 0) {
                 login_input_pos--;
                 login_input[login_input_pos] = '\0';
@@ -608,35 +571,34 @@ void AuthSystem::handleLockScreenInput(uint8_t key) {
             }
             break;
 
-        case 0x3A: // Caps Lock
+        case 0x3A:
             caps_lock_on = !caps_lock_on;
             drawLockScreen();
             break;
 
         default:
-            // Handle alphanumeric input
-            if (key >= 0x02 && key <= 0x0D) { // Numbers 1-0
+            if (key >= 0x02 && key <= 0x0D) {
                 if (login_input_pos < MAX_PIN_LENGTH) {
                     char c = '1' + (key - 0x02);
-                    if (key == 0x0B) c = '0'; // Handle 0 key
+                    if (key == 0x0B) c = '0';
                     login_input[login_input_pos++] = c;
                     drawLockScreen();
                 }
-            } else if (key >= 0x10 && key <= 0x19) { // Letters Q-P
+            } else if (key >= 0x10 && key <= 0x19) {
                 if (system_security_level == SECURITY_PASSWORD && login_input_pos < MAX_PASSWORD_LENGTH) {
                     char c = 'q' + (key - 0x10);
                     if (caps_lock_on) c = c - 'a' + 'A';
                     login_input[login_input_pos++] = c;
                     drawLockScreen();
                 }
-            } else if (key >= 0x1E && key <= 0x26) { // Letters A-L
+            } else if (key >= 0x1E && key <= 0x26) {
                 if (system_security_level == SECURITY_PASSWORD && login_input_pos < MAX_PASSWORD_LENGTH) {
                     char c = 'a' + (key - 0x1E);
                     if (caps_lock_on) c = c - 'a' + 'A';
                     login_input[login_input_pos++] = c;
                     drawLockScreen();
                 }
-            } else if (key >= 0x2C && key <= 0x32) { // Letters Z-M
+            } else if (key >= 0x2C && key <= 0x32) {
                 if (system_security_level == SECURITY_PASSWORD && login_input_pos < MAX_PASSWORD_LENGTH) {
                     char c = 'z' + (key - 0x2C);
                     if (caps_lock_on) c = c - 'a' + 'A';
@@ -724,7 +686,6 @@ int AuthSystem::authenticatePin(const char* pin) {
         return AUTH_SYSTEM_LOCKED;
     }
 
-    // Check system PIN first
     if (custom_strcmp(pin, SYSTEM_DEFAULT_PIN) == 0) {
         custom_strcpy(current_user, "system");
         is_authenticated = true;
@@ -732,7 +693,6 @@ int AuthSystem::authenticatePin(const char* pin) {
         return AUTH_SUCCESS;
     }
 
-    // Check user PINs
     for (int i = 0; i < user_count; i++) {
         if (users[i].is_active && custom_strcmp(users[i].pin, pin) == 0) {
             if (!isUserLocked(users[i].username)) {
@@ -833,35 +793,32 @@ void AuthSystem::setSystemSecurityLevel(int level) {
 }
 
 void AuthSystem::showSecurityLog() {
-    // Implementation for security log display
     int log_window_id = WindowManager::createWindow("Security Log", 5, 2, 70, 20);
-if (log_window_id < 0) return;
+    if (log_window_id < 0) return;
 
     WindowManager::setActiveWindow(log_window_id);
 
     volatile char* video = (volatile char*)0xB8000;
     Window* win = WindowManager::getWindow(log_window_id);
     if (!win) return;
-    // Clear window
+    
     for (int y = win->y; y < win->y + win->height; y++) {
         for (int x = win->x; x < win->x + win->width; x++) {
             int idx = 2 * (y * 80 + x);
             video[idx] = ' ';
-            video[idx + 1] = 0x17; // Gray on black
+            video[idx + 1] = 0x17;
         }
     }
 
-    // Title
     const char* title = "Security Event Log";
     int title_len = custom_strlen(title);
     int title_x = win->x + (win->width - title_len) / 2;
     for (int i = 0; i < title_len; i++) {
         int idx = 2 * ((win->y + 1) * 80 + title_x + i);
         video[idx] = title[i];
-        video[idx + 1] = 0x4F; // White on red
+        video[idx + 1] = 0x4F;
     }
 
-    // Log entries
     int display_count = (log_count < 15) ? log_count : 15;
     int start_entry = (log_count > 15) ? log_count - 15 : 0;
 
@@ -873,22 +830,17 @@ if (log_window_id < 0) return;
         for (int j = 0; j < max_len; j++) {
             int idx = 2 * ((win->y + 3 + i) * 80 + win->x + 2 + j);
             video[idx] = entry[j];
-            video[idx + 1] = 0x1F; // White on blue
+            video[idx + 1] = 0x1F;
         }
     }
 
-    // Footer
     const char* footer = "Press any key to close";
     int footer_len = custom_strlen(footer);
     for (int i = 0; i < footer_len; i++) {
         int idx = 2 * ((win->y + win->height - 2) * 80 + win->x + 2 + i);
         video[idx] = footer[i];
-        video[idx + 1] = 0x70; // Black on gray
+        video[idx + 1] = 0x70;
     }
-}
-
-bool AuthSystem::showLoginScreen() {
-    return showLockScreen();
 }
 
 bool AuthSystem::showPinScreen() {
@@ -899,4 +851,3 @@ bool AuthSystem::showPinScreen() {
 void AuthSystem::handleSecurityInput(uint8_t key) {
     handleLockScreenInput(key);
 }
-// The code has been fixed by applying type casting where necessary to avoid compilation errors.
