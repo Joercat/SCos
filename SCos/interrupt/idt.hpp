@@ -18,19 +18,19 @@ struct idt_ptr {
     uint32_t base;
 } __attribute__((packed));
 
-// Core IDT functions
+
 bool init_idt();
 void set_idt_gate(int n, uint32_t handler);
 
-// PIC functions
+
 void init_pic();
 void enable_irq(uint8_t irq);
 void disable_irq(uint8_t irq);
 
 
 
-// External assembly functions
+
 extern "C" void keyboard_interrupt_wrapper();
 extern "C" void keyboard_handler();
 
-#endif // IDT_HPP
+#endif 
