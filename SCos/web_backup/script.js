@@ -1,11 +1,6 @@
-
-// SCos Browser JavaScript Functions
-
-// Test function for button interaction
 function testFunction() {
     alert('Hello from SCos Browser!\n\nThis demonstrates JavaScript execution in the SCos web browser.');
     
-    // Change the button text
     var button = document.getElementById('test-button');
     if (button) {
         button.textContent = 'Clicked!';
@@ -13,7 +8,6 @@ function testFunction() {
     }
 }
 
-// Function to show input text
 function showText() {
     var input = document.getElementById('text-input');
     if (input && input.value) {
@@ -23,7 +17,6 @@ function showText() {
     }
 }
 
-// Function to demonstrate DOM manipulation
 function changePageStyle() {
     var title = document.getElementById('main-title');
     if (title) {
@@ -32,7 +25,6 @@ function changePageStyle() {
     }
 }
 
-// Function to create dynamic content
 function addContent() {
     var main = document.querySelector('main');
     if (main) {
@@ -45,11 +37,9 @@ function addContent() {
     }
 }
 
-// Event listeners for page interaction
 document.addEventListener('DOMContentLoaded', function() {
     console.log('SCos Browser JavaScript loaded successfully!');
     
-    // Add click handler to title
     var title = document.getElementById('main-title');
     if (title) {
         title.addEventListener('click', changePageStyle);
@@ -58,7 +48,6 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 
-// Simple utility functions
 function showAlert(message) {
     alert('SCos Alert: ' + message);
 }
@@ -70,7 +59,6 @@ function toggleElement(elementId) {
     }
 }
 
-// Browser-specific functions
 function reloadPage() {
     window.location.reload();
 }
@@ -79,7 +67,6 @@ function navigateToPage(url) {
     window.location.href = url;
 }
 
-// Demonstrate modern JavaScript features
 const browserInfo = {
     name: 'SCos Browser',
     version: '1.0',
@@ -90,12 +77,10 @@ const browserInfo = {
     }
 };
 
-// Arrow function example
 const greetUser = (name = 'User') => {
     return `Hello, ${name}! Welcome to SCos Browser.`;
 };
 
-// Promise example for async operations
 function loadData() {
     return new Promise((resolve, reject) => {
         setTimeout(() => {
@@ -104,7 +89,6 @@ function loadData() {
     });
 }
 
-// Usage example
 loadData().then(result => {
     console.log(result);
 }).catch(error => {
