@@ -13,7 +13,6 @@
 #include "../apps/security_center.hpp"
 #include "../apps/network_settings.hpp"
 
-// Local string function implementations for freestanding environment
 static int custom_strlen(const char* str) {
     int len = 0;
     while (str[len]) len++;
@@ -43,7 +42,6 @@ void AppLauncher::init() {
     launcher_visible = false;
     selected_app = 0;
 
-    // Register default applications
     registerApp("Terminal", "[T]", 45, 12, []() { Desktop::launchApplication(APP_TERMINAL); });
     registerApp("Notepad", "[N]", 50, 15, []() { Desktop::launchApplication(APP_NOTEPAD); });
     registerApp("File Manager", "[F]", 35, 18, []() { Desktop::launchApplication(APP_FILE_MANAGER); });
@@ -102,19 +100,16 @@ void AppLauncher::drawLauncher() {
 
     volatile char* video = (volatile char*)0xB8000;
 
-    // Draw launcher content
     int start_x = win->x + 2;
     int start_y = win->y + 2;
 
-    // Title
     const char* title = "Select an application to launch:";
     for (int i = 0; title[i] && i < win->width - 4; ++i) {
         int idx = 2 * (start_y * 80 + start_x + i);
         video[idx] = title[i];
-        video[idx + 1] = 0x1E; // Yellow
+        video[idx + 1] = 0x1E;
     }
 
-    // Draw application list
     int apps_per_row = 4;
     int app_width = 12;
     int app_height = 3;
@@ -131,22 +126,20 @@ void AppLauncher::drawLauncher() {
         drawAppIcon(app_x, app_y, registered_apps[i], i == selected_app);
     }
 
-    // Instructions
     const char* instructions = "Use arrow keys, Enter to launch, Esc to close";
     int instr_y = win->y + win->height - 2;
     for (int i = 0; instructions[i] && i < win->width - 4; ++i) {
         int idx = 2 * (instr_y * 80 + start_x + i);
         video[idx] = instructions[i];
-        video[idx + 1] = 0x17; // Grey
+        video[idx + 1] = 0x17;
     }
 }
 
 void AppLauncher::drawAppIcon(int x, int y, const AppInfo& app, bool selected) {
     volatile char* video = (volatile char*)0xB8000;
-    uint8_t color = selected ? 0x4F : 0x1F; // Red or blue background
-    uint8_t text_color = selected ? 0x4E : 0x1E; // Text color
+    uint8_t color = selected ? 0x4F : 0x1F;
+    uint8_t text_color = selected ? 0x4E : 0x1E;
 
-    // Draw icon background
     for (int j = 0; j < 3; ++j) {
         for (int i = 0; i < 10; ++i) {
             if (x + i >= 80 || y + j >= 25) continue;
@@ -156,7 +149,6 @@ void AppLauncher::drawAppIcon(int x, int y, const AppInfo& app, bool selected) {
         }
     }
 
-    // Draw icon
     int icon_len = custom_strlen(app.icon);
     for (int i = 0; i < icon_len && i < 10; ++i) {
         int idx = 2 * (y * 80 + x + i);
@@ -164,7 +156,6 @@ void AppLauncher::drawAppIcon(int x, int y, const AppInfo& app, bool selected) {
         video[idx + 1] = text_color;
     }
 
-    // Draw name
     int name_len = custom_strlen(app.name);
     for (int i = 0; i < name_len && i < 10; ++i) {
         int idx = 2 * ((y + 1) * 80 + x + i);
@@ -177,31 +168,31 @@ void AppLauncher::handleInput(uint8_t key) {
     if (!launcher_visible) return;
 
     switch (key) {
-        case 0x4B: // Left arrow
+        case 0x4B:
             selectPrevApp();
             break;
-        case 0x4D: // Right arrow
+        case 0x4D:
             selectNextApp();
             break;
-        case 0x48: // Up arrow
+        case 0x48:
             if (selected_app >= 4) {
                 selected_app -= 4;
                 updateSelection();
             }
             break;
-        case 0x50: // Down arrow
+        case 0x50:
             if (selected_app + 4 < app_count) {
                 selected_app += 4;
                 updateSelection();
             }
             break;
-        case 0x1C: // Enter
+        case 0x1C:
             if (selected_app < app_count) {
                 launchApp(selected_app);
                 hideLauncher();
             }
             break;
-        case 0x01: // Escape
+        case 0x01:
             hideLauncher();
             break;
     }
@@ -238,14 +229,12 @@ void AppLauncher::handleMouseClick(int x, int y) {
     Window* win = WindowManager::getWindow(launcher_window_id);
     if (!win) return;
 
-    // Check if click is within launcher window
     if (x < win->x || x >= win->x + win->width || 
         y < win->y || y >= win->y + win->height) return;
 
     int start_x = win->x + 2;
     int start_y = win->y + 2;
 
-    // Calculate which app was clicked
     int apps_per_row = 4;
     int app_width = 12;
     int app_height = 3;
