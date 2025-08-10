@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-// Authentication modes
+
 enum AuthMode {
     AUTH_NONE = 0,
     AUTH_PIN = 1,
@@ -16,12 +16,12 @@ enum AuthMode {
 #define MAX_PASSWORD_LENGTH 32
 #define MAX_USERNAME_LENGTH 16
 
-// AuthResult enum moved to implementation file to avoid conflicts
+
 
 struct UserProfile {
     char username[MAX_USERNAME_LENGTH];
     char pin[MAX_PIN_LENGTH + 1];
-    char password_hash[33]; // MD5 hash as string
+    char password_hash[33]; 
     bool is_admin;
     int failed_attempts;
     bool locked;
@@ -54,7 +54,7 @@ private:
     static void drawSecurityStatus();
 };
 
-// AuthSystem class for desktop compatibility
+
 class AuthSystem {
 public:
     static void init();
@@ -69,7 +69,7 @@ public:
     static bool showPinScreen();
     static void handleSecurityInput(uint8_t key);
     
-    // Additional methods for full AuthSystem functionality
+    
     static void hashPassword(const char* password, char* hash);
     static bool verifyPassword(const char* password, const char* stored_hash);
     static uint32_t getCurrentTime();
