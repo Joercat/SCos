@@ -14,82 +14,77 @@ void ThemeManager::init() {
 }
 
 void ThemeManager::initializeThemes() {
-    // Default Blue Theme
     themes[THEME_DEFAULT_BLUE] = {
         "Default Blue",
-        0x11,  // Blue background
-        0x1F,  // White on blue
-        0x1F,  // Blue window background
-        0x1E,  // Yellow on blue
-        0x70,  // Black on white taskbar
-        0x4F,  // White on red accent
-        0x4F,  // Red selection
-        0x17,  // Grey text
-        0x1C,  // Red accent
+        0x11,
+        0x1F,
+        0x1F,
+        0x1E,
+        0x70,
+        0x4F,
+        0x4F,
+        0x17,
+        0x1C,
         false,
         nullptr
     };
 
-    // Matrix Green Theme (#39ff14 on black)
     themes[THEME_MATRIX_GREEN] = {
         "Matrix Green",
-        0x00,  // Black background
-        0x0A,  // Bright green (#39ff14) on black
-        0x00,  // Black window background
-        0x0A,  // Bright green text
-        0x00,  // Black taskbar background
-        0x0A,  // Bright green on black
-        0x0A,  // Green selection
-        0x0A,  // Bright green
-        0x0A,  // Bright green accent
+        0x00,
+        0x0A,
+        0x00,
+        0x0A,
+        0x00,
+        0x0A,
+        0x0A,
+        0x0A,
+        0x0A,
         true,
         "matrix"
     };
 
-    // Matrix Red Theme
     themes[THEME_MATRIX_RED] = {
         "Matrix Red",
-        0x00,  // Black background
-        0x0C,  // Bright red on black
-        0x04,  // Dark red background
-        0x0C,  // Bright red text
-        0x40,  // Red on black taskbar
-        0x4F,  // White on red accent
-        0x4F,  // Red selection
-        0x04,  // Dark red
-        0x0C,  // Bright red accent
+        0x00,
+        0x0C,
+        0x04,
+        0x0C,
+        0x40,
+        0x4F,
+        0x4F,
+        0x04,
+        0x0C,
         true,
         "matrix"
     };
 
-    // Matrix Purple Theme
     themes[THEME_MATRIX_PURPLE] = {
         "Matrix Purple",
-        0x00,  // Black background
-        0x0D,  // Bright magenta on black
-        0x05,  // Dark magenta background
-        0x0D,  // Bright magenta text
-        0x50,  // Magenta on black taskbar
-        0x5F,  // White on magenta accent
-        0x5F,  // Magenta selection
-        0x05,  // Dark magenta
-        0x0D,  // Bright magenta accent
+        0x00,
+        0x0D,
+        0x05,
+        0x0D,
+        0x50,
+        0x5F,
+        0x5F,
+        0x05,
+        0x0D,
         true,
         "matrix"
     };
 
-    // Nature Theme
     themes[THEME_NATURE] = {
         "Nature",
-        0x02,  // Green background
-        0x2F,  // White on green
-        0x02,  // Green window background
-        0x2A,  // Bright green text
-        0x60,  // Brown on green taskbar
-        0x6F,  // White on brown accent
-        0x3F,  // Cyan selection
-        0x2E,  // Yellow on green
-        0x0B,  // Cyan accent
+        0x02,
+        0x2F,
+        0x02,
+        0x2A,
+        0x60,
+        0x6F,
+        0x3F,
+        0x2E,
+        0x0B,
         true,
         "nature"
     };
@@ -101,7 +96,6 @@ void ThemeManager::setTheme(ThemeType theme) {
     current_theme = theme;
     applyThemeColors();
 
-    // Clear screen and redraw with new theme
     WindowManager::clearScreen();
     drawCustomBackground();
 }
@@ -123,7 +117,6 @@ void ThemeManager::drawCustomBackground() {
     const Theme& theme = getCurrentThemeData();
 
     if (!theme.has_custom_background) {
-        // Draw solid color background
         volatile char* video = (volatile char*)0xB8000;
         for (int y = 0; y < 25; ++y) {
             for (int x = 0; x < 80; ++x) {
@@ -135,11 +128,10 @@ void ThemeManager::drawCustomBackground() {
         return;
     }
 
-    // Draw themed background
     if (theme.background_pattern) {
-        if (theme.background_pattern[0] == 'm') { // matrix
+        if (theme.background_pattern[0] == 'm') {
             drawMatrixBackground(theme.accent_color);
-        } else if (theme.background_pattern[0] == 'n') { // nature
+        } else if (theme.background_pattern[0] == 'n') {
             drawNatureBackgroundFromFile();
         }
     }
@@ -148,16 +140,14 @@ void ThemeManager::drawCustomBackground() {
 void ThemeManager::drawMatrixBackground(uint8_t color) {
     volatile char* video = (volatile char*)0xB8000;
 
-    // Clear to black first
     for (int y = 0; y < 25; ++y) {
         for (int x = 0; x < 80; ++x) {
             int idx = 2 * (y * 80 + x);
             video[idx] = ' ';
-            video[idx + 1] = 0x00; // Black background
+            video[idx + 1] = 0x00;
         }
     }
 
-    // Draw matrix-style characters
     const char matrix_chars[] = "01アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン";
     static int offset = 0;
 
@@ -179,50 +169,41 @@ void ThemeManager::drawMatrixBackground(uint8_t color) {
 void ThemeManager::drawNatureBackground() {
     volatile char* video = (volatile char*)0xB8000;
 
-    // Draw a simple nature scene with ASCII
     for (int y = 0; y < 25; ++y) {
         for (int x = 0; x < 80; ++x) {
             int idx = 2 * (y * 80 + x);
 
-            // Sky and ground
             if (y < 10) {
                 video[idx] = ' ';
-                video[idx + 1] = 0x9F; // Light blue background
+                video[idx + 1] = 0x9F;
             } else {
                 video[idx] = (x + y) % 3 == 0 ? '.' : ' ';
-                video[idx + 1] = (y < 15) ? 0x2A : 0x6E; // Green or brown
+                video[idx + 1] = (y < 15) ? 0x2A : 0x6E;
             }
         }
     }
 }
 
 void ThemeManager::drawNatureBackgroundFromFile() {
-    // Try to load the background image from the file system
     const char* background_data = loadBackgroundImage("../attached_assets/SCos-background.jpg");
 
     if (background_data) {
         drawImageAsASCII(background_data);
     } else {
-        // Fallback to ASCII nature background
         drawNatureBackground();
     }
 }
 
 const char* ThemeManager::loadBackgroundImage(const char* path) {
-    // In a real OS, this would read the image file
-    // For now, we'll simulate reading the image and convert to ASCII representation
-
-    // Since we can't actually load JPEG in this simple OS, 
-    // we'll create a nature-themed ASCII pattern based on the image concept
     static const char nature_pattern[] = 
         "                    Waterfall Scene                     "
         "        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~            "
         "      ~~~  .*.   Trees and Moss   .*.  ~~~             "
-        "    ~~~   .*.*. Flowing Water  .*.*   ~~~              "
+        "    ~~~   .*.*. Flowing Water  .*.* ~~~              "
         "   ~~  .*.*.*.  ||||||||||||  .*.*.*.  ~~              "
         "  ~~ .*.*.*.*. |||||||||||| .*.*.*.*. ~~               "
         " ~  .*.*.*.*.  ||||||||||||  .*.*.*.* ~                "
-        "~  .*.*.*.*.*  |||||||||||| .*.*.*.*.*  ~              ";
+        "~  .*.*.*.*.* |||||||||||| .*.*.*.*.* ~              ";
 
     return nature_pattern;
 }
@@ -230,43 +211,37 @@ const char* ThemeManager::loadBackgroundImage(const char* path) {
 void ThemeManager::drawImageAsASCII(const char* image_data) {
     volatile char* video = (volatile char*)0xB8000;
 
-    // Convert the "image data" to a beautiful ASCII representation
     for (int y = 0; y < 25; ++y) {
         for (int x = 0; x < 80; ++x) {
             int idx = 2 * (y * 80 + x);
 
-            // Create a waterfall/nature scene
             if (y < 5) {
-                // Sky
                 video[idx] = ' ';
-                video[idx + 1] = 0x1F; // Blue background
+                video[idx + 1] = 0x1F;
             } else if (y < 15 && x > 30 && x < 50) {
-                // Waterfall
                 video[idx] = (y + x) % 2 == 0 ? '|' : ' ';
-                video[idx + 1] = 0x3F; // Cyan on blue
+                video[idx + 1] = 0x3F;
             } else if (y >= 15) {
-                // Rocks and moss at bottom
                 if ((x + y) % 4 == 0) {
-                    video[idx] = 'o'; // Rocks
-                    video[idx + 1] = 0x60; // Brown
+                    video[idx] = 'o';
+                    video[idx + 1] = 0x60;
                 } else if ((x + y) % 3 == 0) {
-                    video[idx] = '*'; // Moss
-                    video[idx + 1] = 0x2A; // Green
+                    video[idx] = '*';
+                    video[idx + 1] = 0x2A;
                 } else {
                     video[idx] = ' ';
-                    video[idx + 1] = 0x20; // Green background
+                    video[idx + 1] = 0x20;
                 }
             } else {
-                // Trees and foliage
                 if ((x + y) % 5 == 0) {
-                    video[idx] = '*'; // Leaves
-                    video[idx + 1] = 0x2A; // Green
+                    video[idx] = '*';
+                    video[idx + 1] = 0x2A;
                 } else if (x % 8 == 3 && y > 8) {
-                    video[idx] = '|'; // Tree trunk
-                    video[idx + 1] = 0x64; // Brown
+                    video[idx] = '|';
+                    video[idx + 1] = 0x64;
                 } else {
                     video[idx] = ' ';
-                    video[idx + 1] = 0x20; // Green background
+                    video[idx + 1] = 0x20;
                 }
             }
         }
@@ -274,8 +249,6 @@ void ThemeManager::drawImageAsASCII(const char* image_data) {
 }
 
 void ThemeManager::applyThemeColors() {
-    // This would be called by other UI components to get theme colors
-    // The actual application of colors happens in the drawing functions
 }
 
 void ThemeManager::setCustomBackground(const char* pattern) {
