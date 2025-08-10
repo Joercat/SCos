@@ -35,7 +35,7 @@ public:
     static void drawCustomBackground();
     static void applyThemeColors();
 
-    // Background management
+    
     static void setCustomBackground(const char* pattern);
     static void drawNatureBackground();
     static void drawMatrixBackground(uint8_t color);
