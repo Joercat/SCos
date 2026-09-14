@@ -187,3 +187,43 @@ char *str_chr(const char *s, char c)
     while (*s && *s != c) s++;
     return *s == c ? (char *)s : 0;
 }
+
+void cpu_brand(char *out, int max)
+{
+    u32 ax, bx, cx, dx;
+    out[0] = 0;
+    __asm__ volatile("movl $0x80000000, %%eax; cpuid"
+                     : "=a"(ax), "=b"(bx), "=c"(cx), "=d"(dx));
+    if (ax < 0x80000004) { strncpy(out, "x86 processor", max - 1); return; }
+    u32 *o = (u32 *)out;
+    for (u32 leaf = 0x80000002; leaf <= 0x80000004; leaf++) {
+        __asm__ volatile("cpuid"
+                         : "=a"(ax), "=b"(bx), "=c"(cx), "=d"(dx)
+                         : "a"(leaf));
+        int idx = (int)(leaf - 0x80000002) * 4;
+        if (idx + 4 <= max / 4 + 3 && idx + 4 <= 48) {
+            o[idx / 4] = ax; o[idx / 4 + 1] = bx; o[idx / 4 + 2] = cx; o[idx / 4 + 3] = dx;
+        }
+    }
+    out[48] = 0;
+    /* trim leading spaces */
+    int i = 0;
+    while (out[i] == ' ') i++;
+    if (i) { int j = 0; while (out[i]) { out[j++] = out[i++]; } out[j] = 0; }
+}
+
+u32 str_to_u32(const char *s)
+{
+    u32 v = 0;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (u32)(*s - '0'); s++; }
+    return v;
+}
+
+char *strncat(char *d, const char *s, u32 n)
+{
+    char *o = d;
+    while (*d) d++;
+    while (n-- && *s) *d++ = *s++;
+    *d = 0;
+    return o;
+}

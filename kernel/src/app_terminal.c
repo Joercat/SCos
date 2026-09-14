@@ -94,28 +94,45 @@ static void prompt_str(struct term *t, char *out)
 /* ------------------------------------------------------------ commands --- */
 static const char *help_text =
     "Available commands:\n"
-    "help     - Show this help message\n"
-    "ls       - List directory contents\n"
-    "cd       - Change directory\n"
-    "cat      - Show file contents\n"
-    "echo     - Display a message\n"
-    "clear    - Clear terminal screen\n"
-    "date     - Show current date and time\n"
-    "mkdir    - Create directory\n"
-    "touch    - Create an empty file\n"
-    "rm       - Delete file or directory\n"
-    "whoami   - Show current user\n"
-    "version  - Show system version\n"
-    "calc     - Perform basic arithmetic\n"
-    "ping     - Ping a host\n"
-    "sysinfo  - Display system information\n"
-    "alias    - Create command aliases\n"
-    "history  - Show command history\n"
-    "open     - Launch a desktop app\n"
-    "save     - Write the filesystem image to disk\n"
-    "save     - Persist filesystem to disk (explicit, see docs)\n"
-    "shutdown - Shut down the system\n"
-    "reboot   - Reboot the system";
+    "help      - Show this help message\n"
+    "ls        - List directory contents\n"
+    "cd        - Change directory\n"
+    "pwd       - Print working directory\n"
+    "cat       - Show file contents\n"
+    "head      - Show first lines of a file\n"
+    "wc        - Count lines, words, bytes of a file\n"
+    "grep      - Print lines matching a string\n"
+    "hexdump   - Dump file bytes in hex\n"
+    "tree      - Recursive directory tree\n"
+    "echo      - Display a message\n"
+    "clear     - Clear terminal screen\n"
+    "date      - Show current date and time (CMOS clock)\n"
+    "cal       - Show this month's calendar\n"
+    "mkdir     - Create directory\n"
+    "touch     - Create an empty file\n"
+    "cp        - Copy a file\n"
+    "mv        - Move or rename a file\n"
+    "rm        - Delete file or directory\n"
+    "whoami    - Show current user\n"
+    "version   - Show system version\n"
+    "uptime    - Time since boot (PIT)\n"
+    "free      - Memory usage (real page allocator)\n"
+    "cpu       - CPU brand from CPUID\n"
+    "df        - Filesystem usage\n"
+    "disks     - Detected ATA disks (IDENTIFY)\n"
+    "neofetch  - System summary with logo\n"
+    "theme     - List or switch themes\n"
+    "calc      - Perform basic arithmetic\n"
+    "ping      - Check host reachability\n"
+    "sysinfo   - Display system information\n"
+    "alias     - Create command aliases\n"
+    "history   - Show command history\n"
+    "edit      - Open a file in Notepad\n"
+    "open      - Launch a desktop app\n"
+    "blackjack - Play blackjack\n"
+    "save      - Write the filesystem image to disk\n"
+    "shutdown  - Power the machine off\n"
+    "reboot    - Restart the machine\n";
 
 static const char *month_names[12] = { "Jan","Feb","Mar","Apr","May","Jun",
                                        "Jul","Aug","Sep","Oct","Nov","Dec" };
@@ -145,26 +162,6 @@ static void resolve_path(struct term *t, const char *arg, char *out)
     }
 }
 
-static void start_ping(struct term *t, const char *host)
-{
-    u32 len = 0;
-    char *json = vfs_read("system/network.json", &len);
-    char needle[80];
-    strcpy(needle, "\""); strcat(needle, host); strcat(needle, "\"");
-    if (!json || !str_str(json, needle)) {
-        char msg[128];
-        strcpy(msg, "ping: cannot resolve "); strcat(msg, host); strcat(msg, ": Unknown host");
-        term_type(t, msg);
-        return;
-    }
-    t->ping_active = 1;
-    strncpy(t->ping_host, host, sizeof(t->ping_host) - 1);
-    t->ping_seq = 0;
-    t->ping_next = tick_count + 2;
-    char head[128];
-    strcpy(head, "PING "); strcat(head, host); strcat(head, ": 56 data bytes");
-    term_print(t, head);
-}
 
 static void run_command(struct term *t, const char *command)
 {
@@ -356,8 +353,8 @@ static void run_command(struct term *t, const char *command)
         }
     }
     else if (!strcmp(cmd, "ping")) {
-        if (nargs < 2) strcpy(response, "Usage: ping <hostname>");
-        else { typed = 0; start_ping(t, args[1]); }
+        strcpy(response, "ping: this kernel has no TCP/IP stack - network unreachable.\n"
+                         "No network interface driver is present (see 'disks'/'cpu' for real hardware).");
     }
     else if (!strcmp(cmd, "sysinfo")) {
         char a[32], b[32];
@@ -434,6 +431,292 @@ static void run_command(struct term *t, const char *command)
         term_print(t, "Rebooting SCos... Please wait.");
         t->shutting_down = 2;
         return;
+    }
+    else if (!strcmp(cmd, "pwd")) {
+        strcpy(response, t->cwd);
+    }
+    else if (!strcmp(cmd, "cp")) {
+        if (nargs < 3) strcpy(response, "Usage: cp <src> <dst>");
+        else {
+            char a[256], b[256];
+            resolve_path(t, args[1], a); resolve_path(t, args[2], b);
+            u32 len = 0;
+            char *data = vfs_read(a, &len);
+            if (!data) strcpy(response, "Error: cannot read source");
+            else if (vfs_write(b, data, len)) { strcpy(response, "Copied to "); strcat(response, b); }
+            else strcpy(response, "Error: cannot write destination");
+        }
+    }
+    else if (!strcmp(cmd, "mv")) {
+        if (nargs < 3) strcpy(response, "Usage: mv <src> <dst>");
+        else {
+            char a[256], b[256];
+            resolve_path(t, args[1], a); resolve_path(t, args[2], b);
+            if (vfs_rename(a, b)) { strcpy(response, "Moved to "); strcat(response, b); }
+            else strcpy(response, "Error: rename failed (missing path or name taken)");
+        }
+    }
+    else if (!strcmp(cmd, "head")) {
+        if (nargs < 2) strcpy(response, "Usage: head <file> [lines]");
+        else {
+            char a[256];
+            resolve_path(t, args[1], a);
+            u32 len = 0;
+            char *data = vfs_read(a, &len);
+            if (!data) strcpy(response, "Error: File not found");
+            else {
+                int n = nargs > 2 ? (int)str_to_u32(args[2]) : 10;
+                if (n < 1) n = 1;
+                response[0] = 0;
+                const char *p = data;
+                for (int i = 0; i < n && *p; i++) {
+                    const char *nl = str_chr(p, '\n');
+                    int l = nl ? (int)(nl - p) : (int)strlen(p);
+                    if ((int)strlen(response) + l + 2 > (int)sizeof(response) - 1) break;
+                    strncat(response, p, l);
+                    strcat(response, "\n");
+                    if (!nl) break;
+                    p = nl + 1;
+                }
+            }
+        }
+    }
+    else if (!strcmp(cmd, "wc")) {
+        if (nargs < 2) strcpy(response, "Usage: wc <file>");
+        else {
+            char a[256];
+            resolve_path(t, args[1], a);
+            u32 len = 0;
+            char *data = vfs_read(a, &len);
+            if (!data) strcpy(response, "Error: File not found");
+            else {
+                u32 lines = 0, words = 0;
+                int inw = 0;
+                for (u32 i = 0; i < len; i++) {
+                    char c = data[i];
+                    if (c == '\n') lines++;
+                    if (c == ' ' || c == '\n' || c == '\t') inw = 0;
+                    else if (!inw) { inw = 1; words++; }
+                }
+                char n[12];
+                response[0] = 0;
+                fmt_u32(n, lines); strcat(response, n); strcat(response, " lines, ");
+                fmt_u32(n, words); strcat(response, n); strcat(response, " words, ");
+                fmt_u32(n, len); strcat(response, n); strcat(response, " bytes");
+            }
+        }
+    }
+    else if (!strcmp(cmd, "grep")) {
+        if (nargs < 3) strcpy(response, "Usage: grep <text> <file>");
+        else {
+            char a[256];
+            resolve_path(t, args[2], a);
+            u32 len = 0;
+            char *data = vfs_read(a, &len);
+            if (!data) strcpy(response, "Error: File not found");
+            else {
+                response[0] = 0;
+                const char *p = data;
+                while (*p) {
+                    const char *nl = str_chr(p, '\n');
+                    int l = nl ? (int)(nl - p) : (int)strlen(p);
+                    char one[256];
+                    if (l > (int)sizeof(one) - 1) l = sizeof(one) - 1;
+                    memcpy(one, p, l);
+                    one[l] = 0;
+                    if (str_str(one, args[1])) {
+                        if ((int)strlen(response) + l + 2 < (int)sizeof(response) - 1) {
+                            strcat(response, one); strcat(response, "\n");
+                        }
+                    }
+                    if (!nl) break;
+                    p = nl + 1;
+                }
+                if (!response[0]) strcpy(response, "(no matches)");
+            }
+        }
+    }
+    else if (!strcmp(cmd, "hexdump")) {
+        if (nargs < 2) strcpy(response, "Usage: hexdump <file>");
+        else {
+            char a[256];
+            resolve_path(t, args[1], a);
+            u32 len = 0;
+            char *data = vfs_read(a, &len);
+            if (!data) strcpy(response, "Error: File not found");
+            else {
+                if (len > 128) len = 128;
+                response[0] = 0;
+                static const char hx[] = "0123456789abcdef";
+                for (u32 i = 0; i < len; i += 16) {
+                    char line[80];
+                    int o = 0;
+                    for (u32 j = i; j < i + 16 && j < len; j++) {
+                        line[o++] = hx[(u8)data[j] >> 4];
+                        line[o++] = hx[data[j] & 15];
+                        line[o++] = ' ';
+                    }
+                    line[o++] = '|';
+                    for (u32 j = i; j < i + 16 && j < len; j++)
+                        line[o++] = (data[j] >= 32 && data[j] < 127) ? data[j] : '.';
+                    line[o++] = '|'; line[o] = 0;
+                    if ((int)strlen(response) + o + 2 < (int)sizeof(response) - 1) {
+                        strcat(response, line); strcat(response, "\n");
+                    }
+                }
+            }
+        }
+    }
+    else if (!strcmp(cmd, "tree")) {
+        char path[256];
+        resolve_path(t, nargs > 1 ? args[1] : "", path);
+        struct vfs_node *n = vfs_lookup(path);
+        if (!n || !vfs_is_dir(n)) strcpy(response, "Error: Invalid path");
+        else {
+            response[0] = 0;
+            char names[64][VFS_NAME];
+            /* iterative deep walk with indentation */
+            struct { struct vfs_node *n; int depth; } stack[16];
+            int sp = 0;
+            stack[sp].n = n; stack[sp].depth = 0; sp++;
+            while (sp && (int)strlen(response) < 1200) {
+                sp--;
+                struct vfs_node *cur = stack[sp].n;
+                int d = stack[sp].depth;
+                int c = vfs_list(cur, names, 64);
+                for (int i = c - 1; i >= 0; i--) {
+                    struct vfs_node *ch = vfs_child(cur, names[i]);
+                    if (sp < 16 && ch && ch->is_dir) { stack[sp].n = ch; stack[sp].depth = d + 1; sp++; }
+                }
+                for (int i = 0; i < c; i++) {
+                    for (int k = 0; k < d; k++) strcat(response, "  ");
+                    strcat(response, names[i]);
+                    struct vfs_node *ch = vfs_child(cur, names[i]);
+                    if (ch && ch->is_dir) strcat(response, "/");
+                    strcat(response, "\n");
+                }
+            }
+        }
+    }
+    else if (!strcmp(cmd, "uptime")) {
+        u32 up = uptime_ms() / 1000;
+        char n[12];
+        strcpy(response, "up ");
+        fmt_u32(n, up / 3600); strcat(response, n); strcat(response, "h ");
+        fmt_u32(n, (up / 60) % 60); strcat(response, n); strcat(response, "m ");
+        fmt_u32(n, up % 60); strcat(response, n); strcat(response, "s");
+    }
+    else if (!strcmp(cmd, "free")) {
+        u32 tot = 0, fre = 0;
+        mm_stats(&tot, &fre);
+        char n[16];
+        strcpy(response, "total: ");
+        fmt_u32(n, tot); strcat(response, n); strcat(response, " KB\nfree:  ");
+        fmt_u32(n, fre); strcat(response, n); strcat(response, " KB\nused:  ");
+        fmt_u32(n, tot - fre); strcat(response, n); strcat(response, " KB");
+    }
+    else if (!strcmp(cmd, "cpu")) {
+        char cpu[49];
+        cpu_brand(cpu, sizeof(cpu));
+        strcpy(response, cpu);
+        strcat(response, "\n32-bit protected mode, ring 0, PIT @ 100 Hz");
+    }
+    else if (!strcmp(cmd, "df")) {
+        char n[16];
+        strcpy(response, "vfs:   ");
+        fmt_u32(n, vfs_usage_bytes()); strcat(response, n); strcat(response, " bytes used (in memory)\n");
+        strcat(response, "disk:  ");
+        if (ata_present()) { strcat(response, "fs image at LBA 2048, 'save' writes, loaded at boot"); }
+        else strcat(response, "no ATA disk");
+    }
+    else if (!strcmp(cmd, "disks")) {
+        const char *m = ata_model();
+        if (!m) strcpy(response, "No ATA disks detected on primary bus.");
+        else { strcpy(response, "ATA0:  "); strcat(response, m); }
+    }
+    else if (!strcmp(cmd, "theme")) {
+        if (nargs < 2) {
+            strcpy(response, "Current theme: ");
+            strcat(response, theme_current()->name);
+            strcat(response, "\nAvailable:");
+            for (int i = 0; i < theme_count(); i++) {
+                strcat(response, "\n  "); strcat(response, theme_get(i)->id);
+                strcat(response, "  - "); strcat(response, theme_get(i)->name);
+            }
+            strcat(response, "\nUsage: theme <id>");
+        } else {
+            int found = -1;
+            for (int i = 0; i < theme_count(); i++)
+                if (!strcmp(theme_get(i)->id, args[1])) found = i;
+            if (found < 0) { strcpy(response, "Unknown theme: "); strcat(response, args[1]); }
+            else { theme_set_index(found); settings_save();
+                   strcpy(response, "Theme switched to "); strcat(response, theme_current()->name); }
+        }
+    }
+    else if (!strcmp(cmd, "cal")) {
+        struct rtc_time rt;
+        rtc_read(&rt);
+        response[0] = 0;
+        static const char *mn[] = { "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December" };
+        strcat(response, mn[rt.mon - 1]); strcat(response, " ");
+        char n[8];
+        fmt_u32(n, (u32)rt.year); strcat(response, n); strcat(response, "\n");
+        strcat(response, "Su Mo Tu We Th Fr Sa\n");
+        static const u8 md[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+        int days = md[rt.mon - 1];
+        if (rt.mon == 2 && ((rt.year % 4 == 0 && rt.year % 100 != 0) || rt.year % 400 == 0)) days = 29;
+        /* weekday of day 1 from rtc weekday of today */
+        int wd1 = (rt.weekday - (rt.day - 1) % 7 + 7) % 7;
+        for (int i = 0; i < wd1; i++) strcat(response, "   ");
+        for (int d = 1; d <= days; d++) {
+            char cell[8];
+            if (d == rt.day) { cell[0] = '['; fmt_u32(cell + 1, (u32)d);
+                strcat(cell, "]"); }
+            else { fmt_u32(cell, (u32)d); if (d < 10) { cell[1] = cell[0]; cell[0] = ' '; cell[2] = 0; } }
+            strcat(response, cell);
+            strcat(response, (d == rt.day) ? "" : " ");
+            if ((wd1 + d) % 7 == 0) strcat(response, "\n");
+        }
+    }
+    else if (!strcmp(cmd, "neofetch")) {
+        char cpu[49];
+        cpu_brand(cpu, sizeof(cpu));
+        u32 tot = 0, fre = 0;
+        mm_stats(&tot, &fre);
+        char n[16];
+        strcpy(response,
+            "   ####    user@scos\n"
+            "  ##  ##   -----------\n"
+            " ##    ##  OS:     SCos 2.0.0 (native x86 kernel)\n"
+            " ##   ###  CPU:    ");
+        strcat(response, cpu); strcat(response, "\n");
+        strcat(response, "  ##  ##   Memory: ");
+        fmt_u32(n, (tot - fre) / 1024); strcat(response, n);
+        strcat(response, " / "); fmt_u32(n, tot / 1024); strcat(response, n);
+        strcat(response, " MB\n   ####    Disk:   ");
+        const char *m = ata_model();
+        strcat(response, m && m[0] ? m : "none");
+        strcat(response, "\n           Video:  ");
+        fmt_u32(n, (u32)screen_w); strcat(response, n); strcat(response, "x");
+        fmt_u32(n, (u32)screen_h); strcat(response, n); strcat(response, "x");
+        fmt_u32(n, fb_bpp()); strcat(response, n);
+        strcat(response, "\n           Theme:  ");
+        strcat(response, theme_current()->name);
+        strcat(response, "\n           Shell:  scos-sh");
+    }
+    else if (!strcmp(cmd, "edit")) {
+        if (nargs < 2) strcpy(response, "Usage: edit <file>");
+        else {
+            char a[256];
+            resolve_path(t, args[1], a);
+            wm_open_app("notepad", a);
+            strcpy(response, "Opened in Notepad: "); strcat(response, a);
+        }
+    }
+    else if (!strcmp(cmd, "blackjack")) {
+        wm_open_app("blackjack", NULL);
+        strcpy(response, "Blackjack table opened.");
     }
     else {
         strcpy(response, "Command not found: "); strcat(response, cmd);
@@ -529,7 +812,7 @@ static void term_key(struct window *w, struct key_event *e)
 {
     struct term *t = w->data;
     if (!e->pressed) return;
-    if (t->pending_active || t->ping_active) return;
+    if (t->pending_active) return;
 
     if (e->keycode == '\n') {
         char cmd[TERM_LINE];
@@ -582,73 +865,6 @@ static void term_tick(struct window *w)
             t->pending_active = 0;
         }
         wm_redraw(w);
-    }
-    if (t->ping_active) {
-        if (tick_count >= t->ping_next) {
-            u32 len = 0;
-            char *json = vfs_read("system/network.json", &len);
-            int online = json && str_str(json, "\"online\"") &&
-                         str_str(json, t->ping_host);
-            /* crude: look up the host block then its status */
-            char blk[256];
-            online = 0;
-            char lat[24] = "45ms";
-            char ip[24] = "0.0.0.0";
-            if (json) {
-                char *h = str_str(json, t->ping_host);
-                if (h) {
-                    strncpy(blk, h, sizeof(blk) - 1);
-                    blk[sizeof(blk) - 1] = 0;
-                    char *st = str_str(blk, "\"status\": \"");
-                    if (st) {
-                        st += 11;
-                        online = !strncmp(st, "online", 6);
-                    }
-                    char *la = str_str(blk, "\"latency\": \"");
-                    if (la) {
-                        la += 12;
-                        int i = 0;
-                        while (la[i] && la[i] != '"' && i < 23) { lat[i] = la[i]; i++; }
-                        lat[i] = 0;
-                    }
-                    char *ipx = str_str(blk, "\"ip\": \"");
-                    if (ipx) {
-                        ipx += 7;
-                        int i = 0;
-                        while (ipx[i] && ipx[i] != '"' && i < 23) { ip[i] = ipx[i]; i++; }
-                        ip[i] = 0;
-                    }
-                }
-            }
-            char line[160];
-            if (t->ping_seq < 4) {
-                if (online) {
-                    strcpy(line, "64 bytes from "); strcat(line, ip);
-                    strcat(line, ": icmp_seq=");
-                    char n[8]; fmt_u32(n, t->ping_seq + 1); strcat(line, n);
-                    strcat(line, " ttl=64 time="); strcat(line, lat);
-                    t->ping_next = tick_count + 15;
-                } else {
-                    strcpy(line, "Request timeout for icmp_seq ");
-                    char n[8]; fmt_u32(n, t->ping_seq); strcat(line, n);
-                    t->ping_next = tick_count + 100;
-                }
-                term_print(t, line);
-                t->ping_seq++;
-            } else {
-                strcpy(line, "--- "); strcat(line, t->ping_host);
-                strcat(line, " ping statistics ---\n");
-                if (online) {
-                    strcat(line, "4 packets transmitted, 4 received, 0% packet loss\n");
-                    strcat(line, "round-trip min/avg/max = "); strcat(line, lat);
-                } else {
-                    strcat(line, "4 packets transmitted, 0 received, 100% packet loss, time 3000ms");
-                }
-                term_print(t, line);
-                t->ping_active = 0;
-            }
-            wm_redraw(w);
-        }
     }
     if (t->shutting_down == 1) {
         sleep_ms(1200);

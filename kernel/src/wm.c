@@ -46,6 +46,7 @@ static const struct { const char *app; int icon; const char *label; } desk_icons
     { "calendar", ICON_CALENDAR, "Calendar" },
     { "settings", ICON_SETTINGS, "Settings" },
     { "about",    ICON_INFO,     "About"    },
+    { "blackjack", ICON_CARDS,   "Blackjack" },
 };
 #define N_ICONS ((int)(sizeof(desk_icons)/sizeof(desk_icons[0])))
 static int icon_hover = -1;
@@ -229,10 +230,13 @@ static void paint_icons(void)
 {
     const struct theme *t = theme_current();
     icon_hover = -1;
+    /* no hover feedback while dragging/resizing/modally busy: the pointer is
+     * occupied and highlighting launch buttons underneath is misleading */
+    int interactive = !drag_win && !resize_win && !menu.active && !modal_w;
     for (int i = 0; i < N_ICONS; i++) {
         int x, y, w, h;
         icon_rect(i, &x, &y, &w, &h);
-        if (in_rect(mx, my, x, y, w, h)) {
+        if (interactive && in_rect(mx, my, x, y, w, h)) {
             icon_hover = i;
             s_fill(&screen, x, y, w, h, blend(t->bg_top, t->main, 18));
         }
@@ -324,15 +328,36 @@ static void paint_taskbar(void)
     s_text(&screen, screen_w - tw - 12, y + 12, clock, t->main);
 }
 
+/* classic arrow pointer: white fill with black outline, hotspot at tip */
+static const float cur_poly[7][2] = {
+    { 0, 0 }, { 0, 14 }, { 3.5f, 10.5f }, { 6, 16.5f },
+    { 8.5f, 15.5f }, { 6, 9.5f }, { 10, 9.5f },
+};
 static void paint_cursor(void)
 {
-    static const u8 shape[12] = { 0x70, 0x78, 0x7C, 0x7E, 0x7F, 0x7F,
-                                  0x77, 0x73, 0x71, 0x60, 0x40, 0x00 };
-    for (int off = 1; off >= 0; off--)
-        for (int y = 0; y < 12; y++)
-            for (int x = 0; x < 7; x++)
-                if (shape[y] & (0x80 >> x))
-                    s_pixel(&screen, mx + x + off, my + y + off, off ? 0x000000 : 0xFFFFFF);
+    const int n = 7;
+    for (int y = 0; y < 17; y++) {
+        float xs[8];
+        int nx = 0;
+        for (int i = 0; i < n; i++) {
+            float y0 = cur_poly[i][1], y1 = cur_poly[(i + 1) % n][1];
+            if ((y0 <= y && y1 > y) || (y1 <= y && y0 > y)) {
+                float x0 = cur_poly[i][0], x1 = cur_poly[(i + 1) % n][0];
+                xs[nx++] = x0 + (y + 0.5f - y0) * (x1 - x0) / (y1 - y0);
+            }
+        }
+        for (int i = 0; i + 1 < nx; i++)
+            for (int j = i + 1; j < nx; j++)
+                if (xs[j] < xs[i]) { float t = xs[i]; xs[i] = xs[j]; xs[j] = t; }
+        for (int i = 0; i + 1 < nx; i += 2)
+            for (int x = (int)xs[i]; x <= (int)xs[i + 1]; x++)
+                s_pixel(&screen, mx + x, my + y, 0xFFFFFF);
+    }
+    for (int i = 0; i < n; i++) {
+        int x0 = mx + (int)cur_poly[i][0], y0 = my + (int)cur_poly[i][1];
+        int x1 = mx + (int)cur_poly[(i + 1) % n][0], y1 = my + (int)cur_poly[(i + 1) % n][1];
+        s_line(&screen, x0, y0, x1, y1, 0x000000);
+    }
 }
 
 static void paint_all(void)
@@ -363,7 +388,7 @@ static void paint_all(void)
 static void handle_mouse(struct mouse_event *e)
 {
     if (e->type == MEV_MOVE) {
-        mx += e->dx; my += e->dy;
+        mx += e->dx; my -= e->dy;   /* PS/2: +dy is up, screen y grows down */
         if (mx < 0) mx = 0;
         if (my < 0) my = 0;
         if (mx > screen_w - 1) mx = screen_w - 1;

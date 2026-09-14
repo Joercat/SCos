@@ -96,3 +96,9 @@ void pfree(void *p, u32 bytes)
 
 u32 mm_total_kb(void) { return managed_pages * 4; }
 u32 mm_free_kb(void)  { return free_pages * 4; }
+
+void mm_stats(u32 *total_kb, u32 *free_kb)
+{
+    *total_kb = mm_total_kb();
+    *free_kb = mm_free_kb();
+}

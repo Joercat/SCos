@@ -94,7 +94,7 @@ export async function boot(imgPath, opts = {})
         while (dx || dy) {
             const sx = Math.max(-100, Math.min(100, dx));
             const sy = Math.max(-100, Math.min(100, dy));
-            emulator.bus.send("mouse-delta", [sx, sy]);
+            emulator.bus.send("mouse-delta", [sx, -sy]);  /* PS/2: +dy = up, like v86 browser adapter */
             dx -= sx; dy -= sy;
             state.cursor.x += sx; state.cursor.y += sy;
             await sleep(12);
@@ -124,7 +124,7 @@ export async function boot(imgPath, opts = {})
         while (dx || dy) {
             const sx = Math.max(-100, Math.min(100, dx));
             const sy = Math.max(-100, Math.min(100, dy));
-            emulator.bus.send("mouse-delta", [sx, sy]);
+            emulator.bus.send("mouse-delta", [sx, -sy]);  /* PS/2: +dy = up, like v86 browser adapter */
             dx -= sx; dy -= sy;
             state.cursor.x += sx; state.cursor.y += sy;
             await sleep(15);

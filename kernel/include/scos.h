@@ -130,7 +130,9 @@ struct surface {
 extern struct surface screen;              /* back buffer, full screen */
 extern int screen_w, screen_h;
 
+u32 fb_bpp(void);
 void fb_init(void);
+u32 fb_bpp(void);
 void fb_flip(void);                        /* back buffer -> LFB */
 void fb_clear(u32 color);
 
@@ -150,6 +152,10 @@ void s_char(struct surface *s, int x, int y, char ch, u32 fg);
 void s_char_bg(struct surface *s, int x, int y, char ch, u32 fg, u32 bg);
 void s_text(struct surface *s, int x, int y, const char *str, u32 fg);
 void s_text_bg(struct surface *s, int x, int y, const char *str, u32 fg, u32 bg);
+char *strncat(char *d, const char *s, u32 n);
+char *str_chr(const char *s, char c);
+void cpu_brand(char *out, int max);
+void s_scos_logo(struct surface *s, int x, int y, u32 color, int scale, int phase);
 void s_text_scaled(struct surface *s, int x, int y, const char *str, u32 fg, int scale);
 int  s_text_width(const char *str);
 void s_clip_text(struct surface *s, int x, int y, const char *str, u32 fg, int max_w);
@@ -169,11 +175,12 @@ void fmt_pad2(char *out, u32 v);
 
 /* icon drawing (procedural, 24x24 logical box at x,y) */
 enum { ICON_FOLDER, ICON_TERMINAL, ICON_NOTEPAD, ICON_BROWSER,
-       ICON_CALENDAR, ICON_SETTINGS, ICON_INFO, ICON_COUNT };
+       ICON_CALENDAR, ICON_SETTINGS, ICON_INFO, ICON_CARDS, ICON_COUNT };
 void s_icon(struct surface *s, int id, int x, int y, u32 c);
 
 /* ------------------------------------------------------------------ mm ---- */
 void  mm_init(void);
+void mm_stats(u32 *total_kb, u32 *free_kb);
 void *palloc(u32 bytes);                   /* page-granular, zeroed not guaranteed */
 void  pfree(void *p, u32 bytes);
 u32   mm_total_kb(void);
@@ -199,12 +206,17 @@ char *vfs_read(const char *path, u32 *len);
 int   vfs_write(const char *path, const char *data, u32 len);
 int   vfs_mkdir(const char *path);
 int   vfs_delete(const char *path);
+struct vfs_node *vfs_child(struct vfs_node *dir, const char *name);
+int   vfs_rename(const char *oldp, const char *newp);
+void  vfs_factory_reset(void);
 int   vfs_is_dir(struct vfs_node *n);
 u32   vfs_usage_bytes(void);
+u32   str_to_u32(const char *s);
 char *vfs_parent_path(const char *path, char *out);   /* "a/b/c" -> "a/b/" */
 
 /* ----------------------------------------------------------------- ata ---- */
 int  ata_init(void);                          /* returns detected drive count */
+const char *ata_model(void);                  /* IDENTIFY model string or NULL */
 int  ata_read_sectors(u32 lba, u32 count, void *buf);
 int  ata_write_sectors(u32 lba, u32 count, const void *buf);
 int  ata_present(void);

@@ -6,6 +6,9 @@ int screen_w, screen_h;
 static u32 *lfb;
 static u32 lfb_pitch_px;
 
+static u32 v_bpp;
+u32 fb_bpp(void) { return v_bpp; }
+
 void fb_init(void)
 {
     screen_w = boot_info.width;
@@ -15,6 +18,7 @@ void fb_init(void)
 
     screen.w = screen_w;
     screen.h = screen_h;
+    v_bpp = boot_info.bpp;
     screen.px = palloc(screen_w * screen_h * 4);
     if (!screen.px) {
         klog("fb: back buffer alloc failed");
@@ -254,6 +258,14 @@ void s_icon(struct surface *s, int id, int x, int y, u32 c)
         s_fill(s, x + 11, y + 10, 2, 8, c);
         s_fill(s, x + 11, y + 6, 2, 2, c);
         break;
+    case ICON_CARDS:
+        s_fill(s, x + 8, y + 2, 14, 18, c);
+        s_frame_rect(s, x + 8, y + 2, 14, 18, c);
+        s_fill(s, x + 9, y + 3, 12, 16, (c & 0xFEFEFE) >> 1);
+        s_frame_rect(s, x + 4, y + 5, 14, 18, c);
+        s_fill(s, x + 5, y + 6, 12, 16, (c & 0xFEFEFE) >> 1);
+        s_disc(s, x + 11, y + 14, 2, c);
+        break;
     }
 }
 
@@ -267,4 +279,23 @@ void s_blit(struct surface *d, struct surface *s, int dx, int dy)
     for (int y = 0; y < h; y++)
         memcpy(d->px + (dy + y) * d->w + dx,
                s->px + (sy + y) * s->w + sx, w * 4);
+}
+
+/* The SCos logo: "SC" + spinning 'o' ring + "s", tightly kerned. */
+void s_scos_logo(struct surface *s, int x, int y, u32 color, int scale, int phase)
+{
+    int cw = 8 * scale;
+    s_text_scaled(s, x, y, "SC", color, scale);
+    int r = 4 * scale + 2;
+    int ox = x + 2 * cw + r + 2, oy = y + 6 * scale + r;
+    static const int dxs[8] = { 0, 7, 10, 7, 0, -7, -10, -7 };
+    static const int dys[8] = { -10, -7, 0, 7, 10, 7, 0, -7 };
+    for (int k = 0; k < 8; k++) {
+        int rel = (k - phase + 16) % 8;
+        int on = rel < 3;
+        int rr = (on ? 3 : 2) * scale / 2 + (on ? 1 : 0);
+        int px = ox + dxs[k] * r / 10, py = oy + dys[k] * r / 10;
+        s_disc(s, px, py, rr, on ? color : ((color >> 2) & 0x3F3F3F));
+    }
+    s_text_scaled(s, x + 2 * cw + 2 * r + 6, y, "s", color, scale);
 }

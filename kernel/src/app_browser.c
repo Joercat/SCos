@@ -19,9 +19,9 @@ static void br_paint(struct window *w)
     s_text(s, 14, 14, "https://(no network stack)", ((t->main >> 1) & 0x7F7F7F));
 
     static const char *lines[] = {
-        "Web Browser is not available in SCos native.",
+        "Web Browser is not available on SCos.",
         "",
-        "The original simulation just embedded the host browser.",
+        "A browser needs a network path, and this kernel has none:",
         "A real kernel-side browser would require:",
         "  - a network card driver (e1000/rtl8139/...)",
         "  - a full TCP/IP stack with DNS",
@@ -30,7 +30,7 @@ static void br_paint(struct window *w)
         "Together far beyond this project's scope (10k+ lines),",
         "so this app was intentionally skipped.",
         "",
-        "Everything else from the simulation is implemented natively.",
+        "All other desktop apps run natively on this kernel.",
     };
     int y = 50;
     for (unsigned i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {

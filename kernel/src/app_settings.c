@@ -68,17 +68,33 @@ static void st_paint(struct window *w)
 
     int ry = iy + 70;
     u32 bg = ui->hover_reset == 1 ? t->main : 0x333333;
-    s_fill(s, 16, ry, 110, 26, bg);
-    s_frame_rect(s, 16, ry, 110, 26, t->main);
-    s_text(s, 26, ry + 5, "Reset System", ui->hover_reset == 1 ? t->title_text : t->main);
+    s_fill(s, 16, ry, 130, 26, bg);
+    s_frame_rect(s, 16, ry, 130, 26, t->main);
+    s_text(s, 26, ry + 5, "Factory Reset", ui->hover_reset == 1 ? t->title_text : t->main);
 }
 
 static void reset_confirm_cb(int ok, const char *text, void *ud)
 {
     (void)text; (void)ud;
     if (!ok) return;
-    system_reset();
-    wm_dialog("Settings", "System reset complete.", NULL, NULL, NULL);
+    /* wipe everything back to shipping defaults and persist the wipe */
+    theme_set_index(0);
+    vfs_factory_reset();
+    settings_save();
+    fs_image_save();
+    /* tell the user what happened, then restart the machine */
+    fb_clear(0x000000);
+    const struct theme *t = theme_current();
+    const char *m1 = "Factory reset complete";
+    const char *m2 = "All user data was erased and defaults were restored.";
+    const char *m3 = "The system is restarting...";
+    s_text_scaled(&screen, (screen_w - s_text_width(m1) * 3) / 2, screen_h / 2 - 70, m1, t->main, 3);
+    s_text(&screen, (screen_w - s_text_width(m2)) / 2, screen_h / 2, m2, 0xCCCCCC);
+    s_text(&screen, (screen_w - s_text_width(m3)) / 2, screen_h / 2 + 30, m3, 0xAAAAAA);
+    fb_flip();
+    sleep_ms(1500);
+    cpu_reboot_8042();
+    for (;;) cpu_hlt();
 }
 
 static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
@@ -95,7 +111,7 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
     }
     int iy = 60 + ((theme_count() + 3) / 4) * (TILE_H + 12) + 16;
     int ry = iy + 70;
-    if (x >= 16 && y >= ry && x < 126 && y < ry + 26) ui->hover_reset = 1;
+    if (x >= 16 && y >= ry && x < 146 && y < ry + 26) ui->hover_reset = 1;
     if (oldt != ui->hover_tile || oldr != ui->hover_reset) wm_redraw(w);
 
     if (e->type != MEV_BUTTON || !e->down || e->button != MBTN_LEFT) return;
@@ -104,8 +120,9 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
         settings_save();
         wm_redraw(w);
     } else if (ui->hover_reset == 1) {
-        wm_dialog("Reset System",
-                  "Are you sure you want to reset the system? All data will be lost.",
+        wm_dialog("Factory Reset",
+                  "Erase ALL user data (files, settings) and restore the "
+                  "system to factory defaults? The computer will restart.",
                   NULL, reset_confirm_cb, NULL);
     }
 }

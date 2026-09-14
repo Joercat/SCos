@@ -1,7 +1,11 @@
-/* SCos native - About app */
+/*
+ * SCos native - About app.
+ *
+ * Shows the logo plus a live report of the machine the kernel is actually
+ * running on: CPU brand from CPUID, RAM from the E801 map, disk model from
+ * ATA IDENTIFY, video mode from the VBE handoff, uptime from the PIT.
+ */
 #include "scos.h"
-
-static void ab_open(struct window *w, void *arg) { (void)arg; (void)w; }
 
 static void ab_paint(struct window *w)
 {
@@ -10,44 +14,64 @@ static void ab_paint(struct window *w)
     s_fill(s, 0, 0, s->w, s->h, t->win_bg);
 
     int cx = s->w / 2;
-    /* logo with spinning 'o' (animated ring of dots) */
     int phase = (int)(tick_count / 8) % 8;
-    s_text_scaled(s, cx - 4 * 8 * 2, 20, "SC", t->main, 2);
-    s_text_scaled(s, cx + 0 * 8 * 2, 20, "s", t->main, 2);
-    int ox = cx - 8 * 2 + 8, oy = 20 + 16;
-    for (int k = 0; k < 8; k++) {
-        int a = (k + phase) % 8;
-        static const int dxs[8] = { 0, 5, 7, 5, 0, -5, -7, -5 };
-        static const int dys[8] = { -7, -5, 0, 5, 7, 5, 0, -5 };
-        int on = (a < 3);
-        s_disc(s, ox + dxs[k], oy + dys[k], on ? 2 : 1, on ? t->main : ((t->main >> 2) & 0x3F3F3F));
-    }
+    s_scos_logo(s, cx - 37, 14, t->main, 2, phase);
 
-    int y = 70;
-    char line[96];
-    strcpy(line, "Version: 2.0.0 (native kernel)");
-    s_text(s, cx - s_text_width(line) / 2, y, line, t->text); y += 22;
-    strcpy(line, "Released: September 2026");
-    s_text(s, cx - s_text_width(line) / 2, y, line, t->text); y += 22;
-    strcpy(line, "SCos is a simulated computer operating system.");
-    s_text(s, cx - s_text_width(line) / 2, y, line, t->text); y += 20;
-    strcpy(line, "This build runs as real bare-metal x86 code.");
-    s_text(s, cx - s_text_width(line) / 2, y, line, t->text); y += 30;
+    int y = 66;
+    char line[120];
+    strcpy(line, "SCos 2.0.0 - native x86 kernel");
+    s_text(s, cx - s_text_width(line) / 2, y, line, t->main); y += 24;
 
-    strcpy(line, "Features:");
-    s_text(s, 40, y, line, t->text); y += 22;
+    s_line(s, 24, y, s->w - 24, y, t->main); y += 14;
+
+    char cpu[49];
+    cpu_brand(cpu, sizeof(cpu));
+    strcpy(line, "CPU:      "); strcat(line, cpu);
+    s_clip_text(s, 28, y, line, t->text, s->w - 56); y += 20;
+
+    u32 tot = 0, fre = 0;
+    mm_stats(&tot, &fre);
+    strcpy(line, "Memory:   ");
+    char n[16];
+    fmt_u32(n, tot / 1024); strcat(line, n); strcat(line, " MB total, ");
+    fmt_u32(n, fre / 1024); strcat(line, n); strcat(line, " MB free");
+    s_text(s, 28, y, line, t->text); y += 20;
+
+    const char *model = ata_model();
+    strcpy(line, "Disk:     ");
+    strcat(line, model && model[0] ? model : "none detected");
+    s_clip_text(s, 28, y, line, t->text, s->w - 56); y += 20;
+
+    strcpy(line, "Video:    ");
+    char v[12];
+    fmt_u32(v, (u32)screen_w); strcat(line, v); strcat(line, "x");
+    fmt_u32(v, (u32)screen_h); strcat(line, v); strcat(line, "x");
+    fmt_u32(v, fb_bpp()); strcat(line, v);
+    strcat(line, " VBE linear framebuffer");
+    s_text(s, 28, y, line, t->text); y += 20;
+
+    u32 up = uptime_ms() / 1000;
+    strcpy(line, "Uptime:   ");
+    fmt_u32(v, up / 3600); strcat(line, v); strcat(line, "h ");
+    fmt_u32(v, (up / 60) % 60); strcat(line, v); strcat(line, "m ");
+    fmt_u32(v, up % 60); strcat(line, v); strcat(line, "s");
+    s_text(s, 28, y, line, t->text); y += 20;
+
+    strcpy(line, "Theme:    ");
+    strcat(line, t->name);
+    s_text(s, 28, y, line, t->text); y += 26;
+
     static const char *feats[] = {
-        "- Fully functional in-memory file system (+ optional disk persistence)",
-        "- Window management with drag, resize, and minimize",
-        "- Terminal with 20+ commands",
-        "- Text editor",
-        "- Calendar application",
-        "- Customizable themes",
-        "- PS/2 mouse and keyboard support",
+        "Two-stage MBR bootloader, 32-bit protected-mode kernel",
+        "PS/2 keyboard + mouse drivers, PIT timer, CMOS realtime clock",
+        "VBE framebuffer compositor with window manager and themes",
+        "In-memory file system with optional ATA disk persistence",
+        "Terminal, Files, Notepad, Calendar, Settings, Blackjack",
     };
     for (unsigned i = 0; i < sizeof(feats) / sizeof(feats[0]); i++) {
-        s_text(s, 56, y, feats[i], t->text);
-        y += 20;
+        s_text(s, 28, y, "-", t->main);
+        s_clip_text(s, 40, y, feats[i], t->text, s->w - 68);
+        y += 19;
     }
 }
 
@@ -57,5 +81,5 @@ static void ab_mouse(struct window *w, struct mouse_event *e, int x, int y) { (v
 struct app app_about = {
     .id = "about", .title = "About SCos", .icon = ICON_INFO, .single = 0,
     .def_w = 520, .def_h = 460,
-    .open = ab_open, .paint = ab_paint, .key = ab_key, .mouse = ab_mouse,
+    .paint = ab_paint, .key = ab_key, .mouse = ab_mouse,
 };

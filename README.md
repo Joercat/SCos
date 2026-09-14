@@ -63,21 +63,31 @@ Kernel drivers & services (`kernel/src/`):
 
 Applications (`kernel/src/app_*.c`), all mouse-driven:
 
-* **Terminal** — `help ls cd cat echo clear date mkdir touch rm whoami version
-  calc ping sysinfo alias history open save shutdown reboot`, command
-  history (↑/↓), typewriter output effect, simulated `ping` driven by
-  `system/network.json`, scrollback with wheel scrolling
+* **Terminal** — ~40 commands (`help` lists them all): file ops
+  (`ls cd pwd cat cp mv rm mkdir touch tree hexdump head wc grep edit`),
+  system (`sysinfo cpu free df disks uptime date neofetch theme cal`),
+  shell (`echo alias history clear open save reboot shutdown`), games
+  (`calc`, `blackjack`). Command history (↑/↓), typewriter output effect,
+  scrollback with wheel scrolling. `ping` answers honestly: this kernel
+  ships no TCP/IP stack, so there is nothing to fake.
 * **Files** — back/up/refresh/new-folder toolbar, path box, click to open
   (dirs navigate, files open in Notepad), right-click menu with Delete +
   confirm dialog
 * **Notepad** — editing with cursor, Save / Save As (dialog)
 * **Calendar** — month grid, prev/next/today, today highlight, day click
-* **Settings** — theme tiles (live switch), storage usage, Reset System
-  (confirm dialog restores factory defaults)
-* **About** — system information window
-* **Browser** — intentional stub: a modal explaining that no TCP/IP stack
-  ships with this kernel (a real browser/network stack is far beyond the
-  project's size budget; the icon and dialog exist for fidelity)
+* **Settings** — theme tiles (live switch), storage usage, **Factory
+  Reset**: confirm dialog, then the user filesystem is wiped back to
+  defaults, the wipe is persisted to disk, and the machine restarts
+* **About** — live hardware report read from the machine itself: CPUID
+  brand string, memory map totals, ATA IDENTIFY model, VBE mode/bpp,
+  uptime from the PIT tick counter
+* **Blackjack** — full card game vs. the dealer: 52-card deck shuffled
+  from a PIT/RTC-derived seed, procedurally drawn cards (ranks + suit
+  pips, face-down hole card), hit/stand/new-round by mouse or H/S/N keys,
+  dealer stands on 17, win/loss/push tally
+* **Browser** — intentional, honest stub window explaining that no TCP/IP
+  stack ships with this kernel (a network card driver + TCP/IP + TLS +
+  rendering engine is far beyond the project's size budget)
 
 Easter egg from the web version included: if `home/documents/file.scv`
 exists, ERROR windows start spawning (capped at 50).

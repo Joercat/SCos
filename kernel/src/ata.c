@@ -15,6 +15,7 @@
 #define IMG_MAX_SECTORS 256     /* 128 KB image budget */
 
 struct ata_dev {
+    char model[41];
     u16 io, ctrl;
     u8  slave;
     int present;
@@ -48,6 +49,13 @@ static int ata_ident(struct ata_dev *d)
     }
     u16 buf[256];
     for (int i = 0; i < 256; i++) buf[i] = inw(d->io);
+    for (int i = 0; i < 20; i++) {
+        u16 w = buf[27 + i];
+        d->model[i * 2] = (char)(w >> 8);
+        d->model[i * 2 + 1] = (char)(w & 0xFF);
+    }
+    d->model[40] = 0;
+    for (int i = 39; i >= 0 && d->model[i] == ' '; i--) d->model[i] = 0;
     return 1;
 }
 
@@ -188,4 +196,9 @@ int fs_image_load(void)
     fs_image_found = 1;
     klog("ata: SCos fs image loaded from disk");
     return 1;
+}
+
+const char *ata_model(void)
+{
+    return dev_count ? devs[0].model : NULL;
 }

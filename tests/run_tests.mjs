@@ -27,7 +27,7 @@ function win_pos(n, dw, dh) {
     };
 }
 const ICON_POS = (i) => ({ x: 16 + (i % 8) * 88 + 40, y: 16 + Math.floor(i / 8) * 96 + 44 });
-const ICON = { files: 0, terminal: 1, notepad: 2, browser: 3, calendar: 4, settings: 5, about: 6 };
+const ICON = { files: 0, terminal: 1, notepad: 2, browser: 3, calendar: 4, settings: 5, about: 6, blackjack: 7 };
 
 async function live(state) {
     const grab = () => {
@@ -74,7 +74,7 @@ test(2, "terminal: commands", async (state) => {
     await state.type("help\n"); await sleep(1600);
     await state.type("calc 2 + 3\n"); await sleep(500);
     await state.type("echo hello scos\n"); await sleep(500);
-    await state.type("ping google.com\n"); await sleep(2500);
+    await state.type("ping google.com\n"); await sleep(700);
     await state.type("sysinfo\n"); await sleep(1200);
     await state.type("mkdir documents/testdir\n"); await sleep(400);
     await state.type("touch documents/note.txt\n"); await sleep(400);
@@ -217,8 +217,9 @@ test(7, "settings: theme switch + about", async (state) => {
 test(8, "browser stub dialog", async (state) => {
     const p = ICON_POS(ICON.browser);
     await state.click(p.x, p.y); await sleep(700);
+    const w = win_pos(1, 640, 420);
     shot(state, "28_browser_stub");
-    await state.click(512 - 60, 384 + 40); await sleep(400);   /* OK */
+    await state.click(w.x + 640 - 13, w.y + 13); await sleep(400);   /* close */
     shot(state, "29_browser_stub_closed");
 });
 
@@ -284,17 +285,26 @@ test(13, "files open-in-notepad + settings reset", async (state) => {
     await state.click(row(2).x, row(2).y); await sleep(500);   /* documents */
     await state.click(row(1).x, row(1).y); await sleep(700);   /* welcome.txt -> notepad */
     shot(state, "34_notepad_from_files");
-    /* settings reset */
+    /* close both windows so the desktop icon row is reachable */
+    const nw = win_pos(2, 700, 500);
+    await state.click(nw.x + 700 - 13, nw.y + 13); await sleep(300);
+    await state.click(w.x + 700 - 13, w.y + 13); await sleep(300);
+    /* factory reset via settings */
     const sp = ICON_POS(ICON.settings);
     await state.click(sp.x, sp.y); await sleep(700);
-    const sw = win_pos(2, 620, 480);
-    /* Reset System button: ry = 60 + rows*(TILE_H+12) + 16 + 70 ; one row of tiles */
-    const ry = 60 + 1 * (64 + 12) + 16 + 70;
+    const sw = win_pos(1, 620, 480);
+    /* Factory Reset button: ry = 60 + rows*(TILE_H+12) + 16 + 70 ; TILE_H=80 */
+    const ry = 60 + 1 * (80 + 12) + 16 + 70;
     await state.click(sw.x + 1 + 16 + 55, sw.y + TITLEBAR + ry + 13); await sleep(500);
     shot(state, "35_reset_confirm");
-    await state.key("enter"); await sleep(800);
-    shot(state, "36_after_reset");
-    if (!(await live(state))) throw new Error("frozen after reset");
+    await state.key("enter"); await sleep(1000);
+    shot(state, "36_factory_reset_screen");
+    /* the machine wipes the fs, shows a message, then restarts itself */
+    await sleep(9000);
+    state.cursor.x = 512; state.cursor.y = 384;               /* guest cursor resets on boot */
+    const n = state.serial.split("[s2] stage2 alive").length - 1;
+    if (n < 2) throw new Error("factory reset did not restart (s2 count=" + n + ")");
+    if (!(await live(state))) throw new Error("not alive after factory-reset reboot");
 });
 
 /* --------------------------------------------------------------- 14 ---- */
@@ -311,6 +321,26 @@ test(14, "resize stress (heap coalescing)", async (state) => {
     if (!(await live(state))) throw new Error("frozen after resize stress");
     await state.type("echo still alive\n"); await sleep(500);
     shot(state, "38_alive_after_stress");
+});
+
+/* --------------------------------------------------------------- 15 ---- */
+test(15, "blackjack: deal, stand, new round", async (state) => {
+    const p = ICON_POS(ICON.blackjack);
+    await state.click(p.x, p.y); await sleep(700);
+    const w = win_pos(1, 640, 480);
+    shot(state, "39_blackjack_deal");
+    /* content height = def_h - TITLEBAR; buttons at y = 454-26-40 .. +28 */
+    const by = 480 - TITLEBAR - 40;
+    /* Stand button = #2: content x 220..316 */
+    await state.click(w.x + 1 + 268, w.y + TITLEBAR + by + 14); await sleep(700);
+    shot(state, "40_blackjack_stand");
+    const c = px(state, w.x + 1 + 320, w.y + TITLEBAR + 250);   /* result banner bg = black */
+    if (c[0] > 40 || c[1] > 40 || c[2] > 40) throw new Error("no result banner after stand");
+    /* New Round = button #0: content x 12..108 */
+    await state.click(w.x + 1 + 60, w.y + TITLEBAR + by + 14); await sleep(600);
+    shot(state, "41_blackjack_newround");
+    if (!(await live(state))) throw new Error("frozen during blackjack");
+    await state.click(w.x + 640 - 13, w.y + 13); await sleep(300);
 });
 
 /* ------------------------------------------------------------- runner ---- */

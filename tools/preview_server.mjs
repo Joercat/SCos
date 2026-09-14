@@ -57,6 +57,9 @@ const PAGE = `<!doctype html>
   button { background: #123312; color: #c8ffc8; border: 1px solid #39ff14;
            padding: 4px 12px; font: inherit; cursor: pointer; }
   button:hover { background: #39ff14; color: #060f06; }
+  a.btn { background: #123312; color: #c8ffc8; border: 1px solid #39ff14;
+          padding: 4px 12px; font: inherit; cursor: pointer; text-decoration: none; }
+  a.btn:hover { background: #39ff14; color: #060f06; }
   #wrap { display: flex; justify-content: center; padding: 14px; }
   #screen_container { width: 1024px; height: 768px; background: #000;
                       box-shadow: 0 0 40px #000; cursor: none; }
@@ -70,6 +73,8 @@ const PAGE = `<!doctype html>
   <b>SCos 2.0</b> native kernel &mdash; live preview
   <span class="sp"></span>
   <span id="status">starting...</span>
+  <a class="btn" href="/scos.img?download=1" download="scos.img">Download image</a>
+  <button id="btn_power">Power off</button>
   <button id="btn_restart">Restart</button>
   <button id="btn_full">Fullscreen</button>
 </header>
@@ -101,6 +106,12 @@ function start() {
     setTimeout(() => { if (status.textContent === "booting...") status.textContent = "running"; }, 4000);
 }
 document.getElementById("btn_restart").onclick = () => { start(); };
+document.getElementById("btn_power").onclick = () => {
+    if (!emu) return;
+    status.textContent = "powering off...";
+    try { emu.stop(); } catch (e) {}
+    status.textContent = "powered off - press Restart to boot again";
+};
 document.getElementById("btn_full").onclick = () => {
     const el = document.getElementById("screen_container");
     (el.requestFullscreen || el.webkitRequestFullscreen || function(){}).call(el);
@@ -128,11 +139,14 @@ const server = http.createServer((req, res) => {
         return;
     }
     const ext = path.extname(file);
-    res.writeHead(200, {
+    const headers = {
         "Content-Type": TYPES[ext] || "application/octet-stream",
         "Content-Length": fs.statSync(file).size,
         "Cache-Control": ext === ".img" ? "no-store" : "public, max-age=3600",
-    });
+    };
+    if (url.searchParams.has("download"))
+        headers["Content-Disposition"] = 'attachment; filename="scos.img"';
+    res.writeHead(200, headers);
     fs.createReadStream(file).pipe(res);
 });
 

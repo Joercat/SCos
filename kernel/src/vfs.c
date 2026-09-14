@@ -66,22 +66,13 @@ void vfs_init_defaults(void)
     f->data = palloc(sizeof(settings)); f->size = sizeof(settings) - 1; f->cap = sizeof(settings);
     memcpy(f->data, settings, f->size); f->data[f->size] = 0;
     static const char about[] =
-        "SCos - Simulated Computer Operating System\n"
+        "SCos - a real bare-metal x86 operating system\n"
         "Version 2.0.0 (native kernel)\n"
-        "Developed with heart by the SCos team";
+        "Boots from an MBR bootloader into 32-bit protected mode.\n"
+        "Type 'neofetch' in the Terminal for a live hardware report.";
     f = node_new("about.txt", 0, sys);
     f->data = palloc(sizeof(about)); f->size = sizeof(about) - 1; f->cap = sizeof(about);
     memcpy(f->data, about, f->size); f->data[f->size] = 0;
-    static const char network[] =
-        "{\n"
-        "  \"google.com\": { \"ip\": \"172.217.160.142\", \"status\": \"online\", \"latency\": \"45ms\" },\n"
-        "  \"example.com\": { \"ip\": \"93.184.216.34\", \"status\": \"online\", \"latency\": \"60ms\" },\n"
-        "  \"local.net\": { \"ip\": \"192.168.1.1\", \"status\": \"online\", \"latency\": \"5ms\" },\n"
-        "  \"offline.site\": { \"ip\": \"10.0.0.1\", \"status\": \"offline\", \"latency\": \"timeout\" }\n"
-        "}";
-    f = node_new("network.json", 0, sys);
-    f->data = palloc(sizeof(network)); f->size = sizeof(network) - 1; f->cap = sizeof(network);
-    memcpy(f->data, network, f->size); f->data[f->size] = 0;
 }
 
 struct vfs_node *vfs_lookup(const char *path)
@@ -232,4 +223,43 @@ char *vfs_parent_path(const char *path, char *out)
     strncpy(out, path, i + 1);
     out[i + 1] = 0;
     return out;
+}
+
+int vfs_rename(const char *oldp, const char *newp)
+{
+    struct vfs_node *n = vfs_lookup(oldp);
+    if (!n || !n->parent) return 0;
+    const char *slash = newp;
+    for (const char *q = newp; *q; q++) if (*q == '/') slash = q + 1;
+    if (!*slash) return 0;
+    char parent[256];
+    int pl = (int)(slash - newp);
+    if (pl >= (int)sizeof(parent)) return 0;
+    memcpy(parent, newp, pl);
+    parent[pl] = 0;
+    struct vfs_node *p = vfs_lookup(pl ? parent : "/");
+    if (!p || !p->is_dir) return 0;
+    if (dir_child(p, slash)) return 0;
+    struct vfs_node **l = &n->parent->child;
+    while (*l && *l != n) l = &(*l)->sibling;
+    if (*l) *l = n->sibling;
+    n->sibling = p->child;
+    p->child = n;
+    n->parent = p;
+    strncpy(n->name, slash, VFS_NAME - 1);
+    n->name[VFS_NAME - 1] = 0;
+    return 1;
+}
+
+/* wipe everything back to factory defaults (used by Settings) */
+void vfs_factory_reset(void)
+{
+    node_free_recursive(vfs_root);
+    vfs_root->child = NULL;
+    vfs_init_defaults();
+}
+
+struct vfs_node *vfs_child(struct vfs_node *dir, const char *name)
+{
+    return dir_child(dir, name);
 }
