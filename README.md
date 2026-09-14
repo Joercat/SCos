@@ -103,6 +103,29 @@ scroll up, and paged help (`help`, `help --p2`, `help --p3`).
 `neofetch` prints the ASCII logo contributed in `art.txt` next to the
 live hardware report.
 
+* **Solitaire** - full Klondike: 7 tableau piles (descending, alternating
+  colours), foundations per suit, stock with recycle, stack moves,
+  auto-flip, win detection; shared procedural card painter (`cards.c`)
+
+Desktop shell:
+* icons live on an invisible snap grid: drag them and they stick to the
+  nearest free cell (layout saved to `system/desktop.json`)
+* hold left button on empty desktop = rubber-band rectangle that
+  multi-selects icons; Delete key or right-click menu removes them
+  (app icons are only hidden from the desktop, pinned file shortcuts are
+  un-pinned; real files are never deleted this way)
+* Files right-click menu gained **Pin to Desktop** quick-launch shortcuts
+* taskbar launcher button (far left) opens a search-as-you-type app menu -
+  the place to find apps you removed from the desktop
+* `rm` refuses to delete `/system/*` unless given `-s`/`-f`
+* kernel panic screen (`panic` command in the terminal triggers it on
+  demand): ASCII art, reason, exception, full register dump incl. EIP /
+  EFLAGS from the interrupt frame, raw stack dump, then halt
+* boot screen is a real init log: each `[ OK ]` line is printed by the
+  subsystem that just came up (CPU brand + measured MHz, memory, VBE
+  mode, ATA drives + model, fs image status, RTC date); only the final
+  "Finishing... I think..." line keeps the old ceremonial spinner
+
 Easter egg from the web version included: if `home/documents/file.scv`
 exists, ERROR windows start spawning (capped at 50).
 

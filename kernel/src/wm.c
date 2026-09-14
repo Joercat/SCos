@@ -10,6 +10,8 @@
 
 #define MAX_WINDOWS 48
 #define TASKBAR_H 40
+static void desktop_load(void);
+static void desktop_save(void);
 #define BTN_SZ 18
 
 struct window wins[MAX_WINDOWS];
@@ -48,6 +50,7 @@ static const struct { const char *app; int icon; const char *label; } desk_icons
     { "about",    ICON_INFO,     "About"    },
     { "blackjack", ICON_CARDS,   "Blackjack" },
     { "sysmon",   ICON_CHART,    "SysMon"   },
+    { "solitaire", ICON_SOL,     "Solitaire" },
 };
 #define N_ICONS ((int)(sizeof(desk_icons)/sizeof(desk_icons[0])))
 static int icon_hover = -1;
@@ -62,7 +65,7 @@ static int power_hover = 0;
 
 static void tb_geom(int *x0, int *x1, int *vis, int *scrollable)
 {
-    *x0 = 8;
+    *x0 = 8 + 40;                        /* after the launcher button */
     *x1 = screen_w - TB_CLOCK_W - TB_POWER_W - 24;
     int cap = (*x1 - *x0) / (TB_BTN_W + TB_BTN_GAP);
     if (cap < 1) cap = 1;
@@ -230,6 +233,7 @@ void wm_init(void)
     modal_w = NULL;
     mx = screen_w / 2;
     my = screen_h / 2;
+    desktop_load();
     dirty = 1;
 }
 
@@ -263,10 +267,141 @@ static void paint_wallpaper(void)
     s_disc(&screen, screen_w - 80, 90, 60, blend(t->bg_top, t->main, 8));
 }
 
+/* ---- desktop items: app launchers + pinned files on a snap grid ---- */
+#define DESK_MAX  32
+#define DESK_COLS 11
+#define DESK_ROWS 7
+struct ditem { int kind; char app[32]; char path[192]; char label[40];
+               int gx, gy, hidden; };
+static struct ditem items[DESK_MAX];
+static int nitems;
+static u32 desk_sel;                       /* selection bitmask */
+static int desk_drag = -1, desk_drag_ox, desk_drag_oy, desk_drag_moved;
+static int desk_sx, desk_sy;
+static int band_active, band_x0, band_y0, band_x1, band_y1;
+static struct { int active; char q[48]; int qpos; int hover; } launch;
+
+static int ditem_icon(struct ditem *d)
+{
+    if (d->kind == 0) { struct app *a = app_find(d->app); if (a) return a->icon; }
+    return ICON_NOTEPAD;
+}
+static int cell_taken(int gx, int gy, int skip)
+{
+    for (int i = 0; i < nitems; i++)
+        if (i != skip && !items[i].hidden && items[i].gx == gx && items[i].gy == gy) return 1;
+    return 0;
+}
+static void desktop_save(void)
+{
+    char buf[2048];
+    strcpy(buf, "SCOSDESK1\n");
+    for (int i = 0; i < nitems; i++) {
+        char n[8];
+        fmt_u32(n, (u32)items[i].kind); strcat(buf, n); strcat(buf, "|");
+        strcat(buf, items[i].app); strcat(buf, "|");
+        strcat(buf, items[i].path); strcat(buf, "|");
+        strcat(buf, items[i].label); strcat(buf, "|");
+        fmt_u32(n, (u32)items[i].gx); strcat(buf, n); strcat(buf, "|");
+        fmt_u32(n, (u32)items[i].gy); strcat(buf, n); strcat(buf, "|");
+        fmt_u32(n, (u32)items[i].hidden); strcat(buf, n); strcat(buf, "\n");
+        if (strlen(buf) > 1900) break;
+    }
+    vfs_write("system/desktop.json", buf, (u32)strlen(buf));
+}
+static void desktop_load(void)
+{
+    nitems = 0; desk_sel = 0;
+    u32 len = 0;
+    char *data = vfs_read("system/desktop.json", &len);
+    if (data && len > 10 && !memcmp(data, "SCOSDESK1", 9)) {
+        char *p = data + 10;
+        while (*p && nitems < DESK_MAX) {
+            char *fld[7]; int nf = 0;
+            fld[nf++] = p;
+            while (*p && *p != '\n') { if (*p == '|') { *p = 0; if (nf < 7) fld[nf++] = p + 1; } p++; }
+            if (*p) *p++ = 0;
+            if (nf < 7) break;
+            struct ditem *d = &items[nitems];
+            d->kind = (int)str_to_u32(fld[0]);
+            strncpy(d->app, fld[1], 31); d->app[31] = 0;
+            strncpy(d->path, fld[2], 191); d->path[191] = 0;
+            strncpy(d->label, fld[3], 39); d->label[39] = 0;
+            d->gx = (int)str_to_u32(fld[4]); d->gy = (int)str_to_u32(fld[5]);
+            d->hidden = (int)str_to_u32(fld[6]);
+            nitems++;
+        }
+    }
+    if (!nitems) {
+        for (int i = 0; i < N_ICONS && nitems < DESK_MAX; i++) {
+            struct ditem *d = &items[nitems++];
+            d->kind = 0;
+            strncpy(d->app, desk_icons[i].app, 31);
+            d->path[0] = 0;
+            strncpy(d->label, desk_icons[i].label, 39);
+            d->gx = i % 8; d->gy = i / 8; d->hidden = 0;
+        }
+    }
+}
+static void desktop_open(struct ditem *d)
+{
+    if (d->kind == 0) wm_open_app(d->app, NULL);
+    else wm_open_app("notepad", d->path);
+}
+static void desk_remove_sel(void)
+{
+    for (int i = 0; i < nitems; i++) {
+        if (!(desk_sel & (1u << i))) continue;
+        if (items[i].kind == 0) items[i].hidden = 1;
+        else {
+            for (int k = i; k + 1 < nitems; k++) items[k] = items[k + 1];
+            nitems--; i--;
+        }
+    }
+    desk_sel = 0;
+    desktop_save();
+}
+void wm_desktop_pin_file(const char *path)
+{
+    if (nitems >= DESK_MAX) return;
+    for (int i = 0; i < nitems; i++)
+        if (!items[i].kind && !strcmp(items[i].path, path) == 0 && items[i].kind == 1 && !strcmp(items[i].path, path)) return;
+    struct ditem *d = &items[nitems];
+    d->kind = 1;
+    d->app[0] = 0;
+    strncpy(d->path, path, 191); d->path[191] = 0;
+    const char *base = path;
+    for (const char *q = path; *q; q++) if (*q == '/') base = q + 1;
+    strncpy(d->label, base, 39); d->label[39] = 0;
+    int placed = 0;
+    for (int gy = 0; gy < DESK_ROWS && !placed; gy++)
+        for (int gx = 0; gx < DESK_COLS && !placed; gx++)
+            if (!cell_taken(gx, gy, -1)) { d->gx = gx; d->gy = gy; placed = 1; }
+    if (!placed) { d->gx = 0; d->gy = 0; }
+    d->hidden = 0;
+    nitems++;
+    desktop_save();
+    dirty = 1;
+}
+static void desk_item_menu_cb(int item, void *ud)
+{
+    (void)ud;
+    if (item == 0) {
+        for (int i = 0; i < nitems; i++)
+            if (desk_sel & (1u << i)) { desktop_open(&items[i]); break; }
+    } else desk_remove_sel();
+}
+static void desk_sel_menu_cb(int item, void *ud)
+{
+    (void)ud;
+    if (item == 0) desk_remove_sel();
+    else desk_sel = 0;
+}
+
 static void icon_rect(int i, int *x, int *y, int *w, int *h)
 {
-    *x = 16 + (i % 8) * 88;
-    *y = 16 + (i / 8) * 96;
+    *x = 16 + items[i].gx * 88;
+    *y = 16 + items[i].gy * 96;
     *w = 80; *h = 88;
 }
 
@@ -277,16 +412,29 @@ static void paint_icons(void)
     /* no hover feedback while dragging/resizing/modally busy: the pointer is
      * occupied and highlighting launch buttons underneath is misleading */
     int interactive = !drag_win && !resize_win && !menu.active && !modal_w;
-    for (int i = 0; i < N_ICONS; i++) {
+    for (int i = 0; i < nitems; i++) {
+        if (items[i].hidden) continue;
         int x, y, w, h;
         icon_rect(i, &x, &y, &w, &h);
-        if (interactive && in_rect(mx, my, x, y, w, h)) {
+        if (desk_drag == i && desk_drag_moved) { x = mx - desk_drag_ox; y = my - desk_drag_oy; }
+        if (desk_sel & (1u << i)) {
+            s_fill(&screen, x, y, w, h, blend(t->bg_top, t->main, 30));
+            s_frame_rect(&screen, x, y, w, h, t->main);
+        } else if (interactive && in_rect(mx, my, x, y, w, h)) {
             icon_hover = i;
             s_fill(&screen, x, y, w, h, blend(t->bg_top, t->main, 18));
         }
-        s_icon(&screen, desk_icons[i].icon, x + (w - 24) / 2, y + 8, t->main);
-        int tw = s_text_width(desk_icons[i].label);
-        s_text(&screen, x + (w - tw) / 2, y + 40, desk_icons[i].label, t->text);
+        s_icon(&screen, ditem_icon(&items[i]), x + (w - 24) / 2, y + 8, t->main);
+        int tw = s_text_width(items[i].label);
+        s_clip_text(&screen, x + (w - tw) / 2, y + 40, items[i].label, t->text, w);
+    }
+    if (band_active) {
+        int x = band_x0 < band_x1 ? band_x0 : band_x1;
+        int y = band_y0 < band_y1 ? band_y0 : band_y1;
+        int w = band_x0 < band_x1 ? band_x1 - band_x0 : band_x0 - band_x1;
+        int h = band_y0 < band_y1 ? band_y1 - band_y0 : band_y0 - band_y1;
+        s_fill(&screen, x, y, w, h, blend(t->bg_top, t->main, 15));
+        s_frame_rect(&screen, x, y, w, h, t->main);
     }
 }
 
@@ -348,6 +496,14 @@ static void paint_taskbar(void)
     int y = screen_h - TASKBAR_H;
     s_fill(&screen, 0, y, screen_w, TASKBAR_H, t->taskbar_bg);
     s_fill(&screen, 0, y, screen_w, 1, t->main);
+
+    /* launcher button */
+    u32 lbg = launch.active ? blend(t->taskbar_bg, t->main, 45) : blend(t->taskbar_bg, t->main, 12);
+    s_fill(&screen, 8, y + 6, 34, TASKBAR_H - 12, lbg);
+    s_frame_rect(&screen, 8, y + 6, 34, TASKBAR_H - 12, blend(t->taskbar_bg, t->main, 60));
+    u32 lc = launch.active ? t->title_text : t->main;
+    for (int q = 0; q < 4; q++)
+        s_fill(&screen, 15 + (q % 2) * 11, y + 12 + (q / 2) * 9, 8, 6, lc);
 
     int x0, x1, vis, scrollable;
     tb_geom(&x0, &x1, &vis, &scrollable);
@@ -426,6 +582,42 @@ static void paint_cursor(void)
     }
 }
 
+static int launch_match(int idx)
+{
+    struct app *a = app_at(idx);
+    if (!a) return 0;
+    if (!launch.q[0]) return 1;
+    return strstr(a->id, launch.q) || strstr(a->title, launch.q);
+}
+
+static void paint_launcher(void)
+{
+    const struct theme *t = theme_current();
+    int px = 8, py = screen_h - TASKBAR_H - 308, pw = 300, ph = 300;
+    s_fill(&screen, px, py, pw, ph, t->win_bg);
+    s_frame_rect(&screen, px, py, pw, ph, t->main);
+    s_text(&screen, px + 10, py + 8, "Launch an app (type to search)", t->main);
+    s_frame_rect(&screen, px + 10, py + 26, pw - 20, 20, t->main);
+    s_text(&screen, px + 14, py + 30, launch.q, t->text);
+    if ((tick_count / 50) % 2 == 0)
+        s_fill(&screen, px + 14 + s_text_width(launch.q), py + 30, 2, 12, t->main);
+    int y = py + 56;
+    launch.hover = -1;
+    int row = 0;
+    for (int i = 0; i < app_count(); i++) {
+        if (!launch_match(i)) continue;
+        if (row >= 10) break;
+        if (in_rect(mx, my, px + 6, y - 3, pw - 12, 22)) {
+            launch.hover = i;
+            s_fill(&screen, px + 6, y - 3, pw - 12, 22, blend(t->win_bg, t->main, 25));
+        }
+        s_icon(&screen, app_at(i)->icon, px + 12, y, t->main);
+        s_text(&screen, px + 44, y + 4, app_at(i)->title, t->text);
+        y += 24; row++;
+    }
+    if (!row) s_text(&screen, px + 14, y, "(no matching app)", ((t->main >> 1) & 0x7F7F7F));
+}
+
 static void paint_all(void)
 {
     paint_wallpaper();
@@ -446,6 +638,7 @@ static void paint_all(void)
     }
     paint_menu();
     paint_taskbar();
+    if (launch.active) paint_launcher();
     paint_cursor();
     fb_flip();
 }
@@ -466,6 +659,13 @@ static void handle_mouse(struct mouse_event *e)
             if (drag_win->y > screen_h - TASKBAR_H - WIN_TITLEBAR)
                 drag_win->y = screen_h - TASKBAR_H - WIN_TITLEBAR;
         }
+        if (band_active) {
+            band_x1 = mx; band_y1 = my;
+            dirty = 1;
+        }
+        if (desk_drag >= 0 && !desk_drag_moved &&
+            (mx - desk_sx > 6 || mx - desk_sx < -6 || my - desk_sy > 6 || my - desk_sy < -6))
+            desk_drag_moved = 1;
         if (resize_win) {
             struct window *w = resize_win;
             int nw = mx - w->x, nh = my - w->y;
@@ -509,6 +709,46 @@ static void handle_mouse(struct mouse_event *e)
     /* buttons */
     mbuttons = e->buttons;
     if (!e->down) {
+        if (desk_drag >= 0) {
+            if (desk_drag_moved) {
+                int gx = (mx - desk_drag_ox + 40 - 16) / 88;
+                int gy = (my - desk_drag_oy + 44 - 16) / 96;
+                if (gx < 0) gx = 0; if (gx > DESK_COLS - 1) gx = DESK_COLS - 1;
+                if (gy < 0) gy = 0; if (gy > DESK_ROWS - 1) gy = DESK_ROWS - 1;
+                if (cell_taken(gx, gy, desk_drag)) {       /* nearest free cell */
+                    for (int r = 1; r < 8 && cell_taken(gx, gy, desk_drag); r++)
+                        for (int dy = -r; dy <= r && cell_taken(gx, gy, desk_drag); dy++)
+                            for (int dx = -r; dx <= r && cell_taken(gx, gy, desk_drag); dx++) {
+                                int nx = gx + dx, ny = gy + dy;
+                                if (nx >= 0 && nx < DESK_COLS && ny >= 0 && ny < DESK_ROWS &&
+                                    !cell_taken(nx, ny, desk_drag)) { gx = nx; gy = ny; }
+                            }
+                }
+                items[desk_drag].gx = gx; items[desk_drag].gy = gy;
+                desktop_save();
+            } else {
+                desktop_open(&items[desk_drag]);
+            }
+            desk_drag = -1;
+        }
+        if (band_active) {
+            band_active = 0;
+            if ((band_x1 - band_x0 > 4 || band_x1 - band_x0 < -4) &&
+                (band_y1 - band_y0 > 4 || band_y1 - band_y0 < -4)) {
+                int x = band_x0 < band_x1 ? band_x0 : band_x1;
+                int y = band_y0 < band_y1 ? band_y0 : band_y1;
+                int w = band_x0 < band_x1 ? band_x1 - band_x0 : band_x0 - band_x1;
+                int h = band_y0 < band_y1 ? band_y1 - band_y0 : band_y0 - band_y1;
+                desk_sel = 0;
+                for (int i = 0; i < nitems; i++) {
+                    if (items[i].hidden) continue;
+                    int ix, iy, iw, ih;
+                    icon_rect(i, &ix, &iy, &iw, &ih);
+                    if (ix < x + w && ix + iw > x && iy < y + h && iy + ih > y)
+                        desk_sel |= (1u << i);
+                }
+            }
+        }
         drag_win = NULL;
         resize_win = NULL;
         dirty = 1;
@@ -527,6 +767,23 @@ static void handle_mouse(struct mouse_event *e)
         }
         dirty = 1;
         return;
+    }
+
+    if (launch.active) {
+        int px = 8, py = screen_h - TASKBAR_H - 308, pw = 300, ph = 300;
+        if (in_rect(mx, my, px, py, pw, ph)) {
+            if (launch.hover >= 0) {
+                wm_open_app(app_at(launch.hover)->id, NULL);
+                launch.active = 0;
+            }
+            dirty = 1;
+            return;
+        }
+        if (!in_rect(mx, my, 8, screen_h - TASKBAR_H + 6, 34, 28)) {
+            launch.active = 0;
+            dirty = 1;
+            return;
+        }
     }
 
     struct window *w = win_at_point(mx, my);
@@ -577,18 +834,55 @@ static void handle_mouse(struct mouse_event *e)
         return;
     }
 
-    /* desktop icons */
-    for (int i = 0; i < N_ICONS; i++) {
-        int x, y, ww, hh;
-        icon_rect(i, &x, &y, &ww, &hh);
-        if (in_rect(mx, my, x, y, ww, hh)) {
-            wm_open_app(desk_icons[i].app, NULL);
-            dirty = 1;
-            return;
+    /* desktop items: left = select/drag/open, right = context menu
+     * (taskbar area is handled further below) */
+    if (e->button == MBTN_LEFT && my < screen_h - TASKBAR_H) {
+        for (int i = 0; i < nitems; i++) {
+            if (items[i].hidden) continue;
+            int x, y, ww, hh;
+            icon_rect(i, &x, &y, &ww, &hh);
+            if (in_rect(mx, my, x, y, ww, hh)) {
+                if (!(desk_sel & (1u << i))) desk_sel = (1u << i);
+                desk_drag = i; desk_drag_moved = 0;
+                desk_drag_ox = mx - x; desk_drag_oy = my - y;
+                desk_sx = mx; desk_sy = my;
+                dirty = 1;
+                return;
+            }
         }
+        band_active = 1;
+        band_x0 = band_x1 = mx; band_y0 = band_y1 = my;
+        desk_sel = 0;
+        dirty = 1;
+        return;
+    }
+    if (e->button == MBTN_RIGHT && my < screen_h - TASKBAR_H) {
+        int hit = -1;
+        for (int i = 0; i < nitems; i++) {
+            if (items[i].hidden) continue;
+            int x, y, ww, hh;
+            icon_rect(i, &x, &y, &ww, &hh);
+            if (in_rect(mx, my, x, y, ww, hh)) { hit = i; break; }
+        }
+        if (hit >= 0) {
+            if (!(desk_sel & (1u << hit))) desk_sel = (1u << hit);
+            static const char *m[2] = { "Open", "Remove from Desktop" };
+            wm_menu(mx, my, m, 2, desk_item_menu_cb, NULL);
+        } else if (desk_sel) {
+            static const char *m[2] = { "Remove from Desktop", "Clear Selection" };
+            wm_menu(mx, my, m, 2, desk_sel_menu_cb, NULL);
+        }
+        dirty = 1;
+        return;
     }
     /* taskbar */
     if (my >= screen_h - TASKBAR_H) {
+        if (in_rect(mx, my, 8, screen_h - TASKBAR_H + 6, 34, TASKBAR_H - 12)) {
+            launch.active = !launch.active;
+            launch.q[0] = 0; launch.qpos = 0;
+            dirty = 1;
+            return;
+        }
         int px, py, pw, ph;
         tb_power_rect(&px, &py, &pw, &ph);
         if (in_rect(mx, my, px, py, pw, ph)) {
@@ -624,6 +918,24 @@ static void handle_key(struct key_event *e)
 {
     if (menu.active && e->pressed && e->keycode == 27) {
         menu.active = 0;
+        dirty = 1;
+        return;
+    }
+    if (launch.active) {
+        if (e->pressed && e->keycode == 27) { launch.active = 0; dirty = 1; return; }
+        if (e->pressed && e->keycode == '\n') {
+            for (int i = 0; i < app_count(); i++)
+                if (launch_match(i)) { wm_open_app(app_at(i)->id, NULL); break; }
+            launch.active = 0;
+            dirty = 1;
+            return;
+        }
+        edit_line(launch.q, &launch.qpos, sizeof(launch.q), e);
+        dirty = 1;
+        return;
+    }
+    if (e->pressed && e->keycode == KEY_DELETE && desk_sel && !focused_w && !modal_w) {
+        desk_remove_sel();
         dirty = 1;
         return;
     }

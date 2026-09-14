@@ -249,3 +249,14 @@ char *strncat(char *d, const char *s, u32 n)
     *d = 0;
     return o;
 }
+
+const char *strstr(const char *h, const char *n)
+{
+    if (!*n) return h;
+    for (; *h; h++) {
+        const char *a = h, *b = n;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (!*b) return h;
+    }
+    return NULL;
+}

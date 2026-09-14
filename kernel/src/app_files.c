@@ -69,7 +69,7 @@ static void files_full_path(struct files *f, int row, char *out)
 }
 
 /* ------------------------------------------------------- context menus --- */
-static const char *menu_file_items[] = { "Open", "Delete" };
+static const char *menu_file_items[] = { "Open", "Delete", "Pin to Desktop" };
 static const char *menu_bg_items[] = { "New Folder", "Refresh" };
 
 struct fm_ctx { struct window *w; int row; };
@@ -122,6 +122,12 @@ static void file_menu_cb(int item, void *ud)
             files_full_path(f, ctx->row, full);
             wm_open_app("notepad", full);
         }
+        pfree(ctx, sizeof(*ctx));
+    } else if (item == 2) {
+        char full[300];
+        files_full_path(f, ctx->row, full);
+        if (files_is_dir_row(f, ctx->row)) strcat(full, "/");
+        wm_desktop_pin_file(full);
         pfree(ctx, sizeof(*ctx));
     } else {
         char msg[160];
@@ -229,7 +235,7 @@ static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
         ctx->w = w;
         ctx->row = f->hover_row;
         if (f->hover_row >= 0)
-            wm_menu(mx_abs(w, x), my_abs(w, y), menu_file_items, 2, file_menu_cb, ctx);
+            wm_menu(mx_abs(w, x), my_abs(w, y), menu_file_items, 3, file_menu_cb, ctx);
         else
             wm_menu(mx_abs(w, x), my_abs(w, y), menu_bg_items, 2, bg_menu_cb, ctx);
         return;

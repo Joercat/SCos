@@ -102,9 +102,7 @@ void isr_handler(struct regs *r)
         klog_raw("!! exception entered");
         const char *name = r->int_no < 20 ? exc_names[r->int_no] : "Reserved";
         klog("!! EXCEPTION %d (%s) eip-err=%x", r->int_no, name, r->err_code);
-        irq_disable();
-        wm_fatal_screen("KERNEL FAULT", name);
-        for (;;) cpu_hlt();
+        kernel_panic_regs(name, r);
     }
     u8 irq = (u8)(r->int_no - 32);
     if (irq_handlers[irq]) irq_handlers[irq](r);

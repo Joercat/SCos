@@ -76,6 +76,8 @@ struct regs {
 };
 
 typedef void (*irq_handler_t)(struct regs *);
+void kernel_panic(const char *reason);
+void kernel_panic_regs(const char *name, struct regs *r);
 
 void idt_init(void);
 void irq_install(u8 irq, irq_handler_t h);
@@ -159,6 +161,7 @@ void s_char_bg(struct surface *s, int x, int y, char ch, u32 fg, u32 bg);
 void s_text(struct surface *s, int x, int y, const char *str, u32 fg);
 void s_text_bg(struct surface *s, int x, int y, const char *str, u32 fg, u32 bg);
 char *strncat(char *d, const char *s, u32 n);
+const char *strstr(const char *h, const char *n);
 char *str_chr(const char *s, char c);
 void cpu_brand(char *out, int max);
 void s_scos_logo(struct surface *s, int x, int y, u32 color, int scale, int phase);
@@ -181,9 +184,13 @@ void fmt_pad2(char *out, u32 v);
 
 /* icon drawing (procedural, 24x24 logical box at x,y) */
 enum { ICON_FOLDER, ICON_TERMINAL, ICON_NOTEPAD, ICON_BROWSER,
-       ICON_CALENDAR, ICON_SETTINGS, ICON_INFO, ICON_CARDS, ICON_CHART, ICON_COUNT };
+       ICON_CALENDAR, ICON_SETTINGS, ICON_INFO, ICON_CARDS, ICON_CHART, ICON_SOL, ICON_COUNT };
 void s_icon(struct surface *s, int id, int x, int y, u32 c);
 u32  color_blend(u32 a, u32 b, int t);
+int  card_w(void);
+int  card_h(void);
+void card_draw(struct surface *s, int x, int y, u8 card, int face_down, u32 back_color);
+const char *card_rank_str(int rank);
 
 /* ------------------------------------------------------------------ mm ---- */
 void  mm_init(void);
@@ -332,6 +339,7 @@ void wm_poweroff_screen(void);
 /* apps registry */
 void apps_register_all(void);
 struct app *app_find(const char *id);
+void wm_desktop_pin_file(const char *path);
 int  app_count(void);
 struct app *app_at(int i);
 

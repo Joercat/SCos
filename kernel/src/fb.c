@@ -258,6 +258,14 @@ void s_icon(struct surface *s, int id, int x, int y, u32 c)
         s_fill(s, x + 11, y + 10, 2, 8, c);
         s_fill(s, x + 11, y + 6, 2, 2, c);
         break;
+    case ICON_SOL:
+        s_fill(s, x + 3, y + 6, 12, 16, (c & 0xFEFEFE) >> 1);
+        s_frame_rect(s, x + 3, y + 6, 12, 16, c);
+        s_fill(s, x + 8, y + 4, 12, 16, (c & 0xFEFEFE) >> 1);
+        s_frame_rect(s, x + 8, y + 4, 12, 16, c);
+        s_fill(s, x + 13, y + 2, 12, 16, (c & 0xFEFEFE) >> 1);
+        s_frame_rect(s, x + 13, y + 2, 12, 16, c);
+        break;
     case ICON_CHART:
         s_frame_rect(s, x + 2, y + 3, 20, 18, c);
         s_fill(s, x + 5, y + 12, 3, 6, c);

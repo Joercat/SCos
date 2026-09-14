@@ -109,7 +109,7 @@ static const char *help_text =
     "touch     - Create an empty file\n"
     "cp        - Copy a file\n"
     "mv        - Move or rename a file\n"
-    "rm        - Delete file or directory\n"
+    "rm [-s]   - Delete file (-s also allows system files)\n"
     "whoami    - Show current user\n"
     "version   - Show system version\n"
     "uptime    - Time since boot (PIT)\n"
@@ -128,9 +128,11 @@ static const char *help_text =
     "edit      - Open a file in Notepad\n"
     "open      - Launch a desktop app\n"
     "blackjack - Play blackjack\n"
+    "solitaire - Play Klondike solitaire\n"
     "save      - Write the filesystem image to disk\n"
     "shutdown  - Power the machine off\n"
-    "reboot    - Restart the machine\n";
+    "reboot    - Restart the machine\n"
+    "panic     - Trigger a kernel panic screen (for inspection)\n";
 
 static const char *month_names[12] = { "Jan","Feb","Mar","Apr","May","Jun",
                                        "Jul","Aug","Sep","Oct","Nov","Dec" };
@@ -349,11 +351,19 @@ static void run_command(struct term *t, const char *command)
         }
     }
     else if (!strcmp(cmd, "rm")) {
-        if (nargs < 2) strcpy(response, "Error: No file or directory specified.");
+        int force = 0;
+        const char *target = NULL;
+        for (int j = 1; j < nargs; j++) {
+            if (!strcmp(args[j], "-s") || !strcmp(args[j], "-f")) force = 1;
+            else target = args[j];
+        }
+        if (!target) strcpy(response, "Error: No file or directory specified. (rm [-s] <path>)");
         else {
             char path[256];
-            resolve_path(t, args[1], path);
-            if (vfs_delete(path)) {
+            resolve_path(t, target, path);
+            if (!force && !strncmp(path, "/system/", 8))
+                strcpy(response, "Error: system file - use 'rm -s <path>' to delete it anyway");
+            else if (vfs_delete(path)) {
                 strcpy(response, "Removed: "); strcat(response, path);
             } else strcpy(response, "Error: File or directory not found.");
         }
@@ -463,6 +473,14 @@ static void run_command(struct term *t, const char *command)
         term_print(t, "Rebooting SCos... Please wait.");
         t->shutting_down = 2;
         return;
+    }
+    else if (!strcmp(cmd, "panic")) {
+        char msg[128];
+        msg[0] = 0;
+        for (int j = 1; j < nargs; j++) { if (j > 1) strcat(msg, " "); strncat(msg, args[j], 96); }
+        term_print(t, "Triggering kernel panic as requested...");
+        sleep_ms(600);
+        kernel_panic(msg[0] ? msg : "panic requested from terminal");
     }
     else if (!strcmp(cmd, "pwd")) {
         strcpy(response, t->cwd);

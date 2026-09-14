@@ -110,7 +110,7 @@ test(3, "window manager: drag / resize / min / max / taskbar", async (state) => 
     const gone = px(state, nx + 30, ny + 60);
     shot(state, "06_minimized");
     /* restore from taskbar */
-    await state.click(40, SCREEN_H - 20); await sleep(400);
+    await state.click(110, SCREEN_H - 20); await sleep(400);   /* task button 0 (after launcher btn) */
     const back = px(state, nx + 30, ny + 60);
     if (gone[0] === back[0] && gone[1] === back[1] && gone[2] === back[2])
         throw new Error("minimize/restore produced identical pixels");
@@ -362,7 +362,7 @@ test(16, "sysmon: metrics + end task", async (state) => {
     /* select files row (apps start at row 5; files = win1 -> row 6) and end it */
     await state.click(sw.x + 1 + 200, sw.y + TITLEBAR + 222 + 6 * 18 + 8); await sleep(400);
     shot(state, "43_sysmon_sel");
-    const row = () => state.framebuffer().mem.slice((748 * 1024 + 150) * 4, (748 * 1024 + 260) * 4);
+    const row = () => state.framebuffer().mem.slice((748 * 1024 + 185) * 4, (748 * 1024 + 295) * 4);
     const before = row();
     await state.click(sw.x + 1 + 67, sw.y + TITLEBAR + 480 - 36 + 13); await sleep(600);
     const after = row();
@@ -405,6 +405,71 @@ test(18, "terminal: wheel scroll + paged help", async (state) => {
     await state.type("echo back-at-bottom\n"); await sleep(900);
     shot(state, "48_follow_bottom");
     if (!(await live(state))) throw new Error("frozen after scroll");
+});
+
+/* --------------------------------------------------------------- 19 ---- */
+test(19, "solitaire: deal + draw", async (state) => {
+    const p = ICON_POS(9);
+    await state.click(p.x, p.y); await sleep(900);
+    const w = win_pos(1, 700, 500);
+    shot(state, "49_solitaire");
+    const stock = px(state, w.x + 1 + 40, w.y + TITLEBAR + 48);
+    if (stock[0] + stock[1] + stock[2] < 90) throw new Error("stock pile not drawn");
+    for (let i = 0; i < 3; i++) { await state.click(w.x + 1 + 40, w.y + TITLEBAR + 48); await sleep(300); }
+    const waste = px(state, w.x + 1 + 78 + 44, w.y + TITLEBAR + 74);
+    if (waste[0] + waste[1] + waste[2] < 300) throw new Error("waste card not drawn after draws");
+    shot(state, "50_solitaire_drawn");
+    if (!(await live(state))) throw new Error("frozen in solitaire");
+});
+
+/* --------------------------------------------------------------- 20 ---- */
+test(20, "kernel panic screen from terminal", async (state) => {
+    const p = ICON_POS(ICON.terminal);
+    await state.click(p.x, p.y); await sleep(700);
+    await state.type("panic demo halt\n"); await sleep(2000);
+    shot(state, "51_panic");
+    const fb = state.framebuffer();
+    let red = 0;
+    for (let x = 400; x < 560; x += 3) {
+        const i = (70 * fb.w + x) * 4;      /* framebuffer is BGR(A) */
+        if (fb.mem[i + 2] > 120 && fb.mem[i + 1] < 90) red++;
+    }
+    if (red < 5) throw new Error("panic title not red (red px=" + red + ")");
+    const d = px(state, 512, 700);                   /* halted: dark background */
+    if (d[0] + d[1] + d[2] > 120) throw new Error("panic background not dark");
+});
+
+/* --------------------------------------------------------------- 21 ---- */
+test(21, "desktop: drag-snap, rubber band, remove, launcher", async (state) => {
+    /* drag Files icon from cell (0,0) to cell (3,2) */
+    await state.drag(56, 60, 16 + 3 * 88 + 40, 16 + 2 * 96 + 44);
+    await sleep(400);
+    shot(state, "52_icon_moved");
+    const oldp = px(state, 56, 68);                  /* old cell now empty wallpaper */
+    const newp = px(state, 16 + 3 * 88 + 40, 16 + 2 * 96 + 24);
+    if (oldp[1] === newp[1]) throw new Error("icon did not move");
+    /* rubber band around the moved icon */
+    await state.drag(16 + 3 * 88 + 90, 16 + 2 * 96 + 90, 16 + 3 * 88 - 10, 16 + 2 * 96 - 10);
+    await sleep(300);
+    shot(state, "53_rubberband");
+    /* right-click it -> Remove from Desktop (item 1) */
+    await state.click(16 + 3 * 88 + 40, 16 + 2 * 96 + 44, "right"); await sleep(400);
+    const mx = 16 + 3 * 88 + 40, my = 16 + 2 * 96 + 44;
+    await state.click(mx + 85, my + 3 + 24 + 12); await sleep(400);
+    shot(state, "54_icon_removed");
+    const gone = px(state, 16 + 3 * 88 + 40, 16 + 2 * 96 + 24);
+    if (gone[1] > 120) throw new Error("icon still on desktop after remove");
+    /* launcher: open search, type, enter */
+    await state.click(25, 768 - 20); await sleep(400);
+    shot(state, "55_launcher");
+    const panel = px(state, 8, 768 - 40 - 150);      /* panel left frame = theme main (BGR) */
+    if (panel[1] < 120) throw new Error("launcher panel not visible");
+    await state.type("file");
+    await sleep(300);
+    shot(state, "56_launcher_search");
+    await state.key("enter"); await sleep(700);
+    shot(state, "57_launcher_opened");
+    if (!(await live(state))) throw new Error("frozen after launcher");
 });
 
 /* ------------------------------------------------------------- runner ---- */
