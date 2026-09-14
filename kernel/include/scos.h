@@ -1,0 +1,328 @@
+/*
+ * SCos native - kernel umbrella header.
+ *
+ * SCos native is a freestanding 32-bit x86 kernel: everything runs in ring 0
+ * against real hardware (VBE framebuffer, PS/2 keyboard & mouse, PIT, CMOS
+ * RTC, ATA PIO). This header declares the entire kernel API.
+ */
+#ifndef SCOS_H
+#define SCOS_H
+
+typedef unsigned char      u8;
+typedef unsigned short     u16;
+typedef unsigned int       u32;
+typedef unsigned long long u64;
+typedef signed char        i8;
+typedef signed short       i16;
+typedef signed int         i32;
+
+#define NULL ((void *)0)
+#define true 1
+#define false 0
+
+/* ---------------------------------------------------------------- boot ---- */
+struct boot_info {
+    u32 magic;        /* 'SCSP' */
+    u32 lfb_base;     /* physical address of linear framebuffer */
+    u16 pitch;        /* bytes per scanline */
+    u16 width;
+    u16 height;
+    u8  bpp;
+    u8  pad;
+    u32 mem_kb;       /* total usable memory in KB */
+};
+
+extern struct boot_info boot_info;
+
+/* ------------------------------------------------------------- string ---- */
+void *memcpy(void *d, const void *s, unsigned n);
+void *memset(void *d, int c, unsigned n);
+int   memcmp(const void *a, const void *b, unsigned n);
+unsigned strlen(const char *s);
+int   strcmp(const char *a, const char *b);
+int   strncmp(const char *a, const char *b, unsigned n);
+char *strcpy(char *d, const char *s);
+char *strcat(char *d, const char *s);
+char *strncpy(char *d, const char *s, unsigned n);
+
+/* ------------------------------------------------------------------ io ---- */
+static inline u8 inb(u16 port) { u8 v; __asm__ volatile("inb %1, %0" : "=a"(v) : "Nd"(port)); return v; }
+static inline void outb(u16 port, u8 v) { __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(port)); }
+static inline u16 inw(u16 port) { u16 v; __asm__ volatile("inw %1, %0" : "=a"(v) : "Nd"(port)); return v; }
+static inline void outw(u16 port, u16 v) { __asm__ volatile("outw %0, %1" : : "a"(v), "Nd"(port)); }
+static inline u32 inl(u16 port) { u32 v; __asm__ volatile("inl %1, %0" : "=a"(v) : "Nd"(port)); return v; }
+static inline void outl(u16 port, u32 v) { __asm__ volatile("outl %0, %1" : : "a"(v), "Nd"(port)); }
+static inline void io_wait(void) { outb(0x80, 0); }
+
+void cpu_hlt(void);
+void irq_enable(void);
+void irq_disable(void);
+void cpu_reboot_8042(void);
+
+/* ---------------------------------------------------------------- klog ---- */
+void klog(const char *fmt, ...);           /* serial console logger */
+void klog_raw(const char *s);              /* no-varargs logger (debug-safe) */
+
+/* ----------------------------------------------------------- interrupts --- */
+struct regs {
+    u32 edi, esi, ebp, esp, ebx, edx, ecx, eax;   /* pushal */
+    u32 int_no, err_code;
+};
+
+typedef void (*irq_handler_t)(struct regs *);
+
+void idt_init(void);
+void irq_install(u8 irq, irq_handler_t h);
+void pic_remap(void);
+void pic_clear_mask(u8 irq);
+void pic_set_mask(u8 irq);
+void pic_send_eoi(u8 irq);
+
+/* ----------------------------------------------------------------- pit ---- */
+void pit_init(u32 hz);
+extern volatile u64 tick_count;            /* ticks since boot */
+u32  uptime_ms(void);
+void sleep_ms(u32 ms);
+
+/* ------------------------------------------------------------ keyboard ---- */
+enum {
+    KEY_NONE = 0,
+    KEY_UP = 128, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
+    KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN, KEY_DELETE, KEY_INSERT,
+    KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
+    KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
+    KEY_LSHIFT, KEY_RSHIFT, KEY_LCTRL, KEY_RCTRL, KEY_LALT, KEY_RALT,
+    KEY_CAPS, KEY_NUM, KEY_SCROLL
+};
+
+struct key_event {
+    u8   scancode;      /* raw set-1 code (make code; +0x80 when released) */
+    u16  keycode;       /* ascii or KEY_* code */
+    u8   pressed;
+    u8   shift, ctrl, alt;
+};
+
+void kbd_init(void);
+int  kbd_poll(struct key_event *out);      /* 1 if an event was dequeued */
+
+/* --------------------------------------------------------------- mouse ---- */
+enum { MEV_MOVE = 1, MEV_BUTTON, MEV_WHEEL };
+enum { MBTN_LEFT = 1, MBTN_RIGHT = 2, MBTN_MIDDLE = 4 };
+
+struct mouse_event {
+    u8  type;           /* MEV_* */
+    i16 dx, dy;
+    i8  wheel;
+    u8  buttons;        /* button state bitmask after event */
+    u8  button;         /* which button changed (for MEV_BUTTON) */
+    u8  down;           /* 1 pressed / 0 released */
+};
+
+void mouse_init(void);
+int  mouse_poll(struct mouse_event *out);
+
+/* --------------------------------------------------------------- frame ---- */
+struct surface {
+    u32 *px;
+    int  w, h;
+};
+
+extern struct surface screen;              /* back buffer, full screen */
+extern int screen_w, screen_h;
+
+void fb_init(void);
+void fb_flip(void);                        /* back buffer -> LFB */
+void fb_clear(u32 color);
+
+void s_pixel(struct surface *s, int x, int y, u32 c);
+void s_fill(struct surface *s, int x, int y, int w, int h, u32 c);
+void s_frame_rect(struct surface *s, int x, int y, int w, int h, u32 c);
+void s_line(struct surface *s, int x0, int y0, int x1, int y1, u32 c);
+void s_circle(struct surface *s, int cx, int cy, int r, u32 c);
+void s_disc(struct surface *s, int cx, int cy, int r, u32 c);
+void s_vgrad(struct surface *s, int x, int y, int w, int h, u32 top, u32 bot);
+
+#define FONT_W 8
+#define FONT_H 16
+extern const u8 font8x16[256][16];
+
+void s_char(struct surface *s, int x, int y, char ch, u32 fg);
+void s_char_bg(struct surface *s, int x, int y, char ch, u32 fg, u32 bg);
+void s_text(struct surface *s, int x, int y, const char *str, u32 fg);
+void s_text_bg(struct surface *s, int x, int y, const char *str, u32 fg, u32 bg);
+void s_text_scaled(struct surface *s, int x, int y, const char *str, u32 fg, int scale);
+int  s_text_width(const char *str);
+void s_clip_text(struct surface *s, int x, int y, const char *str, u32 fg, int max_w);
+void s_blit(struct surface *d, struct surface *s, int dx, int dy);
+
+/* shared single-line text editor helper (returns 1 if buffer changed) */
+int edit_line(char *buf, int *pos, int maxlen, struct key_event *e);
+
+char *str_str(const char *hay, const char *needle);
+double strtod_simple(const char *s, char **end);
+void fmt_double(char *out, double v);
+
+/* number formatting */
+void fmt_u32(char *out, u32 v);
+void fmt_i32(char *out, i32 v);
+void fmt_pad2(char *out, u32 v);
+
+/* icon drawing (procedural, 24x24 logical box at x,y) */
+enum { ICON_FOLDER, ICON_TERMINAL, ICON_NOTEPAD, ICON_BROWSER,
+       ICON_CALENDAR, ICON_SETTINGS, ICON_INFO, ICON_COUNT };
+void s_icon(struct surface *s, int id, int x, int y, u32 c);
+
+/* ------------------------------------------------------------------ mm ---- */
+void  mm_init(void);
+void *palloc(u32 bytes);                   /* page-granular, zeroed not guaranteed */
+void  pfree(void *p, u32 bytes);
+u32   mm_total_kb(void);
+u32   mm_free_kb(void);
+
+/* ----------------------------------------------------------------- vfs ---- */
+#define VFS_NAME 48
+
+struct vfs_node {
+    char name[VFS_NAME];
+    int  is_dir;
+    char *data;
+    u32  size, cap;
+    struct vfs_node *child, *sibling, *parent;
+};
+
+extern struct vfs_node *vfs_root;
+
+void vfs_init_defaults(void);
+struct vfs_node *vfs_lookup(const char *path);
+int   vfs_list(struct vfs_node *dir, char names[][VFS_NAME], int max);
+char *vfs_read(const char *path, u32 *len);
+int   vfs_write(const char *path, const char *data, u32 len);
+int   vfs_mkdir(const char *path);
+int   vfs_delete(const char *path);
+int   vfs_is_dir(struct vfs_node *n);
+u32   vfs_usage_bytes(void);
+char *vfs_parent_path(const char *path, char *out);   /* "a/b/c" -> "a/b/" */
+
+/* ----------------------------------------------------------------- ata ---- */
+int  ata_init(void);                          /* returns detected drive count */
+int  ata_read_sectors(u32 lba, u32 count, void *buf);
+int  ata_write_sectors(u32 lba, u32 count, const void *buf);
+int  ata_present(void);
+int  fs_image_load(void);                     /* 1 if an SCos FS image was found */
+int  fs_image_save(void);
+extern int fs_image_found;
+
+/* ----------------------------------------------------------------- rtc ---- */
+struct rtc_time { u16 year; u8 mon, day, hour, min, sec, weekday; };
+void rtc_read(struct rtc_time *t);
+u32  rtc_to_epoch(const struct rtc_time *t);
+
+/* ---------------------------------------------------------------- acpi ---- */
+void acpi_init(void);
+int  acpi_shutdown(void);                     /* 1 if power-off command issued */
+
+/* --------------------------------------------------------------- themes --- */
+struct theme {
+    const char *id;
+    const char *name;
+    u32 main;          /* accent */
+    u32 bg_top, bg_bot;   /* wallpaper gradient */
+    u32 win_bg;
+    u32 text;
+    u32 title_text;    /* text on accent background */
+    u32 taskbar_bg;
+};
+
+int  theme_count(void);
+const struct theme *theme_get(int i);
+const struct theme *theme_current(void);
+void theme_set_index(int i);
+int  theme_index_of_id(const char *id);
+void theme_load_from_settings(void);
+
+/* -------------------------------------------------------------- windows --- */
+struct window;
+struct app;
+
+struct app {
+    const char *id;
+    const char *title;
+    int  icon;
+    int  single;                    /* only one instance */
+    int  def_w, def_h;              /* default window size */
+    void (*open)(struct window *w, void *arg);   /* arg: app-specific (e.g. file path) */
+    void (*paint)(struct window *w);
+    void (*key)(struct window *w, struct key_event *e);
+    void (*mouse)(struct window *w, struct mouse_event *e, int x, int y);
+    void (*tick)(struct window *w);
+    void (*close)(struct window *w);
+};
+
+#define WIN_TITLEBAR 26
+#define WIN_STATE_NORMAL 0
+#define WIN_STATE_MIN 1
+#define WIN_STATE_MAX 2
+
+struct window {
+    int  id;
+    char title[64];
+    struct app *app;
+    void *data;
+    int  x, y, w, h;                /* outer rect (incl. decorations) */
+    int  px, py, pw, ph;            /* saved rect for maximize restore */
+    int  z;
+    int  state;
+    struct surface surf;            /* content surface */
+    int  dirty;
+    int  closing;
+};
+
+int  wm_win_count(void);
+struct window *wm_win_at(int i);
+
+void wm_init(void);
+void wm_run(void);                              /* main loop: never returns */
+struct window *wm_open_app(const char *app_id, void *arg);
+void wm_close_window(struct window *w);
+void wm_set_title(struct window *w, const char *title);
+void wm_redraw(struct window *w);
+void wm_focus(struct window *w);
+struct window *wm_focused(void);
+int  wm_content_w(struct window *w);
+static inline int mx_abs(struct window *w, int x) { return w->x + 1 + x; }
+static inline int my_abs(struct window *w, int y) { return w->y + WIN_TITLEBAR + y; }
+int  wm_content_h(struct window *w);
+
+/* dialog: modal. input!=NULL shows a text field prefilled with input. */
+typedef void (*dialog_cb)(int ok, const char *text, void *ud);
+void wm_dialog(const char *title, const char *message, const char *input,
+               dialog_cb cb, void *ud);
+int  wm_dialog_active(void);
+
+/* context menu */
+typedef void (*menu_cb)(int item, void *ud);
+void wm_menu(int x, int y, const char **items, int n, menu_cb cb, void *ud);
+
+/* spawn an "ERROR" style popup (easter egg + shutdown screens) */
+void wm_error_popup(const char *text);
+void wm_fatal_screen(const char *line1, const char *line2);
+void wm_poweroff_screen(void);
+
+/* apps registry */
+void apps_register_all(void);
+struct app *app_find(const char *id);
+int  app_count(void);
+struct app *app_at(int i);
+
+struct app *wm_dialog_app(void);
+struct app *wm_error_app(void);
+
+/* boot screen */
+void boot_screen_step(const char *msg, int progress_pct);
+void boot_screen_init(void);
+
+/* persistence hooks */
+void settings_save(void);
+void system_reset(void);
+
+#endif /* SCOS_H */

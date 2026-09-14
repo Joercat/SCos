@@ -1,0 +1,120 @@
+/* SCos native - Settings app (themes, system info, reset) */
+#include "scos.h"
+
+struct settings_ui { int hover_tile, hover_reset; };
+
+#define TILE_W 120
+#define TILE_H 80
+
+static void st_open(struct window *w, void *arg)
+{
+    (void)arg;
+    struct settings_ui *ui = palloc(sizeof(*ui));
+    ui->hover_tile = -1;
+    ui->hover_reset = -1;
+    w->data = ui;
+}
+
+static void st_close(struct window *w)
+{
+    if (w->data) pfree(w->data, sizeof(struct settings_ui));
+    w->data = NULL;
+}
+
+static void tile_rect(int i, int sw, int *x, int *y)
+{
+    *x = 16 + (i % 4) * (TILE_W + 12);
+    if (*x + TILE_W > sw - 8) { *x = 16 + (i % 2) * (TILE_W + 12); *y = 60 + (i / 2) * (TILE_H + 12); }
+    else *y = 60 + (i / 4) * (TILE_H + 12);
+}
+
+static void st_paint(struct window *w)
+{
+    struct settings_ui *ui = w->data;
+    struct surface *s = &w->surf;
+    const struct theme *t = theme_current();
+    s_fill(s, 0, 0, s->w, s->h, t->win_bg);
+
+    s_text(s, 16, 16, "Appearance", t->main);
+    s_text(s, 16, 38, "Theme:", t->text);
+
+    for (int i = 0; i < theme_count(); i++) {
+        const struct theme *th = theme_get(i);
+        int x, y;
+        tile_rect(i, s->w, &x, &y);
+        s_fill(s, x, y, TILE_W, TILE_H, th->bg_top);
+        s_fill(s, x, y, TILE_W, 14, th->main);
+        s_text(s, x + 8, y + 24, th->name, th->main);
+        s_frame_rect(s, x, y, TILE_W, TILE_H, th->main);
+        if (i == theme_index_of_id(t->id))
+            s_frame_rect(s, x - 2, y - 2, TILE_W + 4, TILE_H + 4, 0xFFFFFF);
+        if (ui->hover_tile == i)
+            s_frame_rect(s, x - 4, y - 4, TILE_W + 8, TILE_H + 8, t->main);
+    }
+
+    int iy = 60 + ((theme_count() + 3) / 4) * (TILE_H + 12) + 16;
+    s_text(s, 16, iy, "System Information", t->main);
+    char line[96];
+    strcpy(line, "OS Version: 2.0.0 (native kernel)");
+    s_text(s, 16, iy + 22, line, t->text);
+    char sz[32];
+    u32 used = vfs_usage_bytes();
+    if (used < 1024) { fmt_u32(sz, used); strcat(sz, " bytes"); }
+    else if (used < 1024 * 1024) { fmt_u32(sz, used / 1024); strcat(sz, "."); fmt_u32(sz + strlen(sz), (used % 1024) * 100 / 1024); strcat(sz, " KB"); }
+    else { fmt_u32(sz, used / (1024 * 1024)); strcat(sz, " MB"); }
+    strcpy(line, "Storage Used: ");
+    strcat(line, sz);
+    s_text(s, 16, iy + 42, line, t->text);
+
+    int ry = iy + 70;
+    u32 bg = ui->hover_reset == 1 ? t->main : 0x333333;
+    s_fill(s, 16, ry, 110, 26, bg);
+    s_frame_rect(s, 16, ry, 110, 26, t->main);
+    s_text(s, 26, ry + 5, "Reset System", ui->hover_reset == 1 ? t->title_text : t->main);
+}
+
+static void reset_confirm_cb(int ok, const char *text, void *ud)
+{
+    (void)text; (void)ud;
+    if (!ok) return;
+    system_reset();
+    wm_dialog("Settings", "System reset complete.", NULL, NULL, NULL);
+}
+
+static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
+{
+    struct settings_ui *ui = w->data;
+    struct surface *s = &w->surf;
+    int oldt = ui->hover_tile, oldr = ui->hover_reset;
+    ui->hover_tile = -1;
+    ui->hover_reset = -1;
+    for (int i = 0; i < theme_count(); i++) {
+        int tx, ty;
+        tile_rect(i, s->w, &tx, &ty);
+        if (x >= tx && y >= ty && x < tx + TILE_W && y < ty + TILE_H) ui->hover_tile = i;
+    }
+    int iy = 60 + ((theme_count() + 3) / 4) * (TILE_H + 12) + 16;
+    int ry = iy + 70;
+    if (x >= 16 && y >= ry && x < 126 && y < ry + 26) ui->hover_reset = 1;
+    if (oldt != ui->hover_tile || oldr != ui->hover_reset) wm_redraw(w);
+
+    if (e->type != MEV_BUTTON || !e->down || e->button != MBTN_LEFT) return;
+    if (ui->hover_tile >= 0) {
+        theme_set_index(ui->hover_tile);
+        settings_save();
+        wm_redraw(w);
+    } else if (ui->hover_reset == 1) {
+        wm_dialog("Reset System",
+                  "Are you sure you want to reset the system? All data will be lost.",
+                  NULL, reset_confirm_cb, NULL);
+    }
+}
+
+static void st_key(struct window *w, struct key_event *e) { (void)w; (void)e; }
+
+struct app app_settings = {
+    .id = "settings", .title = "Settings", .icon = ICON_SETTINGS, .single = 0,
+    .def_w = 620, .def_h = 480,
+    .open = st_open, .paint = st_paint, .key = st_key,
+    .mouse = st_mouse, .close = st_close,
+};

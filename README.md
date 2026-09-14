@@ -1,0 +1,139 @@
+# SCos — a real, bootable x86 operating system
+
+SCos started life as a browser simulation (`os.html`, kept in this repo as the
+design reference until the native system is declared finished).  This
+repository now contains a **real operating system** that recreates that
+simulation: a two-stage MBR bootloader, a 32-bit protected-mode kernel, a
+VBE framebuffer window manager with full mouse support, a terminal, a virtual
+filesystem with optional disk persistence, and the same look & feel as the
+web original (SCos 1.3.5 / "2.0" native).
+
+It boots on real x86 hardware (legacy/CSM BIOS boot) and in the v86 emulator
+used by the test suite and the live preview.
+
+```
+make            # build build/scos.img (bootable disk image)
+make test       # 14 end-to-end scenarios in headless v86 (screenshots in build/tests/)
+make preview    # browser preview on http://localhost:8080
+```
+
+## Live preview
+
+`make preview` (or `node tools/preview_server.mjs [port]`) serves a page that
+runs `build/scos.img` in the [v86](https://github.com/copy/v86) x86 emulator
+inside your browser, with real mouse and keyboard input.  The emulator
+runtime is fetched once into `.preview/vendor/` by `tools/setup_preview.sh`
+(git-ignored; ~3 MB).
+
+Click inside the screen to capture keyboard/mouse.  Everything is interactive:
+desktop icons, window drag/resize/minimize/maximize/close, taskbar, context
+menus, dialogs, themes.
+
+## What boots
+
+| Stage | File | What it does |
+|---|---|---|
+| 1 | `boot/stage1.S` | MBR (sector 0). Loads stage 2 + kernel via INT 13h (LBA with CHS fallback), jumps to 0x8000. |
+| 2 | `boot/stage2.S` | A20 line, VBE mode query/set (1024×768×32, real LFB address from the VBE info block), E801 memory map, loads the kernel flat binary to 0x100000, builds a GDT, enters protected mode, jumps to the kernel. Passes a boot-params block (LFB base/pitch/size, RAM size). |
+| 3 | `kernel/` | 32-bit protected-mode ring-0 kernel, linked at 0x100000, flat binary. |
+
+Kernel drivers & services (`kernel/src/`):
+
+* `idt/pit` — PIC remap, IDT, exception panics, PIT at 100 Hz
+* `kbd` / `mouse` — PS/2 keyboard (IRQ1) and mouse (IRQ12) with wheel,
+  IntelliMouse probe, event queues
+* `fb` — VBE linear-framebuffer compositor: back buffer, blit, pixel/text/
+  line/circle primitives, 8×16 bitmap font generated from DejaVu Sans Mono
+  (`tools/fontgen.py`, regenerate with `make font`, needs Pillow)
+* `wm` — window manager: windows with title bars (minimize/maximize/close),
+  drag, resize, z-order/focus, desktop icons, taskbar with live clock and
+  running-app buttons, context menus, modal dialogs, error popups
+* `vfs` — in-RAM tree filesystem mirroring the web version
+  (`home/{documents,downloads,desktop}`, `system/{settings.json,about.txt,
+  network.json}`, default `welcome.txt` + `changelog.txt`)
+* `ata` — primary-master ATA PIO driver; `save` in the terminal serializes the
+  whole filesystem to a disk image at LBA 2048 and it is reloaded on next boot
+  (magic-gated; RAM-only until you `save`)
+* `acpi` — RSDP/FADT scan for graceful shutdown; on machines without ACPI
+  (including v86's SeaBIOS) the terminal `shutdown` falls back to a
+  "power off now" screen
+* `rtc` — CMOS clock for the taskbar clock and `date`
+* `theme` — the four themes from the simulation: matrix-1, blue-sky,
+  midnight-purple, amber-tech (persisted in `system/settings.json`)
+
+Applications (`kernel/src/app_*.c`), all mouse-driven:
+
+* **Terminal** — `help ls cd cat echo clear date mkdir touch rm whoami version
+  calc ping sysinfo alias history open save shutdown reboot`, command
+  history (↑/↓), typewriter output effect, simulated `ping` driven by
+  `system/network.json`, scrollback with wheel scrolling
+* **Files** — back/up/refresh/new-folder toolbar, path box, click to open
+  (dirs navigate, files open in Notepad), right-click menu with Delete +
+  confirm dialog
+* **Notepad** — editing with cursor, Save / Save As (dialog)
+* **Calendar** — month grid, prev/next/today, today highlight, day click
+* **Settings** — theme tiles (live switch), storage usage, Reset System
+  (confirm dialog restores factory defaults)
+* **About** — system information window
+* **Browser** — intentional stub: a modal explaining that no TCP/IP stack
+  ships with this kernel (a real browser/network stack is far beyond the
+  project's size budget; the icon and dialog exist for fidelity)
+
+Easter egg from the web version included: if `home/documents/file.scv`
+exists, ERROR windows start spawning (capped at 50).
+
+## Verification
+
+`tests/harness.mjs` boots the image in headless v86 with serial capture,
+framebuffer screenshots and synthetic PS/2 input.  `tests/run_tests.mjs`
+runs 14 user-level scenarios (boot, terminal commands, window manager
+operations, files navigation/new-folder/delete, notepad edit + save-as,
+calendar, themes, browser stub, easter egg, shutdown fallback, reboot,
+ATA persistence across reboot, open-in-notepad + settings reset, resize
+stress).  Each scenario writes a screenshot to `build/tests/`.
+
+```
+node tests/run_tests.mjs          # all
+node tests/run_tests.mjs 4,12     # subset
+```
+
+## Running it on real hardware
+
+```
+sudo dd if=build/scos.img of=/dev/sdX bs=4M status=progress conv=fsync
+```
+
+* The machine must boot in **legacy/CSM mode** (MBR + BIOS INT 13h/10h);
+  UEFI-only machines need CSM enabled.
+* The kernel is a hobby OS: ring 0, single address space, no paging, no
+  user mode, no memory protection between apps.  It is "real" in the sense
+  that it is genuine bare-metal x86 code with real drivers — not in the sense
+  of being a production microkernel.  This is deliberate and matches the
+  project scope.
+* Needs a PS/2 (or USB-legacy-emulated) keyboard+mouse and a VBE-compatible
+  VGA BIOS.  Shutdown uses ACPI when the firmware exposes it, otherwise the
+  power-off screen is shown.  `reboot` uses the 8042 keyboard controller.
+* Only the primary-master IDE/ATA disk is probed for persistence.
+
+## Repository layout
+
+```
+boot/            stage1 (MBR) + stage2 (VBE/PM) bootloaders
+kernel/          entry.S, linker.ld, include/scos.h, src/* (kernel + apps)
+tools/           fontgen.py (font table), makedisk.py (image assembler),
+                 setup_preview.sh, preview_server.mjs
+tests/           harness.mjs (headless v86), smoke_boot.mjs, run_tests.mjs
+os.html          original web simulation (reference only, kept until the
+                 native system is declared finished)
+build/           build output (git-ignored): scos.img, intermediates, tests/
+.preview/        emulator runtime for the preview (git-ignored)
+```
+
+## Build requirements
+
+* GNU make + gcc with `-m32` freestanding support (no multilib needed for
+  linking: objects are compiled `-m32` and linked with `-nostdlib
+  -Wl,--oformat,binary`), `objcopy`
+* Python 3 (+ Pillow only for `make font`)
+* Node.js ≥ 18 for the test suite and preview
+* Network access once, for `tools/setup_preview.sh` (npm + GitHub tarball)

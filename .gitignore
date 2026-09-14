@@ -1,0 +1,6 @@
+build/
+*.img
+*.iso
+node_modules/
+__pycache__/
+.preview/
