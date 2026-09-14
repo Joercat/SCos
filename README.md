@@ -89,6 +89,20 @@ Applications (`kernel/src/app_*.c`), all mouse-driven:
   stack ships with this kernel (a network card driver + TCP/IP + TLS +
   rendering engine is far beyond the project's size budget)
 
+* **System Monitor** — live, measured metrics: CPU brand (CPUID), clock
+  speed (TSC calibrated against the PIT), CPU load (idle-halt time
+  accounted in the PIT interrupt), RAM from the page allocator, and the
+  live task table (kernel services + running apps) with a real
+  End-Task action that closes the selected app window
+
+Taskbar: scrollable app-button strip (mouse wheel over the bar when more
+windows are open than fit), plus a power button whose menu offers
+**Restart** and **Power Off** (ACPI shutdown with power-off-screen
+fallback). Terminal: wheel scrollback that follows the bottom unless you
+scroll up, and paged help (`help`, `help --p2`, `help --p3`).
+`neofetch` prints the ASCII logo contributed in `art.txt` next to the
+live hardware report.
+
 Easter egg from the web version included: if `home/documents/file.scv`
 exists, ERROR windows start spawning (capped at 50).
 

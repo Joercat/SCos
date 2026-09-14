@@ -258,6 +258,12 @@ void s_icon(struct surface *s, int id, int x, int y, u32 c)
         s_fill(s, x + 11, y + 10, 2, 8, c);
         s_fill(s, x + 11, y + 6, 2, 2, c);
         break;
+    case ICON_CHART:
+        s_frame_rect(s, x + 2, y + 3, 20, 18, c);
+        s_fill(s, x + 5, y + 12, 3, 6, c);
+        s_fill(s, x + 10, y + 8, 3, 10, c);
+        s_fill(s, x + 15, y + 5, 3, 13, c);
+        break;
     case ICON_CARDS:
         s_fill(s, x + 8, y + 2, 14, 18, c);
         s_frame_rect(s, x + 8, y + 2, 14, 18, c);
@@ -298,4 +304,9 @@ void s_scos_logo(struct surface *s, int x, int y, u32 color, int scale, int phas
         s_disc(s, px, py, rr, on ? color : ((color >> 2) & 0x3F3F3F));
     }
     s_text_scaled(s, x + 2 * cw + 2 * r + 6, y, "s", color, scale);
+}
+
+u32 color_blend(u32 a, u32 b, int t)
+{
+    return blend(a, b, t);
 }

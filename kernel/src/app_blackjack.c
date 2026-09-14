@@ -135,7 +135,7 @@ static void draw_suit(struct surface *s, int x, int y, int suit, u32 c, int r)
         }
     } else if (suit == 2) {                           /* spade */
         for (int dy = -r; dy <= 0; dy++) {
-            int w = -dy;
+            int w = r + dy;                    /* point up, widen downwards */
             s_fill(s, x - w, y + dy, w * 2 + 1, 1, c);
         }
         s_disc(s, x - r / 2, y + r / 4, r / 2, c);

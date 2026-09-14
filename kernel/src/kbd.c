@@ -3,7 +3,7 @@
 
 #define KBD_DATA 0x60
 #define KBD_STAT 0x64
-#define QUEUE 64
+#define QUEUE 256
 
 static struct key_event queue[QUEUE];
 static volatile int q_head, q_tail;

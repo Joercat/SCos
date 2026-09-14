@@ -14,7 +14,8 @@
 struct term {
     char lines[TERM_LINES][TERM_LINE];
     int nlines;
-    int scroll;              /* first visible line; -1 = follow bottom */
+    int scroll;              /* first visible line */
+    int follow;              /* stick to bottom while new output arrives */
     char input[TERM_LINE];
     int ipos;
     char hist[HIST][TERM_LINE];
@@ -23,11 +24,6 @@ struct term {
     /* typewriter effect */
     char pending[2048];
     int pend_len, pend_shown, pending_active;
-    /* simulated ping */
-    int ping_active;
-    char ping_host[64];
-    int ping_seq;
-    u64 ping_next;
     char aliases[8][2][64];
     int nalias;
     int shutting_down;
@@ -55,6 +51,7 @@ static void term_push_line(struct term *t, const char *s)
         if (!*nl) break;
         p = nl + 1;
     }
+    if (t->follow) t->scroll = 1000000;      /* stay glued to the new output */
 }
 
 static void term_print(struct term *t, const char *s)   /* immediate */
@@ -121,6 +118,7 @@ static const char *help_text =
     "df        - Filesystem usage\n"
     "disks     - Detected ATA disks (IDENTIFY)\n"
     "neofetch  - System summary with logo\n"
+    "sysmon    - Open the System Monitor app\n"
     "theme     - List or switch themes\n"
     "calc      - Perform basic arithmetic\n"
     "ping      - Check host reachability\n"
@@ -220,7 +218,39 @@ static void run_command(struct term *t, const char *command)
     response[0] = 0;
     int typed = 1;
 
-    if (!strcmp(cmd, "help")) strcpy(response, help_text);
+    if (!strcmp(cmd, "help")) {
+        int page = 1;
+        if (nargs > 1 && !strncmp(args[1], "--p", 3)) page = (int)str_to_u32(args[1] + 3);
+        else if (nargs > 1) page = (int)str_to_u32(args[1]);
+        if (page < 1) page = 1;
+        const int PER = 18;
+        int total_lines = 1;
+        for (const char *q = help_text; *q; q++) if (*q == '\n') total_lines++;
+        int pages = (total_lines + PER - 1) / PER;
+        if (page > pages) page = pages;
+        response[0] = 0;
+        int line = 0;
+        for (const char *q = help_text; *q; ) {
+            const char *nl = str_chr(q, '\n');
+            int len = nl ? (int)(nl - q) : (int)strlen(q);
+            if (line >= (page - 1) * PER && line < page * PER) {
+                strncat(response, q, (u32)len);
+                strcat(response, "\n");
+            }
+            line++;
+            if (!nl) break;
+            q = nl + 1;
+        }
+        char foot[64];
+        strcpy(foot, "-- page ");
+        char n[8];
+        fmt_u32(n, (u32)page); strcat(foot, n); strcat(foot, "/");
+        fmt_u32(n, (u32)pages); strcat(foot, n);
+        if (page < pages) { strcat(foot, " : 'help --p");
+            fmt_u32(n, (u32)(page + 1)); strcat(foot, n); strcat(foot, "' for more --"); }
+        else strcat(foot, " --");
+        strcat(response, foot);
+    }
     else if (!strcmp(cmd, "ls")) {
         char path[256];
         resolve_path(t, nargs > 1 ? args[1] : "", path);
@@ -279,6 +309,8 @@ static void run_command(struct term *t, const char *command)
     else if (!strcmp(cmd, "clear")) {
         t->nlines = 0;
         t->scroll = -1;
+    t->follow = 1;
+        t->follow = 1;
         return;
     }
     else if (!strcmp(cmd, "date")) {
@@ -618,8 +650,13 @@ static void run_command(struct term *t, const char *command)
     else if (!strcmp(cmd, "cpu")) {
         char cpu[49];
         cpu_brand(cpu, sizeof(cpu));
-        strcpy(response, cpu);
-        strcat(response, "\n32-bit protected mode, ring 0, PIT @ 100 Hz");
+        strcpy(response, cpu[0] ? cpu : "x86 processor (no CPUID brand string)");
+        char n[16];
+        strcat(response, "\nspeed:   ");
+        fmt_u32(n, cpu_mhz()); strcat(response, n); strcat(response, " MHz (measured via TSC/PIT)");
+        strcat(response, "\nload:    ");
+        fmt_u32(n, cpu_usage_pct()); strcat(response, n); strcat(response, "% (measured idle time)");
+        strcat(response, "\nmode:    32-bit protected mode, ring 0, PIT @ 100 Hz");
     }
     else if (!strcmp(cmd, "df")) {
         char n[16];
@@ -682,28 +719,52 @@ static void run_command(struct term *t, const char *command)
     else if (!strcmp(cmd, "neofetch")) {
         char cpu[49];
         cpu_brand(cpu, sizeof(cpu));
+        if (!cpu[0]) strcpy(cpu, "unknown x86 processor");
         u32 tot = 0, fre = 0;
         mm_stats(&tot, &fre);
         char n[16];
-        strcpy(response,
-            "   ####    user@scos\n"
-            "  ##  ##   -----------\n"
-            " ##    ##  OS:     SCos 2.0.0 (native x86 kernel)\n"
-            " ##   ###  CPU:    ");
-        strcat(response, cpu); strcat(response, "\n");
-        strcat(response, "  ##  ##   Memory: ");
-        fmt_u32(n, (tot - fre) / 1024); strcat(response, n);
-        strcat(response, " / "); fmt_u32(n, tot / 1024); strcat(response, n);
-        strcat(response, " MB\n   ####    Disk:   ");
-        const char *m = ata_model();
-        strcat(response, m && m[0] ? m : "none");
-        strcat(response, "\n           Video:  ");
-        fmt_u32(n, (u32)screen_w); strcat(response, n); strcat(response, "x");
-        fmt_u32(n, (u32)screen_h); strcat(response, n); strcat(response, "x");
-        fmt_u32(n, fb_bpp()); strcat(response, n);
-        strcat(response, "\n           Theme:  ");
-        strcat(response, theme_current()->name);
-        strcat(response, "\n           Shell:  scos-sh");
+        char info[14][64];
+        int ni = 0;
+        strcpy(info[ni++], "user@scos");
+        strcpy(info[ni++], "---------------------");
+        strcpy(info[ni++], "OS:      SCos 2.0.0 (native x86 kernel)");
+        strcpy(info[ni],   "CPU:     "); strncpy(info[ni] + 9, cpu, 40); ni++;
+        strcpy(info[ni],   "Speed:   ");
+        fmt_u32(n, cpu_mhz()); strcat(info[ni], n); strcat(info[ni], " MHz (TSC-measured)"); ni++;
+        strcpy(info[ni],   "Load:    ");
+        fmt_u32(n, cpu_usage_pct()); strcat(info[ni], n); strcat(info[ni], "% (idle-time meter)"); ni++;
+        strcpy(info[ni],   "Memory:  ");
+        fmt_u32(n, (tot - fre) / 1024); strcat(info[ni], n);
+        strcat(info[ni], " / "); fmt_u32(n, tot / 1024); strcat(info[ni], n);
+        strcat(info[ni], " MB"); ni++;
+        strcpy(info[ni],   "Disk:    ");
+        { const char *m = ata_model();
+          strncpy(info[ni] + 9, m && m[0] ? m : "none", 40); }
+        ni++;
+        strcpy(info[ni],   "Video:   ");
+        fmt_u32(n, (u32)screen_w); strcat(info[ni], n); strcat(info[ni], "x");
+        fmt_u32(n, (u32)screen_h); strcat(info[ni], n); strcat(info[ni], "x");
+        fmt_u32(n, fb_bpp()); strcat(info[ni], n); ni++;
+        strcpy(info[ni],   "Uptime:  ");
+        fmt_u32(n, uptime_ms() / 1000); strcat(info[ni], n); strcat(info[ni], " s"); ni++;
+        strcpy(info[ni],   "Theme:   ");
+        strncpy(info[ni] + 9, theme_current()->name, 40); ni++;
+        strcpy(info[ni++], "Shell:   scos-sh");
+        strcpy(info[ni++], "WM:      SCos WM (VBE framebuffer)");
+        response[0] = 0;
+        int rows = neofetch_art_lines > ni ? neofetch_art_lines : ni;
+        for (int i = 0; i < rows; i++) {
+            char line[128];
+            const char *a = i < neofetch_art_lines ? neofetch_art[i] : "";
+            strcpy(line, a);
+            int l = (int)strlen(line);
+            while (l < neofetch_art_width + 2) line[l++] = ' ';
+            line[l] = 0;
+            if (i < ni) strcat(line, info[i]);
+            strcat(response, line);
+            strcat(response, "\n");
+        }
+        response[strlen(response) - 1] = 0;
     }
     else if (!strcmp(cmd, "edit")) {
         if (nargs < 2) strcpy(response, "Usage: edit <file>");
@@ -777,6 +838,7 @@ static void term_paint(struct window *w)
     int total = t->nlines + plines + 1;
     if (t->scroll < 0 || t->scroll > total - rows) t->scroll = total - rows;
     if (t->scroll < 0) t->scroll = 0;
+    t->follow = (t->scroll >= total - rows);
 
     int y = 4;
     for (int r = t->scroll; r < total && r < t->scroll + rows; r++, y += FONT_H + 2) {
@@ -812,7 +874,11 @@ static void term_key(struct window *w, struct key_event *e)
 {
     struct term *t = w->data;
     if (!e->pressed) return;
-    if (t->pending_active) return;
+    /* never swallow keystrokes: finish any typewriter output instantly */
+    if (t->pending_active) {
+        term_push_line(t, t->pending);
+        t->pending_active = 0;
+    }
 
     if (e->keycode == '\n') {
         char cmd[TERM_LINE];
@@ -852,6 +918,7 @@ static void term_mouse(struct window *w, struct mouse_event *e, int x, int y)
         int total = t->nlines + (t->pending_active ? 1 : 0) + 1;
         if (t->scroll > total - rows) t->scroll = total - rows;
         if (t->scroll < 0) t->scroll = 0;
+        t->follow = (t->scroll >= total - rows);
     }
 }
 
@@ -859,7 +926,7 @@ static void term_tick(struct window *w)
 {
     struct term *t = w->data;
     if (t->pending_active) {
-        t->pend_shown += 10;                     /* typewriter speed */
+        t->pend_shown += 40;                     /* typewriter speed */
         if (t->pend_shown >= t->pend_len) {
             term_push_line(t, t->pending);
             t->pending_active = 0;

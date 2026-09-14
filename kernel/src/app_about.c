@@ -66,7 +66,8 @@ static void ab_paint(struct window *w)
         "PS/2 keyboard + mouse drivers, PIT timer, CMOS realtime clock",
         "VBE framebuffer compositor with window manager and themes",
         "In-memory file system with optional ATA disk persistence",
-        "Terminal, Files, Notepad, Calendar, Settings, Blackjack",
+        "Terminal, Files, Notepad, Calendar, Settings,",
+        "Blackjack, System Monitor, Web Browser (stub)",
     };
     for (unsigned i = 0; i < sizeof(feats) / sizeof(feats[0]); i++) {
         s_text(s, 28, y, "-", t->main);

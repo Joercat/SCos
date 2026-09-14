@@ -58,6 +58,12 @@ void cpu_hlt(void);
 void irq_enable(void);
 void irq_disable(void);
 void cpu_reboot_8042(void);
+u64  rdtsc(void);
+void cpu_meter_init(void);
+void cpu_meter_tick(void);
+void cpu_idle_begin(void);
+u32  cpu_mhz(void);
+u32  cpu_usage_pct(void);
 
 /* ---------------------------------------------------------------- klog ---- */
 void klog(const char *fmt, ...);           /* serial console logger */
@@ -175,8 +181,9 @@ void fmt_pad2(char *out, u32 v);
 
 /* icon drawing (procedural, 24x24 logical box at x,y) */
 enum { ICON_FOLDER, ICON_TERMINAL, ICON_NOTEPAD, ICON_BROWSER,
-       ICON_CALENDAR, ICON_SETTINGS, ICON_INFO, ICON_CARDS, ICON_COUNT };
+       ICON_CALENDAR, ICON_SETTINGS, ICON_INFO, ICON_CARDS, ICON_CHART, ICON_COUNT };
 void s_icon(struct surface *s, int id, int x, int y, u32 c);
+u32  color_blend(u32 a, u32 b, int t);
 
 /* ------------------------------------------------------------------ mm ---- */
 void  mm_init(void);
@@ -212,6 +219,8 @@ void  vfs_factory_reset(void);
 int   vfs_is_dir(struct vfs_node *n);
 u32   vfs_usage_bytes(void);
 u32   str_to_u32(const char *s);
+extern const char *const neofetch_art[];
+extern const int neofetch_art_lines, neofetch_art_width;
 char *vfs_parent_path(const char *path, char *out);   /* "a/b/c" -> "a/b/" */
 
 /* ----------------------------------------------------------------- ata ---- */

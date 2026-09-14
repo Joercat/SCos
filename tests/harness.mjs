@@ -113,6 +113,11 @@ export async function boot(imgPath, opts = {})
         await sleep(60);
     };
 
+    state.wheel = async (notches) => {
+        emulator.bus.send("mouse-wheel", [notches, 0]);
+        await sleep(80);
+    };
+
     state.drag = async (x1, y1, x2, y2, button = "left") => {
         await state.move(x1, y1);
         const idx = button === "left" ? 0 : button === "middle" ? 1 : 2;

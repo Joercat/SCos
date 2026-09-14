@@ -27,7 +27,7 @@ function win_pos(n, dw, dh) {
     };
 }
 const ICON_POS = (i) => ({ x: 16 + (i % 8) * 88 + 40, y: 16 + Math.floor(i / 8) * 96 + 44 });
-const ICON = { files: 0, terminal: 1, notepad: 2, browser: 3, calendar: 4, settings: 5, about: 6, blackjack: 7 };
+const ICON = { files: 0, terminal: 1, notepad: 2, browser: 3, calendar: 4, settings: 5, about: 6, blackjack: 7, sysmon: 8 };
 
 async function live(state) {
     const grab = () => {
@@ -208,6 +208,9 @@ test(7, "settings: theme switch + about", async (state) => {
     await state.click(w.x + 620 - 13, w.y + 13); await sleep(300);
     const a = ICON_POS(ICON.about);
     await state.click(a.x, a.y); await sleep(700);
+    const aw = win_pos(1, 520, 460);
+    const tb = px(state, aw.x + 200, aw.y + 13);       /* about titlebar must exist */
+    if (tb[0] + tb[1] + tb[2] < 60) throw new Error("about window did not open");
     shot(state, "27_about");
     const w2 = win_pos(2, 520, 460);
     await state.click(w2.x + 520 - 13, w2.y + 13); await sleep(300);
@@ -341,6 +344,67 @@ test(15, "blackjack: deal, stand, new round", async (state) => {
     shot(state, "41_blackjack_newround");
     if (!(await live(state))) throw new Error("frozen during blackjack");
     await state.click(w.x + 640 - 13, w.y + 13); await sleep(300);
+});
+
+/* --------------------------------------------------------------- 16 ---- */
+test(16, "sysmon: metrics + end task", async (state) => {
+    const p = ICON_POS(ICON.terminal);
+    await state.click(p.x, p.y); await sleep(700);
+    await state.type("open files\n"); await sleep(600);
+    /* sysmon icon sits in row 2 at x=56, left of every cascaded window */
+    const sp = ICON_POS(ICON.sysmon);
+    await state.click(sp.x, sp.y); await sleep(900);
+    const sw = win_pos(2, 640, 480);
+    shot(state, "42_sysmon");
+    /* load bar frame present around (30..330, y) of content */
+    const bar = px(state, sw.x + 1 + 30, sw.y + TITLEBAR + 84);
+    if (bar[0] + bar[1] + bar[2] < 40) throw new Error("cpu load bar missing");
+    /* select files row (apps start at row 5; files = win1 -> row 6) and end it */
+    await state.click(sw.x + 1 + 200, sw.y + TITLEBAR + 222 + 6 * 18 + 8); await sleep(400);
+    shot(state, "43_sysmon_sel");
+    const row = () => state.framebuffer().mem.slice((748 * 1024 + 150) * 4, (748 * 1024 + 260) * 4);
+    const before = row();
+    await state.click(sw.x + 1 + 67, sw.y + TITLEBAR + 480 - 36 + 13); await sleep(600);
+    const after = row();
+    let diff = 0;
+    for (let i = 0; i < before.length; i += 41) if (before[i] !== after[i]) diff++;
+    if (!diff) throw new Error("task button label unchanged after End Task");
+    shot(state, "44_after_endtask");
+    if (!(await live(state))) throw new Error("frozen after end task");
+});
+
+/* --------------------------------------------------------------- 17 ---- */
+test(17, "taskbar power menu reboots", async (state) => {
+    await state.click(1024 - 68 - 34 - 16 + 17, 768 - 40 + 20); await sleep(500);
+    shot(state, "45_power_menu");
+    /* menu opened above the button: item 0 = Restart */
+    await state.click(1024 - 68 - 34 - 16 + 17 - 140 + 85, 768 - 40 + 6 - 2 * 24 - 8 + 12); await sleep(500);
+    await sleep(8000);
+    const n = state.serial.split("[s2] stage2 alive").length - 1;
+    if (n < 2) throw new Error("power menu Restart did not reboot (s2=" + n + ")");
+});
+
+/* --------------------------------------------------------------- 18 ---- */
+test(18, "terminal: wheel scroll + paged help", async (state) => {
+    const p = ICON_POS(ICON.terminal);
+    await state.click(p.x, p.y); await sleep(700);
+    const w = win_pos(1, 700, 450);
+    await state.type("help\n"); await sleep(1200);
+    await state.type("help --p3\n"); await sleep(1200);
+    shot(state, "46_help_p3");
+    const grab = () => state.framebuffer().mem.slice(300 * 1024 * 4, 301 * 1024 * 4);
+    const a = grab();
+    await state.move(w.x + 350, w.y + 200);
+    await state.wheel(6); await sleep(400);
+    const b = grab();
+    let diff = 0;
+    for (let i = 0; i < a.length; i += 37) if (a[i] !== b[i]) diff++;
+    if (!diff) throw new Error("wheel did not scroll terminal");
+    shot(state, "47_help_scrolled");
+    await state.wheel(-50); await sleep(400);
+    await state.type("echo back-at-bottom\n"); await sleep(900);
+    shot(state, "48_follow_bottom");
+    if (!(await live(state))) throw new Error("frozen after scroll");
 });
 
 /* ------------------------------------------------------------- runner ---- */

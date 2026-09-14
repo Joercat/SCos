@@ -47,9 +47,53 @@ static const struct { const char *app; int icon; const char *label; } desk_icons
     { "settings", ICON_SETTINGS, "Settings" },
     { "about",    ICON_INFO,     "About"    },
     { "blackjack", ICON_CARDS,   "Blackjack" },
+    { "sysmon",   ICON_CHART,    "SysMon"   },
 };
 #define N_ICONS ((int)(sizeof(desk_icons)/sizeof(desk_icons[0])))
 static int icon_hover = -1;
+
+/* ---- taskbar layout: scrollable app buttons + power button + clock ---- */
+#define TB_BTN_W   124
+#define TB_BTN_GAP 6
+#define TB_CLOCK_W 68
+#define TB_POWER_W 34
+static int tb_off = 0;            /* index of first visible task button */
+static int power_hover = 0;
+
+static void tb_geom(int *x0, int *x1, int *vis, int *scrollable)
+{
+    *x0 = 8;
+    *x1 = screen_w - TB_CLOCK_W - TB_POWER_W - 24;
+    int cap = (*x1 - *x0) / (TB_BTN_W + TB_BTN_GAP);
+    if (cap < 1) cap = 1;
+    *scrollable = win_count > cap;
+    if (*scrollable) { *x0 += 12; *x1 -= 12; cap = (*x1 - *x0) / (TB_BTN_W + TB_BTN_GAP); if (cap < 1) cap = 1; }
+    *vis = cap;
+    if (tb_off > win_count - cap) tb_off = win_count - cap;
+    if (tb_off < 0) tb_off = 0;
+}
+
+static void tb_power_rect(int *x, int *y, int *w, int *h)
+{
+    *x = screen_w - TB_CLOCK_W - TB_POWER_W - 16;
+    *y = screen_h - TASKBAR_H + 6;
+    *w = TB_POWER_W;
+    *h = TASKBAR_H - 12;
+}
+
+static void power_menu_cb(int item, void *ud)
+{
+    (void)ud;
+    sleep_ms(400);
+    if (item == 0) {                       /* Restart */
+        cpu_reboot_8042();
+        for (;;) cpu_hlt();
+    } else {                               /* Power Off */
+        acpi_shutdown();                   /* may return without ACPI */
+        wm_poweroff_screen();
+        for (;;) cpu_hlt();
+    }
+}
 
 /* ------------------------------------------------------------- utils ---- */
 static u32 blend(u32 a, u32 b, int t)
@@ -305,18 +349,40 @@ static void paint_taskbar(void)
     s_fill(&screen, 0, y, screen_w, TASKBAR_H, t->taskbar_bg);
     s_fill(&screen, 0, y, screen_w, 1, t->main);
 
-    int bx = 8;
-    for (int i = 0; i < win_count && bx < screen_w - 140; i++) {
+    int x0, x1, vis, scrollable;
+    tb_geom(&x0, &x1, &vis, &scrollable);
+    if (scrollable) {
+        u32 ac = blend(t->taskbar_bg, t->main, 60);
+        for (int k = 0; k < 3; k++) {        /* left/right scroll arrows */
+            int ay = y + 14 + k * 4;
+            if (tb_off > 0)
+                s_fill(&screen, 8 + k, ay, 1, 8 - k * 2, ac);
+            if (tb_off + vis < win_count)
+                s_fill(&screen, x1 + 12 - 1 - k, ay, 1, 8 - k * 2, ac);
+        }
+    }
+    int bx = x0;
+    for (int i = tb_off; i < win_count && bx + TB_BTN_W <= x1; i++) {
         struct window *w = &wins[i];
-        int bw = 124;
         u32 bg = (w == focused_w && w->state != WIN_STATE_MIN)
                  ? blend(t->taskbar_bg, t->main, 35)
                  : blend(t->taskbar_bg, t->main, 12);
-        s_fill(&screen, bx, y + 6, bw, TASKBAR_H - 12, bg);
-        s_frame_rect(&screen, bx, y + 6, bw, TASKBAR_H - 12, blend(t->taskbar_bg, t->main, 50));
-        s_clip_text(&screen, bx + 6, y + 12, w->title, t->text, bw - 12);
-        bx += bw + 6;
+        s_fill(&screen, bx, y + 6, TB_BTN_W, TASKBAR_H - 12, bg);
+        s_frame_rect(&screen, bx, y + 6, TB_BTN_W, TASKBAR_H - 12, blend(t->taskbar_bg, t->main, 50));
+        s_clip_text(&screen, bx + 6, y + 12, w->title, t->text, TB_BTN_W - 12);
+        bx += TB_BTN_W + TB_BTN_GAP;
     }
+
+    /* power button */
+    int px, py, pw, ph;
+    tb_power_rect(&px, &py, &pw, &ph);
+    power_hover = in_rect(mx, my, px, py, pw, ph) && !drag_win && !resize_win && !menu.active && !modal_w;
+    s_fill(&screen, px, py, pw, ph, power_hover ? blend(t->taskbar_bg, t->main, 45) : blend(t->taskbar_bg, t->main, 12));
+    s_frame_rect(&screen, px, py, pw, ph, blend(t->taskbar_bg, t->main, 60));
+    u32 pc = power_hover ? t->title_text : t->main;
+    s_circle(&screen, px + pw / 2, py + ph / 2 + 2, 7, pc);
+    s_fill(&screen, px + pw / 2 - 1, py + ph / 2 - 8, 3, 9, power_hover ? t->title_text : t->taskbar_bg);
+    s_line(&screen, px + pw / 2, py + ph / 2 - 8, px + pw / 2, py + ph / 2 - 1, pc);
 
     struct rtc_time rt;
     rtc_read(&rt);
@@ -325,7 +391,7 @@ static void paint_taskbar(void)
     fmt_pad2(a, rt.hour); fmt_pad2(b, rt.min); fmt_pad2(c, rt.sec);
     strcpy(clock, a); strcat(clock, ":"); strcat(clock, b); strcat(clock, ":"); strcat(clock, c);
     int tw = s_text_width(clock);
-    s_text(&screen, screen_w - tw - 12, y + 12, clock, t->main);
+    s_text(&screen, screen_w - tw - 10, y + 12, clock, t->main);
 }
 
 /* classic arrow pointer: white fill with black outline, hotspot at tip */
@@ -422,6 +488,17 @@ static void handle_mouse(struct mouse_event *e)
         dirty = 1;
         return;
     }
+    if (e->type == MEV_WHEEL && my >= screen_h - TASKBAR_H) {
+        int x0, x1, vis, scrollable;
+        tb_geom(&x0, &x1, &vis, &scrollable);
+        if (scrollable) {
+            tb_off += (e->wheel > 0) ? 1 : -1;
+            if (tb_off < 0) tb_off = 0;
+            if (tb_off > win_count - vis) tb_off = win_count - vis;
+        }
+        dirty = 1;
+        return;
+    }
     if (e->type == MEV_WHEEL) {
         struct window *w = win_at_point(mx, my);
         if (w && w->app && w->app->mouse)
@@ -512,10 +589,20 @@ static void handle_mouse(struct mouse_event *e)
     }
     /* taskbar */
     if (my >= screen_h - TASKBAR_H) {
-        int bx = 8;
-        for (int i = 0; i < win_count; i++) {
-            int bw = 124;
-            if (in_rect(mx, my, bx, screen_h - TASKBAR_H + 6, bw, TASKBAR_H - 12)) {
+        int px, py, pw, ph;
+        tb_power_rect(&px, &py, &pw, &ph);
+        if (in_rect(mx, my, px, py, pw, ph)) {
+            static const char *items[2] = { "Restart", "Power Off" };
+            wm_menu(px - 140, py - 2 * 24 - 8, items, 2, power_menu_cb, NULL);
+            dirty = 1;
+            return;
+        }
+        int x0, x1, vis, scrollable;
+        tb_geom(&x0, &x1, &vis, &scrollable);
+        for (int i = tb_off; i < win_count; i++) {
+            int bx = x0 + (i - tb_off) * (TB_BTN_W + TB_BTN_GAP);
+            if (bx + TB_BTN_W > x1) break;
+            if (in_rect(mx, my, bx, screen_h - TASKBAR_H + 6, TB_BTN_W, TASKBAR_H - 12)) {
                 struct window *tw = &wins[i];
                 if (tw->state == WIN_STATE_MIN) {
                     tw->state = WIN_STATE_NORMAL;
@@ -528,7 +615,6 @@ static void handle_mouse(struct mouse_event *e)
                 dirty = 1;
                 return;
             }
-            bx += bw + 6;
         }
     }
     dirty = 1;
@@ -613,6 +699,7 @@ void wm_run(void)
             paint_all();
             dirty = 0;
         }
+        cpu_idle_begin();          /* TSC-mark the halt so usage = 100-idle */
         cpu_hlt();
     }
 }

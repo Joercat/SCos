@@ -194,7 +194,29 @@ void cpu_brand(char *out, int max)
     out[0] = 0;
     __asm__ volatile("movl $0x80000000, %%eax; cpuid"
                      : "=a"(ax), "=b"(bx), "=c"(cx), "=d"(dx));
-    if (ax < 0x80000004) { strncpy(out, "x86 processor", max - 1); return; }
+    if (ax < 0x80000004) {
+        /* no brand string leaf: fall back to vendor + family/model */
+        __asm__ volatile("movl $0, %%eax; cpuid"
+                         : "=a"(ax), "=b"(bx), "=c"(cx), "=d"(dx));
+        char vend[13];
+        *(u32 *)(vend + 0) = bx; *(u32 *)(vend + 4) = dx; *(u32 *)(vend + 8) = cx;
+        vend[12] = 0;
+        u32 fam, mod, f1;
+        __asm__ volatile("movl $1, %%eax; cpuid"
+                         : "=a"(f1), "=b"(bx), "=c"(cx), "=d"(dx));
+        fam = ((f1 >> 8) & 0xF);
+        if (fam == 0xF) fam += (f1 >> 20) & 0xFF;
+        mod = ((f1 >> 4) & 0xF);
+        if (fam == 0x6 || fam == 0xF) mod += (f1 >> 16) & 0xF;
+        strncpy(out, vend, max - 1);
+        char tail[40];
+        strcpy(tail, " family ");
+        char n[8];
+        fmt_u32(n, fam); strcat(tail, n);
+        strcat(tail, " model "); fmt_u32(n, mod); strcat(tail, n);
+        strncat(out, tail, max - strlen(out) - 1);
+        return;
+    }
     u32 *o = (u32 *)out;
     for (u32 leaf = 0x80000002; leaf <= 0x80000004; leaf++) {
         __asm__ volatile("cpuid"

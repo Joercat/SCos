@@ -8,6 +8,7 @@ static void pit_irq(struct regs *r)
 {
     (void)r;
     tick_count++;
+    cpu_meter_tick();
 }
 
 void pit_init(u32 hz)

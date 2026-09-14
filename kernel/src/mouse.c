@@ -5,7 +5,7 @@
 #define MOUSE_STAT 0x64
 #define MOUSE_CMD  0x64
 
-#define QUEUE 64
+#define QUEUE 128
 
 static struct mouse_event queue[QUEUE];
 static int q_head, q_tail;

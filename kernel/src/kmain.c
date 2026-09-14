@@ -20,6 +20,7 @@ void kmain(struct boot_info *bi)
     pit_init(100);
     kbd_init();
     irq_enable();          /* ticks must flow before splash animations sleep */
+    cpu_meter_init();      /* needs sleeping, so only after interrupts are on */
 
     fb_init();
     theme_set_index(0);
