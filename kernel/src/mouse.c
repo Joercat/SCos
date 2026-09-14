@@ -131,7 +131,19 @@ void mouse_init(void)
     mouse_write(80);   mouse_read();
     mouse_write(0xF2); mouse_read();
     u8 id = mouse_read();
-    if (id == 4) packet_len = 4;       /* v86 sends 3-byte packets for id 3 */
+    if (id == 3) {
+        /* try the 5-button (IntelliMouse Explorer) sequence so that both
+         * v86 and spec-compliant real mice end up with 4-byte packets */
+        mouse_write(0xF3); mouse_read();
+        mouse_write(200);  mouse_read();
+        mouse_write(0xF3); mouse_read();
+        mouse_write(200);  mouse_read();
+        mouse_write(0xF3); mouse_read();
+        mouse_write(80);   mouse_read();
+        mouse_write(0xF2); mouse_read();
+        id = mouse_read();
+    }
+    if (id >= 3) packet_len = 4;
     klog("mouse: device id %d, packet len %d", id, packet_len);
 
     mouse_write(0xF4);                     /* enable streaming */
