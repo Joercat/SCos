@@ -11,6 +11,7 @@ static struct mouse_event queue[QUEUE];
 static int q_head, q_tail;
 
 static u8 packet[4];
+static int mouse_ok;
 static int packet_idx;
 static int packet_len = 3;
 static u8 button_state;
@@ -46,22 +47,20 @@ static void mouse_enqueue(struct mouse_event *e)
     q_head = next;
 }
 
-static void handle_packet(void)
+static void mouse_apply(u8 btns, i32 dx, i32 dy, i32 wheel)
 {
-    if (packet[0] & 0xC0) return;                     /* overflow: drop */
-    i32 dx = (i32)(i8)packet[1];
-    i32 dy = (i32)(i8)packet[2];
-    if (packet[0] & 0x10) dx |= ~0xFF;                /* sign extend safety */
-    if (packet[0] & 0x20) dy |= ~0xFF;
-
+    i32 unused = 0;
+    (void)unused;
+    u8 packet0_btns = btns;
+    i32 pdx = dx, pdy = dy;
     struct mouse_event e;
-    e.buttons = packet[0] & 7;
+    e.buttons = packet0_btns & 7;
     e.button = 0;
     e.down = 0;
 
-    if (dx || dy) {
+    if (pdx || pdy) {
         e.type = MEV_MOVE;
-        e.dx = (i16)dx; e.dy = (i16)dy; e.wheel = 0;
+        e.dx = (i16)pdx; e.dy = (i16)pdy; e.wheel = 0;
         mouse_enqueue(&e);
     }
     for (int b = 0; b < 3; b++) {
@@ -74,14 +73,33 @@ static void handle_packet(void)
             mouse_enqueue(&e);
         }
     }
-    if (packet_len == 4 && packet[3]) {
+    if (wheel) {
         e.type = MEV_WHEEL;
-        e.wheel = (i8)packet[3];
+        e.wheel = (i8)wheel;
         e.dx = 0; e.dy = 0;
         mouse_enqueue(&e);
     }
     button_state = e.buttons;
 }
+
+static void handle_packet(void)
+{
+    if (packet[0] & 0xC0) return;                     /* overflow: drop */
+    i32 dx = (i32)(i8)packet[1];
+    i32 dy = (i32)(i8)packet[2];
+    if (packet[0] & 0x10) dx |= ~0xFF;                /* sign extend safety */
+    if (packet[0] & 0x20) dy |= ~0xFF;
+    mouse_apply(packet[0] & 7, dx, dy,
+                packet_len == 4 ? (i32)(i8)packet[3] : 0);
+}
+
+/* USB HID boot mouse reports arrive here */
+void mouse_inject(u8 buttons, i32 dx, i32 dy, i32 wheel)
+{
+    mouse_apply(buttons, dx, dy, wheel);
+}
+
+int mouse_present(void) { return mouse_ok; }
 
 static void mouse_irq(struct regs *r)
 {
@@ -166,6 +184,7 @@ void mouse_init(void)
         klog("mouse: streaming enable refused");
         return;
     }
+    mouse_ok = 1;
 
     irq_install(12, mouse_irq);
     pic_clear_mask(12);

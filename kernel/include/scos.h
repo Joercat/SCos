@@ -65,6 +65,20 @@ void cpu_meter_tick(void);
 void cpu_idle_begin(void);
 u32  cpu_mhz(void);
 u32  cpu_signature(void);
+
+/* pci */
+u32  pci_read32(u8 bus, u8 dev, u8 fn, u8 off);
+void pci_write32(u8 bus, u8 dev, u8 fn, u8 off, u32 v);
+int  pci_find_class(u8 class, u8 subclass, u8 progif,
+                    u8 *bus, u8 *dev, u8 *fn, int max);
+/* usb (xHCI + HID boot) */
+void usb_init(void);
+void usb_poll(void);
+void usb_status(char *out, int max);
+/* input injectors for the USB HID path */
+void mouse_inject(u8 buttons, i32 dx, i32 dy, i32 wheel);
+void kbd_inject_hid(u8 mod, const u8 *keys, u8 *prev_keys, u8 *prev_mod);
+int  mouse_present(void);
 u32  cpu_usage_pct(void);
 
 /* ---------------------------------------------------------------- klog ---- */

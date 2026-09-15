@@ -1192,6 +1192,7 @@ void wm_run(void)
     klog("wm: entering main loop");
     for (;;) {
         irq_watchdog();
+        usb_poll();
         struct mouse_event me;
         while (mouse_poll(&me)) handle_mouse(&me);
         struct key_event ke;

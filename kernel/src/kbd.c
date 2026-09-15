@@ -62,10 +62,8 @@ static u16 special_key(u8 sc)
     }
 }
 
-static void kbd_irq(struct regs *r)
+static void kbd_sc(u8 sc)
 {
-    (void)r;
-    u8 sc = inb(KBD_DATA);
     struct key_event e;
     e.scancode = sc;
     e.ctrl = ctrl_on; e.alt = alt_on; e.shift = shift_on;
@@ -123,6 +121,88 @@ static void kbd_flush(void)
  * port or its IRQ disabled, stale bytes in the output buffer and both
  * devices in an unknown state - v86 forgives all of that, a PC does not.
  */
+/* HID boot-protocol usage -> scancode set 1 make code */
+static u8 hid_make(u8 u)
+{
+    if (u >= 0x04 && u <= 0x1D) {
+        static const u8 let[26] = {
+            0x1E,0x30,0x2E,0x20,0x12,0x21,0x22,0x23,0x17,0x24,0x25,0x26,
+            0x32,0x31,0x18,0x19,0x10,0x13,0x1F,0x14,0x16,0x2F,0x11,0x2D,
+            0x15,0x2C };
+        return let[u - 0x04];
+    }
+    if (u >= 0x1E && u <= 0x27) return (u8)(u - 0x1C);
+    switch (u) {
+    case 0x28: return 0x1C;   /* enter */
+    case 0x29: return 0x01;   /* esc */
+    case 0x2A: return 0x0E;   /* backspace */
+    case 0x2B: return 0x0F;   /* tab */
+    case 0x2C: return 0x39;   /* space */
+    case 0x2D: return 0x0C;
+    case 0x2E: return 0x0D;
+    case 0x2F: return 0x1A;
+    case 0x30: return 0x1B;
+    case 0x31: return 0x2B;
+    case 0x33: return 0x27;
+    case 0x34: return 0x28;
+    case 0x35: return 0x29;
+    case 0x36: return 0x33;
+    case 0x37: return 0x34;
+    case 0x38: return 0x35;
+    case 0x39: return 0x3A;   /* caps lock */
+    case 0x49: return 0x52;   /* insert */
+    case 0x4A: return 0x53;   /* delete */
+    case 0x4B: return 0x47;   /* home */
+    case 0x4C: return 0x4F;   /* end */
+    case 0x4D: return 0x49;   /* pgup */
+    case 0x4E: return 0x51;   /* pgdn */
+    case 0x4F: return 0x4D;   /* right */
+    case 0x50: return 0x4B;   /* left */
+    case 0x51: return 0x50;   /* down */
+    case 0x52: return 0x48;   /* up */
+    default:
+        if (u >= 0x3A && u <= 0x45)
+            return (u <= 0x44) ? (u8)(u - 0x3A + 0x3B) : 0x58;
+        return 0;
+    }
+}
+
+/* USB HID boot keyboard report -> key events (diffed against previous) */
+void kbd_inject_hid(u8 mod, const u8 *keys, u8 *prev_keys, u8 *prev_mod)
+{
+    static const u8 modmake[8] = { 0x1D,0x2A,0x38,0x5B,0x1D,0x2A,0x38,0x5B };
+    for (int b = 0; b < 8; b++) {
+        u8 bit = (u8)(1 << b);
+        if ((mod & bit) != (*prev_mod & bit))
+            kbd_sc((u8)(modmake[b] | ((mod & bit) ? 0 : 0x80)));
+    }
+    *prev_mod = mod;
+    shift_on = (mod & 0x22) ? 1 : 0;
+    ctrl_on  = (mod & 0x11) ? 1 : 0;
+    alt_on   = (mod & 0x44) ? 1 : 0;
+    for (int i = 0; i < 6; i++) {
+        u8 u = prev_keys[i];
+        if (!u) continue;
+        int still = 0;
+        for (int j = 0; j < 6; j++) if (keys[j] == u) still = 1;
+        if (!still) { u8 mk = hid_make(u); if (mk) kbd_sc((u8)(mk | 0x80)); }
+    }
+    for (int i = 0; i < 6; i++) {
+        u8 u = keys[i];
+        if (!u) continue;
+        int was = 0;
+        for (int j = 0; j < 6; j++) if (prev_keys[j] == u) was = 1;
+        if (!was) { u8 mk = hid_make(u); if (mk) kbd_sc(mk); }
+    }
+    for (int i = 0; i < 6; i++) prev_keys[i] = keys[i];
+}
+
+static void kbd_irq(struct regs *r)
+{
+    (void)r;
+    kbd_sc(inb(KBD_DATA));
+}
+
 void kbd_init(void)
 {
     outb(KBD_STAT, 0xAD);                 /* disable keyboard port */

@@ -54,8 +54,18 @@ void kmain(struct boot_info *bi)
         boot_screen_step(line, 65);
         boot_screen_step(fs_image_load() ? "fs:   saved image loaded from disk (LBA 2048)"
                                          : "fs:   no saved image on disk - using defaults", 75);
-        boot_screen_step("wm:   compositor starting, apps registered", 85);
         mouse_init();
+        usb_init();
+        {
+            char ul[96];
+            usb_status(ul, sizeof(ul));
+            strcpy(line, "in:   ps2 kbd");
+            if (mouse_present()) strcat(line, "+mouse");
+            strcat(line, " | ");
+            strncat(line, ul, 70);
+            boot_screen_step(line, 80);
+        }
+        boot_screen_step("wm:   compositor starting, apps registered", 85);
         apps_register_all();
         wm_init();
         struct rtc_time rt2;
