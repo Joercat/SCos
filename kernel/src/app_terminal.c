@@ -124,6 +124,7 @@ static const char *help_text =
     "df        - Filesystem usage\n"
     "disks     - Detected ATA disks (IDENTIFY)\n"
     "neofetch  - System summary with logo\n"
+    "dmesg     - Kernel log ring (USB/input diagnostics)\n"
     "sysmon    - Open the System Monitor app\n"
     "theme     - List or switch themes\n"
     "calc      - Perform basic arithmetic\n"
@@ -364,6 +365,19 @@ static void run_command(struct term *t, const char *command)
     t->follow = 1;
         t->follow = 1;
         return;
+    }
+    else if (!strcmp(cmd, "dmesg")) {
+        int n = klog_ring_count();
+        int start = n > 14 ? n - 14 : 0;
+        response[0] = 0;
+        for (int i = start; i < n; i++) {
+            char ln[96];
+            if (klog_ring(i, ln, sizeof(ln))) {
+                if (response[0]) strcat(response, "\n");
+                strncat(response, ln, sizeof(response) - strlen(response) - 2);
+            }
+        }
+        if (!response[0]) strcpy(response, "(log empty)");
     }
     else if (!strcmp(cmd, "date")) {
         struct rtc_time rt;

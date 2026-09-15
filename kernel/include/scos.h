@@ -75,6 +75,10 @@ int  pci_find_class(u8 class, u8 subclass, u8 progif,
 void usb_init(void);
 void usb_poll(void);
 void usb_status(char *out, int max);
+int  usb_diag_flag(void);
+void diag_run(void);
+int  klog_ring_count(void);
+int  klog_ring(int i, char *out, int max);
 /* input injectors for the USB HID path */
 void mouse_inject(u8 buttons, i32 dx, i32 dy, i32 wheel);
 void kbd_inject_hid(u8 mod, const u8 *keys, u8 *prev_keys, u8 *prev_mod);
@@ -128,6 +132,8 @@ struct key_event {
 
 void kbd_init(void);
 int  kbd_poll(struct key_event *out);      /* 1 if an event was dequeued */
+extern volatile u32 input_last_tick;   /* tick of last kbd/mouse event */
+extern int input_guard_armed;           /* WM arms the silence guard */
 
 /* --------------------------------------------------------------- mouse ---- */
 enum { MEV_MOVE = 1, MEV_BUTTON, MEV_WHEEL };

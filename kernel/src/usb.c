@@ -51,6 +51,8 @@ struct xdev {
     u8 *in_buf[IN_TRBS];
     u8 prev_mod;
     u8 prev_keys[6];
+    u32 last_rep_tick;
+    u8 reported, silent_logged;
 };
 
 static volatile u8 *cap, *op, *db, *rt;
@@ -66,6 +68,7 @@ static u8 *devctx[MAX_SLOTS + 1];
 static u8 *inctx[MAX_SLOTS + 1];
 static struct xdev devs[MAX_SLOTS + 1];
 static int n_devs;
+static int fail_flag, hub_count;
 static volatile u32 cc_code = 0xFF;
 static volatile u32 cc_slot;
 static char status_line[96];
@@ -127,6 +130,12 @@ static int proc_events(void)
                     if (PA(d->in_buf[b]) == ptr) i = b;
                 if (i >= 0) {
                     u8 *r = d->in_buf[i];
+                    d->last_rep_tick = tick_count;
+                    if (!d->reported) {
+                        d->reported = 1;
+                        klog("usb: first report from slot %d (%s)", slot,
+                             d->kind == 2 ? "mouse" : "keyboard");
+                    }
                     if (d->kind == 2 && len >= 3)
                         mouse_inject(r[0], (i32)(i8)r[1], (i32)(i8)r[2],
                                      len >= 4 ? (i32)(i8)r[3] : 0);
@@ -273,7 +282,13 @@ static int enumerate_port(int port)
 {
     if (!(portsc(port) & 1)) return 0;    /* CCS */
     port_reset(port);
+    if (!(portsc(port) & 2)) {
+        klog("usb: port %d reset failed (device not enabled)", port);
+        fail_flag = 1;
+        return 0;
+    }
     int speed = port_speed(port);
+    klog("usb: port %d connected, speed %d", port, speed);
     if (speed < 1 || speed > 4) return 0;
 
     if (run_cmd(0, 0, 0, (u32)(TRB_ENABSLOT << 10), 500) != 1) {
@@ -323,7 +338,16 @@ static int enumerate_port(int port)
         return 0;
     }
     if (ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, 9, 1) != 1) {
+        klog("usb: config descriptor failed slot %d", slot);
         d->used = 0; return 0;
+    }
+    if (desc_buf[4] == 9) {
+        klog("usb: port %d is a HUB - devices behind hubs are not walked yet",
+             port);
+        hub_count++;
+        fail_flag = 1;
+        d->used = 0;
+        return 3;
     }
     u16 tot = (u16)(desc_buf[2] | (desc_buf[3] << 8));
     if (tot > sizeof(desc_buf)) tot = sizeof(desc_buf);
@@ -408,7 +432,19 @@ static int enumerate_port(int port)
 /* -------------------------------------------------------------- public ---- */
 void usb_poll(void)
 {
-    if (have_xhci) proc_events();
+    static u32 hb;
+    if (!have_xhci) return;
+    proc_events();
+    if (tick_count - hb < 100) return;      /* 1 Hz heartbeat */
+    hb = tick_count;
+    for (int sl = 1; sl <= MAX_SLOTS; sl++) {
+        struct xdev *d = &devs[sl];
+        if (!d->used || !d->reported || d->silent_logged) continue;
+        if (tick_count - d->last_rep_tick > 500) {
+            d->silent_logged = 1;
+            klog("usb: slot %d silent - no reports for 5 s (pipe stalled?)", sl);
+        }
+    }
 }
 
 void usb_init(void)
@@ -424,6 +460,14 @@ void usb_init(void)
         return;
     }
     u32 bar0 = pci_read32(bus[0], dev[0], fn[0], 0x10);
+    u32 bar0h = pci_read32(bus[0], dev[0], fn[0], 0x14);
+    if ((bar0 & 0x6) == 0x4 && bar0h) {
+        strcpy(status_line,
+               "usb: xHCI BAR above 4 GB - 32-bit kernel cannot map it");
+        fail_flag = 1;
+        klog("usb: BAR0 = %x:%x (64-bit, above 4G)", bar0h, bar0 & ~0xFu);
+        return;
+    }
     if ((bar0 & 0x7) != 0) {
         strcpy(status_line, "usb: xHCI BAR not memory-mapped");
         klog("%s", status_line);
@@ -444,6 +488,34 @@ void usb_init(void)
     db = cap + dboff;
     rt = cap + rtsoff;
     klog("usb: xHCI at %x ports %d ctx %d", (u32)cap, max_ports, csz);
+
+    /* BIOS/SMM ownership handoff (USB legacy support extended capability).
+     * Without this, firmware that traps USB for "legacy support" keeps
+     * generating SMIs and can hold the controller hostage. */
+    {
+        u32 xecp = (hcc1 >> 16) & 0xFFFF;
+        int guard = 0;
+        while (xecp >= 8 && xecp * 4 < 0x4000 && guard++ < 32) {
+            volatile u32 *ec = (volatile u32 *)(cap + xecp * 4);
+            u32 id = ec[0] & 0xFF;
+            u32 next = (ec[0] >> 8) & 0xFF;
+            if (id == 1) {                    /* USB legacy support */
+                klog("usb: USBLEGSP found - taking ownership from BIOS");
+                ec[0] |= 1u << 24;            /* OS owned */
+                u64 t0 = now_ms();
+                while (now_ms() - t0 < 400 && (ec[0] & (1u << 16))) cpu_hlt();
+                if (ec[0] & (1u << 16)) {
+                    klog("usb: BIOS did not release SMM ownership");
+                    fail_flag = 1;
+                } else {
+                    klog("usb: SMM handoff complete");
+                }
+                ec[1] = 0;                    /* disable all legacy SMI enables */
+            }
+            if (!next) break;
+            xecp += next;
+        }
+    }
 
     volatile u32 *cmd = (volatile u32 *)op;
     volatile u32 *sts = (volatile u32 *)(op + 4);
@@ -511,8 +583,18 @@ void usb_init(void)
     strcpy(nl, "usb: xHCI live - ");
     fmt_u32(tmp, (u32)mk); strcat(nl, tmp); strcat(nl, " keyboard, ");
     fmt_u32(tmp, (u32)mm); strcat(nl, tmp); strcat(nl, " mouse (HID boot)");
+    if (hub_count) {
+        strcat(nl, ", "); fmt_u32(tmp, (u32)hub_count); strcat(nl, tmp);
+        strcat(nl, " hub(s)");
+    }
+    if (fail_flag) strcat(nl, " - see diagnostics");
     strcpy(status_line, nl);
     klog("%s", status_line);
+}
+
+int usb_diag_flag(void)
+{
+    return have_xhci && (n_devs == 0 || fail_flag);
 }
 
 void usb_status(char *out, int max)

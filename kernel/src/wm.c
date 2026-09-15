@@ -1187,12 +1187,30 @@ static void irq_watchdog(void)
     last_tick = (u32)tick_count;
 }
 
+static u32 wm_t0;
+static int diag_tried;
+
+static int is_v86_box(void)
+{
+    const char *m = ata_model();
+    return m && strstr(m, "v86");
+}
+
 void wm_run(void)
 {
+    wm_t0 = tick_count;
+    input_guard_armed = 1;
+    if (usb_diag_flag()) diag_run();   /* enumeration already reported trouble */
+
     klog("wm: entering main loop");
     for (;;) {
         irq_watchdog();
         usb_poll();
+        if (!diag_tried && !input_last_tick && !is_v86_box() &&
+            tick_count - wm_t0 > 600) {   /* 6 s of total silence on real HW */
+            diag_tried = 1;
+            diag_run();
+        }
         struct mouse_event me;
         while (mouse_poll(&me)) handle_mouse(&me);
         struct key_event ke;

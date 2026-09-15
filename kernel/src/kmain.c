@@ -79,7 +79,7 @@ void kmain(struct boot_info *bi)
         fmt_pad2(n, rt2.sec); strcat(line, n);
         boot_screen_step(line, 95);
         boot_screen_step("Finishing... I think...", 100);
-        sleep_ms(200);
+        sleep_ms(1400);   /* let the finished log be read (and photographed) */
     }
 
     klog("boot complete, handing over to window manager");

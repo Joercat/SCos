@@ -1,6 +1,9 @@
 /* SCos native - PS/2 keyboard driver (scancode set 1) */
 #include "scos.h"
 
+volatile u32 input_last_tick;   /* any kbd/mouse event stamps this */
+int input_guard_armed;            /* set when WM starts; ignores boot-time BAT/ACK */
+
 #define KBD_DATA 0x60
 #define KBD_STAT 0x64
 #define QUEUE 256
@@ -27,6 +30,7 @@ static const char sc_shift[] = {
 
 static void kbd_enqueue(struct key_event *e)
 {
+    if (input_guard_armed) input_last_tick = tick_count;
     int next = (q_head + 1) % QUEUE;
     if (next == q_tail) return;      /* full: drop */
     queue[q_head] = *e;

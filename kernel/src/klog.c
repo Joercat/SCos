@@ -17,25 +17,35 @@ static void serial_puts(const char *s)
     }
 }
 
-static void put_uint(u32 v, int base, int width, char pad)
+/* on-screen ring so a held diagnostics screen (and `dmesg`) can show what
+ * happened on machines without a serial console attached */
+#define KLOG_LINES 40
+#define KLOG_LEN   92
+static char ring[KLOG_LINES][KLOG_LEN];
+static int ring_head, ring_count;
+
+static void klog_push(const char *line)
 {
-    char buf[16];
-    int i = 0;
-    static const char digits[] = "0123456789abcdef";
-    if (v == 0) buf[i++] = '0';
-    while (v) { buf[i++] = digits[v % base]; v /= base; }
-    while (i < width) buf[i++] = pad;
-    while (i--) serial_putc(buf[i]);
+    strncpy(ring[ring_head], line, KLOG_LEN - 1);
+    ring[ring_head][KLOG_LEN - 1] = 0;
+    ring_head = (ring_head + 1) % KLOG_LINES;
+    if (ring_count < KLOG_LINES) ring_count++;
 }
 
-static void put_int(i32 v, int width)
+int klog_ring_count(void) { return ring_count; }
+
+int klog_ring(int i, char *out, int max)
 {
-    if (v < 0) { serial_putc('-'); v = -v; }
-    put_uint((u32)v, 10, width, ' ');
+    if (i < 0 || i >= ring_count || max < 2) return 0;
+    int idx = (ring_head - ring_count + i + KLOG_LINES * 2) % KLOG_LINES;
+    strncpy(out, ring[idx], max - 1);
+    out[max - 1] = 0;
+    return 1;
 }
 
 void klog_raw(const char *s)
 {
+    klog_push(s);
     serial_puts(s);
     serial_putc('\r');
     serial_putc('\n');
@@ -43,44 +53,63 @@ void klog_raw(const char *s)
 
 void klog(const char *fmt, ...)
 {
+    char buf[KLOG_LEN];
+    int bp = 0;
     /* minimal varargs via builtin */
     __builtin_va_list ap;
     __builtin_va_start(ap, fmt);
     for (; *fmt; fmt++) {
-        if (*fmt != '%') { serial_putc(*fmt); continue; }
+        if (*fmt != '%') {
+            if (bp < KLOG_LEN - 1) buf[bp++] = *fmt;
+            continue;
+        }
         fmt++;
         int width = 0;
-        char pad = ' ';
-        if (*fmt == '0') { pad = '0'; fmt++; }
+        if (*fmt == '0') fmt++;
         while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
+        (void)width;
         switch (*fmt) {
         case 's': {
             const char *s = __builtin_va_arg(ap, const char *);
-            serial_puts(s ? s : "(null)");
+            if (!s) s = "(null)";
+            while (*s && bp < KLOG_LEN - 1) buf[bp++] = *s++;
             break;
         }
         case 'c':
-            serial_putc((char)__builtin_va_arg(ap, int));
+            if (bp < KLOG_LEN - 1) buf[bp++] = (char)__builtin_va_arg(ap, int);
             break;
-        case 'd':
-            put_int(__builtin_va_arg(ap, i32), width);
+        case 'd': {
+            char t[16]; int ti = 0; i32 v = __builtin_va_arg(ap, i32);
+            u32 uv; int neg = 0;
+            if (v < 0) { neg = 1; uv = (u32)-v; } else uv = (u32)v;
+            if (!uv) t[ti++] = '0';
+            while (uv) { t[ti++] = (char)('0' + uv % 10); uv /= 10; }
+            if (neg && bp < KLOG_LEN - 1) buf[bp++] = '-';
+            while (ti-- && bp < KLOG_LEN - 1) buf[bp++] = t[ti];
             break;
-        case 'u':
-            put_uint(__builtin_va_arg(ap, u32), 10, width, pad);
+        }
+        case 'u': case 'x': {
+            u32 v = __builtin_va_arg(ap, u32);
+            const char *dg = "0123456789abcdef";
+            char t[16]; int ti = 0; int base = (*fmt == 'x') ? 16 : 10;
+            if (!v) t[ti++] = '0';
+            while (v) { t[ti++] = dg[v % base]; v /= base; }
+            while (ti-- && bp < KLOG_LEN - 1) buf[bp++] = t[ti];
             break;
-        case 'x':
-            put_uint(__builtin_va_arg(ap, u32), 16, width, pad);
-            break;
+        }
         case '%':
-            serial_putc('%');
+            if (bp < KLOG_LEN - 1) buf[bp++] = '%';
             break;
         default:
-            serial_putc('%');
-            serial_putc(*fmt);
+            if (bp < KLOG_LEN - 1) buf[bp++] = '%';
+            if (bp < KLOG_LEN - 1) buf[bp++] = *fmt;
             break;
         }
     }
     __builtin_va_end(ap);
+    buf[bp] = 0;
+    klog_push(buf);
+    serial_puts(buf);
     serial_putc('\r');
     serial_putc('\n');
 }
