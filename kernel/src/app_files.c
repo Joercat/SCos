@@ -7,6 +7,10 @@ struct files {
     int n;
     int hover_row;          /* -1 = none */
     int hover_btn;
+    u8 synth[64];           /* 0 = real entry, 1 = app shortcut, 2 = pin */
+    int notice;             /* 1 = show "hidden system dir" notice */
+    u64 last_down_tick;     /* double-click detection */
+    int last_down_row;
 };
 
 #define TB_Y 8
@@ -28,10 +32,53 @@ static u32 fr_mix(u32 a, u32 b, int t)
            (((ab * (255 - t) + bb * t) / 255));
 }
 
+static int path_is_desktop(const char *p)
+{
+    return !strcmp(p, "/home/desktop") || !strcmp(p, "/home/desktop/");
+}
+
 static void files_load(struct files *f)
 {
+    for (int i = 0; i < 64; i++) f->synth[i] = 0;
+    f->notice = 0;
+    /* system files are terminal-only: the file manager never exposes them */
+    if (!strncmp(f->path, "/system", 7)) {
+        f->n = 0;
+        f->notice = 1;
+        return;
+    }
     struct vfs_node *dir = vfs_lookup(f->path);
     f->n = dir ? vfs_list(dir, f->names, 64) : 0;
+    if (!strcmp(f->path, "/") || !strcmp(f->path, "")) {
+        for (int i = 0; i < f->n; i++) {
+            if (!strcmp(f->names[i], "system")) {
+                for (int j = i; j < f->n - 1; j++)
+                    memcpy(f->names[j], f->names[j + 1], VFS_NAME);
+                f->n--;
+                i--;
+            }
+        }
+    }
+    /* the desktop folder mirrors the desktop: app shortcuts + pins */
+    if (path_is_desktop(f->path)) {
+        int cnt = wm_desk_vis_count();
+        for (int i = 0; i < cnt && f->n < 64; i++) {
+            char app[32], path[192], label[40];
+            int kind = 0;
+            if (!wm_desk_vis_get(i, app, path, label, &kind)) continue;
+            char nm[VFS_NAME];
+            nm[0] = 0;
+            strncpy(nm, label, VFS_NAME - 6);
+            strcat(nm, kind == 0 ? " .app" : " .lnk");
+            int dup = 0;
+            for (int j = 0; j < f->n; j++)
+                if (!strcmp(f->names[j], nm)) dup = 1;
+            if (dup) continue;
+            strncpy(f->names[f->n], nm, VFS_NAME - 1);
+            f->synth[f->n] = (u8)(kind + 1);
+            f->n++;
+        }
+    }
 }
 
 static void files_open(struct window *w, void *arg)
@@ -206,10 +253,14 @@ static void files_paint(struct window *w)
             s_fill(s, 15, y + 8, 7, 1, t->main);
             s_fill(s, 15, y + 11, 7, 1, t->main);
         }
+        if (f->synth[i])                     /* shortcut badge */
+            s_fill(s, 21, y + 15, 5, 5, t->main);
         s_clip_text(s, 34, y + 4, f->names[i], t->text, s->w - 44);
     }
     if (!f->n)
-        s_text(s, 12, LIST_Y + 10, "(empty directory)", t->text);
+        s_text(s, 12, LIST_Y + 10, f->notice ?
+               "(system directory - hidden here, use the terminal)" :
+               "(empty directory)", t->text);
 }
 
 /* -------------------------------------------------------------- input ---- */
@@ -231,6 +282,7 @@ static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
     if (e->type != MEV_BUTTON || !e->down) return;
 
     if (e->button == MBTN_RIGHT) {
+        if (f->hover_row >= 0 && f->synth[f->hover_row]) return;
         struct fm_ctx *ctx = palloc(sizeof(*ctx));
         ctx->w = w;
         ctx->row = f->hover_row;
@@ -269,6 +321,31 @@ static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
         return;
     }
     if (f->hover_row >= 0) {
+        int row = f->hover_row;
+        u64 now = tick_count;
+        int dbl = (row == f->last_down_row &&
+                   (now - f->last_down_tick) <= (u64)prefs_get()->dbl_ms / 10);
+        f->last_down_tick = now;
+        f->last_down_row = row;
+        if (!dbl) { wm_redraw(w); return; }   /* first click selects */
+        if (f->synth[row]) {
+            int cnt = wm_desk_vis_count();
+            for (int i = 0; i < cnt; i++) {
+                char a2[32], p2[192], l2[40];
+                int k2 = 0;
+                if (!wm_desk_vis_get(i, a2, p2, l2, &k2)) continue;
+                char nm[VFS_NAME];
+                nm[0] = 0;
+                strncpy(nm, l2, VFS_NAME - 6);
+                strcat(nm, k2 == 0 ? " .app" : " .lnk");
+                if (strcmp(f->names[row], nm)) continue;
+                if (k2 == 0) wm_open_app(a2, NULL);
+                else wm_open_app("notepad", p2);
+                break;
+            }
+            wm_redraw(w);
+            return;
+        }
         if (files_is_dir_row(f, f->hover_row)) {
             char full[300];
             files_full_path(f, f->hover_row, full);

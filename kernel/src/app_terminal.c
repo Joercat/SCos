@@ -27,6 +27,11 @@ struct term {
     char aliases[8][2][64];
     int nalias;
     int shutting_down;
+    /* nano-style full screen editor */
+    int edit_mode;
+    char ed_path[192];
+    char ed_buf[128][96];
+    int ed_lines, ed_row, ed_col, ed_scroll, ed_modified;
 };
 
 static void term_push_line(struct term *t, const char *s)
@@ -110,6 +115,7 @@ static const char *help_text =
     "cp        - Copy a file\n"
     "mv        - Move or rename a file\n"
     "rm [-s]   - Delete file (-s also allows system files)\n"
+    "edit <f>  - Full-screen editor (nano-like: ^O save, ^X exit)\n"
     "whoami    - Show current user\n"
     "version   - Show system version\n"
     "uptime    - Time since boot (PIT)\n"
@@ -256,8 +262,11 @@ static void run_command(struct term *t, const char *command)
     else if (!strcmp(cmd, "ls")) {
         char path[256];
         resolve_path(t, nargs > 1 ? args[1] : "", path);
+        if (!strncmp(path, "/system", 7))
+            strcpy(response, "Warning: /system holds OS files - view with care, "
+                             "edits can break SCos\n");
         struct vfs_node *n = vfs_lookup(path);
-        if (!n || !vfs_is_dir(n)) strcpy(response, "Error: Invalid path or permission denied.");
+        if (!n || !vfs_is_dir(n)) strcat(response, "Error: Invalid path or permission denied.");
         else {
             char names[64][VFS_NAME];
             int c = vfs_list(n, names, 64);
@@ -297,9 +306,50 @@ static void run_command(struct term *t, const char *command)
             char *data = vfs_read(path, &len);
             if (!data) strcpy(response, "Error: File not found");
             else {
-                strncpy(response, data, sizeof(response) - 1);
+                char *o = response;
+                if (!strncmp(path, "/system", 7)) {
+                    strcpy(o, "Warning: system file - editing it can break SCos\n");
+                    o += strlen(o);
+                }
+                strncpy(o, data, sizeof(response) - 1 - (u32)(o - response));
                 response[sizeof(response) - 1] = 0;
             }
+        }
+    }
+    else if (!strcmp(cmd, "edit") || !strcmp(cmd, "nano")) {
+        if (nargs < 2) strcpy(response, "Error: usage: edit <file>");
+        else {
+            char path[256];
+            resolve_path(t, args[1], path);
+            t->edit_mode = 1;
+            t->ed_row = t->ed_col = t->ed_scroll = 0;
+            t->ed_modified = 0;
+            t->ed_lines = 0;
+            strncpy(t->ed_path, path, sizeof(t->ed_path) - 1);
+            u32 len = 0;
+            char *data = vfs_read(path, &len);
+            if (data) {
+                char *start = data;
+                while (t->ed_lines < 128) {
+                    char *nl = str_chr(start, '\n');
+                    int ln = nl ? (int)(nl - start) : (int)strlen(start);
+                    if (ln > 95) ln = 95;
+                    memcpy(t->ed_buf[t->ed_lines], start, ln);
+                    t->ed_buf[t->ed_lines][ln] = 0;
+                    t->ed_lines++;
+                    if (!nl) break;
+                    start = nl + 1;
+                    if (!*start) {
+                        if (t->ed_lines < 128) {
+                            t->ed_buf[t->ed_lines][0] = 0;
+                            t->ed_lines++;
+                        }
+                        break;
+                    }
+                }
+            }
+            if (!t->ed_lines) { t->ed_buf[0][0] = 0; t->ed_lines = 1; }
+            strcpy(response, "");
         }
     }
     else if (!strcmp(cmd, "echo")) {
@@ -814,7 +864,7 @@ static void term_open(struct window *w, void *arg)
     (void)arg;
     struct term *t = palloc(sizeof(struct term));
     memset(t, 0, sizeof(*t));
-    strcpy(t->cwd, "/home/");
+    strcpy(t->cwd, "/");
     t->scroll = -1;
     t->hindex = 0;
     w->data = t;
@@ -833,8 +883,145 @@ static int term_visible_rows(struct window *w)
     return (wm_content_h(w) - 24) / (FONT_H + 2);
 }
 
+static void ed_clamp_cursor(struct term *t)
+{
+    if (t->ed_row < 0) t->ed_row = 0;
+    if (t->ed_row > t->ed_lines - 1) t->ed_row = t->ed_lines - 1;
+    int ln = (int)strlen(t->ed_buf[t->ed_row]);
+    if (t->ed_col > ln) t->ed_col = ln;
+    if (t->ed_col < 0) t->ed_col = 0;
+}
+
+static void ed_save(struct term *t)
+{
+    char out[128 * 97];
+    int o = 0;
+    for (int i = 0; i < t->ed_lines; i++) {
+        int ln = (int)strlen(t->ed_buf[i]);
+        memcpy(out + o, t->ed_buf[i], ln);
+        o += ln;
+        out[o++] = '\n';
+    }
+    vfs_write(t->ed_path, out, (u32)o);
+    t->ed_modified = 0;
+}
+
+static void ed_key(struct window *w, struct key_event *e)
+{
+    struct term *t = w->data;
+    if (!e->pressed) return;
+    char c = (char)e->keycode;
+    if (e->ctrl && (c == 15 || c == 'o' || c == 'O')) { ed_save(t); wm_redraw(w); return; }
+    if (e->ctrl && (c == 24 || c == 'x' || c == 'X')) {
+        t->edit_mode = 0;
+        char m[224];
+        strcpy(m, "[editor] closed ");
+        strcat(m, t->ed_path);
+        term_push_line(t, m);
+        wm_redraw(w);
+        return;
+    }
+    char *line = t->ed_buf[t->ed_row];
+    int ln = (int)strlen(line);
+    switch (e->keycode) {
+    case KEY_UP:    t->ed_row--; break;
+    case KEY_DOWN:  t->ed_row++; break;
+    case KEY_LEFT:
+        if (t->ed_col) t->ed_col--;
+        else if (t->ed_row) { t->ed_row--; t->ed_col = (int)strlen(t->ed_buf[t->ed_row]); }
+        break;
+    case KEY_RIGHT:
+        if (t->ed_col < ln) t->ed_col++;
+        else if (t->ed_row < t->ed_lines - 1) { t->ed_row++; t->ed_col = 0; }
+        break;
+    case KEY_HOME:  t->ed_col = 0; break;
+    case KEY_END:   t->ed_col = ln; break;
+    case KEY_PGUP:  t->ed_row -= 12; break;
+    case KEY_PGDN:  t->ed_row += 12; break;
+    case 8: case 127:
+        if (t->ed_col) {
+            memmove(line + t->ed_col - 1, line + t->ed_col, ln - t->ed_col + 1);
+            t->ed_col--;
+            t->ed_modified = 1;
+        } else if (t->ed_row) {
+            int plen = (int)strlen(t->ed_buf[t->ed_row - 1]);
+            if (plen + ln < 96) {
+                memcpy(t->ed_buf[t->ed_row - 1] + plen, line, ln + 1);
+                for (int i = t->ed_row; i < t->ed_lines - 1; i++)
+                    memcpy(t->ed_buf[i], t->ed_buf[i + 1], sizeof(t->ed_buf[i]));
+                t->ed_lines--;
+                t->ed_row--;
+                t->ed_col = plen;
+                t->ed_modified = 1;
+            }
+        }
+        break;
+    case 10: case 13:
+        if (t->ed_lines < 128) {
+            for (int i = t->ed_lines; i > t->ed_row + 1; i--)
+                memcpy(t->ed_buf[i], t->ed_buf[i - 1], sizeof(t->ed_buf[i]));
+            int tail = ln - t->ed_col;
+            memcpy(t->ed_buf[t->ed_row + 1], line + t->ed_col, tail);
+            t->ed_buf[t->ed_row + 1][tail] = 0;
+            line[t->ed_col] = 0;
+            t->ed_lines++;
+            t->ed_row++;
+            t->ed_col = 0;
+            t->ed_modified = 1;
+        }
+        break;
+    default:
+        if (c >= 32 && c < 127 && ln < 95) {
+            memmove(line + t->ed_col + 1, line + t->ed_col, ln - t->ed_col + 1);
+            line[t->ed_col++] = c;
+            t->ed_modified = 1;
+        }
+        break;
+    }
+    ed_clamp_cursor(t);
+    int rows = term_visible_rows(w) - 2;
+    if (rows < 4) rows = 4;
+    if (t->ed_row < t->ed_scroll) t->ed_scroll = t->ed_row;
+    if (t->ed_row >= t->ed_scroll + rows) t->ed_scroll = t->ed_row - rows + 1;
+    wm_redraw(w);
+}
+
+static void term_paint_editor(struct window *w)
+{
+    struct term *t = w->data;
+    struct surface *s = &w->surf;
+    const struct theme *th = theme_current();
+    s_fill(s, 0, 0, s->w, s->h, 0x000000);
+    s_fill(s, 0, 0, s->w, 20, 0x1a1a1a);
+    char hdr[160];
+    strcpy(hdr, "  edit: ");
+    strcat(hdr, t->ed_path);
+    if (t->ed_modified) strcat(hdr, "  [modified]");
+    s_clip_text(s, 0, 3, hdr, th->main, s->w - 8);
+    int rows = (s->h - 24 - 20) / (FONT_H + 2);
+    for (int i = 0; i < rows; i++) {
+        int r = t->ed_scroll + i;
+        int y = 24 + i * (FONT_H + 2);
+        if (r < t->ed_lines)
+            s_clip_text(s, 6, y, t->ed_buf[r], 0xCCCCCC, s->w - 12);
+        else
+            s_text(s, 6, y, "~", 0x555555);
+    }
+    int cy = 24 + (t->ed_row - t->ed_scroll) * (FONT_H + 2);
+    int cx = 6 + t->ed_col * FONT_W;
+    char under = (t->ed_col < (int)strlen(t->ed_buf[t->ed_row]))
+                 ? t->ed_buf[t->ed_row][t->ed_col] : ' ';
+    s_fill(s, cx, cy, FONT_W, FONT_H, th->main);
+    char one[2] = { under, 0 };
+    s_text(s, cx, cy, one, th->title_text);
+    s_fill(s, 0, s->h - 18, s->w, 18, 0x1a1a1a);
+    s_text(s, 6, s->h - 15, "^O save   ^X exit   arrows move   type to insert",
+           0x888888);
+}
+
 static void term_paint(struct window *w)
 {
+    if (((struct term *)w->data)->edit_mode) { term_paint_editor(w); return; }
     struct term *t = w->data;
     struct surface *s = &w->surf;
     const struct theme *th = theme_current();
@@ -890,6 +1077,7 @@ static void term_paint(struct window *w)
 
 static void term_key(struct window *w, struct key_event *e)
 {
+    if (((struct term *)w->data)->edit_mode) { ed_key(w, e); return; }
     struct term *t = w->data;
     if (!e->pressed) return;
     /* never swallow keystrokes: finish any typewriter output instantly */

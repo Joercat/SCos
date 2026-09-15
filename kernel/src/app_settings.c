@@ -1,10 +1,29 @@
 /* SCos native - Settings app (themes, system info, reset) */
 #include "scos.h"
 
-struct settings_ui { int hover_tile, hover_reset; };
+struct settings_ui { int hover_tile, hover_reset, hover_pref; };
 
 #define TILE_W 120
 #define TILE_H 80
+
+/* prefs section geometry: top y, reset-button y */
+static void st_layout(struct surface *s, int *sy, int *ry)
+{
+    (void)s;
+    int iy = 60 + ((theme_count() + 3) / 4) * (TILE_H + 12) + 16;
+    *sy = iy + 70;
+    *ry = *sy + 186;
+}
+/* hover_pref ids: 0/1 sens -/+, 2/3 dbl -/+, 4 restore icons */
+static void st_pref_rect(int id, int sy, int *x, int *y, int *w, int *h)
+{
+    int row = (id < 2) ? 0 : (id < 4 ? 1 : 2);
+    *y = sy + 22 + row * 30;
+    if (id == 0 || id == 2) { *x = 210; *w = 24; *h = 20; }
+    else if (id == 1 || id == 3) { *x = 290; *w = 24; *h = 20; }
+    else { *x = 16; *w = 170; *h = 24; *y = sy + 84; }
+}
+
 
 static void st_open(struct window *w, void *arg)
 {
@@ -52,7 +71,38 @@ static void st_paint(struct window *w)
             s_frame_rect(s, x - 4, y - 4, TILE_W + 8, TILE_H + 8, t->main);
     }
 
-    int iy = 60 + ((theme_count() + 3) / 4) * (TILE_H + 12) + 16;
+    int sy, ry_ignored;
+    st_layout(s, &sy, &ry_ignored);
+    s_text(s, 16, sy, "Mouse && Desktop", t->main);
+    const struct prefs *pf = prefs_get();
+    char val[24];
+    s_text(s, 16, sy + 26, "Mouse speed:", t->text);
+    fmt_u32(val, (u32)pf->mouse_sens);
+    s_text(s, 250, sy + 26, val, t->main);
+    s_text(s, 16, sy + 56, "Double-click:", t->text);
+    fmt_u32(val, (u32)pf->dbl_ms);
+    strcat(val, " ms");
+    s_text(s, 250, sy + 56, val, t->main);
+    for (int id = 0; id < 4; id++) {
+        int x, y, ww, hh;
+        st_pref_rect(id, sy, &x, &y, &ww, &hh);
+        u32 bg = ui->hover_pref == id ? t->main : 0x333333;
+        s_fill(s, x, y, ww, hh, bg);
+        s_frame_rect(s, x, y, ww, hh, t->main);
+        s_text(s, x + 8, y + 4, (id & 1) ? "+" : "-",
+               ui->hover_pref == id ? t->title_text : t->main);
+    }
+    {
+        int x, y, ww, hh;
+        st_pref_rect(4, sy, &x, &y, &ww, &hh);
+        u32 bg = ui->hover_pref == 4 ? t->main : 0x333333;
+        s_fill(s, x, y, ww, hh, bg);
+        s_frame_rect(s, x, y, ww, hh, t->main);
+        s_text(s, x + 10, y + 5, "Restore desktop icons",
+               ui->hover_pref == 4 ? t->title_text : t->main);
+    }
+
+    int iy = sy + 116;
     s_text(s, 16, iy, "System Information", t->main);
     char line[96];
     strcpy(line, "OS Version: 2.0.0 (native kernel)");
@@ -101,7 +151,7 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
 {
     struct settings_ui *ui = w->data;
     struct surface *s = &w->surf;
-    int oldt = ui->hover_tile, oldr = ui->hover_reset;
+    int oldt = ui->hover_tile, oldr = ui->hover_reset, oldp = ui->hover_pref;
     ui->hover_tile = -1;
     ui->hover_reset = -1;
     for (int i = 0; i < theme_count(); i++) {
@@ -109,15 +159,37 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
         tile_rect(i, s->w, &tx, &ty);
         if (x >= tx && y >= ty && x < tx + TILE_W && y < ty + TILE_H) ui->hover_tile = i;
     }
-    int iy = 60 + ((theme_count() + 3) / 4) * (TILE_H + 12) + 16;
-    int ry = iy + 70;
+    int sy, ry;
+    st_layout(s, &sy, &ry);
+    ui->hover_pref = -1;
+    for (int id = 0; id < 5; id++) {
+        int hx, hy, hw, hh;
+        st_pref_rect(id, sy, &hx, &hy, &hw, &hh);
+        if (x >= hx && y >= hy && x < hx + hw && y < hy + hh) ui->hover_pref = id;
+    }
     if (x >= 16 && y >= ry && x < 146 && y < ry + 26) ui->hover_reset = 1;
-    if (oldt != ui->hover_tile || oldr != ui->hover_reset) wm_redraw(w);
+    if (oldt != ui->hover_tile || oldr != ui->hover_reset ||
+        oldp != ui->hover_pref) wm_redraw(w);
 
     if (e->type != MEV_BUTTON || !e->down || e->button != MBTN_LEFT) return;
     if (ui->hover_tile >= 0) {
         theme_set_index(ui->hover_tile);
         settings_save();
+        wm_redraw(w);
+    } else if (ui->hover_pref == 0) {
+        prefs_set_mouse(prefs_get()->mouse_sens - 1);
+        wm_redraw(w);
+    } else if (ui->hover_pref == 1) {
+        prefs_set_mouse(prefs_get()->mouse_sens + 1);
+        wm_redraw(w);
+    } else if (ui->hover_pref == 2) {
+        prefs_set_dbl(prefs_get()->dbl_ms - 100);
+        wm_redraw(w);
+    } else if (ui->hover_pref == 3) {
+        prefs_set_dbl(prefs_get()->dbl_ms + 100);
+        wm_redraw(w);
+    } else if (ui->hover_pref == 4) {
+        wm_desktop_restore();
         wm_redraw(w);
     } else if (ui->hover_reset == 1) {
         wm_dialog("Factory Reset",

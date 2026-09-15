@@ -121,7 +121,7 @@ int wm_dialog_active(void) { return modal_w != NULL; }
 int wm_content_w(struct window *w) { return w->w - 2; }
 int wm_content_h(struct window *w) { return w->h - WIN_TITLEBAR - 1; }
 
-void wm_redraw(struct window *w) { (void)w; dirty = 1; }
+void wm_redraw(struct window *w) { if (w) w->dirty = 1; dirty = 1; }
 
 static void win_alloc_buf(struct window *w)
 {
@@ -220,6 +220,7 @@ struct window *wm_open_app(const char *app_id, void *arg)
     w->z = ++next_z;
     w->state = WIN_STATE_NORMAL;
     win_alloc_buf(w);
+    w->dirty = 1;
     if (app->open) app->open(w, arg);
     focused_w = w;
     dirty = 1;
@@ -254,17 +255,43 @@ void wm_menu(int x, int y, const char **items, int n, menu_cb cb, void *ud)
 }
 
 /* ------------------------------------------------------------- paint ---- */
+static struct surface wp_cache;
+static int wp_valid;
+
+void wm_wallpaper_invalidate(void) { wp_valid = 0; }
+
+/*
+ * The wallpaper is static per theme: render it once into a cache and blit
+ * from there on every composite (per-pixel gradient + discs used to run on
+ * every single repaint, which dominated CPU use in slow emulators).
+ */
 static void paint_wallpaper(void)
 {
     const struct theme *t = theme_current();
-    s_vgrad(&screen, 0, 0, screen_w, screen_h, t->bg_top, t->bg_bot);
-    u32 grid = blend(t->bg_top, t->main, 14);
-    for (int x = 0; x < screen_w; x += 64)
-        s_fill(&screen, x, 0, 1, screen_h, grid);
-    for (int y = 0; y < screen_h; y += 64)
-        s_fill(&screen, 0, y, screen_w, 1, grid);
-    /* subtle corner glow */
-    s_disc(&screen, screen_w - 80, 90, 60, blend(t->bg_top, t->main, 8));
+    if (!wp_valid) {
+        if (!wp_cache.px) {
+            wp_cache.px = palloc((u32)screen_w * screen_h * 4);
+            wp_cache.w = screen_w;
+            wp_cache.h = screen_h;
+        }
+        if (wp_cache.px) {
+            struct surface *c = &wp_cache;
+            s_vgrad(c, 0, 0, screen_w, screen_h, t->bg_top, t->bg_bot);
+            u32 grid = blend(t->bg_top, t->main, 14);
+            for (int x = 0; x < screen_w; x += 64)
+                s_fill(c, x, 0, 1, screen_h, grid);
+            for (int y = 0; y < screen_h; y += 64)
+                s_fill(c, 0, y, screen_w, 1, grid);
+            /* soft corner glow: stacked discs, intensity falls off outward */
+            for (int r = 100, pc = 10; r >= 20; r -= 10, pc--)
+                s_disc(c, screen_w - 80, 90, r, blend(t->bg_top, t->main, pc));
+            wp_valid = 1;
+        }
+    }
+    if (wp_valid)
+        memcpy(screen.px, wp_cache.px, (u32)screen_w * screen_h * 4);
+    else
+        s_fill(&screen, 0, 0, screen_w, screen_h, t->bg_top);
 }
 
 /* ---- desktop items: app launchers + pinned files on a snap grid ---- */
@@ -391,6 +418,64 @@ static void desk_item_menu_cb(int item, void *ud)
             if (desk_sel & (1u << i)) { desktop_open(&items[i]); break; }
     } else desk_remove_sel();
 }
+/* bring back every hidden app icon and re-add missing registered apps */
+static void desk_restore(void)
+{
+    for (int i = 0; i < nitems; i++)
+        if (items[i].kind == 0) items[i].hidden = 0;
+    for (int a = 0; a < app_count(); a++) {
+        const struct app *ap = app_at(a);
+        int found = 0;
+        for (int i = 0; i < nitems; i++)
+            if (items[i].kind == 0 && strcmp(items[i].app, ap->id) == 0) found = 1;
+        if (found || nitems >= DESK_MAX) continue;
+        struct ditem *d = &items[nitems];
+        memset(d, 0, sizeof(*d));
+        d->kind = 0;
+        strcpy(d->app, ap->id);
+        strcpy(d->label, ap->title);
+        int placed = 0;
+        for (int gy = 0; gy < DESK_ROWS && !placed; gy++)
+            for (int gx = 0; gx < DESK_COLS && !placed; gx++)
+                if (!cell_taken(gx, gy, -1)) { d->gx = gx; d->gy = gy; placed = 1; }
+        if (placed) nitems++;
+    }
+    desktop_save();
+    dirty = 1;
+}
+
+void wm_desktop_restore(void) { desk_restore(); }
+
+/* enumerate visible desktop items for the file manager's desktop view */
+int wm_desk_vis_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < nitems; i++)
+        if (!items[i].hidden) n++;
+    return n;
+}
+
+int wm_desk_vis_get(int idx, char *app, char *path, char *label, int *kind)
+{
+    int n = 0;
+    for (int i = 0; i < nitems; i++) {
+        if (items[i].hidden) continue;
+        if (n++ != idx) continue;
+        strcpy(app, items[i].app);
+        strcpy(path, items[i].path);
+        strcpy(label, items[i].label);
+        *kind = items[i].kind;
+        return 1;
+    }
+    return 0;
+}
+
+static void desk_empty_menu_cb(int item, void *ud)
+{
+    (void)item; (void)ud;
+    desk_restore();
+}
+
 static void desk_sel_menu_cb(int item, void *ud)
 {
     (void)ud;
@@ -618,6 +703,13 @@ static void paint_launcher(void)
     if (!row) s_text(&screen, px + 14, y, "(no matching app)", ((t->main >> 1) & 0x7F7F7F));
 }
 
+#define CUR_W 14
+#define CUR_H 19
+static u32 *cur_buf;
+static int cur_bx, cur_by, cur_bw, cur_bh, cur_have;
+static void cur_draw(void);
+static void cur_restore(void);
+
 static void paint_all(void)
 {
     paint_wallpaper();
@@ -633,21 +725,85 @@ static void paint_all(void)
         }
         if (!lowest) break;
         drawn[lowest - wins] = 1;
-        if (lowest->app && lowest->app->paint) lowest->app->paint(lowest);
+        if (lowest->dirty && lowest->app && lowest->app->paint) {
+            lowest->app->paint(lowest);
+            lowest->dirty = 0;
+        }
         paint_window(lowest);
     }
     paint_menu();
     paint_taskbar();
     if (launch.active) paint_launcher();
-    paint_cursor();
+    cur_have = 0;                 /* scene was fully redrawn under cursor */
+    cur_draw();
     fb_flip();
+}
+
+/* ------------------------------------------------------- cursor overlay ----
+ * Moving the mouse over plain desktop used to trigger a full-screen
+ * composite per event. The cursor now lives in a tiny saved-background
+ * overlay: erase old position, save+draw new one, flip. ~300 pixels of
+ * memcpy instead of a megapixel repaint.
+ */
+
+static void cur_restore(void)
+{
+    if (!cur_have || !cur_buf) return;
+    for (int r = 0; r < cur_bh; r++)
+        memcpy(screen.px + (u32)(cur_by + r) * screen_w + cur_bx,
+               cur_buf + (u32)r * CUR_W, (u32)cur_bw * 4);
+    cur_have = 0;
+}
+
+static void cur_draw(void)
+{
+    cur_restore();
+    int x = mx, y = my, w = CUR_W, h = CUR_H;
+    if (x + w > screen_w) w = screen_w - x;
+    if (y + h > screen_h) h = screen_h - y;
+    if (w <= 0 || h <= 0) return;
+    if (!cur_buf) cur_buf = palloc(CUR_W * CUR_H * 4);
+    if (!cur_buf) { paint_cursor(); return; }
+    for (int r = 0; r < h; r++)
+        memcpy(cur_buf + (u32)r * CUR_W,
+               screen.px + (u32)(y + r) * screen_w + x, (u32)w * 4);
+    cur_bx = x; cur_by = y; cur_bw = w; cur_bh = h;
+    paint_cursor();
+    cur_have = 1;
+}
+
+/* pure cursor move: erase + redraw overlay only */
+static void cur_move(void)
+{
+    cur_restore();
+    cur_draw();
+    fb_flip();
+}
+
+/* does anything hoverable live under the cursor? */
+static int move_needs_composite(struct window **wout)
+{
+    if (menu.active) return 1;
+    if (launch.active &&
+        in_rect(mx, my, 8, screen_h - TASKBAR_H - 308, 300, 308)) return 1;
+    if (my >= screen_h - TASKBAR_H) return 1;
+    for (int i = 0; i < nitems; i++) {
+        if (items[i].hidden) continue;
+        int x, y, ww, hh;
+        icon_rect(i, &x, &y, &ww, &hh);
+        if (in_rect(mx, my, x, y, ww, hh)) return 1;
+    }
+    struct window *w = win_at_point(mx, my);
+    if (w) { *wout = w; return 1; }
+    return 0;
 }
 
 /* -------------------------------------------------------------- input ---- */
 static void handle_mouse(struct mouse_event *e)
 {
     if (e->type == MEV_MOVE) {
-        mx += e->dx; my -= e->dy;   /* PS/2: +dy is up, screen y grows down */
+        int sens = prefs_get()->mouse_sens;
+        mx += e->dx * sens / 3; my -= e->dy * sens / 3;  /* PS/2: +dy is up */
         if (mx < 0) mx = 0;
         if (my < 0) my = 0;
         if (mx > screen_w - 1) mx = screen_w - 1;
@@ -682,9 +838,20 @@ static void handle_mouse(struct mouse_event *e)
                     w->surf.px = np; w->surf.w = cw; w->surf.h = ch;
                     memset(np, 0, (u32)cw * ch * 4);
                     if (w->app && w->app->paint) w->app->paint(w);
+                    w->dirty = 0;
                 }
             }
         }
+        if (drag_win || band_active || resize_win || desk_drag >= 0) {
+            dirty = 1;
+            return;
+        }
+        struct window *hw = NULL;
+        if (!move_needs_composite(&hw)) {
+            cur_move();              /* cheap overlay-only cursor move */
+            return;
+        }
+        if (hw) hw->dirty = 1;       /* hover effects inside that window */
         dirty = 1;
         return;
     }
@@ -708,6 +875,29 @@ static void handle_mouse(struct mouse_event *e)
     }
     /* buttons */
     mbuttons = e->buttons;
+    if (e->down) {
+        static u64 last_down_tick;
+        static int last_down_x, last_down_y, last_down_btn;
+        int dbl = (e->button == last_down_btn &&
+                   (tick_count - last_down_tick) <= (u64)prefs_get()->dbl_ms / 10 &&
+                   mx - last_down_x <= 6 && mx - last_down_x >= -6 &&
+                   my - last_down_y <= 6 && my - last_down_y >= -6);
+        last_down_tick = tick_count;
+        last_down_x = mx; last_down_y = my; last_down_btn = e->button;
+        if (dbl && e->button == MBTN_LEFT && my < screen_h - TASKBAR_H &&
+            !win_at_point(mx, my)) {
+            for (int i = 0; i < nitems; i++) {
+                if (items[i].hidden) continue;
+                int x, y, ww, hh;
+                icon_rect(i, &x, &y, &ww, &hh);
+                if (in_rect(mx, my, x, y, ww, hh)) {
+                    desktop_open(&items[i]);
+                    dirty = 1;
+                    return;
+                }
+            }
+        }
+    }
     if (!e->down) {
         if (desk_drag >= 0) {
             if (desk_drag_moved) {
@@ -726,8 +916,6 @@ static void handle_mouse(struct mouse_event *e)
                 }
                 items[desk_drag].gx = gx; items[desk_drag].gy = gy;
                 desktop_save();
-            } else {
-                desktop_open(&items[desk_drag]);
             }
             desk_drag = -1;
         }
@@ -802,12 +990,14 @@ static void handle_mouse(struct mouse_event *e)
                             w->x = w->px; w->y = w->py; w->w = w->pw; w->h = w->ph;
                             w->state = WIN_STATE_NORMAL;
                             win_alloc_buf(w);
+                            w->dirty = 1;
                         } else {
                             w->px = w->x; w->py = w->y; w->pw = w->w; w->ph = w->h;
                             win_free_buf(w);
                             w->x = 0; w->y = 0;
                             w->w = screen_w; w->h = screen_h - TASKBAR_H;
                             w->state = WIN_STATE_MAX;
+                            w->dirty = 1;
                             win_alloc_buf(w);
                         }
                     } else {
@@ -871,6 +1061,9 @@ static void handle_mouse(struct mouse_event *e)
         } else if (desk_sel) {
             static const char *m[2] = { "Remove from Desktop", "Clear Selection" };
             wm_menu(mx, my, m, 2, desk_sel_menu_cb, NULL);
+        } else {
+            static const char *m[1] = { "Restore removed icons" };
+            wm_menu(mx, my, m, 1, desk_empty_menu_cb, NULL);
         }
         dirty = 1;
         return;
@@ -955,6 +1148,8 @@ static void wm_tick(void)
     u64 phase = tick_count / 50;
     if (phase != last_blink_phase) {
         last_blink_phase = phase;
+        for (int i = 0; i < win_count; i++)
+            if (wins[i].state != WIN_STATE_MIN) wins[i].dirty = 1;
         dirty = 1;
     }
 

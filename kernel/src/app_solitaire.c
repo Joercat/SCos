@@ -12,9 +12,29 @@
 
 #define CW 56
 #define CH 80
-#define COLX(c) (12 + (c) * 66)
-#define TOP_Y 8
-#define TAB_Y 104
+/*
+ * Responsive layout: column pitch and vertical origin adapt to the window
+ * content size so a maximised window spreads the board instead of leaving
+ * it huddled in the top-left corner.
+ */
+struct sollay { int x0, colw, topy, taby; };
+static struct sollay sol_L;
+static void sol_layout(struct window *w, struct sollay *L)
+{
+    int cw = wm_content_w(w), ch = wm_content_h(w);
+    int colw = (cw - 24) / 7;
+    if (colw < 60) colw = 60;
+    if (colw > 140) colw = 140;
+    int x0 = (cw - colw * 7) / 2 + (colw - CW) / 2;
+    if (x0 < 4) x0 = 4;
+    int yoff = (ch - 520) / 3;
+    if (yoff < 0) yoff = 0;
+    if (yoff > 160) yoff = 160;
+    L->x0 = x0; L->colw = colw; L->topy = 8 + yoff; L->taby = 104 + yoff;
+}
+#define COLX(c) (sol_L.x0 + (c) * sol_L.colw)
+#define TOP_Y (sol_L.topy)
+#define TAB_Y (sol_L.taby)
 #define DOWN_OFF 12
 #define UP_OFF 22
 
@@ -169,6 +189,7 @@ static void empty_pile(struct surface *s, int x, int y, u32 col, const char *hin
 
 static void sl_paint(struct window *w)
 {
+    sol_layout(w, &sol_L);
     struct sol *g = w->data;
     struct surface *s = &w->surf;
     const struct theme *t = theme_current();
@@ -242,23 +263,25 @@ static void sl_paint(struct window *w)
 }
 
 /* -------------------------------------------------------------- input ---- */
-static int col_at(int x)
+static int col_at(struct window *w, int x)
 {
-    if (x < 12) return -1;
-    int c = (x - 12) / 66;
-    if (c > 6 || (x - 12) % 66 >= CW + 8) return -1;
+    sol_layout(w, &sol_L);
+    if (x < sol_L.x0) return -1;
+    int c = (x - sol_L.x0) / sol_L.colw;
+    if (c > 6 || (x - sol_L.x0) % sol_L.colw >= CW + 8) return -1;
     return c;
 }
 
 static void sl_mouse(struct window *w, struct mouse_event *e, int x, int y)
 {
+    sol_layout(w, &sol_L);
     struct sol *g = w->data;
     struct surface *s = &w->surf;
     int old_sel = g->sel_src, old_hov = g->hover, old_btn = g->hover_btn;
     g->hover = -1;
     g->hover_btn = (x >= 12 && x < 108 && y >= s->h - 38 && y < s->h - 10);
 
-    int c = col_at(x);
+    int c = col_at(w, x);
     if (c >= 0) g->hover = c;
 
     if (e->type != MEV_BUTTON || !e->down || e->button != MBTN_LEFT) {

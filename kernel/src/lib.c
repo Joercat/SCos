@@ -182,6 +182,14 @@ u64 __udivdi3(u64 num, u64 den) { return udivmod64(num, den, 0); }
 u64 __umoddi3(u64 num, u64 den) { u64 r; udivmod64(num, den, &r); return r; }
 
 
+u32 cpu_signature(void)
+{
+    u32 ax, bx, cx, dx;
+    __asm__ volatile("movl $1, %%eax; cpuid"
+                     : "=a"(ax), "=b"(bx), "=c"(cx), "=d"(dx));
+    return ax;
+}
+
 char *str_chr(const char *s, char c)
 {
     while (*s && *s != c) s++;
@@ -259,4 +267,16 @@ const char *strstr(const char *h, const char *n)
         if (!*b) return h;
     }
     return NULL;
+}
+void *memmove(void *dst, const void *src, u32 n)
+{
+    u8 *d = dst;
+    const u8 *sr = src;
+    if (d == sr) return dst;
+    if (d < sr) {
+        for (u32 i = 0; i < n; i++) d[i] = sr[i];
+    } else {
+        for (u32 i = n; i > 0; i--) d[i - 1] = sr[i - 1];
+    }
+    return dst;
 }

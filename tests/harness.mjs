@@ -168,6 +168,10 @@ export async function boot(imgPath, opts = {})
         await sleep(60);
     };
 
+    state.scancodes = async (arr) => {
+        emulator.keyboard_send_scancodes(arr);
+        await sleep(40);
+    };
     state.key = async (name) => {
         const codes = {
             enter: [0x1c, 0x9c],

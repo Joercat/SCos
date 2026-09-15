@@ -36,6 +36,7 @@ extern struct boot_info boot_info;
 
 /* ------------------------------------------------------------- string ---- */
 void *memcpy(void *d, const void *s, unsigned n);
+void *memmove(void *d, const void *s, unsigned n);
 void *memset(void *d, int c, unsigned n);
 int   memcmp(const void *a, const void *b, unsigned n);
 unsigned strlen(const char *s);
@@ -63,6 +64,7 @@ void cpu_meter_init(void);
 void cpu_meter_tick(void);
 void cpu_idle_begin(void);
 u32  cpu_mhz(void);
+u32  cpu_signature(void);
 u32  cpu_usage_pct(void);
 
 /* ---------------------------------------------------------------- klog ---- */
@@ -352,6 +354,14 @@ void boot_screen_init(void);
 
 /* persistence hooks */
 void settings_save(void);
+struct prefs { int mouse_sens; int dbl_ms; };
+const struct prefs *prefs_get(void);
+void prefs_set_mouse(int sens);
+void prefs_set_dbl(int ms);
+void wm_desktop_restore(void);
+int wm_desk_vis_count(void);
+int wm_desk_vis_get(int idx, char *app, char *path, char *label, int *kind);
+void wm_wallpaper_invalidate(void);
 void system_reset(void);
 
 #endif /* SCOS_H */

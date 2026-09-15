@@ -34,6 +34,7 @@ const struct theme *theme_current(void) { return &themes[current]; }
 void theme_set_index(int i)
 {
     if (i >= 0 && i < theme_count()) current = i;
+    wm_wallpaper_invalidate();
 }
 int theme_index_of_id(const char *id)
 {
@@ -42,11 +43,47 @@ int theme_index_of_id(const char *id)
     return -1;
 }
 
+static struct prefs prefs = { 3, 500 };
+const struct prefs *prefs_get(void) { return &prefs; }
+
+void prefs_set_mouse(int sens)
+{
+    if (sens < 1) sens = 1;
+    if (sens > 6) sens = 6;
+    prefs.mouse_sens = sens;
+    settings_save();
+}
+
+void prefs_set_dbl(int ms)
+{
+    if (ms < 200) ms = 200;
+    if (ms > 900) ms = 900;
+    prefs.dbl_ms = ms;
+    settings_save();
+}
+
+static int json_int(const char *json, const char *key)
+{
+    const char *p = strstr_safe(json, key);
+    if (!p) return -1;
+    while (*p && *p != ':') p++;
+    if (!*p) return -1;
+    p++;
+    while (*p == ' ') p++;
+    int v = 0;
+    while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+    return v;
+}
+
 void theme_load_from_settings(void)
 {
     u32 len = 0;
     char *json = vfs_read("system/settings.json", &len);
     if (!json) return;
+    int ms = json_int(json, "\"mouse_sens\"");
+    if (ms > 0) prefs.mouse_sens = ms > 6 ? 6 : ms;
+    int db = json_int(json, "\"dbl_ms\"");
+    if (db > 0) prefs.dbl_ms = db;
     char *p = strstr_safe(json, "\"theme\"");
     if (!p) return;
     p = strchr_q(p, '"', 2);
@@ -61,13 +98,18 @@ void theme_load_from_settings(void)
 
 void settings_save(void)
 {
-    char buf[128];
+    char buf[224];
     const struct theme *t = theme_current();
     /* manual format: no printf-to-buffer in the kernel */
     char *o = buf;
+    char num[8];
     strcpy(o, "{\n  \"theme\": \""); o += strlen(o);
     strcpy(o, t->id); o += strlen(o);
-    strcpy(o, "\",\n  \"version\": \"2.0.0\"\n}"); o += strlen(o);
+    strcpy(o, "\",\n  \"mouse_sens\": "); o += strlen(o);
+    fmt_u32(num, (u32)prefs.mouse_sens); strcpy(o, num); o += strlen(o);
+    strcpy(o, ",\n  \"dbl_ms\": "); o += strlen(o);
+    fmt_u32(num, (u32)prefs.dbl_ms); strcpy(o, num); o += strlen(o);
+    strcpy(o, ",\n  \"version\": \"2.1.0\"\n}"); o += strlen(o);
     vfs_write("system/settings.json", buf, (u32)(o - buf));
 }
 

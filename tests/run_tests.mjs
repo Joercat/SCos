@@ -69,7 +69,7 @@ test(1, "boot to desktop", async (state) => {
 /* ---------------------------------------------------------------- 2 ---- */
 test(2, "terminal: commands", async (state) => {
     const p = ICON_POS(ICON.terminal);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 700, 450);
     await state.type("help\n"); await sleep(1600);
     await state.type("calc 2 + 3\n"); await sleep(500);
@@ -93,7 +93,7 @@ test(2, "terminal: commands", async (state) => {
 /* ---------------------------------------------------------------- 3 ---- */
 test(3, "window manager: drag / resize / min / max / taskbar", async (state) => {
     const p = ICON_POS(ICON.terminal);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     let w = win_pos(1, 700, 450);
     /* drag by title bar */
     await state.drag(w.x + 200, w.y + 13, 400, 150);
@@ -128,7 +128,7 @@ test(3, "window manager: drag / resize / min / max / taskbar", async (state) => 
 /* ---------------------------------------------------------------- 4 ---- */
 test(4, "files explorer: navigate, new folder, delete", async (state) => {
     const p = ICON_POS(ICON.files);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 700, 500);
     shot(state, "10_files_root");
     /* open "home" (second row at root: system, home) */
@@ -158,7 +158,7 @@ test(4, "files explorer: navigate, new folder, delete", async (state) => {
 /* ---------------------------------------------------------------- 5 ---- */
 test(5, "notepad: edit + save as", async (state) => {
     const p = ICON_POS(ICON.notepad);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 700, 500);
     await state.type("Hello from the native kernel!\nSecond line.\n"); await sleep(500);
     shot(state, "18_notepad_text");
@@ -175,7 +175,7 @@ test(5, "notepad: edit + save as", async (state) => {
 /* ---------------------------------------------------------------- 6 ---- */
 test(6, "calendar: month navigation", async (state) => {
     const p = ICON_POS(ICON.calendar);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 600, 460);
     shot(state, "21_calendar");
     await state.click(w.x + 1 + 8 + 34 + 15, w.y + TITLEBAR + 7 + 13); await sleep(400);  /* next */
@@ -194,7 +194,7 @@ test(6, "calendar: month navigation", async (state) => {
 test(7, "settings: theme switch + about", async (state) => {
     const before = px(state, 300, 300);
     const p = ICON_POS(ICON.settings);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 620, 480);
     shot(state, "25_settings");
     /* theme tile 1 = blue-sky: x=16+(TILE_W+12), y=60 ; TILE_W=130 TILE_H=64 */
@@ -207,7 +207,7 @@ test(7, "settings: theme switch + about", async (state) => {
     await state.click(w.x + 1 + 16 + 65, w.y + TITLEBAR + 60 + 32); await sleep(500);
     await state.click(w.x + 620 - 13, w.y + 13); await sleep(300);
     const a = ICON_POS(ICON.about);
-    await state.click(a.x, a.y); await sleep(700);
+    await state.click(a.x, a.y); await sleep(120); await state.click(a.x, a.y); await sleep(700);
     const aw = win_pos(1, 520, 460);
     const tb = px(state, aw.x + 200, aw.y + 13);       /* about titlebar must exist */
     if (tb[0] + tb[1] + tb[2] < 60) throw new Error("about window did not open");
@@ -219,7 +219,7 @@ test(7, "settings: theme switch + about", async (state) => {
 /* ---------------------------------------------------------------- 8 ---- */
 test(8, "browser stub dialog", async (state) => {
     const p = ICON_POS(ICON.browser);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 640, 420);
     shot(state, "28_browser_stub");
     await state.click(w.x + 640 - 13, w.y + 13); await sleep(400);   /* close */
@@ -229,7 +229,7 @@ test(8, "browser stub dialog", async (state) => {
 /* ---------------------------------------------------------------- 9 ---- */
 test(9, "easter egg: file.scv spawns error windows", async (state) => {
     const p = ICON_POS(ICON.terminal);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 700, 450);
     await state.type("touch documents/file.scv\n"); await sleep(400);
     await state.click(w.x + 700 - 13, w.y + 13); await sleep(300);
@@ -242,7 +242,7 @@ test(9, "easter egg: file.scv spawns error windows", async (state) => {
 /* --------------------------------------------------------------- 10 ---- */
 test(10, "shutdown falls back to power-off screen (no ACPI in v86)", async (state) => {
     const p = ICON_POS(ICON.terminal);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 700, 450);
     await state.type("shutdown\n"); await sleep(3000);
     shot(state, "31_poweroff");
@@ -253,7 +253,7 @@ test(10, "shutdown falls back to power-off screen (no ACPI in v86)", async (stat
 /* --------------------------------------------------------------- 11 ---- */
 test(11, "reboot returns to bootloader", async (state) => {
     const p = ICON_POS(ICON.terminal);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 700, 450);
     await state.type("reboot\n"); await sleep(4000);
     const n = state.serial.split("[s2] stage2 alive").length - 1;
@@ -264,14 +264,14 @@ test(11, "reboot returns to bootloader", async (state) => {
 /* --------------------------------------------------------------- 12 ---- */
 test(12, "ATA persistence: save survives reboot", async (state) => {
     const p = ICON_POS(ICON.terminal);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     let w = win_pos(1, 700, 450);
     await state.type("touch documents/persist.txt\n"); await sleep(400);
     await state.type("save\n"); await sleep(1500);
     shot(state, "32_saved_to_disk");
     await state.type("reboot\n"); await sleep(6000);          /* second boot */
     state.cursor.x = 512; state.cursor.y = 384;               /* guest cursor resets on boot */
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     w = win_pos(1, 700, 450);
     await state.type("ls documents\n"); await sleep(800);
     shot(state, "33_after_reboot_ls");
@@ -281,7 +281,7 @@ test(12, "ATA persistence: save survives reboot", async (state) => {
 /* --------------------------------------------------------------- 13 ---- */
 test(13, "files open-in-notepad + settings reset", async (state) => {
     const p = ICON_POS(ICON.files);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 700, 500);
     const row = (i) => ({ x: w.x + 1 + 120, y: w.y + TITLEBAR + 48 + i * 24 + 12 });
     await state.click(row(1).x, row(1).y); await sleep(500);   /* home */
@@ -294,10 +294,10 @@ test(13, "files open-in-notepad + settings reset", async (state) => {
     await state.click(w.x + 700 - 13, w.y + 13); await sleep(300);
     /* factory reset via settings */
     const sp = ICON_POS(ICON.settings);
-    await state.click(sp.x, sp.y); await sleep(700);
+    await state.click(sp.x, sp.y); await sleep(120); await state.click(sp.x, sp.y); await sleep(700);
     const sw = win_pos(1, 620, 480);
     /* Factory Reset button: ry = 60 + rows*(TILE_H+12) + 16 + 70 ; TILE_H=80 */
-    const ry = 60 + 1 * (80 + 12) + 16 + 70;
+    const ry = 60 + 1 * (80 + 12) + 16 + 70 + 186;   /* prefs section above it */
     await state.click(sw.x + 1 + 16 + 55, sw.y + TITLEBAR + ry + 13); await sleep(500);
     shot(state, "35_reset_confirm");
     await state.key("enter"); await sleep(1000);
@@ -313,7 +313,7 @@ test(13, "files open-in-notepad + settings reset", async (state) => {
 /* --------------------------------------------------------------- 14 ---- */
 test(14, "resize stress (heap coalescing)", async (state) => {
     const p = ICON_POS(ICON.terminal);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 700, 450);
     for (let i = 0; i < 10; i++) {
         await state.drag(w.x + 700 - 6 + i * 0, w.y + 450 - 6, w.x + 760, w.y + 490);
@@ -329,7 +329,7 @@ test(14, "resize stress (heap coalescing)", async (state) => {
 /* --------------------------------------------------------------- 15 ---- */
 test(15, "blackjack: deal, stand, new round", async (state) => {
     const p = ICON_POS(ICON.blackjack);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 640, 480);
     shot(state, "39_blackjack_deal");
     /* content height = def_h - TITLEBAR; buttons at y = 454-26-40 .. +28 */
@@ -349,22 +349,22 @@ test(15, "blackjack: deal, stand, new round", async (state) => {
 /* --------------------------------------------------------------- 16 ---- */
 test(16, "sysmon: metrics + end task", async (state) => {
     const p = ICON_POS(ICON.terminal);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     await state.type("open files\n"); await sleep(600);
     /* sysmon icon sits in row 2 at x=56, left of every cascaded window */
     const sp = ICON_POS(ICON.sysmon);
-    await state.click(sp.x, sp.y); await sleep(900);
-    const sw = win_pos(2, 640, 480);
+    await state.click(sp.x, sp.y); await sleep(120); await state.click(sp.x, sp.y); await sleep(900);
+    const sw = win_pos(3, 640, 480);
     shot(state, "42_sysmon");
     /* load bar frame present around (30..330, y) of content */
-    const bar = px(state, sw.x + 1 + 30, sw.y + TITLEBAR + 84);
+    const bar = px(state, sw.x + 1 + 30, sw.y + TITLEBAR + 102);
     if (bar[0] + bar[1] + bar[2] < 40) throw new Error("cpu load bar missing");
     /* select files row (apps start at row 5; files = win1 -> row 6) and end it */
-    await state.click(sw.x + 1 + 200, sw.y + TITLEBAR + 222 + 6 * 18 + 8); await sleep(400);
+    await state.click(sw.x + 1 + 200, sw.y + TITLEBAR + 240 + 6 * 18 + 8); await sleep(400);
     shot(state, "43_sysmon_sel");
     const row = () => state.framebuffer().mem.slice((748 * 1024 + 185) * 4, (748 * 1024 + 295) * 4);
     const before = row();
-    await state.click(sw.x + 1 + 67, sw.y + TITLEBAR + 480 - 36 + 13); await sleep(600);
+    await state.click(sw.x + 1 + 67, sw.y + TITLEBAR + 430); await sleep(600);
     const after = row();
     let diff = 0;
     for (let i = 0; i < before.length; i += 41) if (before[i] !== after[i]) diff++;
@@ -387,7 +387,7 @@ test(17, "taskbar power menu reboots", async (state) => {
 /* --------------------------------------------------------------- 18 ---- */
 test(18, "terminal: wheel scroll + paged help", async (state) => {
     const p = ICON_POS(ICON.terminal);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 700, 450);
     await state.type("help\n"); await sleep(1200);
     await state.type("help --p3\n"); await sleep(1200);
@@ -413,11 +413,19 @@ test(19, "solitaire: deal + draw", async (state) => {
     await state.click(p.x, p.y); await sleep(900);
     const w = win_pos(1, 700, 500);
     shot(state, "49_solitaire");
-    const stock = px(state, w.x + 1 + 40, w.y + TITLEBAR + 48);
-    if (stock[0] + stock[1] + stock[2] < 90) throw new Error("stock pile not drawn");
+    let bright = 0;
+    for (let x = 2; x < 56; x += 2) {
+        const q = px(state, w.x + 1 + 33 + x, w.y + TITLEBAR + 8 + 40);
+        if (q[0] + q[1] + q[2] > 90) bright++;
+    }
+    if (bright < 8) throw new Error("stock pile not drawn (bright=" + bright + ")");
     for (let i = 0; i < 3; i++) { await state.click(w.x + 1 + 40, w.y + TITLEBAR + 48); await sleep(300); }
-    const waste = px(state, w.x + 1 + 78 + 44, w.y + TITLEBAR + 74);
-    if (waste[0] + waste[1] + waste[2] < 300) throw new Error("waste card not drawn after draws");
+    let wb = 0;
+    for (let x = 4; x < 56; x += 4) {
+        const q = px(state, w.x + 1 + 129 + x, w.y + TITLEBAR + 8 + 70);
+        if (q[0] + q[1] + q[2] > 300) wb++;
+    }
+    if (wb < 5) throw new Error("waste card not drawn after draws (wb=" + wb + ")");
     shot(state, "50_solitaire_drawn");
     if (!(await live(state))) throw new Error("frozen in solitaire");
 });
@@ -425,7 +433,7 @@ test(19, "solitaire: deal + draw", async (state) => {
 /* --------------------------------------------------------------- 20 ---- */
 test(20, "kernel panic screen from terminal", async (state) => {
     const p = ICON_POS(ICON.terminal);
-    await state.click(p.x, p.y); await sleep(700);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     await state.type("panic demo halt\n"); await sleep(2000);
     shot(state, "51_panic");
     const fb = state.framebuffer();
@@ -470,6 +478,43 @@ test(21, "desktop: drag-snap, rubber band, remove, launcher", async (state) => {
     await state.key("enter"); await sleep(700);
     shot(state, "57_launcher_opened");
     if (!(await live(state))) throw new Error("frozen after launcher");
+});
+
+/* --------------------------------------------------------------- 22 ---- */
+test(22, "terminal: editor + root cwd", async (state) => {
+    const p = ICON_POS(ICON.terminal);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
+    const w = win_pos(1, 700, 450);
+    await state.type("edit /home/notes.txt\n"); await sleep(600);
+    const hdr = px(state, w.x + 1 + 300, w.y + TITLEBAR + 10);
+    const hs = hdr[0] + hdr[1] + hdr[2];
+    if (hs < 40 || hs > 130) throw new Error("editor chrome missing (hdr=" + hs + ")");
+    await state.type("hello scos"); await sleep(300);
+    await state.scancodes([0x1d, 0x18, 0x98, 0x9d]); await sleep(400);   /* ctrl+o */
+    shot(state, "56_editor");
+    await state.scancodes([0x1d, 0x2d, 0xad, 0x9d]); await sleep(500);   /* ctrl+x */
+    await state.type("cat /home/notes.txt\n"); await sleep(700);
+    shot(state, "57_editor_saved");
+    if (!(await live(state))) throw new Error("frozen after editor");
+});
+
+/* --------------------------------------------------------------- 23 ---- */
+test(23, "files: system hidden + desktop shortcuts", async (state) => {
+    const p = ICON_POS(ICON.files);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(800);
+    const w = win_pos(1, 700, 500);
+    /* root lists only home: row 1 must be empty background */
+    const row1 = px(state, w.x + 1 + 40, w.y + TITLEBAR + 44 + 4 + 24 + 12);
+    if (row1[0] + row1[1] + row1[2] > 120) throw new Error("system dir visible at root");
+    /* home -> desktop */
+    await state.click(w.x + 1 + 200, w.y + TITLEBAR + 44 + 4 + 12); await sleep(150);
+    await state.click(w.x + 1 + 200, w.y + TITLEBAR + 44 + 4 + 12); await sleep(500);
+    await state.click(w.x + 1 + 200, w.y + TITLEBAR + 44 + 4 + 12); await sleep(150);
+    await state.click(w.x + 1 + 200, w.y + TITLEBAR + 44 + 4 + 12); await sleep(500);
+    shot(state, "58_desktop_dir");
+    const row0 = px(state, w.x + 1 + 60, w.y + TITLEBAR + 44 + 4 + 12);
+    if (row0[0] + row0[1] + row0[2] < 60) throw new Error("desktop shortcuts not listed");
+    if (!(await live(state))) throw new Error("frozen in files");
 });
 
 /* ------------------------------------------------------------- runner ---- */

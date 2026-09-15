@@ -40,6 +40,16 @@ static void sm_paint(struct window *w)
     cpu_brand(cpu, sizeof(cpu));
     strcpy(line, "  model:  "); strcat(line, cpu[0] ? cpu : "x86 processor (no brand leaf)");
     s_text(s, 12, y, line, t->text); y += 18;
+    u32 sig = cpu_signature();
+    u32 fam = (sig >> 8) & 0xF;
+    if (fam == 0xF) fam += (sig >> 20) & 0xFF;
+    u32 mod = (sig >> 4) & 0xF;
+    if (fam == 6 || fam == 0xF) mod += (sig >> 16) & 0xF;
+    strcpy(line, "  cpuid:  family ");
+    fmt_u32(n, fam); strcat(line, n);
+    strcat(line, " model "); fmt_u32(n, mod); strcat(line, n);
+    strcat(line, " stepping "); fmt_u32(n, sig & 0xF); strcat(line, n);
+    s_text(s, 12, y, line, t->text); y += 18;
     strcpy(line, "  speed:  ");
     fmt_u32(n, cpu_mhz()); strcat(line, n); strcat(line, " MHz (TSC calibrated against PIT)");
     s_text(s, 12, y, line, t->text); y += 18;
@@ -128,8 +138,8 @@ static void sm_mouse(struct window *w, struct mouse_event *e, int x, int y)
     int old_sel = m->sel, old_h = m->hover_btn;
     m->hover_btn = (x >= 12 && x < 122 && y >= s->h - 36 && y < s->h - 10);
 
-    /* row geometry mirrors paint: header block ends at y = 208 */
-    int y0 = 222;
+    /* row geometry mirrors paint (CPU block grew by one line this round) */
+    int y0 = 240;
     if (e->type == MEV_BUTTON && e->down && e->button == MBTN_LEFT) {
         if (y >= y0 && y < y0 + m->rows * 18) {
             int row = (y - y0) / 18;

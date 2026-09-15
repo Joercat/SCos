@@ -99,13 +99,25 @@ static void mouse_irq(struct regs *r)
     }
 }
 
+static int mouse_cmd_ack(u8 cmd)
+{
+    mouse_write(cmd);
+    for (int i = 0; i < 4; i++) {
+        mouse_wait_read();
+        u8 r = inb(MOUSE_DATA);
+        if (r == 0xFA) return 1;          /* ACK */
+        if (r == 0xFE) return 0;          /* NAK */
+    }
+    return 0;
+}
+
 void mouse_init(void)
 {
     /* enable aux port on the 8042 */
     mouse_wait_write();
     outb(MOUSE_CMD, 0xA8);
 
-    /* enable IRQ12, translation */
+    /* enable IRQ12, keep firmware translation setting, unlock aux clock */
     mouse_wait_write();
     outb(MOUSE_CMD, 0x20);
     mouse_wait_read();
@@ -116,9 +128,12 @@ void mouse_init(void)
     mouse_wait_write();
     outb(MOUSE_DATA, status);
 
-    /* reset + enable data reporting */
-    mouse_write(0xFF);
-    mouse_read(); mouse_read(); mouse_read();
+    /* reset; if nothing ACKs there is no mouse - leave the port quiet */
+    if (!mouse_cmd_ack(0xFF)) {
+        klog("mouse: no ACK on reset, aux port left idle");
+        return;
+    }
+    while (inb(MOUSE_STAT) & 1) inb(MOUSE_DATA);   /* BAT + id bytes */
     mouse_write(0xF6);
     mouse_read();
 
@@ -146,8 +161,11 @@ void mouse_init(void)
     if (id >= 3) packet_len = 4;
     klog("mouse: device id %d, packet len %d", id, packet_len);
 
-    mouse_write(0xF4);                     /* enable streaming */
-    mouse_read();
+    while (inb(MOUSE_STAT) & 1) inb(MOUSE_DATA);   /* flush probe leftovers */
+    if (!mouse_cmd_ack(0xF4)) {            /* enable streaming */
+        klog("mouse: streaming enable refused");
+        return;
+    }
 
     irq_install(12, mouse_irq);
     pic_clear_mask(12);

@@ -100,9 +100,65 @@ static void kbd_irq(struct regs *r)
     }
 }
 
+/* bounded wait for the controller input buffer to empty */
+static int kbd_wait_write(void)
+{
+    for (int i = 0; i < 200000; i++)
+        if ((inb(KBD_STAT) & 2) == 0) return 1;
+    return 0;
+}
+static int kbd_wait_read(void)
+{
+    for (int i = 0; i < 200000; i++)
+        if (inb(KBD_STAT) & 1) return 1;
+    return 0;
+}
+static void kbd_flush(void)
+{
+    for (int i = 0; i < 64 && (inb(KBD_STAT) & 1); i++) inb(KBD_DATA);
+}
+
+/*
+ * Real-hardware 8042 init. Firmware commonly hands over with the keyboard
+ * port or its IRQ disabled, stale bytes in the output buffer and both
+ * devices in an unknown state - v86 forgives all of that, a PC does not.
+ */
 void kbd_init(void)
 {
-    while (inb(KBD_STAT) & 1) inb(KBD_DATA);    /* drain */
+    outb(KBD_STAT, 0xAD);                 /* disable keyboard port */
+    outb(KBD_STAT, 0xA7);                 /* disable aux (mouse) port */
+    kbd_flush();
+
+    kbd_wait_write();
+    outb(KBD_STAT, 0x20);                 /* read controller command byte */
+    u8 cmd = 0x00;
+    if (kbd_wait_read()) cmd = inb(KBD_DATA);
+    cmd |= 0x01;                          /* keyboard IRQ1 enable */
+    cmd |= 0x02;                          /* aux IRQ12 enable */
+    cmd &= ~0x10;                         /* keyboard clock enabled */
+    cmd &= ~0x20;                         /* aux clock enabled */
+    /* bit 6 (translation) left exactly as firmware configured it */
+    kbd_wait_write();
+    outb(KBD_STAT, 0x60);
+    kbd_wait_write();
+    outb(KBD_DATA, cmd);
+
+    kbd_wait_write();
+    outb(KBD_STAT, 0xAE);                 /* enable keyboard port */
+    kbd_flush();
+
+    /* keyboard reset + enable scanning; tolerate devices that stay silent */
+    kbd_wait_write();
+    outb(KBD_DATA, 0xFF);
+    if (kbd_wait_read()) {
+        inb(KBD_DATA);                    /* ACK / BAT result */
+        kbd_flush();
+    }
+    kbd_wait_write();
+    outb(KBD_DATA, 0xF4);                 /* enable scanning */
+    if (kbd_wait_read()) inb(KBD_DATA);
+    kbd_flush();
+
     irq_install(1, kbd_irq);
     pic_clear_mask(1);
 }
