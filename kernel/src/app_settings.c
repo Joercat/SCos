@@ -121,6 +121,13 @@ static void st_paint(struct window *w)
     s_fill(s, 16, ry, 130, 26, bg);
     s_frame_rect(s, 16, ry, 130, 26, t->main);
     s_text(s, 26, ry + 5, "Factory Reset", ui->hover_reset == 1 ? t->title_text : t->main);
+    {
+        u32 bg2 = ui->hover_reset == 2 ? t->main : 0x333333;
+        s_fill(s, 160, ry, 200, 26, bg2);
+        s_frame_rect(s, 160, ry, 200, 26, t->main);
+        s_text(s, 172, ry + 5, "System diagnostics (full scan)",
+               ui->hover_reset == 2 ? t->title_text : t->main);
+    }
 }
 
 static void reset_confirm_cb(int ok, const char *text, void *ud)
@@ -168,6 +175,7 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
         if (x >= hx && y >= hy && x < hx + hw && y < hy + hh) ui->hover_pref = id;
     }
     if (x >= 16 && y >= ry && x < 146 && y < ry + 26) ui->hover_reset = 1;
+    if (x >= 160 && y >= ry && x < 360 && y < ry + 26) ui->hover_reset = 2;
     if (oldt != ui->hover_tile || oldr != ui->hover_reset ||
         oldp != ui->hover_pref) wm_redraw(w);
 
@@ -191,6 +199,8 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
     } else if (ui->hover_pref == 4) {
         wm_desktop_restore();
         wm_redraw(w);
+    } else if (ui->hover_reset == 2) {
+        diag_manual();
     } else if (ui->hover_reset == 1) {
         wm_dialog("Factory Reset",
                   "Erase ALL user data (files, settings) and restore the "

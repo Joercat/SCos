@@ -125,6 +125,7 @@ static const char *help_text =
     "disks     - Detected ATA disks (IDENTIFY)\n"
     "neofetch  - System summary with logo\n"
     "dmesg     - Kernel log ring (USB/input diagnostics)\n"
+    "diag      - Full hardware scan on the diagnostics screen\n"
     "sysmon    - Open the System Monitor app\n"
     "theme     - List or switch themes\n"
     "calc      - Perform basic arithmetic\n"
@@ -365,6 +366,10 @@ static void run_command(struct term *t, const char *command)
     t->follow = 1;
         t->follow = 1;
         return;
+    }
+    else if (!strcmp(cmd, "diag")) {
+        diag_manual();
+        strcpy(response, "Diagnostics complete - see dmesg for the scan log");
     }
     else if (!strcmp(cmd, "dmesg")) {
         int n = klog_ring_count();

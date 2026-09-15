@@ -45,7 +45,7 @@ static void diag_draw(int secs_left)
     fb_flip();
 }
 
-void diag_run(void)
+static void diag_hold(void)
 {
     u64 t0 = tick_count * 10;
     int last_secs = -1;
@@ -69,4 +69,24 @@ void diag_run(void)
         }
         sleep_ms(60);
     }
+}
+
+void diag_run(void)
+{
+    diag_draw(25);
+    diag_hold();
+}
+
+/* on-demand full system scan (Settings button / `diag` terminal command) */
+void diag_manual(void)
+{
+    klog("diag: manual scan triggered");
+    pci_scan_dump();
+    char ul[96];
+    usb_status(ul, sizeof(ul));
+    klog("diag: %s", ul);
+    klog("diag: ps/2 mouse %s", mouse_present() ? "present" : "absent");
+    klog("diag: input %s", input_last_tick ? "events seen" : "silent");
+    diag_draw(25);
+    diag_hold();
 }

@@ -77,6 +77,8 @@ void usb_poll(void);
 void usb_status(char *out, int max);
 int  usb_diag_flag(void);
 void diag_run(void);
+void diag_manual(void);
+int  pci_scan_dump(void);
 int  klog_ring_count(void);
 int  klog_ring(int i, char *out, int max);
 /* input injectors for the USB HID path */

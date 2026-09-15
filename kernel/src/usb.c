@@ -454,7 +454,9 @@ void usb_init(void)
     status_line[0] = 0;
     u8 bus[8], dev[8], fn[8];
     int n = pci_find_class(0x0C, 0x03, 0x30, bus, dev, fn, 8);
+    if (!n) n = pci_find_class(0x0C, 0x03, 0xFF, bus, dev, fn, 8);
     if (!n) {
+        pci_scan_dump();   /* put the whole bus in the log for the photo */
         strcpy(status_line, "usb: no xHCI controller - PS/2 input only");
         klog("%s", status_line);
         return;

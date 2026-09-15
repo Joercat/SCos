@@ -49,7 +49,8 @@ static int scan_bus(u8 bus, int depth, u8 class, u8 subclass, u8 progif,
             u32 id = pci_read32(bus, d, f, 0);
             if (id == 0xFFFFFFFFu) { if (f == 0) break; else continue; }
             u32 cls = pci_read32(bus, d, f, 8);
-            u8 c = (u8)(cls >> 16), sc = (u8)(cls >> 8), pi = (u8)cls;
+            /* reg 0x08: rev 0-7, progIF 8-15, subclass 16-23, base 24-31 */
+            u8 pi = (u8)(cls >> 8), sc = (u8)(cls >> 16), c = (u8)(cls >> 24);
             if (c == class && sc == subclass &&
                 (progif == 0xFF || pi == progif)) {
                 out[n].bus = bus; out[n].dev = (u8)d; out[n].fn = f;
@@ -79,4 +80,30 @@ int pci_find_class(u8 class, u8 subclass, u8 progif,
         bus[i] = f[i].bus; dev[i] = f[i].dev; fn[i] = f[i].fn;
     }
     return n;
+}
+
+/* Forensic sweep: log everything sitting on bus 0 so a failed class match
+ * is still visible in the diagnostics ring. Returns function count. */
+int pci_scan_dump(void)
+{
+    int funcs = 0, bridges = 0, usb = 0;
+    for (u16 d = 0; d < 32; d++) {
+        for (u8 f = 0; f < 8; f++) {
+            u32 id = pci_read32(0, (u8)d, f, 0);
+            if (id == 0xFFFFFFFFu) { if (f == 0) break; continue; }
+            funcs++;
+            u32 cls = pci_read32(0, (u8)d, f, 8);
+            u8 pi = (u8)(cls >> 8), sc = (u8)(cls >> 16), c = (u8)(cls >> 24);
+            if (c == 0x06 && sc == 0x04) bridges++;
+            if (c == 0x0C && sc == 0x03) {
+                usb++;
+                klog("pci: USB ctrl %d:%d.%x vid %x dev %x prog %x",
+                     0, (int)d, f, id & 0xFFFF, (id >> 16) & 0xFFFF, pi);
+            }
+            if (!(pci_read8(0, (u8)d, f, 0x0E) & 0x80)) break;
+        }
+    }
+    klog("pci: bus 0: %d functions, %d bridges, %d USB controller(s)",
+         funcs, bridges, usb);
+    return funcs;
 }
