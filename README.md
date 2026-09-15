@@ -146,8 +146,17 @@ node tests/run_tests.mjs 4,12     # subset
 
 ## Running it on real hardware
 
+A prebuilt image is kept in `dist/` and refreshed with every change, so
+there is no need to build or serve anything to try it:
+
+* image:    https://raw.githubusercontent.com/Joercat/SCos/arena/01a09dfd-scos/dist/scos.img
+* checksum: https://raw.githubusercontent.com/Joercat/SCos/arena/01a09dfd-scos/dist/scos.img.sha256
+
+(The same URLs always point at the newest pushed image. Temporary drop,
+removed on request.)
+
 ```
-sudo dd if=build/scos.img of=/dev/sdX bs=4M status=progress conv=fsync
+sudo dd if=scos.img of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
 * The machine must boot in **legacy/CSM mode** (MBR + BIOS INT 13h/10h);
