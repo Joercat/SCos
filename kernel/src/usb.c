@@ -20,7 +20,7 @@
  */
 #include "scos.h"
 
-#define MAX_SLOTS 8
+#define MAX_SLOTS 12   /* hub + children + onboard devices need headroom */
 #define CMD_TRBS 128
 #define EVT_TRBS 256   /* 4 KiB segment, same as Linux: 64 filled up in the
                         * port-power link-training storm on the H510M-A */
@@ -56,7 +56,20 @@ struct xdev {
     u8 prev_keys[6];
     u32 last_rep_tick;
     u8 reported, silent_logged;
+    /* round 25: topology - where this device hangs in the tree */
+    u32 route;                /* xHCI route string (hub path) */
+    u8 root_port;             /* root hub port number */
+    u8 mtt;                   /* FS/LS child of a multi-TT HS hub */
+    u8 speed;                 /* xHCI port speed id (1 FS 2 LS 3 HS 4 SS) */
+    u8 tier;                  /* hub tiers above it (0 = on the root hub) */
+    u8 is_hub;
+    u8 hub_ports;             /* downstream ports (hub only) */
+    u8 hub_mtt;               /* hub itself has multiple TTs */
+    u8 hub_p2g;               /* bPwrOn2PwrGood, 2 ms units */
+    u8 child_slot[8];         /* hub: slot id per downstream port */
 };
+static u8 port_slot[32];      /* root port -> live slot (hotplug guard) */
+static int last_enum_slot;    /* slot of the last enumerate_device */
 
 static volatile u8 *cap, *op, *db, *rt;
 static int have_xhci;
@@ -103,6 +116,8 @@ static void ring_link(volatile u32 *ring, int last_idx, u32 cycle)
 }
 
 static int enumerate_port(int port);
+static int enumerate_device(int root_port, u32 route, int speed, int mtt,
+                            int tier, struct xdev *phub, int hport);
 
 /* ------------------------------------------------------------- events ---- */
 static int proc_events(void)
@@ -139,7 +154,12 @@ static int proc_events(void)
             u32 ptr = t[0];
             cc_code = code;
             cc_slot = slot | (ep << 8) | 0x10000u;
-            if (slot <= MAX_SLOTS && devs[slot].used &&
+            /* devs[slot].inr: until the HID ring is armed, ep_addr==0
+             * would match every EP0 control transfer event (DCI 1) and
+             * the re-arm below would scribble through a NULL ring into
+             * low physical memory - survived only because page 0 is
+             * identity-mapped and holds nothing live anymore */
+            if (slot <= MAX_SLOTS && devs[slot].used && devs[slot].inr &&
                 ep == (u32)(devs[slot].ep_addr * 2 + 1) &&
                 (code == 1 || code == 12 || code == 13)) {
                 struct xdev *d = &devs[slot];
@@ -467,6 +487,30 @@ static u32 relocate_bar(u8 d, u32 bar0, u32 want_len)
 }
 
 /* --------------------------------------------------------- enumeration ---- */
+static void hex2(char *p, u8 v)
+{
+    static const char hx[] = "0123456789abcdef";
+    p[0] = hx[v >> 4];
+    p[1] = hx[v & 0xF];
+}
+
+/* raw descriptor bytes into the log: the r24.1 photo proved we need to
+ * SEE what the device actually sent, not just our interpretation of it */
+static void hexdump(const char *tag, int slot, const u8 *b, int n)
+{
+    char line[64];
+    for (int i = 0; i < n; i += 16) {
+        char *p = line;
+        for (int j = i; j < i + 16 && j < n; j++) {
+            hex2(p, b[j]);
+            p += 2;
+            *p++ = ' ';
+        }
+        *p = 0;
+        klog("usb: %s slot %d +%02d: %s", tag, slot, i, line);
+    }
+}
+
 static u32 portsc(int port)
 {
     volatile u32 *ps = (volatile u32 *)(op + 0x400 + 0x10 * (port - 1));
@@ -500,9 +544,264 @@ static void port_reset(int port)
 
 static int port_speed(int port) { return (int)((portsc(port) >> 10) & 0xF); }
 
+/* allocate + wire up the host-side context buffers for a fresh slot */
+static struct xdev *slot_alloc(int slot)
+{
+    struct xdev *d = &devs[slot];
+    d->used = 1;
+    d->slot = slot;
+    d->kind = 0;
+    d->iface = -1;
+    d->ep_addr = 0;
+    d->inr = 0;
+    d->ep0 = (volatile u32 *)palloc(4096);
+    devctx[slot] = palloc(csz * 4);
+    inctx[slot] = palloc(csz * 34);
+    if (!d->ep0 || !devctx[slot] || !inctx[slot]) return NULL;
+    memset((void *)d->ep0, 0, 4096);
+    memset(devctx[slot], 0, csz * 4);
+    memset(inctx[slot], 0, csz * 34);
+    memset(d->child_slot, 0, sizeof(d->child_slot));
+    d->ep0_idx = 0;
+    d->ep0_cycle = 1;
+    d->reported = 0;
+    d->silent_logged = 0;
+    dcbaa[slot] = (u64)PA(devctx[slot]);
+    return d;
+}
+
+/* Address Device with the slot's saved topology (route string, root port,
+ * MTT) and the given EP0 max packet size; is_hub sets the Hub bit so the
+ * xHC can route children through this slot. */
+static int address_slot(struct xdev *d, u32 mps0, int is_hub)
+{
+    u8 *ic = inctx[d->slot];
+    ic[0] = 0x03;                        /* add: slot ctx + ep0 */
+    u32 *slw = (u32 *)(ic + csz);
+    /* dw0: Route String [19:0], Speed [23:20], MTT [25], Hub [26],
+     * Context Entries [31:27] = 1 (EP0 only); dw1: Root Hub Port [23:16] */
+    slw[0] = (d->route & 0xFFFFFu) | ((u32)(d->speed & 0xF) << 20) |
+             ((u32)(d->mtt & 1) << 25) | ((u32)(is_hub & 1) << 26) |
+             (1u << 27);
+    slw[1] = ((u32)d->root_port & 0xFF) << 16;
+    u32 *epw = (u32 *)(ic + csz * 2);
+    epw[0] = 0;                          /* state: disabled */
+    epw[1] = (4u << 3) | (3u << 1) | ((mps0 & 0xFFFF) << 16);
+    epw[2] = PA(d->ep0) | 1;
+    epw[3] = 0;
+    epw[4] = 8;
+    return run_cmd(PA(ic), 0, 0,
+                   (u32)(TRB_ADDRDEV << 10) | ((u32)d->slot << 24), 800);
+}
+
+/* ------------------------------------------------------------- hub bits ---- */
+static int hub_port_status(int hslot, int p, u32 *st, u32 *chg)
+{
+    int rc = ctrl_xfer(hslot, 0xA3, 0, 0, (u16)p, desc_buf, 4, 1);
+    if (rc != 1 && rc != 12 && rc != 13) return rc;
+    *st = (u32)(desc_buf[0] | (desc_buf[1] << 8));
+    *chg = (u32)(desc_buf[2] | (desc_buf[3] << 8));
+    return 1;
+}
+
+static int hub_port_reset(struct xdev *h, int p)
+{
+    ctrl_xfer(h->slot, 0x23, 3, 4, (u16)p, 0, 0, 0);   /* PORT_RESET */
+    u64 t0 = now_ms();
+    while (now_ms() - t0 < 600) {
+        drain_ms(5);
+        u32 st = 0, chg = 0;
+        if (hub_port_status(h->slot, p, &st, &chg) != 1) return 0;
+        if ((chg & 0x10) && !(st & 0x10)) {            /* C_RESET, done */
+            ctrl_xfer(h->slot, 0x23, 1, 20, (u16)p, 0, 0, 0);  /* clr */
+            u32 s2 = 0, c2 = 0;
+            hub_port_status(h->slot, p, &s2, &c2);
+            if (!(s2 & 4)) {
+                klog("usb: hub %d port %d reset done but not enabled (%04x)",
+                     h->slot, p, s2);
+                return 0;
+            }
+            return 1;
+        }
+        if (!(st & 1)) return 0;                       /* unplugged */
+    }
+    klog("usb: hub %d port %d reset timed out", h->slot, p);
+    return 0;
+}
+
+/* Disable -> port reset -> Enable -> Address with new context values.
+ * The port reset is NOT optional: a device already at a nonzero address
+ * only hears SET_ADDRESS after a reset puts it back into Default state. */
+static int readdress(struct xdev **dp, int old_slot, u32 mps0, int is_hub,
+                     struct xdev *phub, int hport, int root_port)
+{
+    struct xdev save = devs[old_slot];
+    disable_slot(old_slot);
+    drain_ms(2);
+    if (phub) {
+        if (!hub_port_reset(phub, hport)) {
+            klog("usb: re-address: hub port reset failed");
+            return 0;
+        }
+    } else {
+        port_reset(root_port);
+    }
+    int rc = run_cmd(0, 0, 0, (u32)(TRB_ENABSLOT << 10), 500);
+    if (rc != 1) {
+        klog("usb: re-address enable slot failed (code %d)", rc);
+        return 0;
+    }
+    int slot = (int)cc_slot;
+    if (slot < 1 || slot > MAX_SLOTS || devs[slot].used) {
+        klog("usb: re-address got bad slot %d", slot);
+        return 0;
+    }
+    struct xdev *d = slot_alloc(slot);
+    if (!d) { disable_slot(slot); return 0; }
+    d->route = save.route;
+    d->speed = save.speed;
+    d->mtt = save.mtt;
+    d->root_port = save.root_port;
+    d->tier = save.tier;
+    d->is_hub = (u8)is_hub;
+    d->hub_mtt = save.hub_mtt;
+    rc = address_slot(d, mps0, is_hub);
+    if (rc != 1) {
+        klog("usb: re-address Address Device failed slot %d (code %d)",
+             slot, rc);
+        disable_slot(slot);
+        return 0;
+    }
+    *dp = d;
+    return slot;
+}
+
+/* reset + enumerate one connected downstream port of hub h */
+static int hub_attach(struct xdev *h, int p);
+
+/* full hub bring-up: Hub=1 re-address, config, hub descriptor, power,
+ * walk every downstream port. Returns 3 (the "hub" kind). */
+static int hub_walk(struct xdev *d, u8 hproto, u32 mps0,
+                    struct xdev *phub, int hport, int root_port)
+{
+    if (d->tier >= 3) {   /* 20-bit route string = max 5 tiers anyway */
+        klog("usb: hub slot %d too deep (tier %d) - not walking",
+             d->slot, d->tier);
+        fail_flag = 1;
+        return 3;
+    }
+    struct xdev *nd = NULL;
+    int ns = readdress(&nd, d->slot, mps0, 1, phub, hport, root_port);
+    if (!ns) {
+        klog("usb: hub re-address failed - ports behind it unreachable");
+        fail_flag = 1;
+        return 3;
+    }
+    d = nd;
+    last_enum_slot = ns;
+    d->is_hub = 1;
+    d->hub_mtt = (hproto == 2) ? 1 : 0;
+    klog("usb: hub slot %d re-addressed Hub=1 (multi-TT %d)",
+         ns, d->hub_mtt);
+    int drc = ctrl_xfer(ns, 0x80, 6, 0x0200, 0, desc_buf, 9, 1);
+    if (drc != 1 && drc != 12 && drc != 13) {
+        klog("usb: hub %d config fetch failed (code %d)", ns, drc);
+        fail_flag = 1;
+        return 3;
+    }
+    u8 cfg_val = desc_buf[5];
+    drc = ctrl_xfer(ns, 0x00, 9, cfg_val, 0, 0, 0, 0);
+    klog("usb: hub %d SET_CONFIGURATION(%d) rc %d", ns, cfg_val, drc);
+    /* class descriptor: GET_DESCRIPTOR(Hub) = type 0x29 */
+    drc = ctrl_xfer(ns, 0xA0, 6, 0x2900, 0, desc_buf, 9, 1);
+    if (drc != 1 && drc != 12 && drc != 13) {
+        klog("usb: hub %d descriptor failed (code %d)", ns, drc);
+        fail_flag = 1;
+        return 3;
+    }
+    hexdump("hubdesc", ns, desc_buf, 9);
+    int nports = desc_buf[2];
+    int p2g = desc_buf[5];
+    if (nports < 1 || nports > 8) {
+        klog("usb: hub %d: %d ports - unsupported, skipping", ns, nports);
+        fail_flag = 1;
+        return 3;
+    }
+    d->hub_ports = (u8)nports;
+    d->hub_p2g = (u8)p2g;
+    klog("usb: hub %d: %d ports, chars %04x, pwr2good %d ms", ns, nports,
+         (u32)(desc_buf[3] | (desc_buf[4] << 8)), p2g * 2);
+    for (int p = 1; p <= nports; p++)
+        ctrl_xfer(ns, 0x23, 3, 8, (u16)p, 0, 0, 0);   /* PORT_POWER */
+    drain_ms((u32)(p2g * 2 + 110));
+    for (int p = 1; p <= nports; p++) {
+        u32 st = 0, chg = 0;
+        if (hub_port_status(ns, p, &st, &chg) != 1) {
+            klog("usb: hub %d port %d status read failed", ns, p);
+            continue;
+        }
+        klog("usb: hub %d port %d: status %04x change %04x%s", ns, p,
+             st, chg, (st & 1) ? " CONNECTED" : "");
+        if (chg & 1) ctrl_xfer(ns, 0x23, 1, 16, (u16)p, 0, 0, 0); /* C_CONN */
+        if (!(st & 1)) continue;
+        hub_attach(d, p);
+    }
+    return 3;
+}
+
+/* debounce, reset and enumerate whatever sits on hub port p */
+static int hub_attach(struct xdev *h, int p)
+{
+    u32 st = 0, chg = 0;
+    if (hub_port_status(h->slot, p, &st, &chg) != 1) return 0;
+    if (!(st & 1)) return 0;
+    drain_ms(20);                              /* USB debounce */
+    u32 st2 = 0, chg2 = 0;
+    if (hub_port_status(h->slot, p, &st2, &chg2) != 1) return 0;
+    if (!(st2 & 1)) {
+        klog("usb: hub %d port %d connect bounced away", h->slot, p);
+        return 0;
+    }
+    klog("usb: hub %d port %d attaching (status %04x)", h->slot, p, st2);
+    if (!hub_port_reset(h, p)) {
+        klog("usb: hub %d port %d reset failed", h->slot, p);
+        fail_flag = 1;
+        return 0;
+    }
+    u32 s3 = 0, c3 = 0;
+    hub_port_status(h->slot, p, &s3, &c3);
+    /* USB2 hub port status: bit 9 = low-speed, bit 10 = high-speed */
+    int raw = (int)((s3 >> 9) & 3);
+    int cspeed = (raw == 0) ? 1 : (raw == 1) ? 2 : (raw == 2) ? 3 : 0;
+    if (!cspeed) {
+        klog("usb: hub %d port %d bad speed bits (%04x)", h->slot, p, s3);
+        return 0;
+    }
+    u32 croute = h->route | ((u32)p << (4 * h->tier));
+    int cmtt = (h->speed == 3 && cspeed < 3 && h->hub_mtt) ? 1 : 0;
+    klog("usb: hub %d port %d: child speed %d route %x mtt %d",
+         h->slot, p, cspeed, croute, cmtt);
+    int kind = enumerate_device(h->root_port, croute, cspeed, cmtt,
+                                h->tier + 1, h, p);
+    if (last_enum_slot > 0 && last_enum_slot <= MAX_SLOTS && p <= 8)
+        h->child_slot[p - 1] = (u8)last_enum_slot;
+    return kind;
+}
+
 static int enumerate_port(int port)
 {
-    if (!(portsc(port) & 1)) return 0;    /* CCS */
+    if (!(portsc(port) & 1)) {            /* CCS gone: device unplugged */
+        u8 old = port_slot[port];
+        if (old && old <= MAX_SLOTS && devs[old].used) {
+            klog("usb: port %d: slot %d disconnected", port, old);
+            disable_slot(old);
+        }
+        port_slot[port] = 0;
+        return 0;
+    }
+    if (port_slot[port] && port_slot[port] <= MAX_SLOTS &&
+        devs[port_slot[port]].used)
+        return 0;    /* already enumerated - spurious change event */
     int enabled = 0;
     for (int attempt = 0; attempt < 3 && !enabled; attempt++) {
         port_reset(port);
@@ -535,7 +834,16 @@ static int enumerate_port(int port)
     klog("usb: port %d connected, speed %d, portsc %08x",
          port, speed, portsc(port));
     if (speed < 1 || speed > 4) return 0;
+    int kind = enumerate_device(port, 0, speed, 0, 0, 0, 0);
+    if (last_enum_slot > 0 && last_enum_slot <= MAX_SLOTS)
+        port_slot[port] = (u8)last_enum_slot;
+    return kind;
+}
 
+static int enumerate_device(int root_port, u32 route, int speed, int mtt,
+                            int tier, struct xdev *phub, int hport)
+{
+    last_enum_slot = 0;
     int rc = run_cmd(0, 0, 0, (u32)(TRB_ENABSLOT << 10), 500);
     if (rc != 1) {
         klog("usb: enable slot failed (code %d usbsts %x)", rc,
@@ -548,51 +856,30 @@ static int enumerate_port(int port)
         return 0;
     }
     if (devs[slot].used) disable_slot(slot);   /* stale entry: free and reuse */
-    klog("usb: port %d -> slot %d (enable slot ok)", port, slot);
+    klog("usb: root %d route %x tier %d -> slot %d", root_port, route,
+         tier, slot);
 
-    struct xdev *d = &devs[slot];
-    d->used = 1;
-    d->slot = slot;
-    d->ep0 = (volatile u32 *)palloc(4096);
-    devctx[slot] = palloc(csz * 4);
-    inctx[slot] = palloc(csz * 34);
-    if (!d->ep0 || !devctx[slot] || !inctx[slot]) { disable_slot(slot); return 0; }
-    memset((void *)d->ep0, 0, 4096);
-    memset(devctx[slot], 0, csz * 4);
-    memset(inctx[slot], 0, csz * 34);
-    d->ep0_idx = 0;
-    d->ep0_cycle = 1;
-    dcbaa[slot] = (u64)PA(devctx[slot]);
+    struct xdev *d = slot_alloc(slot);
+    if (!d) { disable_slot(slot); return 0; }
+    d->route = route;
+    d->speed = (u8)speed;
+    d->mtt = (u8)mtt;
+    d->root_port = (u8)root_port;
+    d->tier = (u8)tier;
+    last_enum_slot = slot;
 
-    u8 *ic = inctx[slot];
-    ic[0] = 0x03;                                   /* add: slot + ep0 */
-    u32 *slw = (u32 *)(ic + csz);
-    /* Slot ctx dw0: speed [23:20], Context Entries [31:27] = 1 (EP0 only).
-     * dw1: Root Hub Port Number [23:16]. (Entries used to be OR-ed into
-     * dw1 bit 27 - reserved there, and 0 entries in dw0 made every
-     * Address Device command invalid.) */
-    slw[0] = ((u32)(speed & 0xF) << 20) | (1u << 27);
-    slw[1] = ((u32)port & 0xFF) << 16;
     /* USB spec: LS control EP is ALWAYS 8 bytes; HS always 64; SS 2^9.
-     * FS may be 8/16/32/64 - guess 64 and correct via Evaluate Context
-     * after the first descriptor bytes (same as Linux). */
+     * FS may be 8/16/32/64 - guess 64 and re-address after the first
+     * descriptor bytes if the device disagrees (same as Linux). */
     u32 mps = (speed == 4) ? 9 : (speed == 2) ? 8 : 64;
-    u32 *epw = (u32 *)(ic + csz * 2);               /* ep ctx index 2 = EP ID 0 */
-    /* EP ctx (xHCI 6.2.3): dw1 = EP Type [5:3] (4 = control), CErr [2:1],
-     * Max Packet Size [31:16]; dw2/3 = dequeue | DCS; dw4 = Avg TRB Len */
-    epw[0] = 0;                                     /* state: disabled */
-    epw[1] = (4u << 3) | (3u << 1) | ((u32)mps << 16);
-    epw[2] = PA(d->ep0) | 1;
-    epw[3] = 0;
-    epw[4] = 8;
-
-    rc = run_cmd(PA(ic), 0, 0,
-                 (u32)(TRB_ADDRDEV << 10) | ((u32)slot << 24), 800);
+    rc = address_slot(d, mps, 0);
     if (rc != 1) {
-        klog("usb: address device failed (port %d code %d)", port, rc);
+        klog("usb: address device failed slot %d (code %d)", slot, rc);
         disable_slot(slot);
         return 0;
     }
+    u8 *ic = inctx[slot];
+    u32 *slw, *epw;
 
     /* Linux-style first fetch: only 8 bytes. With the EP0 context MPS
      * still at the assumed 64, an 18-byte fetch to a real-MPS-8 device
@@ -615,55 +902,13 @@ static int enumerate_port(int port)
              * Evaluate Context command that fails on this controller */
             klog("usb: slot %d mps0 %u != assumed %u - re-addressing",
                  slot, mps0, assumed);
-            disable_slot(slot);
-            drain_ms(2);
-            rc = run_cmd(0, 0, 0, (u32)(TRB_ENABSLOT << 10), 500);
-            if (rc != 1) {
-                klog("usb: re-address enable slot failed (code %d)", rc);
-                return 0;
-            }
-            slot = (int)cc_slot;
-            if (slot < 1 || slot > MAX_SLOTS || devs[slot].used) {
-                klog("usb: re-address got bad slot %d", slot);
-                return 0;
-            }
-            d = &devs[slot];
-            d->used = 1;
-            d->slot = slot;
-            d->ep0 = (volatile u32 *)palloc(4096);
-            devctx[slot] = palloc(csz * 4);
-            inctx[slot] = palloc(csz * 34);
-            if (!d->ep0 || !devctx[slot] || !inctx[slot]) {
-                disable_slot(slot); return 0;
-            }
-            memset((void *)d->ep0, 0, 4096);
-            memset(devctx[slot], 0, csz * 4);
-            memset(inctx[slot], 0, csz * 34);
-            d->ep0_idx = 0;
-            d->ep0_cycle = 1;
-            dcbaa[slot] = (u64)PA(devctx[slot]);
-            /* Address Device again, now with the REAL EP0 MPS - same
-             * recipe as the first addressing above (variables still in
-             * scope; ic/slw/epw just get rebuilt for the new slot) */
+            struct xdev *nd = NULL;
+            int ns = readdress(&nd, slot, mps0, 0, phub, hport, root_port);
+            if (!ns) return 0;
+            slot = ns;
+            d = nd;
             ic = inctx[slot];
-            ic[0] = 0x03;                        /* add: slot ctx + ep0 */
-            slw = (u32 *)(ic + csz);
-            slw[0] = ((u32)(speed & 0xF) << 20) | (1u << 27);
-            slw[1] = ((u32)port & 0xFF) << 16;
-            epw = (u32 *)(ic + csz * 2);
-            epw[0] = 0;
-            epw[1] = (4u << 3) | (3u << 1) | (mps0 << 16);
-            epw[2] = PA(d->ep0) | 1;
-            epw[3] = 0;
-            epw[4] = 8;
-            rc = run_cmd(PA(ic), 0, 0,
-                         (u32)(TRB_ADDRDEV << 10) | ((u32)slot << 24), 800);
-            if (rc != 1) {
-                klog("usb: re-address Address Device failed slot %d (code %d)",
-                     slot, rc);
-                disable_slot(slot);
-                return 0;
-            }
+            last_enum_slot = slot;
             klog("usb: slot %d re-addressed with mps0 %u", slot, mps0);
         }
         /* now fetch the full 18-byte device descriptor with the right MPS */
@@ -674,21 +919,19 @@ static int enumerate_port(int port)
             disable_slot(slot);
             return 0;
         }
+        hexdump("dev", slot, desc_buf, 18);
         klog("usb: slot %d dev: %02x:%02x vid:pid %04x:%04x class %d mps0 %u",
              slot, desc_buf[0], desc_buf[1],
              (u32)(desc_buf[8] | (desc_buf[9] << 8)),
              (u32)(desc_buf[10] | (desc_buf[11] << 8)),
              desc_buf[4], desc_buf[7]);
-        if (desc_buf[1] != 0x12)
-            klog("usb: slot %d WARNING: desc len %u != 18", slot,
+        if (desc_buf[1] != 0x01)   /* bDescriptorType must be DEVICE (1) */
+            klog("usb: slot %d WARNING: desc type %u != 1", slot,
                  desc_buf[1]);
-        if (desc_buf[4] == 9) {   /* bDeviceClass 9 = hub */
-            klog("usb: slot %d is a HUB - devices behind hubs not walked",
-                 slot);
+        if (desc_buf[4] == 9) {   /* bDeviceClass 9 = hub: walk it */
             hub_count++;
-            fail_flag = 1;
-            disable_slot(slot);
-            return 3;
+            return hub_walk(d, desc_buf[6], desc_buf[7], phub, hport,
+                            root_port);
         }
     }
     drc = ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, 9, 1);
@@ -705,6 +948,7 @@ static int enumerate_port(int port)
         klog("usb: full config descriptor failed slot %d (code %d)", slot, drc);
         disable_slot(slot); return 0;
     }
+    hexdump("cfg", slot, desc_buf, (int)(tot > 64 ? 64 : tot));
     u8 cfg_val = desc_buf[5];
     int iface = -1, proto = -1, ep_addr = 0, ep_mps = 8;
     int off = 9;
@@ -713,11 +957,11 @@ static int enumerate_port(int port)
         if (!dl) break;
         u8 dt = desc_buf[off + 1];
         if (dt == 4 && dl >= 9) {
-            klog("usb:   iface %d: class %d/%d/%d proto %s",
-                 desc_buf[off + 2], desc_buf[off + 5], desc_buf[off + 6],
-                 desc_buf[off + 7],
+            klog("usb:   iface %d alt %d: class %d/%d/%d eps %d %s",
+                 desc_buf[off + 2], desc_buf[off + 3], desc_buf[off + 5],
+                 desc_buf[off + 6], desc_buf[off + 7], desc_buf[off + 4],
                  (desc_buf[off + 5] == 3 && desc_buf[off + 6] == 1 &&
-                  desc_buf[off + 7] <= 2) ? "boot-HID candidate" : "-");
+                  desc_buf[off + 7] <= 2) ? "boot-HID candidate" : "");
             if (desc_buf[off + 5] == 3 && desc_buf[off + 6] == 1 &&
                 (desc_buf[off + 7] == 1 || desc_buf[off + 7] == 2)) {
                 iface = desc_buf[off + 2];
@@ -767,8 +1011,11 @@ static int enumerate_port(int port)
     memset(ic, 0, csz * 34);
     ic[0] = 0x01 | (1u << dci);              /* Add: slot ctx + this EP ctx */
     slw = (u32 *)(ic + csz);
-    slw[0] = ((u32)(speed & 0xF) << 20) | (dci << 27); /* Context Entries = last DCI */
-    slw[1] = ((u32)port & 0xFF) << 16;
+    /* keep the FULL topology: dropping route/MTT here would cut a
+     * hub-attached device off the moment its interrupt EP is added */
+    slw[0] = (route & 0xFFFFFu) | ((u32)(speed & 0xF) << 20) |
+             ((u32)(mtt & 1) << 25) | (dci << 27);
+    slw[1] = ((u32)root_port & 0xFF) << 16;
     epw = (u32 *)(ic + csz * (dci + 1));     /* input ctx array: index DCI+1 */
     /* dw0: Interval [23:16] = 3 (4 ms FS / 250 us HS polling);
      * dw1: EP Type [5:3] = 6 (Interrupt IN), CErr [2:1] = 3, MPS [31:16] */
@@ -835,7 +1082,36 @@ void usb_poll(void)
         u32 m = pending_portc;
         pending_portc = 0;
         for (int p = 1; p <= max_ports && p < 32; p++)
-            if (m & (1u << p)) enumerate_port(p);
+            if (m & (1u << p)) {
+                enumerate_port(p);
+                /* our own resets re-armed this bit during enumerate -
+                 * dropping it here stops a 1 Hz re-enumeration loop */
+                pending_portc &= ~(1u << p);
+            }
+    }
+    for (int sl = 1; sl <= MAX_SLOTS; sl++) {   /* hub-port hotplug, 1 Hz */
+        struct xdev *h = &devs[sl];
+        if (!h->used || !h->is_hub) continue;
+        for (int p = 1; p <= h->hub_ports && p <= 8; p++) {
+            u32 st = 0, chg = 0;
+            if (hub_port_status(sl, p, &st, &chg) != 1) continue;
+            if (!(chg & 0x13)) continue;        /* conn/enable/reset changes */
+            klog("usb: hub %d port %d change %04x status %04x", sl, p,
+                 chg, st);
+            if (chg & 2) ctrl_xfer(sl, 0x23, 1, 17, (u16)p, 0, 0, 0);
+            if (chg & 0x10) ctrl_xfer(sl, 0x23, 1, 20, (u16)p, 0, 0, 0);
+            if (chg & 1) {
+                ctrl_xfer(sl, 0x23, 1, 16, (u16)p, 0, 0, 0);
+                u8 old = h->child_slot[p - 1];
+                if (old && old <= MAX_SLOTS && devs[old].used) {
+                    klog("usb: hub %d port %d: slot %d went away", sl, p,
+                         old);
+                    disable_slot(old);
+                }
+                h->child_slot[p - 1] = 0;
+                if (st & 1) hub_attach(h, p);
+            }
+        }
     }
     for (int sl = 1; sl <= MAX_SLOTS; sl++) {
         struct xdev *d = &devs[sl];
@@ -1048,6 +1324,7 @@ void usb_init(void)
         if (!(psc & 1)) continue;
         klog("usb: enumerate port %d (portsc %08x speed %d)",
              p, psc, (int)((psc >> 10) & 0xF));
+        port_slot[p] = 0;
         int k = enumerate_port(p);
         if (k == 1) mk++;
         if (k == 2) mm++;
