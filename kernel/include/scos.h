@@ -78,6 +78,12 @@ void usb_status(char *out, int max);
 int  usb_diag_flag(void);
 void diag_run(void);
 void diag_manual(void);
+void error_screen(const char *subsys, const char *msg,
+                  const char *const *dump, int ndump);
+void err_notify(const char *subsys, const char *msg,
+                const char *const *dump, int ndump);
+int  err_pending(void);
+void err_show_pending(void);
 int  pci_scan_dump(void);
 int  klog_ring_count(void);
 int  klog_ring(int i, char *out, int max);

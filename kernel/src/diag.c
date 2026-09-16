@@ -87,6 +87,25 @@ void diag_manual(void)
     klog("diag: %s", ul);
     klog("diag: ps/2 mouse %s", mouse_present() ? "present" : "absent");
     klog("diag: input %s", input_last_tick ? "events seen" : "silent");
+    {   /* injection self-test: HID report -> scancode/queue -> WM poll path,
+         * no hardware involved; events are consumed here so nothing leaks */
+        u8 prevk[6] = {0}, prevm = 0;
+        u8 rep[6] = {0x04, 0, 0, 0, 0, 0};      /* HID usage 0x04 = 'a' */
+        kbd_inject_hid(0, rep, prevk, &prevm);
+        u8 rel[6] = {0, 0, 0, 0, 0, 0};
+        kbd_inject_hid(0, rel, prevk, &prevm);
+        int kok = 0;
+        struct key_event ke;
+        while (kbd_poll(&ke))
+            if (ke.pressed && ke.keycode == 'a') kok = 1;
+        mouse_inject(0, 40, -12, 0);
+        int mok = 0;
+        struct mouse_event me;
+        while (mouse_poll(&me))
+            if (me.type == MEV_MOVE && me.dx == 40 && me.dy == -12) mok = 1;
+        klog("diag: self-test kbd injection %s, mouse injection %s",
+             kok ? "OK" : "FAILED", mok ? "OK" : "FAILED");
+    }
     diag_draw(25);
     diag_hold();
 }

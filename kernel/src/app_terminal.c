@@ -126,6 +126,7 @@ static const char *help_text =
     "neofetch  - System summary with logo\n"
     "dmesg     - Kernel log ring (USB/input diagnostics)\n"
     "diag      - Full hardware scan on the diagnostics screen\n"
+    "errtest   - Show the non-fatal error screen (self-check)\n"
     "sysmon    - Open the System Monitor app\n"
     "theme     - List or switch themes\n"
     "calc      - Perform basic arithmetic\n"
@@ -366,6 +367,17 @@ static void run_command(struct term *t, const char *command)
     t->follow = 1;
         t->follow = 1;
         return;
+    }
+    else if (!strcmp(cmd, "errtest")) {
+        static const char *dump[3] = {
+            "example: last io port 0x3f6 status 0x50",
+            "example: retry count 3, drive master",
+            "example: caller vfs_flush() + 0x2a",
+        };
+        err_notify("self-test",
+                   "this is what a non-fatal subsystem error looks like",
+                   dump, 3);
+        strcpy(response, "Error screen dismissed - system continued");
     }
     else if (!strcmp(cmd, "diag")) {
         diag_manual();

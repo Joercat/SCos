@@ -79,6 +79,23 @@ int ata_init(void)
 
 int ata_present(void) { return dev_count > 0; }
 
+static void ata_err(u32 lba, u32 count, u8 st, struct ata_dev *d)
+{
+    static char l0[64], l1[64], a[8], b[8];
+    strcpy(l0, "status 0x");
+    a[0] = (char)((st >> 4) & 0xF); a[0] = (char)(a[0] < 10 ? a[0] + '0' : a[0] - 10 + 'a');
+    a[1] = (char)(st & 0xF); a[1] = (char)(a[1] < 10 ? a[1] + '0' : a[1] - 10 + 'a');
+    a[2] = 0;
+    strcat(l0, a);
+    strcat(l0, "  lba "); fmt_u32(b, lba); strcat(l0, b);
+    strcat(l0, "  count "); fmt_u32(b, count); strcat(l0, b);
+    strcpy(l1, "drive "); strcat(l1, d->slave ? "slave" : "master");
+    strcat(l1, "  io 0x"); fmt_u32(b, d->io); strcat(l1, b);
+    static const char *dump[2];
+    dump[0] = l0; dump[1] = l1;
+    err_notify("ata", "PIO transfer failed (drive error or timeout)", dump, 2);
+}
+
 static int ata_pio_transfer(struct ata_dev *d, u32 lba, u32 count, void *buf, int write)
 {
     ata_wait_ready(d);
@@ -92,10 +109,16 @@ static int ata_pio_transfer(struct ata_dev *d, u32 lba, u32 count, void *buf, in
 
     u16 *w = buf;
     for (u32 s = 0; s < count; s++) {
-        for (int i = 0; i < 1000000; i++) {
-            u8 st = inb(d->io + 7);
-            if (st & 1) return 0;
-            if ((st & 0x88) == 0x08) break;      /* DRQ ready */
+        int ok = 0;
+        for (int attempt = 0; attempt < 2 && !ok; attempt++)
+            for (int i = 0; i < 2000000; i++) {
+                u8 st = inb(d->io + 7);
+                if (st & 1) { ata_err(lba, count, st, d); return 0; }
+                if ((st & 0x88) == 0x08) { ok = 1; break; }   /* DRQ ready */
+            }
+        if (!ok) {   /* slow device, not an error: log only, never hold a screen */
+            klog("ata: DRQ timeout at lba %u count %u", lba, count);
+            return 0;
         }
         if (write) {
             for (int i = 0; i < 256; i++) outw(d->io, w[i]);
@@ -190,7 +213,28 @@ int fs_image_load(void)
     if (!dev_count) return 0;
     if (!img_buf) img_buf = palloc(IMG_MAX_SECTORS * SECTOR);
     if (!ata_read_sectors(IMG_LBA, IMG_MAX_SECTORS, img_buf)) return 0;
-    if (memcmp(img_buf, "SCOSFS1", 8)) return 0;
+    {
+        int pristine = 1;
+        for (int i = 0; i < 16; i++)
+            if (img_buf[i] != 0x00 && img_buf[i] != 0xFF) pristine = 0;
+        if (pristine) return 0;          /* never written: silently absent */
+    }
+    if (memcmp(img_buf, "SCOSFS1", 8)) {
+        static char l0[64];
+        strcpy(l0, "first bytes: ");
+        static const char *dg = "0123456789abcdef";
+        for (int i = 0; i < 8; i++) {
+            l0[13 + i * 2] = dg[img_buf[i] >> 4];
+            l0[14 + i * 2] = dg[img_buf[i] & 0xF];
+        }
+        l0[29] = 0;
+        static const char *dump[1];
+        dump[0] = l0;
+        err_notify("filesystem",
+                   "saved image has a bad magic - starting with defaults",
+                   dump, 1);
+        return 0;
+    }
     /* start from a clean tree, then overlay the image */
     image_apply(img_buf, IMG_MAX_SECTORS * SECTOR);
     fs_image_found = 1;

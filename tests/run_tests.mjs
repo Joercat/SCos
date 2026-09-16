@@ -517,6 +517,29 @@ test(23, "files: system hidden + desktop shortcuts", async (state) => {
     if (!(await live(state))) throw new Error("frozen in files");
 });
 
+/* --------------------------------------------------------------- 24 ---- */
+test(24, "error screen: non-fatal tier shows and dismisses", async (state) => {
+    const p = ICON_POS(ICON.terminal);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
+    await state.type("errtest\n"); await sleep(1200);
+    /* the SYSTEM ERROR title block must contain many amber pixels */
+    const fb = state.framebuffer();
+    let amber = 0;
+    for (let y = 48; y < 150; y++)
+        for (let x = 420; x < 580; x++) {
+            const i = (y * fb.w + x) * 4;
+            /* v86 svga memory is B,G,R,A */
+            const r = fb.mem[i + 2], g = fb.mem[i + 1], b = fb.mem[i];
+            if (r > 180 && g > 120 && b < 120) amber++;
+        }
+    if (amber < 200) throw new Error("error screen title missing (amber=" + amber + ")");
+    shot(state, "58_error_screen");
+    await state.type("x"); await sleep(600);          /* any key dismisses */
+    if (!(await live(state))) throw new Error("OS did not continue after error screen");
+    await state.type("echo survived\n"); await sleep(500);
+    if (!(await live(state))) throw new Error("terminal dead after dismiss");
+});
+
 /* ------------------------------------------------------------- runner ---- */
 const list = only ? scenarios.filter((s) => only.includes(s.id)) : scenarios;
 for (const s of list) {

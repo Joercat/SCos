@@ -64,7 +64,11 @@ void *palloc(u32 bytes)
         b = b->next;
     }
     irq_enable();
-    klog("mm: palloc(%u) FAILED", bytes);
+    klog("mm: palloc(%u) FAILED free_pages=%u head=%x headpages=%u",
+         bytes, free_pages, (u32)free_list,
+         free_list ? free_list->pages : 0);
+    err_notify("memory", "page allocation failed - managed memory exhausted",
+               0, 0);
     return NULL;
 }
 

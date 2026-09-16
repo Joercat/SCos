@@ -1182,6 +1182,8 @@ static void irq_watchdog(void)
         outb(0xA0, 0x20);
         pic_clear_mask(0);
         klog("wm: irq watchdog re-armed PIC");
+        err_notify("interrupt controller",
+                   "IRQ watchdog re-armed the PIC (ticks had stopped)", 0, 0);
     }
     last_sec = rt.sec;
     last_tick = (u32)tick_count;
@@ -1205,6 +1207,7 @@ void wm_run(void)
     klog("wm: entering main loop");
     for (;;) {
         irq_watchdog();
+        if (err_pending()) err_show_pending();
         usb_poll();
         if (!diag_tried && !input_last_tick && !is_v86_box() &&
             tick_count - wm_t0 > 600) {   /* 6 s of total silence on real HW */
