@@ -34,7 +34,7 @@ static void ata_wait_ready(struct ata_dev *d)
 static int ata_ident(struct ata_dev *d)
 {
     ata_wait_ready(d);
-    outb(d->io + 6, d->slave ? 0xB0 : 0xA0)
+    outb(d->io + 6, d->slave ? 0xB0 : 0xA0);
     outb(d->io + 2, 0);
     outb(d->io + 3, 0);
     outb(d->io + 4, 0);
