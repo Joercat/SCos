@@ -60,7 +60,7 @@ void kmain(struct boot_info *bi)
     mouse_init();
         usb_init();
         {
-            char ul[96];
+            char ul[160];
             usb_status(ul, sizeof(ul));
             strcpy(line, "in:   ps2 kbd");
             if (mouse_present()) strcat(line, "+mouse");

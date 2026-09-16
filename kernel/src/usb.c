@@ -22,7 +22,8 @@
 
 #define MAX_SLOTS 8
 #define CMD_TRBS 128
-#define EVT_TRBS 64
+#define EVT_TRBS 256   /* 4 KiB segment, same as Linux: 64 filled up in the
+                        * port-power link-training storm on the H510M-A */
 #define EP0_TRBS 16
 #define IN_TRBS 8
 
@@ -75,7 +76,12 @@ static volatile u32 cc_code = 0xFF;
 static volatile u32 cc_slot;
 static volatile int cc_valid;
 static u32 pending_portc;           /* ports with queued connect-change work */
-static char status_line[96];
+static char status_line[128];
+/* ring-24 forensics: counted and shown on the status line / diagnostics */
+static u32 evt_seen;        /* events consumed from the ring */
+static u32 evt_hcevent;     /* Host Controller Events (TRB type 37) */
+static u32 ring_full_hits;  /* code-17 (Event Ring Full) sightings */
+static u32 restart_count;   /* xHC restarts after a halt */
 static u8 desc_buf[512];
 
 static u64 now_ms(void) { return tick_count * 10; }
@@ -107,13 +113,23 @@ static int proc_events(void)
         if ((t[3] & 1) != evt_cycle) break;
         u32 type = (t[3] >> 10) & 0x3F;
         work = 1;
-        if (type == EV_CMDCOMP) {
+        evt_seen++;
+        if (type == 37) {
+            /* Host Controller Event: posted when the xHC could not write
+             * an event earlier (ring full). dw2[31:24] carries the code. */
+            u32 hc = (t[2] >> 24) & 0xFF;
+            evt_hcevent++;
+            if (hc == 17) ring_full_hits++;
+            klog("usb: HC event code %u (ring-full total %u)",
+                 hc, ring_full_hits);
+        } else if (type == EV_CMDCOMP) {
             cc_code = (t[2] >> 24) & 0xFF;      /* completion code: dw2[31:24] */
             cc_slot = (t[3] >> 24) & 0xFF;      /* slot id: dw3[31:24] (the
                                                  * TRB type is dw3[15:10]=33;
                                                  * dw0/1 is the command TRB
                                                  * pointer, NOT the slot!) */
             cc_valid = 1;
+            if (cc_code == 17) ring_full_hits++;
         } else if (type == EV_TRANSFER) {
             u32 slot = (t[3] >> 24) & 0xFF;
             u32 ep = (t[3] >> 16) & 0x1F;
@@ -193,6 +209,17 @@ static int proc_events(void)
     return work;
 }
 
+/* Sleep WHILE draining the event ring. Port resets and power-on settle
+ * windows are exactly when the xHC posts its port-change / link-training
+ * storm; plain sleep_ms there let the ring fill to the brim before the
+ * first wait_event got a chance to drain (H510M-A: everything then died
+ * with completion code 17). */
+static void drain_ms(u32 ms)
+{
+    u64 t0 = now_ms();
+    while (now_ms() - t0 < ms) { proc_events(); cpu_hlt(); }
+}
+
 static int wait_event(u64 timeout_ms)
 {
     u64 t0 = now_ms();
@@ -202,7 +229,15 @@ static int wait_event(u64 timeout_ms)
     while (now_ms() - t0 < timeout_ms) {
         proc_events();
         /* bit16 marks a TRANSFER event - not a command completion */
-        if (cc_valid && !(cc_slot & 0x10000u)) return (int)cc_code;
+        if (cc_valid && !(cc_slot & 0x10000u)) {
+            if (cc_code == 17) {
+                /* Event-Ring-Full Error completion: the command stalled
+                 * while the ring was jammed; its true completion follows
+                 * once space frees (we drain every loop). Keep waiting. */
+                klog("usb: cmd completion code 17 (ring full) - waiting on");
+                cc_valid = 0;
+            } else return (int)cc_code;
+        }
         cpu_hlt();
     }
     return -1;
@@ -220,12 +255,24 @@ static void xhci_restart(void)
     volatile u32 *erdp = (volatile u32 *)(rt + 0x20 + 0x18);
     wr64(erdp, (u64)PA(evt_ring + (u32)evt_idx * 4) | (1ull << 3));
     if (!(sts[0] & 1u)) return;
+    restart_count++;
     klog("usb: xHC halted (usbsts %x) - restarting", sts[0]);
-    cmdr[0] |= 1u;                       /* RS */
+    cmdr[0] &= ~1u;                      /* RS=0 while re-priming */
     u64 t0 = now_ms();
+    while (now_ms() - t0 < 100 && !(sts[0] & 1u)) cpu_hlt();
+    /* xHCI spec 4.21: a halted controller has Command Ring Running = 0,
+     * and setting RS alone does NOT restart the ring - software must
+     * write CRCR with the current dequeue pointer + cycle state FIRST.
+     * Skipping this is why every Enable Slot after "running again" timed
+     * out on the H510M-A (code -1, usbsts 14) and the replugged mouse
+     * never came back. */
+    wr64((volatile u32 *)(op + 0x18),
+         (u64)PA(cmd_ring + (u32)cmd_idx * 4) | (u64)(cmd_cycle & 1));
+    cmdr[0] |= 1u;                       /* RS */
+    t0 = now_ms();
     while (now_ms() - t0 < 200 && (sts[0] & 1u)) cpu_hlt();
     if (sts[0] & 1u) klog("usb: restart FAILED (usbsts %x)", sts[0]);
-    else klog("usb: xHC running again");
+    else klog("usb: xHC running again (usbsts %x)", sts[0]);
 }
 
 static void ring_db(u32 slot, u32 target)
@@ -264,21 +311,11 @@ static void disable_slot(int slot)
 /* the device's real EP0 max packet size differs from what we assumed at
  * Address Device time (full/low-speed HID devices usually say 8): patch the
  * controller's own EP0 context and Evaluate it, the same dance Linux does */
-static int eval_ep0_mps(int slot, u32 mps)
-{
-    u8 *ic = inctx[slot];
-    memset(ic, 0, csz * 34);
-    ic[0] = (1u << 1);                       /* Add EP0 (DCI 1) only */
-    memcpy(ic + csz * 2, devctx[slot] + csz, csz);  /* devctx: [0]=slot [1]=EP0 */
-    u32 *epw = (u32 *)(ic + csz * 2);
-    epw[1] = (epw[1] & 0x0000FFFFu) | ((mps & 0xFFFF) << 16);
-    int rc = run_cmd(PA(ic), 0, 0,
-                     (u32)(TRB_EVALCTX << 10) | ((u32)slot << 24), 500);
-    if (rc != 1)
-        klog("usb: evaluate ctx (ep0 mps %u) failed slot %d code %d",
-             mps, slot, rc);
-    return rc;
-}
+/* Evaluate Context is gone on purpose: on the H510M-A the only command
+ * that ever failed was Evaluate Context (ep0 mps 8 -> completion code 17)
+ * and its failure truncated every later descriptor fetch. The re-address
+ * flow below (Disable Slot -> Enable Slot -> Address Device with the real
+ * MPS) uses only commands proven to work on this board. */
 
 /* ------------------------------------------------------- control pipe ---- */
 static volatile u32 *ep0_next(struct xdev *d)
@@ -454,7 +491,10 @@ static void port_reset(int port)
      * while the keyboard/mouse stay dark. */
     ps[0] = (1u << 4) | (1u << 9);        /* PR + PP */
     u64 t0 = now_ms();
-    while (now_ms() - t0 < 400 && !(ps[0] & (1u << 21))) cpu_hlt();
+    while (now_ms() - t0 < 400 && !(ps[0] & (1u << 21))) {
+        proc_events();                    /* drain the change-event storm */
+        cpu_hlt();
+    }
     ps[0] = (1u << 21) | (1u << 9);       /* clear PRC (PED survives), keep PP */
 }
 
@@ -474,9 +514,9 @@ static int enumerate_port(int port)
                  port, attempt + 1, portsc(port));
             volatile u32 *ps = (volatile u32 *)(op + 0x400 + 0x10 * (port - 1));
             ps[0] = 0;                       /* RW bits off (PP, PR); W1C untouched */
-            sleep_ms(30);
+            drain_ms(30);
             ps[0] = 1u << 9;                 /* PP on, alone */
-            sleep_ms(120);                   /* debounce */
+            drain_ms(120);                   /* debounce */
             ps[0] = (1u << 21) | (1u << 22) | (1u << 23);
             if (!(portsc(port) & 1)) return 0;   /* device went away */
         }
@@ -492,7 +532,8 @@ static int enumerate_port(int port)
         return 0;
     }
     int speed = port_speed(port);
-    klog("usb: port %d connected, speed %d", port, speed);
+    klog("usb: port %d connected, speed %d, portsc %08x",
+         port, speed, portsc(port));
     if (speed < 1 || speed > 4) return 0;
 
     int rc = run_cmd(0, 0, 0, (u32)(TRB_ENABSLOT << 10), 500);
@@ -507,6 +548,7 @@ static int enumerate_port(int port)
         return 0;
     }
     if (devs[slot].used) disable_slot(slot);   /* stale entry: free and reuse */
+    klog("usb: port %d -> slot %d (enable slot ok)", port, slot);
 
     struct xdev *d = &devs[slot];
     d->used = 1;
@@ -552,29 +594,101 @@ static int enumerate_port(int port)
         return 0;
     }
 
-    int drc = ctrl_xfer(slot, 0x80, 6, 0x0100, 0, desc_buf, 18, 1);
-    if ((drc != 1 && drc != 12 && drc != 13)) {   /* 13 = Success with Short Packet: normal
-                                    * when the device's EP0 packets are
-                                    * smaller than the 64 we assumed */
-        klog("usb: device descriptor failed slot %d (code %d)", slot, drc);
+    /* Linux-style first fetch: only 8 bytes. With the EP0 context MPS
+     * still at the assumed 64, an 18-byte fetch to a real-MPS-8 device
+     * ends the data stage at the first 8-byte packet and the device can
+     * stall the premature status stage; 8 bytes always fit one packet. */
+    int drc = ctrl_xfer(slot, 0x80, 6, 0x0100, 0, desc_buf, 8, 1);
+    if ((drc != 1 && drc != 12 && drc != 13)) {   /* 12/13 = Short Packet:
+                                    * normal when the device's EP0 packets
+                                    * are smaller than the 64 we assumed */
+        klog("usb: descriptor 8B fetch failed slot %d (code %d)", slot, drc);
         disable_slot(slot);
         return 0;
     }
-    {   /* FS/LS devices cut the fetch short at their real EP0 max packet
-         * (usually 8): honor it and refetch, or the config descriptor read
-         * desyncs the pipe */
+    {
         u32 mps0 = desc_buf[7];
         u32 assumed = (speed == 2) ? 8 : 64;
         if (speed != 4 && mps0 != assumed &&
             (mps0 == 8 || mps0 == 16 || mps0 == 32 || mps0 == 64)) {
-            if (eval_ep0_mps(slot, mps0) == 1) {
-                drc = ctrl_xfer(slot, 0x80, 6, 0x0100, 0, desc_buf, 18, 1);
-                if ((drc != 1 && drc != 12 && drc != 13)) {
-                    klog("usb: descriptor refetch failed slot %d", slot);
-                    disable_slot(slot);
-                    return 0;
-                }
+            /* re-address with the device's real EP0 MPS instead of the
+             * Evaluate Context command that fails on this controller */
+            klog("usb: slot %d mps0 %u != assumed %u - re-addressing",
+                 slot, mps0, assumed);
+            disable_slot(slot);
+            drain_ms(2);
+            rc = run_cmd(0, 0, 0, (u32)(TRB_ENABSLOT << 10), 500);
+            if (rc != 1) {
+                klog("usb: re-address enable slot failed (code %d)", rc);
+                return 0;
             }
+            slot = (int)cc_slot;
+            if (slot < 1 || slot > MAX_SLOTS || devs[slot].used) {
+                klog("usb: re-address got bad slot %d", slot);
+                return 0;
+            }
+            d = &devs[slot];
+            d->used = 1;
+            d->slot = slot;
+            d->ep0 = (volatile u32 *)palloc(4096);
+            devctx[slot] = palloc(csz * 4);
+            inctx[slot] = palloc(csz * 34);
+            if (!d->ep0 || !devctx[slot] || !inctx[slot]) {
+                disable_slot(slot); return 0;
+            }
+            memset((void *)d->ep0, 0, 4096);
+            memset(devctx[slot], 0, csz * 4);
+            memset(inctx[slot], 0, csz * 34);
+            d->ep0_idx = 0;
+            d->ep0_cycle = 1;
+            dcbaa[slot] = (u64)PA(devctx[slot]);
+            /* Address Device again, now with the REAL EP0 MPS - same
+             * recipe as the first addressing above (variables still in
+             * scope; ic/slw/epw just get rebuilt for the new slot) */
+            ic = inctx[slot];
+            ic[0] = 0x03;                        /* add: slot ctx + ep0 */
+            slw = (u32 *)(ic + csz);
+            slw[0] = ((u32)(speed & 0xF) << 20) | (1u << 27);
+            slw[1] = ((u32)port & 0xFF) << 16;
+            epw = (u32 *)(ic + csz * 2);
+            epw[0] = 0;
+            epw[1] = (4u << 3) | (3u << 1) | (mps0 << 16);
+            epw[2] = PA(d->ep0) | 1;
+            epw[3] = 0;
+            epw[4] = 8;
+            rc = run_cmd(PA(ic), 0, 0,
+                         (u32)(TRB_ADDRDEV << 10) | ((u32)slot << 24), 800);
+            if (rc != 1) {
+                klog("usb: re-address Address Device failed slot %d (code %d)",
+                     slot, rc);
+                disable_slot(slot);
+                return 0;
+            }
+            klog("usb: slot %d re-addressed with mps0 %u", slot, mps0);
+        }
+        /* now fetch the full 18-byte device descriptor with the right MPS */
+        drc = ctrl_xfer(slot, 0x80, 6, 0x0100, 0, desc_buf, 18, 1);
+        if ((drc != 1 && drc != 12 && drc != 13)) {
+            klog("usb: descriptor 18B fetch failed slot %d (code %d)",
+                 slot, drc);
+            disable_slot(slot);
+            return 0;
+        }
+        klog("usb: slot %d dev: %02x:%02x vid:pid %04x:%04x class %d mps0 %u",
+             slot, desc_buf[0], desc_buf[1],
+             (u32)(desc_buf[8] | (desc_buf[9] << 8)),
+             (u32)(desc_buf[10] | (desc_buf[11] << 8)),
+             desc_buf[4], desc_buf[7]);
+        if (desc_buf[1] != 0x12)
+            klog("usb: slot %d WARNING: desc len %u != 18", slot,
+                 desc_buf[1]);
+        if (desc_buf[4] == 9) {   /* bDeviceClass 9 = hub */
+            klog("usb: slot %d is a HUB - devices behind hubs not walked",
+                 slot);
+            hub_count++;
+            fail_flag = 1;
+            disable_slot(slot);
+            return 3;
         }
     }
     drc = ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, 9, 1);
@@ -582,15 +696,9 @@ static int enumerate_port(int port)
         klog("usb: config descriptor failed slot %d (code %d)", slot, drc);
         disable_slot(slot); return 0;
     }
-    if (desc_buf[4] == 9) {
-        klog("usb: port %d is a HUB - devices behind hubs are not walked yet",
-             port);
-        hub_count++;
-        fail_flag = 1;
-        disable_slot(slot);
-        return 3;
-    }
     u16 tot = (u16)(desc_buf[2] | (desc_buf[3] << 8));
+    klog("usb: slot %d config: wTotalLength %u, %d interface(s)",
+         slot, (u32)tot, desc_buf[4]);
     if (tot > sizeof(desc_buf)) tot = sizeof(desc_buf);
     drc = ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, tot, 1);
     if ((drc != 1 && drc != 12 && drc != 13)) {
@@ -605,6 +713,11 @@ static int enumerate_port(int port)
         if (!dl) break;
         u8 dt = desc_buf[off + 1];
         if (dt == 4 && dl >= 9) {
+            klog("usb:   iface %d: class %d/%d/%d proto %s",
+                 desc_buf[off + 2], desc_buf[off + 5], desc_buf[off + 6],
+                 desc_buf[off + 7],
+                 (desc_buf[off + 5] == 3 && desc_buf[off + 6] == 1 &&
+                  desc_buf[off + 7] <= 2) ? "boot-HID candidate" : "-");
             if (desc_buf[off + 5] == 3 && desc_buf[off + 6] == 1 &&
                 (desc_buf[off + 7] == 1 || desc_buf[off + 7] == 2)) {
                 iface = desc_buf[off + 2];
@@ -616,6 +729,7 @@ static int enumerate_port(int port)
             if (ea & 0x80) {
                 ep_addr = ea & 0xF;
                 ep_mps = desc_buf[off + 4] | (desc_buf[off + 5] << 8);
+                klog("usb:   HID ep %02x IN mps %u", ea, ep_mps);
             }
         }
         off += dl;
@@ -625,9 +739,13 @@ static int enumerate_port(int port)
         disable_slot(slot);
         return 0;
     }
-    ctrl_xfer(slot, 0x00, 9, cfg_val, 0, 0, 0, 0);         /* set configuration */
-    ctrl_xfer(slot, 0x21, 0x0B, 0, (u16)iface, 0, 0, 0);   /* boot protocol */
-    ctrl_xfer(slot, 0x21, 0x0A, 0, (u16)iface, 0, 0, 0);   /* set idle */
+    int srcc;
+    srcc = ctrl_xfer(slot, 0x00, 9, cfg_val, 0, 0, 0, 0);  /* set config */
+    klog("usb: slot %d SET_CONFIGURATION(%d) rc %d", slot, cfg_val, srcc);
+    srcc = ctrl_xfer(slot, 0x21, 0x0B, 0, (u16)iface, 0, 0, 0); /* boot proto */
+    klog("usb: slot %d SET_PROTOCOL(boot) rc %d", slot, srcc);
+    srcc = ctrl_xfer(slot, 0x21, 0x0A, 0, (u16)iface, 0, 0, 0); /* set idle */
+    klog("usb: slot %d SET_IDLE rc %d", slot, srcc);
     if (proto == 1) {
         u8 leds = 0;   /* BIOS often leaves NumLock lit: SCos has no NumLock
                         * state, so drive the LEDs off explicitly */
@@ -683,6 +801,8 @@ static int enumerate_port(int port)
     ring_link(d->inr, IN_TRBS - 1, d->inr_cycle);
     d->inr_cycle ^= 1;
     ring_db((u32)slot, (u32)(d->ep_addr * 2 + 1));     /* doorbell = EP ID */
+    klog("usb: slot %d int ring armed, doorbell %d - waiting for reports",
+         slot, d->ep_addr * 2 + 1);
     n_devs++;
     klog("usb: slot %d = HID %s (ep %d mps %d)", slot,
          d->kind == 2 ? "mouse" : "keyboard", ep_addr, ep_mps);
@@ -870,8 +990,8 @@ void usb_init(void)
     cmd_idx = 0; cmd_cycle = 1;
     wr64((volatile u32 *)(op + 0x18), (u64)PA(cmd_ring) | 1);
 
-    evt_ring = (volatile u32 *)palloc(4096);
-    memset((void *)evt_ring, 0, 4096);
+    evt_ring = (volatile u32 *)palloc(EVT_TRBS * 16);
+    memset((void *)evt_ring, 0, EVT_TRBS * 16);
     evt_idx = 0; evt_cycle = 1;
     /* NO Link TRB here on purpose: the xHC wraps the event ring per the
      * ERST segment size (spec 4.9.3/4.9.4), it does not chase in-band
@@ -911,7 +1031,7 @@ void usb_init(void)
         volatile u32 *ps = (volatile u32 *)(op + 0x400 + 0x10 * (p - 1));
         ps[0] = 1u << 9;        /* PP alone: PORTSC has W1C bits, never RMW */
     }
-    sleep_ms(250);
+    drain_ms(250);   /* settle AND drain the 15-port link-training storm */
     {
         int pw = 0, cc = 0;
         for (int p = 1; p <= max_ports; p++) {
@@ -924,13 +1044,16 @@ void usb_init(void)
 
     int mk = 0, mm = 0;
     for (int p = 1; p <= max_ports; p++) {
-        if (!(portsc(p) & 1)) continue;
+        u32 psc = portsc(p);
+        if (!(psc & 1)) continue;
+        klog("usb: enumerate port %d (portsc %08x speed %d)",
+             p, psc, (int)((psc >> 10) & 0xF));
         int k = enumerate_port(p);
         if (k == 1) mk++;
         if (k == 2) mm++;
     }
     pending_portc = 0;   /* our own boot-time resets queued stale changes */
-    char nl[96], tmp[8];
+    char nl[128], tmp[8];
     strcpy(nl, "usb: xHCI live - ");
     fmt_u32(tmp, (u32)mk); strcat(nl, tmp); strcat(nl, " keyboard, ");
     fmt_u32(tmp, (u32)mm); strcat(nl, tmp); strcat(nl, " mouse (HID boot)");
@@ -938,7 +1061,11 @@ void usb_init(void)
         strcat(nl, ", "); fmt_u32(tmp, (u32)hub_count); strcat(nl, tmp);
         strcat(nl, " hub(s)");
     }
-    if (fail_flag) strcat(nl, " - see diagnostics");
+    if (fail_flag) strcat(nl, " - see diag");
+    strcat(nl, " | ev "); fmt_u32(tmp, evt_seen); strcat(nl, tmp);
+    strcat(nl, " rf "); fmt_u32(tmp, ring_full_hits); strcat(nl, tmp);
+    strcat(nl, " hc "); fmt_u32(tmp, evt_hcevent); strcat(nl, tmp);
+    strcat(nl, " rs "); fmt_u32(tmp, restart_count); strcat(nl, tmp);
     strcpy(status_line, nl);
     klog("%s", status_line);
 }

@@ -19,8 +19,10 @@ static void serial_puts(const char *s)
 
 /* on-screen ring so a held diagnostics screen (and `dmesg`) can show what
  * happened on machines without a serial console attached */
-#define KLOG_LINES 40
-#define KLOG_LEN   92
+#define KLOG_LINES 128   /* ring 24: the boot log with full USB tracing no
+                          * longer fits in 40 lines - diagnostics must show
+                          * the whole enumeration story in one photo */
+#define KLOG_LEN   120   /* room for the full usb status line + counters */
 static char ring[KLOG_LINES][KLOG_LEN];
 static int ring_head, ring_count;
 

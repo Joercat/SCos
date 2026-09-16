@@ -14,24 +14,21 @@ static void diag_draw(int secs_left)
 {
     const struct theme *t = theme_current();
     fb_clear(0x000000);
-    s_text_scaled(&screen, 24, 14, "SCos INPUT DIAGNOSTICS", t->main, 2);
-    s_text(&screen, 24, 54,
-           "No input reached the OS, or USB enumeration reported a problem.",
+    s_text_scaled(&screen, 24, 10, "SCos INPUT DIAGNOSTICS", t->main, 2);
+    s_text(&screen, 24, 42,
+           "PHOTOGRAPH THIS WHOLE SCREEN and send it - the log names the failing stage.",
            t->text);
-    s_text(&screen, 24, 72,
-           "PHOTOGRAPH THIS WHOLE SCREEN and send it - the log below names",
-           t->text);
-    s_text(&screen, 24, 90, "the exact stage that failed.", t->text);
-    s_text(&screen, 24, 122, "kernel log (oldest first):", t->main);
-    int y = 146;
+    s_text(&screen, 24, 58, "kernel log (oldest first, newest at bottom):",
+           t->main);
+    int y = 74;
     int n = klog_ring_count();
-    int maxrows = (screen_h - 200) / 18;
+    int maxrows = (screen_h - 104) / 11;
     int start = n > maxrows ? n - maxrows : 0;
     for (int i = start; i < n; i++) {
-        char ln[96];
+        char ln[128];
         if (klog_ring(i, ln, sizeof(ln))) {
             s_text(&screen, 24, y, ln, t->text);
-            y += 18;
+            y += 11;
         }
     }
     {
@@ -63,7 +60,7 @@ static void diag_hold(void)
         while (mouse_poll(&me)) { }
         while (kbd_poll(&ke)) { }
         u64 now = tick_count * 10;
-        int secs = 25 - (int)((now - t0) / 1000);
+        int secs = 30 - (int)((now - t0) / 1000);
         if (secs <= 0) break;
         /* input arrived while we were watching: success, hand back */
         if (input_last_tick != base && now - t0 > 1000)
@@ -78,7 +75,7 @@ static void diag_hold(void)
 
 void diag_run(void)
 {
-    diag_draw(25);
+    diag_draw(30);
     diag_hold();
 }
 
@@ -87,7 +84,7 @@ void diag_manual(void)
 {
     klog("diag: manual scan triggered");
     pci_scan_dump();
-    char ul[96];
+    char ul[160];
     usb_status(ul, sizeof(ul));
     klog("diag: %s", ul);
     klog("diag: ps/2 mouse %s", mouse_present() ? "present" : "absent");
@@ -111,6 +108,6 @@ void diag_manual(void)
         klog("diag: self-test kbd injection %s, mouse injection %s",
              kok ? "OK" : "FAILED", mok ? "OK" : "FAILED");
     }
-    diag_draw(25);
+    diag_draw(30);
     diag_hold();
 }
