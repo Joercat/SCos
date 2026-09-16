@@ -702,6 +702,25 @@ void usb_init(void)
     }
     have_xhci = 1;
 
+    /* Power EVERY port unconditionally, like every real OS does. Connect
+     * status is electrical: an unpowered device cannot pull up, so waiting
+     * for CCS before powering (the old order) deadlocked at zero devices
+     * and left keyboards/mice dark. VBUS ramp + attach debounce ~200 ms. */
+    for (int p = 1; p <= max_ports; p++) {
+        volatile u32 *ps = (volatile u32 *)(op + 0x400 + 0x10 * (p - 1));
+        ps[0] = ps[0] | (1u << 9);              /* PP */
+    }
+    sleep_ms(250);
+    {
+        int pw = 0, cc = 0;
+        for (int p = 1; p <= max_ports; p++) {
+            u32 v = portsc(p);
+            if (v & (1u << 9)) pw++;
+            if (v & 1) cc++;
+        }
+        klog("usb: ports powered %d/%d, connected %d", pw, max_ports, cc);
+    }
+
     int mk = 0, mm = 0;
     for (int p = 1; p <= max_ports; p++) {
         if (!(portsc(p) & 1)) continue;
