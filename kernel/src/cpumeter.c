@@ -45,30 +45,28 @@ u32 cpu_mhz(void)
     return tsc_per_ms / 1000;
 }
 
+extern volatile int wm_in_idle;
+
 void cpu_idle_begin(void)
 {
-    if (have_tsc) idle_mark = rdtsc();
+    (void)0;   /* usage is tick-sampled now; kept for call-site stability */
 }
 
 void cpu_meter_tick(void)                 /* from the PIT ISR, 100 Hz */
 {
-    if (!have_tsc) return;
-    if (idle_mark) {
-        u64 m = idle_mark;
-        idle_mark = 0;
-        idle_acc += rdtsc() - m;
-    }
-    if (++tick_acc >= 100) {
-        u64 per_sec = (u64)tsc_per_ms * 1000;
-        u64 idle = idle_acc;
-        if (idle > per_sec) idle = per_sec;
-        usage_pct = (u32)(100 - (u32)(idle * 100 / per_sec));
-        idle_acc = 0;
+    /* Sample the WM idle flag at timer rate: usage = share of ticks the
+     * main loop was NOT halted. Works on CPUs whose TSC stops in halt or
+     * that lack TSC entirely - both made the old TSC-span math lie. */
+    tick_acc++;
+    if (wm_in_idle) idle_acc++;
+    if (tick_acc >= 100) {
+        usage_pct = (u32)((tick_acc - (u32)idle_acc) * 100u / tick_acc);
         tick_acc = 0;
+        idle_acc = 0;
     }
 }
 
 u32 cpu_usage_pct(void)
 {
-    return have_tsc ? usage_pct : 0;
+    return usage_pct;
 }

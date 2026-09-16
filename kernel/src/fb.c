@@ -28,6 +28,21 @@ void fb_init(void)
          boot_info.lfb_base, boot_info.pitch);
 }
 
+void fb_flip_rect(int x, int y, int w, int h)
+{
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > screen_w) w = screen_w - x;
+    if (y + h > screen_h) h = screen_h - y;
+    u32 *src = screen.px + (u32)y * screen_w + x;
+    u32 *dst = lfb + (u32)y * lfb_pitch_px + x;
+    for (int r = 0; r < h; r++) {
+        memcpy(dst, src, (u32)w * 4);
+        src += screen_w;
+        dst += lfb_pitch_px;
+    }
+}
+
 void fb_flip(void)
 {
     u32 *src = screen.px;

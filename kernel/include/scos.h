@@ -172,6 +172,7 @@ u32 fb_bpp(void);
 void fb_init(void);
 u32 fb_bpp(void);
 void fb_flip(void);                        /* back buffer -> LFB */
+void fb_flip_rect(int x, int y, int w, int h);   /* damaged region only */
 void fb_clear(u32 color);
 
 void s_pixel(struct surface *s, int x, int y, u32 c);

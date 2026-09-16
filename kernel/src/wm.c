@@ -772,12 +772,20 @@ static void cur_draw(void)
     cur_have = 1;
 }
 
-/* pure cursor move: erase + redraw overlay only */
+/* pure cursor move: erase + redraw overlay only, flip the damaged union */
 static void cur_move(void)
 {
+    int ox = cur_bx, oy = cur_by, ow = cur_bw, oh = cur_bh, have = cur_have;
     cur_restore();
     cur_draw();
-    fb_flip();
+    int x0 = mx, y0 = my, x1 = mx + CUR_W, y1 = my + CUR_H;
+    if (have) {
+        if (ox < x0) x0 = ox;
+        if (oy < y0) y0 = oy;
+        if (ox + ow > x1) x1 = ox + ow;
+        if (oy + oh > y1) y1 = oy + oh;
+    }
+    fb_flip_rect(x0, y0, x1 - x0, y1 - y0);
 }
 
 /* does anything hoverable live under the cursor? */
@@ -847,12 +855,30 @@ static void handle_mouse(struct mouse_event *e)
             return;
         }
         struct window *hw = NULL;
-        if (!move_needs_composite(&hw)) {
-            cur_move();              /* cheap overlay-only cursor move */
-            return;
+        int zone = move_needs_composite(&hw);
+        /* hover signature: composite only when the hover TARGET changes,
+         * not on every pixel of motion; apps get the move event and repaint
+         * their own surface only when their internal hover state flips */
+        static struct window *last_hw;
+        static int last_zone, last_icon = -2, last_tb = -2;
+        int icon = -1, tbz = -1;
+        if (!zone && !hw) {
+            for (int i = 0; i < nitems; i++) {
+                int x, y, ww, hh;
+                icon_rect(i, &x, &y, &ww, &hh);
+                if (in_rect(mx, my, x, y, ww, hh)) { icon = i; break; }
+            }
+            if (my >= screen_h - TASKBAR_H) tbz = my / 8;
         }
-        if (hw) hw->dirty = 1;       /* hover effects inside that window */
-        dirty = 1;
+        if (hw != last_hw || zone != last_zone || icon != last_icon ||
+            tbz != last_tb) {
+            last_hw = hw; last_zone = zone; last_icon = icon; last_tb = tbz;
+            dirty = 1;
+        }
+        if (hw && hw->app && hw->app->mouse)
+            hw->app->mouse(hw, e, mx - (hw->x + 1), my - (hw->y + WIN_TITLEBAR));
+        cur_move();                  /* cheap overlay-only cursor move */
+        (void)zone;
         return;
     }
     if (e->type == MEV_WHEEL && my >= screen_h - TASKBAR_H) {
@@ -1177,10 +1203,9 @@ static void wm_tick(void)
  * PIT so the system recovers instead of hanging. */
 static void irq_watchdog(void)
 {
-    static u32 last_sec, last_tick;
-    static int checks;
-    if (++checks < 200000) return;
-    checks = 0;
+    static u32 last_sec, last_tick, last_wd;
+    if ((u32)tick_count - last_wd < 100) return;   /* 1 Hz, tick-based */
+    last_wd = (u32)tick_count;
     struct rtc_time rt;
     rtc_read(&rt);
     if (last_sec && rt.sec != last_sec && (u32)tick_count == last_tick) {
@@ -1197,6 +1222,8 @@ static void irq_watchdog(void)
 
 static u32 wm_t0;
 static int diag_tried;
+static u32 last_paint_tick;
+volatile int wm_in_idle;
 
 static int is_v86_box(void)
 {
@@ -1230,12 +1257,14 @@ void wm_run(void)
             last_tick = tick_count;
             wm_tick();
         }
-        if (dirty) {
+        if (dirty && (u32)tick_count - last_paint_tick >= 2) {  /* 50 fps cap */
+            last_paint_tick = (u32)tick_count;
             paint_all();
             dirty = 0;
         }
-        cpu_idle_begin();          /* TSC-mark the halt so usage = 100-idle */
+        wm_in_idle = 1;
         cpu_hlt();
+        wm_in_idle = 0;
     }
 }
 
