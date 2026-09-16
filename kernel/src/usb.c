@@ -21,7 +21,7 @@
 #include "scos.h"
 
 #define MAX_SLOTS 8
-#define CMD_TRBS 64
+#define CMD_TRBS 128
 #define EVT_TRBS 64
 #define EP0_TRBS 16
 #define IN_TRBS 8
@@ -74,6 +74,7 @@ static int fail_flag, hub_count;
 static volatile u32 cc_code = 0xFF;
 static volatile u32 cc_slot;
 static volatile int cc_valid;
+static u32 pending_portc;           /* ports with queued connect-change work */
 static char status_line[96];
 static u8 desc_buf[512];
 
@@ -104,22 +105,8 @@ static int proc_events(void)
     for (int guard = 0; guard < 128; guard++) {
         volatile u32 *t = evt_ring + (u32)evt_idx * 4;
         if ((t[3] & 1) != evt_cycle) break;
-        /* hand the consumed slot back to the controller: ERDP with the
-         * Event Handler Busy bit, or the ring reports Full after 63
-         * events and the xHC stops posting anything */
-        {
-            volatile u32 *erdp = (volatile u32 *)(rt + 0x20 + 0x18);
-            wr64(erdp, (u64)PA(&evt_ring[evt_idx]) | (1ull << 3));
-        }
         u32 type = (t[3] >> 10) & 0x3F;
         work = 1;
-        if (type == TRB_LINK) {          /* our own link: wrap the consumer */
-            evt_idx = 0;
-            evt_cycle ^= 1;
-            volatile u32 *erdp = (volatile u32 *)(rt + 0x20 + 0x18);
-            wr64(erdp, (u64)PA(evt_ring));
-            continue;
-        }
         if (type == EV_CMDCOMP) {
             cc_code = (t[2] >> 24) & 0xFF;      /* completion code: dw2[31:24] */
             cc_slot = (t[3] >> 24) & 0xFF;      /* slot id: dw3[31:24] (the
@@ -138,7 +125,7 @@ static int proc_events(void)
             cc_slot = slot | (ep << 8) | 0x10000u;
             if (slot <= MAX_SLOTS && devs[slot].used &&
                 ep == (u32)(devs[slot].ep_addr * 2 + 1) &&
-                (code == 1 || code == 13)) {
+                (code == 1 || code == 12 || code == 13)) {
                 struct xdev *d = &devs[slot];
                 int i = -1;
                 for (int b = 0; b < IN_TRBS; b++)
@@ -181,16 +168,27 @@ static int proc_events(void)
                 u32 v = ps[0];
                 ps[0] = (1u << 17) | (1u << 18) | (1u << 20) |
                         (1u << 21) | (1u << 22) | (1u << 23);
-                if (v & 1) enumerate_port((int)port);   /* hot plug */
+                /* never re-enumerate inline: our own port-reset PRC events
+                 * fire DURING boot enumeration and nesting a full enumerate
+                 * inside event processing burns slots and floods the ring.
+                 * Queue it; the usb_poll heartbeat does real hotplug. */
+                if (v & 1 && port < 32) pending_portc |= 1u << port;
             }
         }
+        /* advance the dequeue pointer and ALWAYS write EHB: a transiently
+         * full event ring latches Event-Handler-Busy and only an ERDP write
+         * with EHB=1 makes the xHC resume posting (symptom otherwise: every
+         * later command completes with code 17, Event Ring Full Error).
+         * There is no Link TRB in this ring - the xHC wraps per the ERST
+         * segment size - so consume all EVT_TRBS slots, exactly like Linux
+         * (inc_deq wraps at TRBS_PER_SEGMENT). */
         evt_idx++;
-        if (evt_idx == EVT_TRBS - 1) {   /* link slot: wrap */
+        if (evt_idx == EVT_TRBS) {
             evt_idx = 0;
             evt_cycle ^= 1;
         }
         volatile u32 *erdp = (volatile u32 *)(rt + 0x20 + 0x18);
-        wr64(erdp, (u64)PA(evt_ring + (u32)evt_idx * 4));
+        wr64(erdp, (u64)PA(evt_ring + (u32)evt_idx * 4) | (1ull << 3));
     }
     return work;
 }
@@ -216,6 +214,11 @@ static void xhci_restart(void)
 {
     volatile u32 *cmdr = (volatile u32 *)op;
     volatile u32 *sts = (volatile u32 *)(op + 4);
+    /* kick the event-ring dequeue with EHB set FIRST: a ring that went
+     * momentarily full latches Event-Handler-Busy and stops all posting
+     * until software writes ERDP with EHB=1 */
+    volatile u32 *erdp = (volatile u32 *)(rt + 0x20 + 0x18);
+    wr64(erdp, (u64)PA(evt_ring + (u32)evt_idx * 4) | (1ull << 3));
     if (!(sts[0] & 1u)) return;
     klog("usb: xHC halted (usbsts %x) - restarting", sts[0]);
     cmdr[0] |= 1u;                       /* RS */
@@ -322,6 +325,7 @@ static int ctrl_xfer(int slot, u8 rt_, u8 rq, u16 val, u16 idx,
             return (int)cc_code;
         cpu_hlt();
     }
+    xhci_restart();                      /* ring-full/halt recovery kick */
     return -1;
 }
 
@@ -527,7 +531,10 @@ static int enumerate_port(int port)
      * Address Device command invalid.) */
     slw[0] = ((u32)(speed & 0xF) << 20) | (1u << 27);
     slw[1] = ((u32)port & 0xFF) << 16;
-    u32 mps = (speed == 4) ? 9 : 64;
+    /* USB spec: LS control EP is ALWAYS 8 bytes; HS always 64; SS 2^9.
+     * FS may be 8/16/32/64 - guess 64 and correct via Evaluate Context
+     * after the first descriptor bytes (same as Linux). */
+    u32 mps = (speed == 4) ? 9 : (speed == 2) ? 8 : 64;
     u32 *epw = (u32 *)(ic + csz * 2);               /* ep ctx index 2 = EP ID 0 */
     /* EP ctx (xHCI 6.2.3): dw1 = EP Type [5:3] (4 = control), CErr [2:1],
      * Max Packet Size [31:16]; dw2/3 = dequeue | DCS; dw4 = Avg TRB Len */
@@ -546,7 +553,7 @@ static int enumerate_port(int port)
     }
 
     int drc = ctrl_xfer(slot, 0x80, 6, 0x0100, 0, desc_buf, 18, 1);
-    if (drc != 1 && drc != 13) {   /* 13 = Success with Short Packet: normal
+    if ((drc != 1 && drc != 12 && drc != 13)) {   /* 13 = Success with Short Packet: normal
                                     * when the device's EP0 packets are
                                     * smaller than the 64 we assumed */
         klog("usb: device descriptor failed slot %d (code %d)", slot, drc);
@@ -557,10 +564,12 @@ static int enumerate_port(int port)
          * (usually 8): honor it and refetch, or the config descriptor read
          * desyncs the pipe */
         u32 mps0 = desc_buf[7];
-        if (speed != 4 && (mps0 == 8 || mps0 == 16 || mps0 == 32)) {
+        u32 assumed = (speed == 2) ? 8 : 64;
+        if (speed != 4 && mps0 != assumed &&
+            (mps0 == 8 || mps0 == 16 || mps0 == 32 || mps0 == 64)) {
             if (eval_ep0_mps(slot, mps0) == 1) {
                 drc = ctrl_xfer(slot, 0x80, 6, 0x0100, 0, desc_buf, 18, 1);
-                if (drc != 1 && drc != 13) {
+                if ((drc != 1 && drc != 12 && drc != 13)) {
                     klog("usb: descriptor refetch failed slot %d", slot);
                     disable_slot(slot);
                     return 0;
@@ -569,7 +578,7 @@ static int enumerate_port(int port)
         }
     }
     drc = ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, 9, 1);
-    if (drc != 1 && drc != 13) {
+    if ((drc != 1 && drc != 12 && drc != 13)) {
         klog("usb: config descriptor failed slot %d (code %d)", slot, drc);
         disable_slot(slot); return 0;
     }
@@ -584,7 +593,7 @@ static int enumerate_port(int port)
     u16 tot = (u16)(desc_buf[2] | (desc_buf[3] << 8));
     if (tot > sizeof(desc_buf)) tot = sizeof(desc_buf);
     drc = ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, tot, 1);
-    if (drc != 1 && drc != 13) {
+    if ((drc != 1 && drc != 12 && drc != 13)) {
         klog("usb: full config descriptor failed slot %d (code %d)", slot, drc);
         disable_slot(slot); return 0;
     }
@@ -702,6 +711,12 @@ void usb_poll(void)
     proc_events();
     if (tick_count - hb < 100) return;      /* 1 Hz heartbeat */
     hb = tick_count;
+    if (pending_portc) {                    /* real hotplug, post-boot only */
+        u32 m = pending_portc;
+        pending_portc = 0;
+        for (int p = 1; p <= max_ports && p < 32; p++)
+            if (m & (1u << p)) enumerate_port(p);
+    }
     for (int sl = 1; sl <= MAX_SLOTS; sl++) {
         struct xdev *d = &devs[sl];
         if (!d->used || !d->reported || d->silent_logged) continue;
@@ -822,9 +837,8 @@ void usb_init(void)
     }
     cmd[0] |= 1u << 1;                       /* HCRST */
     u64 t0 = now_ms();
-    while (now_ms() - t0 < 500 &&
-           ((cmd[0] & (1u << 1)) || (sts[0] & (1u << 11)))) cpu_hlt();
-    if (sts[0] & (1u << 11)) {
+    while (now_ms() - t0 < 500 && (cmd[0] & (1u << 1))) cpu_hlt();
+    if (cmd[0] & (1u << 1)) {
         strcpy(status_line, "usb: xHCI reset timed out");
         klog("%s", status_line);
         return;
@@ -859,7 +873,12 @@ void usb_init(void)
     evt_ring = (volatile u32 *)palloc(4096);
     memset((void *)evt_ring, 0, 4096);
     evt_idx = 0; evt_cycle = 1;
-    ring_link(evt_ring, EVT_TRBS - 1, 1);
+    /* NO Link TRB here on purpose: the xHC wraps the event ring per the
+     * ERST segment size (spec 4.9.3/4.9.4), it does not chase in-band
+     * links. A static link at slot 63 gets overwritten by event #64 while
+     * the consumer skips that slot - producer and consumer wrap out of
+     * phase, the ring jams Full, and every later command dies with
+     * completion code 17 (Event Ring Full Error). */
     u32 *erst = palloc(4096);
     memset(erst, 0, 4096);
     erst[0] = PA(evt_ring);
@@ -880,7 +899,7 @@ void usb_init(void)
         klog("%s (usbsts %x)", status_line, sts[0]);
         return;
     }
-    if (sts[0] & (1u << 12))
+    if (sts[0] & (1u << 8))                  /* STS_HCE - bit 8, not 12 */
         klog("usb: WARNING host controller error (usbsts %x)", sts[0]);
     have_xhci = 1;
 
@@ -910,6 +929,7 @@ void usb_init(void)
         if (k == 1) mk++;
         if (k == 2) mm++;
     }
+    pending_portc = 0;   /* our own boot-time resets queued stale changes */
     char nl[96], tmp[8];
     strcpy(nl, "usb: xHCI live - ");
     fmt_u32(tmp, (u32)mk); strcat(nl, tmp); strcat(nl, " keyboard, ");
