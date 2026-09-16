@@ -51,6 +51,7 @@ static const struct { const char *app; int icon; const char *label; } desk_icons
     { "blackjack", ICON_CARDS,   "Blackjack" },
     { "sysmon",   ICON_CHART,    "SysMon"   },
     { "solitaire", ICON_SOL,     "Solitaire" },
+    { "image",    ICON_IMAGE,    "Image Viewer"},
 };
 #define N_ICONS ((int)(sizeof(desk_icons)/sizeof(desk_icons[0])))
 static int icon_hover = -1;

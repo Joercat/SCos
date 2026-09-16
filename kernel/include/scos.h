@@ -78,6 +78,12 @@ void usb_status(char *out, int max);
 int  usb_diag_flag(void);
 void diag_run(void);
 void diag_manual(void);
+void error_screen(const char *subsys, const char *msg,
+                  const char *const *dump, int ndump);
+void err_notify(const char *subsys, const char *msg,
+                const char *const *dump, int ndump);
+int  err_pending(void);
+void err_show_pending(void);
 int  pci_scan_dump(void);
 int  klog_ring_count(void);
 int  klog_ring(int i, char *out, int max);
@@ -159,6 +165,9 @@ struct surface {
     int  w, h;
 };
 
+struct surface *image_load(const void *data, u32 size);
+void image_free(struct surface *img);
+
 extern struct surface screen;              /* back buffer, full screen */
 extern int screen_w, screen_h;
 
@@ -208,7 +217,7 @@ void fmt_pad2(char *out, u32 v);
 
 /* icon drawing (procedural, 24x24 logical box at x,y) */
 enum { ICON_FOLDER, ICON_TERMINAL, ICON_NOTEPAD, ICON_BROWSER,
-       ICON_CALENDAR, ICON_SETTINGS, ICON_INFO, ICON_CARDS, ICON_CHART, ICON_SOL, ICON_COUNT };
+       ICON_CALENDAR, ICON_SETTINGS, ICON_INFO, ICON_CARDS, ICON_CHART, ICON_SOL, ICON_IMAGE, ICON_COUNT };
 void s_icon(struct surface *s, int id, int x, int y, u32 c);
 u32  color_blend(u32 a, u32 b, int t);
 int  card_w(void);

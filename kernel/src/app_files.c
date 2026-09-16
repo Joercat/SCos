@@ -108,6 +108,24 @@ static int files_is_dir_row(struct files *f, int row)
     return 0;
 }
 
+static int files_is_image(const char *name)
+{
+    const char *dot = NULL;
+
+    for (const char *p = name; *p; p++) {
+        if (*p == '.')
+            dot = p;
+    }
+
+    if (!dot)
+        return 0;
+
+    if (!strcmp(dot, ".ppm"))
+        return 1;
+
+    return 0;
+}
+
 static void files_full_path(struct files *f, int row, char *out)
 {
     strcpy(out, f->path);
@@ -152,6 +170,8 @@ static void delete_confirm_cb(int ok, const char *text, void *ud)
     pfree(ctx, sizeof(*ctx));
 }
 
+
+
 static void file_menu_cb(int item, void *ud)
 {
     struct fm_ctx *ctx = ud;
@@ -166,8 +186,13 @@ static void file_menu_cb(int item, void *ud)
             files_load(f);
         } else {
             char full[300];
+
             files_full_path(f, ctx->row, full);
-            wm_open_app("notepad", full);
+
+            if (files_is_image(f->names[ctx->row]))
+                wm_open_app("image", full);
+            else
+                wm_open_app("notepad", full);
         }
         pfree(ctx, sizeof(*ctx));
     } else if (item == 2) {
@@ -190,15 +215,19 @@ static void file_menu_cb(int item, void *ud)
 static void bg_menu_cb(int item, void *ud)
 {
     struct fm_ctx *ctx = ud;
-    struct files *f = ctx->w->data;
+    struct window *w = ctx->w;
+    struct files *f = w->data;
+
     if (item == 0) {
-        files_dialog_win = ctx->w;
-        wm_dialog("New Folder", "Enter folder name:", "new folder", newfolder_cb, NULL);
+        files_dialog_win = w;
+        wm_dialog("New Folder", "Enter folder name:",
+                  "new folder", newfolder_cb, NULL);
     } else {
         files_load(f);
     }
+
     pfree(ctx, sizeof(*ctx));
-    wm_redraw(ctx->w);
+    wm_redraw(w);
 }
 
 /* -------------------------------------------------------------- paint ---- */
@@ -348,14 +377,24 @@ static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
         }
         if (files_is_dir_row(f, f->hover_row)) {
             char full[300];
+
             files_full_path(f, f->hover_row, full);
+
             strncpy(f->path, full, sizeof(f->path) - 1);
+            f->path[sizeof(f->path) - 1] = 0;
+
             strcat(f->path, "/");
+
             files_load(f);
         } else {
             char full[300];
+
             files_full_path(f, f->hover_row, full);
-            wm_open_app("notepad", full);
+
+            if (files_is_image(f->names[f->hover_row]))
+                wm_open_app("image", full);
+            else
+                wm_open_app("notepad", full);
         }
         wm_redraw(w);
     }

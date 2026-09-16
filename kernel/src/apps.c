@@ -2,7 +2,7 @@
 #include "scos.h"
 
 extern struct app app_files, app_terminal, app_notepad, app_browser,
-                  app_calendar, app_settings, app_about, app_blackjack, app_sysmon, app_solitaire;
+                  app_calendar, app_settings, app_about, app_blackjack, app_sysmon, app_solitaire, app_image;
 
 static struct app *registry[16];
 static int reg_count;
@@ -20,6 +20,7 @@ void apps_register_all(void)
     registry[reg_count++] = &app_blackjack;
     registry[reg_count++] = &app_sysmon;
     registry[reg_count++] = &app_solitaire;
+    registry[reg_count++] = &app_image;
     registry[reg_count++] = wm_dialog_app();
     registry[reg_count++] = wm_error_app();
 }

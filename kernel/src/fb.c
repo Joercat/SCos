@@ -280,6 +280,15 @@ void s_icon(struct surface *s, int id, int x, int y, u32 c)
         s_fill(s, x + 5, y + 6, 12, 16, (c & 0xFEFEFE) >> 1);
         s_disc(s, x + 11, y + 14, 2, c);
         break;
+    case ICON_IMAGE:
+        s_frame_rect(s, x + 2, y + 3, 20, 18, c);
+        s_fill(s, x + 4, y + 5, 16, 14, (c & 0xFEFEFE) >> 1);
+        s_disc(s, x + 16, y + 8, 2, c);
+        s_line(s, x + 4, y + 17, x + 9, y + 11, c);
+        s_line(s, x + 9, y + 11, x + 13, y + 16, c);
+        s_line(s, x + 13, y + 16, x + 17, y + 12, c);
+        s_line(s, x + 17, y + 12, x + 20, y + 17, c);
+        break;
     }
 }
 
