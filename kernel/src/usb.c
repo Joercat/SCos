@@ -592,8 +592,14 @@ void usb_init(void)
         bar0 = nb | (bar0 & 0xFu);
         bar0h = 0;
     }
-    if ((bar0 & 0x7) != 0) {
-        strcpy(status_line, "usb: xHCI BAR not memory-mapped");
+    if (bar0 & 0x1) {          /* bit0 set = IO-space BAR (type bits 0b10 =
+                                * 64-bit memory are perfectly valid here) */
+        strcpy(status_line, "usb: xHCI BAR is IO-space - unsupported");
+        klog("%s (bar0 %x)", status_line, bar0);
+        return;
+    }
+    if (!(bar0 & ~0xFu)) {
+        strcpy(status_line, "usb: xHCI BAR unassigned by firmware");
         klog("%s", status_line);
         return;
     }
