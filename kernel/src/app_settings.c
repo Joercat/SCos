@@ -136,6 +136,7 @@ static void reset_confirm_cb(int ok, const char *text, void *ud)
     if (!ok) return;
     /* wipe everything back to shipping defaults and persist the wipe */
     theme_set_index(0);
+    wm_theme_changed();
     vfs_factory_reset();
     settings_save();
     fs_image_save();
@@ -182,6 +183,7 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
     if (e->type != MEV_BUTTON || !e->down || e->button != MBTN_LEFT) return;
     if (ui->hover_tile >= 0) {
         theme_set_index(ui->hover_tile);
+        wm_theme_changed();
         settings_save();
         wm_redraw(w);
     } else if (ui->hover_pref == 0) {

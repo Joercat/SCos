@@ -21,6 +21,15 @@ static struct window *focused_w;
 static struct window *modal_w;
 static int dirty = 1;
 
+/* ---- damage-rect compositing: repaint and flip only what changed ---- */
+struct drect { int x, y, w, h; };
+static struct drect dmg[8];
+static int ndmg;
+static int full_dirty;
+static int tb_dirty, icons_dirty, menu_dirty, launch_dirty;
+
+static void wm_full(void) { dirty = 1; full_dirty = 1; }
+
 static int mx = 300, my = 300;
 static u8 mbuttons;
 static struct window *drag_win, *resize_win;
@@ -145,6 +154,7 @@ static void win_free_buf(struct window *w)
 void wm_set_title(struct window *w, const char *title)
 {
     strncpy(w->title, title, sizeof(w->title) - 1);
+    w->chrome_dirty = 1;
     dirty = 1;
 }
 
@@ -153,7 +163,7 @@ void wm_focus(struct window *w)
     if (!w) return;
     w->z = ++next_z;
     focused_w = w;
-    dirty = 1;
+    wm_full();
 }
 
 static struct window *win_at_point(int x, int y)
@@ -190,7 +200,7 @@ void wm_close_window(struct window *w)
             if (!top || wins[i].z > top->z) top = &wins[i];
         focused_w = top;
     }
-    dirty = 1;
+    wm_full();
 }
 
 struct window *wm_open_app(const char *app_id, void *arg)
@@ -223,7 +233,7 @@ struct window *wm_open_app(const char *app_id, void *arg)
     w->dirty = 1;
     if (app->open) app->open(w, arg);
     focused_w = w;
-    dirty = 1;
+    wm_full();
     return w;
 }
 
@@ -235,7 +245,7 @@ void wm_init(void)
     mx = screen_w / 2;
     my = screen_h / 2;
     desktop_load();
-    dirty = 1;
+    wm_full();
 }
 
 /* -------------------------------------------------------------- menus ---- */
@@ -251,6 +261,7 @@ void wm_menu(int x, int y, const char **items, int n, menu_cb cb, void *ud)
     menu.x = x; menu.y = y;
     if (menu.x + menu.w > screen_w) menu.x = screen_w - menu.w - 2;
     if (menu.y + menu.h > screen_h) menu.y = screen_h - menu.h - 2;
+    menu_dirty = 1;
     dirty = 1;
 }
 
@@ -408,6 +419,7 @@ void wm_desktop_pin_file(const char *path)
     d->hidden = 0;
     nitems++;
     desktop_save();
+    icons_dirty = 1;
     dirty = 1;
 }
 static void desk_item_menu_cb(int item, void *ud)
@@ -441,6 +453,7 @@ static void desk_restore(void)
         if (placed) nitems++;
     }
     desktop_save();
+    icons_dirty = 1;
     dirty = 1;
 }
 
@@ -534,15 +547,11 @@ static void draw_win_button(struct surface *s, int x, int y, int kind, u32 fg)
     }
 }
 
-static void paint_window(struct window *w)
+static void paint_win_chrome(struct window *w)
 {
     const struct theme *t = theme_current();
-    if (w->state == WIN_STATE_MIN) return;
     int x = w->x, y = w->y, ww = w->w, hh = w->h;
-
-    /* shadow */
     s_fill(&screen, x + 4, y + 4, ww, hh, blend(t->bg_bot, 0x000000, 60));
-    /* frame + title bar */
     u32 title_bg = (focused_w == w) ? t->main : blend(t->main, t->win_bg, 55);
     s_fill(&screen, x, y, ww, hh, t->win_bg);
     s_frame_rect(&screen, x, y, ww, hh, t->main);
@@ -551,14 +560,111 @@ static void paint_window(struct window *w)
     s_clip_text(&screen, x + 8, y + 5, w->title, title_fg, ww - 90);
     for (int b = 0; b < 3; b++)
         draw_win_button(&screen, x + ww - 22 - (2 - b) * 22, y + 3, b, title_fg);
-
-    /* content */
-    s_blit(&screen, &w->surf, x + 1, y + WIN_TITLEBAR);
-
-    /* resize handle */
     u32 hz = blend(t->win_bg, t->main, 60);
     for (int i = 0; i < 4; i++)
         s_fill(&screen, x + ww - 12 + i * 3, y + hh - 12 + i * 3, 2, 2, hz);
+}
+
+static void paint_win_content(struct window *w)
+{
+    s_blit(&screen, &w->surf, w->x + 1, w->y + WIN_TITLEBAR);
+}
+
+static void paint_window(struct window *w)
+{
+    if (w->state == WIN_STATE_MIN) return;
+    paint_win_chrome(w);
+    paint_win_content(w);
+}
+
+#define CUR_W 14
+#define CUR_H 19
+static u32 *cur_buf;
+static int cur_bx, cur_by, cur_bw, cur_bh, cur_have;
+static void cur_draw(void);
+static void cur_restore(void);
+static void paint_icons(void);
+static void paint_taskbar(void);
+static void paint_menu(void);
+static void paint_launcher(void);
+
+
+static void damage_add(int x, int y, int w, int h)
+{
+    if (ndmg >= 8) { ndmg = 0; dmg[0].x = 0; dmg[0].y = 0;
+                    dmg[0].w = screen_w; dmg[0].h = screen_h; ndmg = 1; return; }
+    for (int i = 0; i < ndmg; i++) {
+        struct drect *r = &dmg[i];
+        if (x < r->x + r->w + 8 && r->x < x + w + 8 &&
+            y < r->y + r->h + 8 && r->y < y + h + 8) {
+            int x1 = r->x < x ? r->x : x, y1 = r->y < y ? r->y : y;
+            int x2 = r->x + r->w > x + w ? r->x + r->w : x + w;
+            int y2 = r->y + r->h > y + h ? r->y + r->h : y + h;
+            r->x = x1; r->y = y1; r->w = x2 - x1; r->h = y2 - y1;
+            return;
+        }
+    }
+    dmg[ndmg].x = x; dmg[ndmg].y = y; dmg[ndmg].w = w; dmg[ndmg].h = h;
+    ndmg++;
+}
+
+static int rect_hits_cursor(int x, int y, int w, int h)
+{
+    return cur_have && x < mx + CUR_W && mx < x + w && y < my + CUR_H && my < y + h;
+}
+
+static void paint_partial(void)
+{
+    if (icons_dirty) {
+        paint_icons();
+        damage_add(0, 0, screen_w, 16 + 2 * 96 + 24);
+        icons_dirty = 0;
+    }
+    for (int i = 0; i < win_count; i++) {
+        struct window *w = &wins[i];
+        if (w->state == WIN_STATE_MIN) continue;
+        if (w->dirty && w->app && w->app->paint) {
+            w->app->paint(w);
+            w->dirty = 0;
+            paint_win_content(w);
+            damage_add(w->x + 1, w->y + WIN_TITLEBAR, w->w - 2,
+                       w->h - WIN_TITLEBAR - 1);
+        }
+        if (w->chrome_dirty) {
+            w->chrome_dirty = 0;
+            /* chrome paints the whole frame background first, so the content
+             * surface must be re-blitted over it in the same pass */
+            paint_window(w);
+            damage_add(w->x, w->y, w->w + 4, w->h + 4);
+        }
+    }
+    if (tb_dirty) {
+        paint_taskbar();
+        damage_add(0, screen_h - TASKBAR_H, screen_w, TASKBAR_H);
+        tb_dirty = 0;
+    }
+    if (menu.active && menu_dirty) {
+        paint_menu();
+        damage_add(menu.x, menu.y, menu.w, menu.h);
+        menu_dirty = 0;
+    }
+    if (launch.active && launch_dirty) {
+        paint_launcher();
+        damage_add(8, screen_h - 348, 300, 308);
+        launch_dirty = 0;
+    }
+    /* cursor lives in the back buffer: if we just repainted under it,
+     * redraw it and include its rect in the flip */
+    for (int i = 0; i < ndmg; i++)
+        if (rect_hits_cursor(dmg[i].x, dmg[i].y, dmg[i].w, dmg[i].h)) {
+            cur_have = 0;
+            cur_draw();
+            damage_add(mx, my, CUR_W, CUR_H);
+            break;
+        }
+    for (int i = 0; i < ndmg; i++)
+        fb_flip_rect(dmg[i].x, dmg[i].y, dmg[i].w, dmg[i].h);
+    ndmg = 0;
 }
 
 static void paint_menu(void)
@@ -703,12 +809,6 @@ static void paint_launcher(void)
     if (!row) s_text(&screen, px + 14, y, "(no matching app)", ((t->main >> 1) & 0x7F7F7F));
 }
 
-#define CUR_W 14
-#define CUR_H 19
-static u32 *cur_buf;
-static int cur_bx, cur_by, cur_bw, cur_bh, cur_have;
-static void cur_draw(void);
-static void cur_restore(void);
 
 static void paint_all(void)
 {
@@ -734,6 +834,8 @@ static void paint_all(void)
     paint_menu();
     paint_taskbar();
     if (launch.active) paint_launcher();
+    tb_dirty = 0; icons_dirty = 0; menu_dirty = 0; launch_dirty = 0; ndmg = 0;
+    for (int i = 0; i < win_count; i++) wins[i].chrome_dirty = 0;
     cur_have = 0;                 /* scene was fully redrawn under cursor */
     cur_draw();
     fb_flip();
@@ -825,7 +927,7 @@ static void handle_mouse(struct mouse_event *e)
         }
         if (band_active) {
             band_x1 = mx; band_y1 = my;
-            dirty = 1;
+            wm_full();
         }
         if (desk_drag >= 0 && !desk_drag_moved &&
             (mx - desk_sx > 6 || mx - desk_sx < -6 || my - desk_sy > 6 || my - desk_sy < -6))
@@ -851,7 +953,7 @@ static void handle_mouse(struct mouse_event *e)
             }
         }
         if (drag_win || band_active || resize_win || desk_drag >= 0) {
-            dirty = 1;
+            wm_full();
             return;
         }
         struct window *hw = NULL;
@@ -861,7 +963,12 @@ static void handle_mouse(struct mouse_event *e)
          * their own surface only when their internal hover state flips */
         static struct window *last_hw;
         static int last_zone, last_icon = -2, last_tb = -2;
-        int icon = -1, tbz = -1;
+        static int last_mrow = -2, last_lrow = -2;
+        int icon = -1, tbz = -1, mrow = -1, lrow = -1;
+        if (menu.active && in_rect(mx, my, menu.x, menu.y, menu.w, menu.h))
+            mrow = (my - menu.y - 3) / 24;
+        if (launch.active)
+            lrow = my / 22;
         if (!zone && !hw) {
             for (int i = 0; i < nitems; i++) {
                 int x, y, ww, hh;
@@ -872,7 +979,12 @@ static void handle_mouse(struct mouse_event *e)
         }
         if (hw != last_hw || zone != last_zone || icon != last_icon ||
             tbz != last_tb) {
+            if (icon != last_icon) icons_dirty = 1;
+            if (tbz != last_tb) tb_dirty = 1;
+            if (mrow != last_mrow) menu_dirty = 1;
+            if (lrow != last_lrow) launch_dirty = 1;
             last_hw = hw; last_zone = zone; last_icon = icon; last_tb = tbz;
+            last_mrow = mrow; last_lrow = lrow;
             dirty = 1;
         }
         if (hw && hw->app && hw->app->mouse)
@@ -889,13 +1001,16 @@ static void handle_mouse(struct mouse_event *e)
             if (tb_off < 0) tb_off = 0;
             if (tb_off > win_count - vis) tb_off = win_count - vis;
         }
+        tb_dirty = 1;
         dirty = 1;
         return;
     }
     if (e->type == MEV_WHEEL) {
         struct window *w = win_at_point(mx, my);
-        if (w && w->app && w->app->mouse)
+        if (w && w->app && w->app->mouse) {
             w->app->mouse(w, e, mx - (w->x + 1), my - (w->y + WIN_TITLEBAR));
+            w->dirty = 1;            /* app scrolled: repaint its content */
+        }
         dirty = 1;
         return;
     }
@@ -965,7 +1080,7 @@ static void handle_mouse(struct mouse_event *e)
         }
         drag_win = NULL;
         resize_win = NULL;
-        dirty = 1;
+        wm_full();
         return;
     }
 
@@ -979,7 +1094,7 @@ static void handle_mouse(struct mouse_event *e)
         } else {
             menu.active = 0;
         }
-        dirty = 1;
+        wm_full();
         return;
     }
 
@@ -990,12 +1105,12 @@ static void handle_mouse(struct mouse_event *e)
                 wm_open_app(app_at(launch.hover)->id, NULL);
                 launch.active = 0;
             }
-            dirty = 1;
+            wm_full();
             return;
         }
         if (!in_rect(mx, my, 8, screen_h - TASKBAR_H + 6, 34, 28)) {
             launch.active = 0;
-            dirty = 1;
+            wm_full();
             return;
         }
     }
@@ -1009,7 +1124,7 @@ static void handle_mouse(struct mouse_event *e)
             for (int b = 0; b < 3; b++) {
                 int bx = w->w - 22 - (2 - b) * 22;
                 if (in_rect(rx, ry, bx, 3, BTN_SZ, BTN_SZ)) {
-                    if (b == 0) { w->state = WIN_STATE_MIN; }
+                    if (b == 0) { w->state = WIN_STATE_MIN; wm_full(); }
                     else if (b == 1) {
                         if (w->state == WIN_STATE_MAX) {
                             win_free_buf(w);
@@ -1022,26 +1137,26 @@ static void handle_mouse(struct mouse_event *e)
                             win_free_buf(w);
                             w->x = 0; w->y = 0;
                             w->w = screen_w; w->h = screen_h - TASKBAR_H;
-                            w->state = WIN_STATE_MAX;
+                            w->state = WIN_STATE_MAX; wm_full();
                             w->dirty = 1;
                             win_alloc_buf(w);
                         }
                     } else {
                         wm_close_window(w);
                     }
-                    dirty = 1;
+                    wm_full();
                     return;
                 }
             }
             drag_win = w;
             drag_ox = rx; drag_oy = ry;
-            dirty = 1;
+            wm_full();
             return;
         }
         /* resize handle */
         if (in_rect(rx, ry, w->w - 16, w->h - 16, 16, 16) && w->state != WIN_STATE_MAX) {
             resize_win = w;
-            dirty = 1;
+            wm_full();
             return;
         }
         if (w->app && w->app->mouse)
@@ -1062,7 +1177,7 @@ static void handle_mouse(struct mouse_event *e)
                 desk_drag = i; desk_drag_moved = 0;
                 desk_drag_ox = mx - x; desk_drag_oy = my - y;
                 desk_sx = mx; desk_sy = my;
-                dirty = 1;
+                wm_full();
                 return;
             }
         }
@@ -1098,6 +1213,7 @@ static void handle_mouse(struct mouse_event *e)
     if (my >= screen_h - TASKBAR_H) {
         if (in_rect(mx, my, 8, screen_h - TASKBAR_H + 6, 34, TASKBAR_H - 12)) {
             launch.active = !launch.active;
+            wm_full();
             launch.q[0] = 0; launch.qpos = 0;
             dirty = 1;
             return;
@@ -1121,7 +1237,7 @@ static void handle_mouse(struct mouse_event *e)
                     tw->state = WIN_STATE_NORMAL;
                     wm_focus(tw);
                 } else if (tw == focused_w) {
-                    tw->state = WIN_STATE_MIN;
+                    tw->state = WIN_STATE_MIN; wm_full();
                 } else {
                     wm_focus(tw);
                 }
@@ -1143,19 +1259,20 @@ static void handle_key(struct key_event *e)
     }
     if (menu.active && e->pressed && e->keycode == 27) {
         menu.active = 0;
-        dirty = 1;
+        wm_full();
         return;
     }
     if (launch.active) {
-        if (e->pressed && e->keycode == 27) { launch.active = 0; dirty = 1; return; }
+        if (e->pressed && e->keycode == 27) { launch.active = 0; wm_full(); return; }
         if (e->pressed && e->keycode == '\n') {
             for (int i = 0; i < app_count(); i++)
                 if (launch_match(i)) { wm_open_app(app_at(i)->id, NULL); break; }
             launch.active = 0;
-            dirty = 1;
+            wm_full();
             return;
         }
         edit_line(launch.q, &launch.qpos, sizeof(launch.q), e);
+        launch_dirty = 1;
         dirty = 1;
         return;
     }
@@ -1176,12 +1293,24 @@ static void wm_tick(void)
         if (wins[i].app && wins[i].app->tick && wins[i].state != WIN_STATE_MIN)
             wins[i].app->tick(&wins[i]);
 
-    /* clock / blink phase */
+    /* clock / blink phase: repaint only the rects that actually show them */
     u64 phase = tick_count / 50;
     if (phase != last_blink_phase) {
         last_blink_phase = phase;
         for (int i = 0; i < win_count; i++)
-            if (wins[i].state != WIN_STATE_MIN) wins[i].dirty = 1;
+            if (wins[i].state != WIN_STATE_MIN) wins[i].chrome_dirty = 1;
+        dirty = 1;
+    }
+    {
+        static u32 last_sec_tick;
+        if (tick_count / 100 != last_sec_tick) {
+            last_sec_tick = (u32)(tick_count / 100);
+            tb_dirty = 1;
+            dirty = 1;
+        }
+    }
+    if (launch.active && (tick_count % 50) == 0) {
+        launch_dirty = 1;
         dirty = 1;
     }
 
@@ -1225,6 +1354,12 @@ static int diag_tried;
 static u32 last_paint_tick;
 volatile int wm_in_idle;
 
+void wm_theme_changed(void)
+{
+    wp_valid = 0;
+    wm_full();
+}
+
 static int is_v86_box(void)
 {
     const char *m = ata_model();
@@ -1259,7 +1394,8 @@ void wm_run(void)
         }
         if (dirty && (u32)tick_count - last_paint_tick >= 2) {  /* 50 fps cap */
             last_paint_tick = (u32)tick_count;
-            paint_all();
+            if (full_dirty) { paint_all(); full_dirty = 0; }
+            else paint_partial();
             dirty = 0;
         }
         wm_in_idle = 1;
@@ -1375,6 +1511,7 @@ void wm_dialog(const char *title, const char *message, const char *input,
     w->data = d;
     wm_set_title(w, title);
     modal_w = w;
+    wm_full();
     wm_focus(w);
 }
 

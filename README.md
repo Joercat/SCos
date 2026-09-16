@@ -118,9 +118,28 @@ Desktop shell:
 * taskbar launcher button (far left) opens a search-as-you-type app menu -
   the place to find apps you removed from the desktop
 * `rm` refuses to delete `/system/*` unless given `-s`/`-f`
-* kernel panic screen (`panic` command in the terminal triggers it on
+* `/system` is now a real directory you can browse in Files and in the
+  terminal: every boot it is refreshed with true copies of the boot chain
+  read straight off the disk (`boot/stage1.bin` = MBR, `boot/stage2.bin`,
+  `kernel.bin`, plus a `README.txt`). `cat` shows a hex preview of binary
+  files, `hexdump` dumps them fully, `edit` edits the copy and `rm -s`
+  deletes it (restored next boot). The real boot sectors are never
+  rewritten, so you cannot brick the machine by exploring
+* kernel panic screen (`sysrq panic` in the terminal triggers it on
   demand): ASCII art, reason, exception, full register dump incl. EIP /
   EFLAGS from the interrupt frame, raw stack dump, then halt
+* `sysrq` is a Linux-style multi-action system request command:
+  `panic`, `reboot`, `error` (non-fatal error screen self-test),
+  `dump` (recent kernel log) and `time` (PIT uptime + RTC)
+* `diag` takes optional subsystems: `diag pci|usb|input` scans just that
+  subsystem and prints the kernel-log result in the terminal; bare
+  `diag` still runs the full-screen everything scan
+* CPU thread count is detected via CPUID (leaf 1, cross-checked with
+  leaf 4) and shown in `neofetch`, `sysinfo` and the System Monitor
+* the compositor repaints and flips only damaged rectangles: caret blink
+  repaints a titlebar, the clock repaints the taskbar strip, app updates
+  repaint their own window - idle CPU drops accordingly; an IRQ-storm
+  guard masks any interrupt line firing above 1500/s
 * boot screen is a real init log: each `[ OK ]` line is printed by the
   subsystem that just came up (CPU brand + measured MHz, memory, VBE
   mode, ATA drives + model, fs image status, RTC date); only the final

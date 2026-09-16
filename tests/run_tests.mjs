@@ -434,7 +434,7 @@ test(19, "solitaire: deal + draw", async (state) => {
 test(20, "kernel panic screen from terminal", async (state) => {
     const p = ICON_POS(ICON.terminal);
     await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
-    await state.type("panic demo halt\n"); await sleep(2000);
+    await state.type("sysrq panic demo halt\n"); await sleep(2000);
     shot(state, "51_panic");
     const fb = state.framebuffer();
     let red = 0;
@@ -499,21 +499,28 @@ test(22, "terminal: editor + root cwd", async (state) => {
 });
 
 /* --------------------------------------------------------------- 23 ---- */
-test(23, "files: system hidden + desktop shortcuts", async (state) => {
+test(23, "files: /system real files + desktop shortcuts", async (state) => {
     const p = ICON_POS(ICON.files);
     await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(800);
     const w = win_pos(1, 700, 500);
-    /* root lists only home: row 1 must be empty background */
-    const row1 = px(state, w.x + 1 + 40, w.y + TITLEBAR + 44 + 4 + 24 + 12);
-    if (row1[0] + row1[1] + row1[2] > 120) throw new Error("system dir visible at root");
-    /* home -> desktop */
-    await state.click(w.x + 1 + 200, w.y + TITLEBAR + 44 + 4 + 12); await sleep(150);
-    await state.click(w.x + 1 + 200, w.y + TITLEBAR + 44 + 4 + 12); await sleep(500);
-    await state.click(w.x + 1 + 200, w.y + TITLEBAR + 44 + 4 + 12); await sleep(150);
-    await state.click(w.x + 1 + 200, w.y + TITLEBAR + 44 + 4 + 12); await sleep(500);
+    const rowY = (r) => w.y + TITLEBAR + 44 + 4 + r * 24 + 12;
+    const bright = (x, y) => { const q = px(state, x, y); return q[0] + q[1] + q[2]; };
+    /* root lists home (row0) AND system (row1) - the boot chain is visible now */
+    if (bright(w.x + 1 + 60, rowY(1)) < 60) throw new Error("system dir not visible at root");
+    /* enter /system (double-click row 1) */
+    await state.click(w.x + 1 + 200, rowY(1)); await sleep(150);
+    await state.click(w.x + 1 + 200, rowY(1)); await sleep(600);
+    shot(state, "58_system_dir");
+    if (bright(w.x + 1 + 60, rowY(0)) < 60) throw new Error("/system lists no files");
+    if (bright(w.x + 1 + 60, rowY(1)) < 60) throw new Error("/system lists only one file");
+    /* toolbar 'up' button back to root, then home -> desktop */
+    await state.click(w.x + 1 + 42 + 15, w.y + TITLEBAR + 8 + 13); await sleep(500);
+    await state.click(w.x + 1 + 200, rowY(0)); await sleep(150);
+    await state.click(w.x + 1 + 200, rowY(0)); await sleep(500);
+    await state.click(w.x + 1 + 200, rowY(0)); await sleep(150);
+    await state.click(w.x + 1 + 200, rowY(0)); await sleep(500);
     shot(state, "58_desktop_dir");
-    const row0 = px(state, w.x + 1 + 60, w.y + TITLEBAR + 44 + 4 + 12);
-    if (row0[0] + row0[1] + row0[2] < 60) throw new Error("desktop shortcuts not listed");
+    if (bright(w.x + 1 + 60, rowY(0)) < 60) throw new Error("desktop shortcuts not listed");
     if (!(await live(state))) throw new Error("frozen in files");
 });
 
@@ -521,7 +528,7 @@ test(23, "files: system hidden + desktop shortcuts", async (state) => {
 test(24, "error screen: non-fatal tier shows and dismisses", async (state) => {
     const p = ICON_POS(ICON.terminal);
     await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
-    await state.type("errtest\n"); await sleep(1200);
+    await state.type("sysrq error\n"); await sleep(1200);
     /* the SYSTEM ERROR title block must contain many amber pixels */
     const fb = state.framebuffer();
     let amber = 0;
@@ -538,6 +545,41 @@ test(24, "error screen: non-fatal tier shows and dismisses", async (state) => {
     if (!(await live(state))) throw new Error("OS did not continue after error screen");
     await state.type("echo survived\n"); await sleep(500);
     if (!(await live(state))) throw new Error("terminal dead after dismiss");
+});
+
+/* --------------------------------------------------------------- 25 ---- */
+test(25, "terminal: /system files + sysrq + diag subsystems", async (state) => {
+    const p = ICON_POS(ICON.terminal);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
+    const w = win_pos(1, 700, 450);
+    const textPx = () => {
+        /* count bright text pixels inside the terminal content area */
+        let n = 0;
+        const fb = state.framebuffer();
+        for (let y = w.y + TITLEBAR + 10; y < w.y + 400; y += 3)
+            for (let x = w.x + 10; x < w.x + 690; x += 3) {
+                const i = (y * fb.w + x) * 4;
+                if (fb.mem[i] + fb.mem[i + 1] + fb.mem[i + 2] > 300) n++;
+            }
+        return n;
+    };
+    await state.type("cat /system/README.txt\n"); await sleep(900);
+    const a = textPx();
+    /* the real README is ~15 lines of text; an error line would be ~90 px */
+    if (a < 300) throw new Error("README.txt did not display (px=" + a + ")");
+    await state.type("clear\n"); await sleep(300);
+    await state.type("cat /system/kernel.bin\n"); await sleep(900);
+    const b = textPx();
+    /* hex preview = 4+ dense hex lines; a not-found error is one thin line */
+    if (b < 400) throw new Error("kernel.bin hex preview did not display (px=" + b + ")");
+    shot(state, "59_kernel_hex");
+    await state.type("clear\n"); await sleep(300);
+    await state.type("sysrq time\n"); await sleep(600);
+    if (textPx() < 20) throw new Error("sysrq time produced no output");
+    await state.type("diag input\n"); await sleep(900);
+    if (textPx() < 20) throw new Error("diag input produced no output");
+    shot(state, "60_sysrq_diag");
+    if (!(await live(state))) throw new Error("frozen after sysrq/diag");
 });
 
 /* ------------------------------------------------------------- runner ---- */

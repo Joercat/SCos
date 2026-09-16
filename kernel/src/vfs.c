@@ -263,3 +263,56 @@ struct vfs_node *vfs_child(struct vfs_node *dir, const char *name)
 {
     return dir_child(dir, name);
 }
+
+/* ------------------------------------------------------ real system files --
+ * /system holds true copies of the boot chain, read straight off the disk at
+ * boot: stage1 (MBR, LBA 0), stage2 (LBA 1..16) and the flat kernel image
+ * (LBA 17..). They are browsable in Files and cat/hexdump/edit/rm-able in
+ * the terminal. Edits and deletes touch the file image only - the actual
+ * boot sectors are never rewritten, so a curious user cannot brick boot.
+ * Deleting a copy is fine: the next boot recreates it from the disk.
+ */
+extern char _bss_end[];
+
+void system_files_init(int have_disk)
+{
+    if (!have_disk) return;
+    vfs_mkdir("/system/boot");
+
+    static char buf[8192];
+    if (ata_read_sectors(0, 1, buf))
+        vfs_write("/system/boot/stage1.bin", buf, 512);
+    if (ata_read_sectors(1, 16, buf))
+        vfs_write("/system/boot/stage2.bin", buf, 8192);
+
+    u32 ksz = (u32)(_bss_end - (char *)0x100000);
+    ksz = (ksz + 511u) & ~511u;
+    char *kb = palloc(ksz);
+    if (kb) {
+        u32 done = 0;
+        while (done < ksz) {
+            u32 n = ksz - done; if (n > 8192) n = 8192;
+            if (!ata_read_sectors(17 + done / 512, n / 512, kb + done)) break;
+            done += n;
+        }
+        if (done == ksz) vfs_write("/system/kernel.bin", kb, ksz);
+        pfree(kb, ksz);
+    }
+
+    static const char readme[] =
+        "/system - real copies of the SCos boot chain\n"
+        "\n"
+        "  boot/stage1.bin  512 B   MBR, read from disk LBA 0\n"
+        "  boot/stage2.bin  8 KB    second-stage loader, LBA 1..16\n"
+        "  kernel.bin       ~133 KB flat 32-bit kernel image, LBA 17..\n"
+        "\n"
+        "These files are re-read from the disk every boot, so they always\n"
+        "match what the machine actually booted from. 'cat' shows a hex\n"
+        "preview, 'hexdump' shows more, 'edit' opens the copy and\n"
+        "'rm -s' removes it (restored next boot).\n"
+        "\n"
+        "Editing or deleting here NEVER touches the real boot sectors -\n"
+        "that would brick the machine, so SCos keeps the disk read-only\n"
+        "for these files by design.\n";
+    vfs_write("/system/README.txt", readme, sizeof(readme) - 1);
+}

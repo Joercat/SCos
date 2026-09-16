@@ -64,6 +64,8 @@ void cpu_meter_init(void);
 void cpu_meter_tick(void);
 void cpu_idle_begin(void);
 u32  cpu_mhz(void);
+u32  cpu_core_count(void);
+u32  cpu_thread_count(void);
 u32  cpu_signature(void);
 
 /* pci */
@@ -254,6 +256,7 @@ int   vfs_delete(const char *path);
 struct vfs_node *vfs_child(struct vfs_node *dir, const char *name);
 int   vfs_rename(const char *oldp, const char *newp);
 void  vfs_factory_reset(void);
+void  system_files_init(int have_disk);
 int   vfs_is_dir(struct vfs_node *n);
 u32   vfs_usage_bytes(void);
 u32   str_to_u32(const char *s);
@@ -334,6 +337,7 @@ struct window {
     struct surface surf;            /* content surface */
     int  dirty;
     int  closing;
+    int chrome_dirty;
 };
 
 int  wm_win_count(void);
@@ -345,6 +349,7 @@ struct window *wm_open_app(const char *app_id, void *arg);
 void wm_close_window(struct window *w);
 void wm_set_title(struct window *w, const char *title);
 void wm_redraw(struct window *w);
+void wm_theme_changed(void);
 void wm_focus(struct window *w);
 struct window *wm_focused(void);
 int  wm_content_w(struct window *w);

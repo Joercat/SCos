@@ -52,6 +52,12 @@ static void sm_paint(struct window *w)
     s_text(s, 12, y, line, t->text); y += 18;
     strcpy(line, "  speed:  ");
     fmt_u32(n, cpu_mhz()); strcat(line, n); strcat(line, " MHz (TSC calibrated against PIT)");
+    y += 18;
+    strcpy(line, "cpu cores: ");
+    fmt_u32(n, cpu_core_count()); strcat(line, n);
+    strcat(line, "  threads: ");
+    fmt_u32(n, cpu_thread_count()); strcat(line, n);
+    strcat(line, " (CPUID leaf 1/4)");
     s_text(s, 12, y, line, t->text); y += 18;
     u32 load = cpu_usage_pct();
     strcpy(line, "  load:   ");

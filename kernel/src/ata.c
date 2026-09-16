@@ -34,7 +34,7 @@ static void ata_wait_ready(struct ata_dev *d)
 static int ata_ident(struct ata_dev *d)
 {
     ata_wait_ready(d);
-    outb(d->io + 6, d->slave ? 0xB0 : 0xA0);
+    outb(d->io + 6, d->slave ? 0xF0 : 0xE0);
     outb(d->io + 2, 0);
     outb(d->io + 3, 0);
     outb(d->io + 4, 0);
@@ -100,7 +100,10 @@ static int ata_pio_transfer(struct ata_dev *d, u32 lba, u32 count, void *buf, in
 {
     ata_wait_ready(d);
     outb(d->ctrl, 0);
-    outb(d->io + 6, (d->slave ? 0xB0 : 0xA0) | ((lba >> 24) & 0x0F));
+    /* 0xE0: bit7 set, bit6 = LBA mode, bit5 set. (0xA0 would be CHS mode -
+     * the drive would reinterpret our LBA registers as cylinder/head/sector
+     * and read completely wrong sectors.) */
+    outb(d->io + 6, (d->slave ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F));
     outb(d->io + 2, count & 0xFF);
     outb(d->io + 3, lba & 0xFF);
     outb(d->io + 4, (lba >> 8) & 0xFF);

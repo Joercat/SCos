@@ -383,9 +383,26 @@ static int port_speed(int port) { return (int)((portsc(port) >> 10) & 0xF); }
 static int enumerate_port(int port)
 {
     if (!(portsc(port) & 1)) return 0;    /* CCS */
-    port_reset(port);
-    if (!(portsc(port) & 2)) {
-        klog("usb: port %d reset failed (device not enabled)", port);
+    int enabled = 0;
+    for (int attempt = 0; attempt < 3 && !enabled; attempt++) {
+        port_reset(port);
+        enabled = (portsc(port) & 2) != 0;   /* PED */
+        if (!enabled && attempt < 2) {
+            /* some controllers/ports need a power cycle before the reset
+             * sticks: PP off, brief pause, PP on, debounce, clear changes */
+            klog("usb: port %d reset attempt %d failed - power cycling port",
+                 port, attempt + 1);
+            volatile u32 *ps = (volatile u32 *)(op + 0x400 + 0x10 * (port - 1));
+            ps[0] = 0;                       /* RW bits off (PP, PR); W1C untouched */
+            sleep_ms(30);
+            ps[0] = 1u << 9;                 /* PP on, alone */
+            sleep_ms(120);                   /* debounce */
+            ps[0] = (1u << 21) | (1u << 22) | (1u << 23);
+            if (!(portsc(port) & 1)) return 0;   /* device went away */
+        }
+    }
+    if (!enabled) {
+        klog("usb: port %d reset failed after 3 attempts (device not enabled)", port);
         fail_flag = 1;
         return 0;
     }

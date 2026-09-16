@@ -93,6 +93,29 @@ static void prompt_str(struct term *t, char *out)
     strcat(out, "$ ");
 }
 
+/* collect recent kernel-log lines mentioning `tag` for diag subsystems */
+static void klog_grep_into(char *out, u32 sz, const char *tag)
+{
+    static char hits[10][96];
+    int nh = 0;
+    int n = klog_ring_count();
+    for (int i = n - 1; i >= 0 && nh < 10; i--) {
+        char ln[96];
+        if (klog_ring(i, ln, sizeof(ln)) && strstr(ln, tag))
+            strcpy(hits[nh++], ln);
+    }
+    out[0] = 0;
+    for (int i = nh - 1; i >= 0; i--) {
+        if (out[0] && strlen(out) + 2 < sz) strcat(out, "\n");
+        strncat(out, hits[i], sz - strlen(out) - 2);
+    }
+    if (!out[0]) {
+        strcpy(out, "(no '");
+        strncat(out, tag, 16);
+        strcat(out, "' lines in the kernel log yet)");
+    }
+}
+
 /* ------------------------------------------------------------ commands --- */
 static const char *help_text =
     "Available commands:\n"
@@ -125,12 +148,13 @@ static const char *help_text =
     "disks     - Detected ATA disks (IDENTIFY)\n"
     "neofetch  - System summary with logo\n"
     "dmesg     - Kernel log ring (USB/input diagnostics)\n"
-    "diag      - Full hardware scan on the diagnostics screen\n"
-    "errtest   - Show the non-fatal error screen (self-check)\n"
+    "diag [sub]- Full hardware scan; sub = pci|usb|input for a quick\n"
+            "            subsystem scan printed right here in the terminal\n"
+    "sysrq <a> - System request: a = panic|reboot|error|dump|time\n"
     "sysmon    - Open the System Monitor app\n"
     "theme     - List or switch themes\n"
     "calc      - Perform basic arithmetic\n"
-    "ping      - Check host reachability\n"
+    "ping      - Honest answer: this kernel has no TCP/IP stack\n"
     "sysinfo   - Display system information\n"
     "alias     - Create command aliases\n"
     "history   - Show command history\n"
@@ -309,13 +333,47 @@ static void run_command(struct term *t, const char *command)
             char *data = vfs_read(path, &len);
             if (!data) strcpy(response, "Error: File not found");
             else {
-                char *o = response;
-                if (!strncmp(path, "/system", 7)) {
-                    strcpy(o, "Warning: system file - editing it can break SCos\n");
-                    o += strlen(o);
+                /* binary file? show a hex preview instead of raw bytes */
+                int weird = 0, probe = len < 256 ? (int)len : 256;
+                for (int i = 0; i < probe; i++)
+                    if ((unsigned char)data[i] != '\n' && (unsigned char)data[i] != '\t' &&
+                        ((unsigned char)data[i] < 32 || (unsigned char)data[i] > 126)) weird++;
+                if (probe && weird * 5 > probe) {
+                    static const char hx[] = "0123456789abcdef";
+                    char *o = response;
+                    char num[12];
+                    strcpy(o, "Binary file ("); o += strlen(o);
+                    fmt_u32(num, len); strcpy(o, num); o += strlen(o);
+                    strcpy(o, " bytes) - hex preview, first "); o += strlen(o);
+                    fmt_u32(num, (u32)(probe < 64 ? probe : 64)); strcpy(o, num); o += strlen(o);
+                    strcpy(o, " bytes.\nUse 'hexdump "); o += strlen(o);
+                    strncat(o, path, 100); o += strlen(o);
+                    strcpy(o, "' for a full dump.\n\n"); o += strlen(o);
+                    int nb = probe < 64 ? probe : 64;
+                    for (int i = 0; i < nb; i++) {
+                        if (i % 16 == 0 && o + 8 < response + sizeof(response)) {
+                            *o++ = hx[(i >> 12) & 15]; *o++ = hx[(i >> 8) & 15];
+                            *o++ = hx[(i >> 4) & 15]; *o++ = hx[i & 15];
+                            *o++ = ':'; *o++ = ' ';
+                        }
+                        if (o + 4 < response + sizeof(response)) {
+                            *o++ = hx[(data[i] >> 4) & 15];
+                            *o++ = hx[data[i] & 15];
+                            *o++ = (i % 16 == 15 || i == nb - 1) ? '\n' : ' ';
+                        }
+                    }
+                    *o = 0;
+                    if (!strncmp(path, "/system", 7))
+                        strcat(response, "\n(this is a real copy of a system file - the disk original is untouched)");
+                } else {
+                    char *o = response;
+                    if (!strncmp(path, "/system", 7)) {
+                        strcpy(o, "Warning: system file - editing it can break SCos\n");
+                        o += strlen(o);
+                    }
+                    strncpy(o, data, sizeof(response) - 1 - (u32)(o - response));
+                    response[sizeof(response) - 1] = 0;
                 }
-                strncpy(o, data, sizeof(response) - 1 - (u32)(o - response));
-                response[sizeof(response) - 1] = 0;
             }
         }
     }
@@ -368,20 +426,89 @@ static void run_command(struct term *t, const char *command)
         t->follow = 1;
         return;
     }
-    else if (!strcmp(cmd, "errtest")) {
-        static const char *dump[3] = {
-            "example: last io port 0x3f6 status 0x50",
-            "example: retry count 3, drive master",
-            "example: caller vfs_flush() + 0x2a",
-        };
-        err_notify("self-test",
-                   "this is what a non-fatal subsystem error looks like",
-                   dump, 3);
-        strcpy(response, "Error screen dismissed - system continued");
+    else if (!strcmp(cmd, "sysrq")) {
+        /* Linux-style system request: one command, several real actions */
+        if (nargs < 2) {
+            strcpy(response,
+                "sysrq - system request key. Actions:\n"
+                "  sysrq panic [msg]  trigger a real kernel panic\n"
+                "  sysrq reboot       reboot the machine now\n"
+                "  sysrq error        show the non-fatal error screen (self-test)\n"
+                "  sysrq dump         dump recent kernel log to this terminal\n"
+                "  sysrq time         PIT uptime, tick rate and RTC clock");
+        } else if (!strcmp(args[1], "panic")) {
+            char msg[128];
+            msg[0] = 0;
+            for (int j = 2; j < nargs; j++) { if (j > 2) strcat(msg, " "); strncat(msg, args[j], 96); }
+            term_print(t, "Triggering kernel panic as requested...");
+            sleep_ms(600);
+            kernel_panic(msg[0] ? msg : "panic requested via sysrq");
+            return;
+        } else if (!strcmp(args[1], "reboot")) {
+            term_print(t, "Rebooting SCos... Please wait.");
+            t->shutting_down = 2;
+            return;
+        } else if (!strcmp(args[1], "error")) {
+            static const char *dump[3] = {
+                "example: last io port 0x3f6 status 0x50",
+                "example: retry count 3, drive master",
+                "example: caller vfs_flush() + 0x2a",
+            };
+            err_notify("self-test",
+                       "this is what a non-fatal subsystem error looks like",
+                       dump, 3);
+            strcpy(response, "Error screen dismissed - system continued");
+        } else if (!strcmp(args[1], "dump")) {
+            int n = klog_ring_count();
+            int start = n > 14 ? n - 14 : 0;
+            response[0] = 0;
+            for (int i = start; i < n; i++) {
+                char ln[96];
+                if (klog_ring(i, ln, sizeof(ln))) {
+                    if (response[0]) strcat(response, "\n");
+                    strncat(response, ln, sizeof(response) - strlen(response) - 2);
+                }
+            }
+            if (!response[0]) strcpy(response, "(log empty)");
+        } else if (!strcmp(args[1], "time")) {
+            struct rtc_time rt;
+            rtc_read(&rt);
+            char a[16], b[16];
+            fmt_u32(a, uptime_ms());
+            fmt_pad2(b, rt.hour);
+            strcpy(response, "uptime: "); strcat(response, a); strcat(response, " ms (PIT ticks)\n");
+            char c[8];
+            fmt_pad2(c, rt.min); strcat(response, "rtc:    ");
+            strcat(response, b); strcat(response, ":"); strcat(response, c);
+            strcat(response, " local CMOS clock");
+        } else {
+            strcpy(response, "sysrq: unknown action '");
+            strncat(response, args[1], 32);
+            strcat(response, "' - run 'sysrq' for the list");
+        }
     }
     else if (!strcmp(cmd, "diag")) {
-        diag_manual();
-        strcpy(response, "Diagnostics complete - see dmesg for the scan log");
+        const char *sub = nargs > 1 ? args[1] : NULL;
+        if (!sub || !strcmp(sub, "all")) {
+            diag_manual();
+            strcpy(response, "Diagnostics complete - see dmesg for the scan log");
+        } else if (!strcmp(sub, "pci")) {
+            pci_scan_dump();
+            klog_grep_into(response, sizeof(response), "pci");
+        } else if (!strcmp(sub, "usb")) {
+            char ul[96];
+            usb_status(ul, sizeof(ul));
+            klog("diag: %s", ul);
+            klog_grep_into(response, sizeof(response), "usb");
+        } else if (!strcmp(sub, "input")) {
+            klog("diag: ps/2 mouse %s", mouse_present() ? "present" : "absent");
+            klog("diag: input %s", input_last_tick ? "events seen" : "silent");
+            klog_grep_into(response, sizeof(response), "input");
+        } else {
+            strcpy(response, "diag: unknown subsystem '");
+            strncat(response, sub, 24);
+            strcat(response, "' - use pci, usb, input or all");
+        }
     }
     else if (!strcmp(cmd, "dmesg")) {
         int n = klog_ring_count();
@@ -492,7 +619,11 @@ static void run_command(struct term *t, const char *command)
         strcat(response, "Uptime: "); fmt_u32(b, uptime_ms() / 60000); strcat(response, b); strcat(response, " minutes\n");
         strcat(response, "Total Memory: "); fmt_u32(b, mm_total_kb() / 1024); strcat(response, b); strcat(response, " MB\n");
         strcat(response, "Free Memory: "); fmt_u32(b, mm_free_kb() / 1024); strcat(response, b); strcat(response, " MB\n");
-        strcat(response, "CPU Cores: 1\n");
+        { char cc[8];
+          strcat(response, "CPU Cores: "); fmt_u32(cc, cpu_core_count());
+          strcat(response, cc); strcat(response, " (");
+          fmt_u32(cc, cpu_thread_count()); strcat(response, cc);
+          strcat(response, " threads)\n"); }
         strcat(response, "Storage Used: "); strcat(response, a); strcat(response, "\n");
         strcat(response, "Disk: "); strcat(response, ata_present() ? "ATA present" : "none");
         strcat(response, fs_image_found ? " (SCos image loaded)" : "");
@@ -554,14 +685,6 @@ static void run_command(struct term *t, const char *command)
         term_print(t, "Rebooting SCos... Please wait.");
         t->shutting_down = 2;
         return;
-    }
-    else if (!strcmp(cmd, "panic")) {
-        char msg[128];
-        msg[0] = 0;
-        for (int j = 1; j < nargs; j++) { if (j > 1) strcat(msg, " "); strncat(msg, args[j], 96); }
-        term_print(t, "Triggering kernel panic as requested...");
-        sleep_ms(600);
-        kernel_panic(msg[0] ? msg : "panic requested from terminal");
     }
     else if (!strcmp(cmd, "pwd")) {
         strcpy(response, t->cwd);
@@ -785,7 +908,7 @@ static void run_command(struct term *t, const char *command)
             for (int i = 0; i < theme_count(); i++)
                 if (!strcmp(theme_get(i)->id, args[1])) found = i;
             if (found < 0) { strcpy(response, "Unknown theme: "); strcat(response, args[1]); }
-            else { theme_set_index(found); settings_save();
+            else { theme_set_index(found); wm_theme_changed(); settings_save();
                    strcpy(response, "Theme switched to "); strcat(response, theme_current()->name); }
         }
     }
@@ -830,6 +953,8 @@ static void run_command(struct term *t, const char *command)
         strcpy(info[ni],   "CPU:     "); strncpy(info[ni] + 9, cpu, 40); ni++;
         strcpy(info[ni],   "Speed:   ");
         fmt_u32(n, cpu_mhz()); strcat(info[ni], n); strcat(info[ni], " MHz (TSC-measured)"); ni++;
+        fmt_u32(n, cpu_core_count()); strcat(info[ni], n); strcat(info[ni], " core(s), ");
+        fmt_u32(n, cpu_thread_count()); strcat(info[ni], n); strcat(info[ni], " thread(s) (CPUID)"); ni++;
         strcpy(info[ni],   "Load:    ");
         fmt_u32(n, cpu_usage_pct()); strcat(info[ni], n); strcat(info[ni], "% (idle-time meter)"); ni++;
         strcpy(info[ni],   "Memory:  ");
@@ -1123,6 +1248,8 @@ static void term_key(struct window *w, struct key_event *e)
         t->input[0] = 0;
         t->ipos = 0;
         run_command(t, cmd);
+        wm_redraw(w);          /* commands with empty output (edit, clear...)
+                                * still change what must be on screen */
         return;
     }
     if (e->keycode == KEY_UP) {

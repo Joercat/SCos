@@ -54,7 +54,10 @@ void kmain(struct boot_info *bi)
         boot_screen_step(line, 65);
         boot_screen_step(fs_image_load() ? "fs:   saved image loaded from disk (LBA 2048)"
                                          : "fs:   no saved image on disk - using defaults", 75);
-        mouse_init();
+        system_files_init(drives > 0);
+    if (drives > 0)
+        boot_screen_step("sys:  /system boot-chain files read from disk", 78);
+    mouse_init();
         usb_init();
         {
             char ul[96];

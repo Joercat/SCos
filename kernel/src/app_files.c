@@ -41,24 +41,10 @@ static void files_load(struct files *f)
 {
     for (int i = 0; i < 64; i++) f->synth[i] = 0;
     f->notice = 0;
-    /* system files are terminal-only: the file manager never exposes them */
-    if (!strncmp(f->path, "/system", 7)) {
-        f->n = 0;
-        f->notice = 1;
-        return;
-    }
+    /* /system is a real directory now: true copies of the boot chain,
+     * readable and editable from here and from the terminal */
     struct vfs_node *dir = vfs_lookup(f->path);
     f->n = dir ? vfs_list(dir, f->names, 64) : 0;
-    if (!strcmp(f->path, "/") || !strcmp(f->path, "")) {
-        for (int i = 0; i < f->n; i++) {
-            if (!strcmp(f->names[i], "system")) {
-                for (int j = i; j < f->n - 1; j++)
-                    memcpy(f->names[j], f->names[j + 1], VFS_NAME);
-                f->n--;
-                i--;
-            }
-        }
-    }
     /* the desktop folder mirrors the desktop: app shortcuts + pins */
     if (path_is_desktop(f->path)) {
         int cnt = wm_desk_vis_count();
@@ -258,9 +244,7 @@ static void files_paint(struct window *w)
         s_clip_text(s, 34, y + 4, f->names[i], t->text, s->w - 44);
     }
     if (!f->n)
-        s_text(s, 12, LIST_Y + 10, f->notice ?
-               "(system directory - hidden here, use the terminal)" :
-               "(empty directory)", t->text);
+        s_text(s, 12, LIST_Y + 10, "(empty directory)", t->text);
 }
 
 /* -------------------------------------------------------------- input ---- */

@@ -96,6 +96,25 @@ static const char *exc_names[] = {
     "Alignment check", "Machine check", "SIMD"
 };
 
+static u32 irq_rate[16];
+static u32 rate_sec;
+
+/* Once per second, any IRQ line that fired far beyond sane rates is
+ * masked once so a misbehaving device cannot eat the whole CPU. */
+static void irq_storm_sweep(void)
+{
+    u32 sec = (u32)(tick_count / 100);
+    if (sec == rate_sec) return;
+    rate_sec = sec;
+    for (int i = 1; i < 16; i++) {
+        if (irq_rate[i] >= 1500) {
+            klog("idt: IRQ %d storm (%u/s) - masking", i, irq_rate[i]);
+            pic_set_mask(i);
+        }
+        irq_rate[i] = 0;
+    }
+}
+
 void isr_handler(struct regs *r)
 {
     if (r->int_no < 32) {
@@ -105,6 +124,10 @@ void isr_handler(struct regs *r)
         kernel_panic_regs(name, r);
     }
     u8 irq = (u8)(r->int_no - 32);
+    if (irq < 16) {
+        irq_rate[irq]++;
+        if (irq == 0) irq_storm_sweep();
+    }
     if (irq_handlers[irq]) irq_handlers[irq](r);
     pic_send_eoi(irq);
 }
