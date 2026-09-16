@@ -34,27 +34,49 @@ static void ata_wait_ready(struct ata_dev *d)
 static int ata_ident(struct ata_dev *d)
 {
     ata_wait_ready(d);
-    outb(d->io + 6, d->slave ? 0xF0 : 0xE0);
+    /* select the drive, then wait ~400 ns before sampling (ATA spec) */
+    outb(d->io + 6, d->slave ? 0xB0 : 0xA0);
+    for (int i = 0; i < 15; i++) inb(d->io + 7);
+    /* signature check on LBA mid/high:
+     *   0x00/0x00 = ATA, 0x3C/0xC3 = ATAPI, 0xFF/0xFF = floating bus.
+     * On AHCI boxes with no legacy emulation every port read returns
+     * 0xFF - the old code happily "identified" four ghost drives there
+     * and then spammed PIO errors for every later access. */
+    u8 lm = inb(d->io + 4), lh = inb(d->io + 5);
+    /* 0xFF/0xFF = floating bus (AHCI boxes with no legacy emulation read
+     * all-ones from every port - the old code "identified" four ghost
+     * drives there and spammed PIO errors). 0x3C/0xC3 = ATAPI: no driver. */
+    if (lm == 0xFF || lh == 0xFF) return 0;
+    if (lm == 0x3C && lh == 0xC3) return 0;
     outb(d->io + 2, 0);
     outb(d->io + 3, 0);
     outb(d->io + 4, 0);
     outb(d->io + 5, 0);
     outb(d->io + 7, 0xEC);
+    int done = 0;
     for (int i = 0; i < 100000; i++) {
         u8 st = inb(d->io + 7);
+        if (st == 0xFF) return 0;                /* bus went away */
         if (st == 0) return 0;
-        if (st & 0x80) continue;
-        if (st & 1) return 0;             /* error */
+        if (st & 0x80) continue;                 /* BSY */
+        if (st & 1) return 0;                    /* error */
+        done = 1;
         break;
     }
+    if (!done) return 0;                         /* BSY stuck: not a drive */
     u16 buf[256];
     for (int i = 0; i < 256; i++) buf[i] = inw(d->io);
+    if (buf[0] == 0xFFFF || buf[0] == 0x0000) return 0;   /* garbage */
     for (int i = 0; i < 20; i++) {
         u16 w = buf[27 + i];
         d->model[i * 2] = (char)(w >> 8);
         d->model[i * 2 + 1] = (char)(w & 0xFF);
     }
     d->model[40] = 0;
+    int printable = 0;
+    for (int i = 0; i < 40; i++)
+        if (d->model[i] >= 32 && d->model[i] <= 126) printable++;
+    if (printable < 4) return 0;                 /* not a real model string */
     for (int i = 39; i >= 0 && d->model[i] == ' '; i--) d->model[i] = 0;
     return 1;
 }

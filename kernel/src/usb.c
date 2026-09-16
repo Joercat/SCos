@@ -370,12 +370,18 @@ static void port_reset(int port)
      * completed reset's PED=1 gets written back as 1 and disables the port
      * (the exact failure seen on the H510M-A: "reset failed (not enabled)"). */
     ps[0] = 1u << 9;                      /* PP: port power */
-    for (int i = 0; i < 4; i++)           /* clear stale change bits */
-        ps[0] = (1u << 21) | (1u << 22) | (1u << 23);
-    ps[0] = 1u << 4;                      /* PR: reset */
+    for (int i = 0; i < 4; i++)           /* clear stale change bits (CSC,
+                                             OCC, PRC, PLC, CEC), keep PP */
+        ps[0] = (1u << 18) | (1u << 20) | (1u << 21) | (1u << 22) | (1u << 23) | (1u << 9);
+    /* PR with PP held on: on controllers where PP is a plain RW bit (not
+     * write-1-only), a bare PR write would cut port power mid-reset - the
+     * device drops off the bus and the reset completes with PED=0. That is
+     * the H510M-A signature: every port "reset failed, device not enabled"
+     * while the keyboard/mouse stay dark. */
+    ps[0] = (1u << 4) | (1u << 9);        /* PR + PP */
     u64 t0 = now_ms();
     while (now_ms() - t0 < 400 && !(ps[0] & (1u << 21))) cpu_hlt();
-    ps[0] = 1u << 21;                     /* clear PRC alone (PED survives) */
+    ps[0] = (1u << 21) | (1u << 9);       /* clear PRC (PED survives), keep PP */
 }
 
 static int port_speed(int port) { return (int)((portsc(port) >> 10) & 0xF); }
@@ -390,8 +396,8 @@ static int enumerate_port(int port)
         if (!enabled && attempt < 2) {
             /* some controllers/ports need a power cycle before the reset
              * sticks: PP off, brief pause, PP on, debounce, clear changes */
-            klog("usb: port %d reset attempt %d failed - power cycling port",
-                 port, attempt + 1);
+            klog("usb: port %d reset attempt %d failed (portsc %08x) - power cycling",
+                 port, attempt + 1, portsc(port));
             volatile u32 *ps = (volatile u32 *)(op + 0x400 + 0x10 * (port - 1));
             ps[0] = 0;                       /* RW bits off (PP, PR); W1C untouched */
             sleep_ms(30);
@@ -402,7 +408,12 @@ static int enumerate_port(int port)
         }
     }
     if (!enabled) {
-        klog("usb: port %d reset failed after 3 attempts (device not enabled)", port);
+        u32 psc = portsc(port);
+        klog("usb: port %d reset failed after 3 attempts", port);
+        klog("usb:   portsc %08x: ccs=%d ped=%d prc=%d csc=%d pls=%u speed=%u pp=%d",
+             psc, (int)(psc & 1), (int)((psc >> 1) & 1), (int)((psc >> 21) & 1),
+             (int)((psc >> 18) & 1), (unsigned)((psc >> 5) & 0xF),
+             (unsigned)((psc >> 10) & 0xF), (int)((psc >> 9) & 1));
         fail_flag = 1;
         return 0;
     }
