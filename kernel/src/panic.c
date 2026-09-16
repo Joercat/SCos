@@ -9,17 +9,6 @@
  */
 #include "scos.h"
 
-static const char *skull_art[] = {
-    "        .----------------.        ",
-    "       /   .--------.     \\       ",
-    "      |   /          \\     |      ",
-    "      |  |   X    X   |    |      ",
-    "      |  |      __    |    |      ",
-    "       \\ |   X X X X  |   /       ",
-    "        '------------'---'        ",
-    "           | |  | |  | |          ",
-};
-
 static void hx(char *out, u32 v)
 {
     static const char d[] = "0123456789abcdef";
@@ -33,17 +22,19 @@ void kernel_panic_info(const char *reason, const char *detail, struct regs *r)
     if (!screen.px) { for (;;) cpu_hlt(); }
 
     fb_clear(0x100000);
+    /* the user's neofetch logo (art.txt), rendered in panic red */
     int y = 40;
-    for (unsigned i = 0; i < sizeof(skull_art) / sizeof(skull_art[0]); i++) {
-        s_text(&screen, 60, y, skull_art[i], 0xFF4444);
+    for (int i = 0; i < neofetch_art_lines; i++) {
+        s_text(&screen, 60, y, neofetch_art[i], 0xFF4444);
         y += 18;
     }
-    s_text_scaled(&screen, 400, 60, "KERNEL", 0xFF4444, 3);
-    s_text_scaled(&screen, 400, 110, "PANIC", 0xFF4444, 3);
+    int tx = 60 + (neofetch_art_width + 3) * 8;
+    s_text_scaled(&screen, tx, 60, "KERNEL", 0xFF4444, 3);
+    s_text_scaled(&screen, tx, 110, "PANIC", 0xFF4444, 3);
 
     y = 210;
-    s_text(&screen, 400, y, reason ? reason : "fatal error", 0xFFFFFF); y += 24;
-    if (detail && detail[0]) { s_text(&screen, 400, y, detail, 0xCCCCCC); y += 24; }
+    s_text(&screen, tx, y, reason ? reason : "fatal error", 0xFFFFFF); y += 24;
+    if (detail && detail[0]) { s_text(&screen, tx, y, detail, 0xCCCCCC); y += 24; }
 
     if (r) {
         const u32 *fr = (const u32 *)r;

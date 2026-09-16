@@ -48,6 +48,12 @@ static void diag_draw(int secs_left)
 static void diag_hold(void)
 {
     u64 t0 = tick_count * 10;
+    /* the click/key that OPENED this screen already stamped input_last_tick;
+     * only a genuinely NEW event (stamp changes while we hold) counts as
+     * "input started working". Comparing against the entry stamp also stops
+     * the old re-show loop where the opening click dismissed the screen a
+     * second later and the button could fire again. */
+    u32 base = input_last_tick;
     int last_secs = -1;
     diag_draw(25);
     for (;;) {
@@ -60,8 +66,7 @@ static void diag_hold(void)
         int secs = 25 - (int)((now - t0) / 1000);
         if (secs <= 0) break;
         /* input arrived while we were watching: success, hand back */
-        if (input_last_tick && input_last_tick >= (u32)(t0 / 10) &&
-            now - t0 > 1000)
+        if (input_last_tick != base && now - t0 > 1000)
             break;
         if (secs != last_secs) {
             diag_draw(secs);

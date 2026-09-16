@@ -16,6 +16,7 @@ static void cal_open(struct window *w, void *arg)
     struct rtc_time rt;
     rtc_read(&rt);
     struct cal *c = palloc(sizeof(*c));
+    if (!c) return;              /* OOM: wm_open_app reports it centrally */
     memset(c, 0, sizeof(*c));
     c->month = rt.mon - 1;
     c->year = rt.year;
@@ -173,7 +174,7 @@ static void cal_mouse(struct window *w, struct mouse_event *e, int x, int y)
 static void cal_key(struct window *w, struct key_event *e) { (void)w; (void)e; }
 
 struct app app_calendar = {
-    .id = "calendar", .title = "Calendar", .icon = ICON_CALENDAR, .single = 0,
+    .uses_data = 1, .id = "calendar", .title = "Calendar", .icon = ICON_CALENDAR, .single = 0,
     .def_w = 600, .def_h = 460,
     .open = cal_open, .paint = cal_paint, .key = cal_key,
     .mouse = cal_mouse, .close = cal_close,

@@ -70,6 +70,7 @@ static void files_load(struct files *f)
 static void files_open(struct window *w, void *arg)
 {
     struct files *f = palloc(sizeof(struct files));
+    if (!f) return;              /* OOM: wm_open_app reports it centrally */
     memset(f, 0, sizeof(*f));
     if (arg) strncpy(f->path, (char *)arg, sizeof(f->path) - 1);
     else strcpy(f->path, "/");
@@ -351,7 +352,7 @@ static void files_key(struct window *w, struct key_event *e)
 }
 
 struct app app_files = {
-    .id = "files", .title = "File Explorer", .icon = ICON_FOLDER, .single = 0,
+    .uses_data = 1, .id = "files", .title = "File Explorer", .icon = ICON_FOLDER, .single = 0,
     .def_w = 700, .def_h = 500,
     .open = files_open, .paint = files_paint, .key = files_key,
     .mouse = files_mouse, .close = files_close,

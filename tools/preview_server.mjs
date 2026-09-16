@@ -116,6 +116,18 @@ document.getElementById("btn_full").onclick = () => {
     const el = document.getElementById("screen_container");
     (el.requestFullscreen || el.webkitRequestFullscreen || function(){}).call(el);
 };
+/* v86's built-in MouseAdapter forwards DOM wheel with a sign that reaches the
+ * guest inverted relative to the harness convention (browser scroll-down must
+ * scroll the terminal down). Grab wheel first (capture phase), stop v86's
+ * bubble listener, and send the corrected notch ourselves. */
+window.addEventListener("wheel", (e) => {
+    if (!emu) return;
+    let d = e.deltaY;
+    if (e.deltaMode === 1) d *= 16;        /* lines  */
+    else if (e.deltaMode === 2) d *= 100;  /* pages */
+    const notch = d > 0 ? 1 : d < 0 ? -1 : 0;
+    if (notch) { e.preventDefault(); e.stopPropagation(); emu.bus.send("mouse-wheel", [notch, 0]); }
+}, { capture: true, passive: false });
 start();
 </script>
 </body>

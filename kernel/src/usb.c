@@ -71,6 +71,7 @@ static int n_devs;
 static int fail_flag, hub_count;
 static volatile u32 cc_code = 0xFF;
 static volatile u32 cc_slot;
+static volatile int cc_valid;
 static char status_line[96];
 static u8 desc_buf[512];
 
@@ -101,6 +102,13 @@ static int proc_events(void)
     for (int guard = 0; guard < 128; guard++) {
         volatile u32 *t = evt_ring + (u32)evt_idx * 4;
         if ((t[3] & 1) != evt_cycle) break;
+        /* hand the consumed slot back to the controller: ERDP with the
+         * Event Handler Busy bit, or the ring reports Full after 63
+         * events and the xHC stops posting anything */
+        {
+            volatile u32 *erdp = (volatile u32 *)(rt + 0x20 + 0x18);
+            wr64(erdp, (u64)PA(&evt_ring[evt_idx]) | (1ull << 3));
+        }
         u32 type = (t[3] >> 10) & 0x3F;
         work = 1;
         if (type == TRB_LINK) {          /* our own link: wrap the consumer */
@@ -111,8 +119,11 @@ static int proc_events(void)
             continue;
         }
         if (type == EV_CMDCOMP) {
-            cc_code = (t[2] >> 24) & 0xFF;
-            cc_slot = (t[3] >> 24) & 0xFF;
+            cc_code = (t[2] >> 24) & 0xFF;      /* completion code: status dw */
+            cc_slot = (t[0] >> 24) & 0xFF;      /* slot id: PARAMETER dword,
+                                                 * not dword3 (that is the TRB
+                                                 * type - always 33 here!) */
+            cc_valid = 1;
         } else if (type == EV_TRANSFER) {
             u32 slot = (t[3] >> 24) & 0xFF;
             u32 ep = (t[3] >> 16) & 0x1F;
@@ -180,9 +191,10 @@ static int wait_event(u64 timeout_ms)
     u64 t0 = now_ms();
     cc_code = 0xFF;
     cc_slot = 0;
+    cc_valid = 0;
     while (now_ms() - t0 < timeout_ms) {
         proc_events();
-        if (cc_slot && !(cc_slot & 0x10000u)) return (int)cc_code;
+        if (cc_valid) return (int)cc_code;
         cpu_hlt();
     }
     return -1;
@@ -243,7 +255,7 @@ static int ctrl_xfer(int slot, u8 rt_, u8 rq, u16 val, u16 idx,
     stat[0] = 0; stat[1] = 0; stat[2] = 0;
     stat[3] = (TRB_STATUS << 10) | (1u << 5) |
               (len ? (in ? 0u : (1u << 16)) : (1u << 16)) | d->ep0_cycle;
-    cc_code = 0xFF; cc_slot = 0;
+    cc_code = 0xFF; cc_slot = 0; cc_valid = 0;
     ring_db((u32)slot, 0);
     u64 t0 = now_ms();
     while (now_ms() - t0 < 800) {
@@ -421,12 +433,17 @@ static int enumerate_port(int port)
     klog("usb: port %d connected, speed %d", port, speed);
     if (speed < 1 || speed > 4) return 0;
 
-    if (run_cmd(0, 0, 0, (u32)(TRB_ENABSLOT << 10), 500) != 1) {
-        klog("usb: enable slot failed");
+    int rc = run_cmd(0, 0, 0, (u32)(TRB_ENABSLOT << 10), 500);
+    if (rc != 1) {
+        klog("usb: enable slot failed (code %d usbsts %x)", rc,
+             *(volatile u32 *)(op + 4));
         return 0;
     }
     int slot = (int)cc_slot;
-    if (slot < 1 || slot > MAX_SLOTS || devs[slot].used) return 0;
+    if (slot < 1 || slot > MAX_SLOTS || devs[slot].used) {
+        klog("usb: slot %d unusable (max %d)", slot, MAX_SLOTS);
+        return 0;
+    }
 
     struct xdev *d = &devs[slot];
     d->used = 1;
@@ -445,19 +462,26 @@ static int enumerate_port(int port)
     u8 *ic = inctx[slot];
     ic[0] = 0x03;                                   /* add: slot + ep0 */
     u32 *slw = (u32 *)(ic + csz);
-    slw[0] = (u32)(speed & 0xF) << 20;
-    slw[1] = ((u32)port & 0xFF) << 16 | (1u << 27); /* port, entries = 1 */
+    /* Slot ctx dw0: speed [23:20], Context Entries [31:27] = 1 (EP0 only).
+     * dw1: Root Hub Port Number [23:16]. (Entries used to be OR-ed into
+     * dw1 bit 27 - reserved there, and 0 entries in dw0 made every
+     * Address Device command invalid.) */
+    slw[0] = ((u32)(speed & 0xF) << 20) | (1u << 27);
+    slw[1] = ((u32)port & 0xFF) << 16;
     u32 mps = (speed == 4) ? 9 : 64;
     u32 *epw = (u32 *)(ic + csz * 2);               /* ep ctx index 2 = EP ID 0 */
-    epw[0] = (3u << 16) | (3u << 1) | (4u << 3);    /* interval, CErr, control */
-    epw[1] = mps;
+    /* EP ctx (xHCI 6.2.3): dw1 = EP Type [5:3] (4 = control), CErr [2:1],
+     * Max Packet Size [31:16]; dw2/3 = dequeue | DCS; dw4 = Avg TRB Len */
+    epw[0] = 0;                                     /* state: disabled */
+    epw[1] = (4u << 3) | (3u << 1) | ((u32)mps << 16);
     epw[2] = PA(d->ep0) | 1;
     epw[3] = 0;
     epw[4] = 8;
 
-    if (run_cmd(PA(ic), 0, 0,
-                (u32)(TRB_ADDRDEV << 10) | ((u32)slot << 24), 800) != 1) {
-        klog("usb: address device failed (port %d)", port);
+    rc = run_cmd(PA(ic), 0, 0,
+                 (u32)(TRB_ADDRDEV << 10) | ((u32)slot << 24), 800);
+    if (rc != 1) {
+        klog("usb: address device failed (port %d code %d)", port, rc);
         d->used = 0;
         return 0;
     }
@@ -530,17 +554,20 @@ static int enumerate_port(int port)
     memset(ic, 0, csz * 8);
     ic[0] = 0x01 | (1u << 5);        /* add slot + ep ctx index 5 (EP ID 3) */
     slw = (u32 *)(ic + csz);
-    slw[0] = (u32)(speed & 0xF) << 20;
-    slw[1] = ((u32)port & 0xFF) << 16 | (4u << 27);   /* entries through EP ID 3 */
+    slw[0] = ((u32)(speed & 0xF) << 20) | (4u << 27); /* entries through EPID 3 */
+    slw[1] = ((u32)port & 0xFF) << 16;
     epw = (u32 *)(ic + csz * 5);
-    epw[0] = (6u << 16) | (3u << 1) | (3u << 3);      /* interval, CErr, int IN */
-    epw[1] = (u32)(ep_mps & 0xFFFF);
+    /* dw0: Interval [23:16] = 3 (4 ms FS / 250 us HS polling);
+     * dw1: EP Type [5:3] = 6 (Interrupt IN), CErr [2:1] = 3, MPS [31:16] */
+    epw[0] = (3u << 16);
+    epw[1] = (6u << 3) | (3u << 1) | ((u32)(ep_mps & 0xFFFF) << 16);
     epw[2] = PA(d->inr) | 1;
     epw[3] = 0;
     epw[4] = 16;
-    if (run_cmd(PA(ic), 0, 0,
-                (u32)(TRB_CFGEP << 10) | ((u32)slot << 24), 800) != 1)
-        klog("usb: configure endpoint failed slot %d", slot);
+    rc = run_cmd(PA(ic), 0, 0,
+                 (u32)(TRB_CFGEP << 10) | ((u32)slot << 24), 800);
+    if (rc != 1)
+        klog("usb: configure endpoint failed slot %d (code %d)", slot, rc);
 
     /* pre-queue interrupt IN TRBs (all usable slots), link at the end */
     for (int b = 0; b < IN_TRBS - 1; b++) {
@@ -548,7 +575,11 @@ static int enumerate_port(int port)
         tr[0] = PA(d->in_buf[b]);
         tr[1] = 0;
         tr[2] = 16;
-        tr[3] = (TRB_NORMAL << 10) | d->inr_cycle;
+        /* IOC: get a completion event per report; ISP: also complete on
+         * short packets - an 8-byte keyboard report into a 16-byte buffer
+         * is ALWAYS short, without ISP no event ever fires and input is
+         * silently dead */
+        tr[3] = (TRB_NORMAL << 10) | (1u << 5) | (1u << 2) | d->inr_cycle;
     }
     ring_link(d->inr, IN_TRBS - 1, d->inr_cycle);
     d->inr_cycle ^= 1;
@@ -599,7 +630,6 @@ void usb_init(void)
         u32 lo = bar0 & 0xFFFFFFF0u;
         u32 len = 0;
         {   /* size of the xHCI window itself */
-            u32 b2, l2;
             pci_write32(bus[0], dev[0], fn[0], 0x10, 0xFFFFFFFFu);
             pci_write32(bus[0], dev[0], fn[0], 0x14, 0xFFFFFFFFu);
             u32 mlo = pci_read32(bus[0], dev[0], fn[0], 0x10) & 0xFFFFFFF0u;
@@ -638,6 +668,8 @@ void usb_init(void)
     cap = (volatile u8 *)(bar0 & ~0xFu);
     u32 caplen = *(volatile u32 *)cap & 0xFF;
     u32 hcs1 = *(volatile u32 *)(cap + 4);
+    u32 hcs2 = *(volatile u32 *)(cap + 8);
+    u32 maxsp = (hcs2 >> 21) & 0x1F;      /* Max Scratchpad Buffers */
     u32 hcc1 = *(volatile u32 *)(cap + 0x10);
     u32 dboff = *(volatile u32 *)(cap + 0x14) & ~0x3u;
     u32 rtsoff = *(volatile u32 *)(cap + 0x18) & ~0x1Fu;
@@ -682,7 +714,7 @@ void usb_init(void)
     if (cmd[0] & 1) {
         cmd[0] &= ~1u;
         u64 t0 = now_ms();
-        while (now_ms() - t0 < 100 && !(sts[0] & (1u << 2))) cpu_hlt();
+        while (now_ms() - t0 < 100 && !(sts[0] & 1u)) cpu_hlt();  /* HCHalted */
     }
     cmd[0] |= 1u << 1;                       /* HCRST */
     u64 t0 = now_ms();
@@ -699,6 +731,20 @@ void usb_init(void)
 
     dcbaa = (volatile u64 *)palloc(4096);
     memset((void *)dcbaa, 0, 4096);
+    if (maxsp) {
+        /* DCBAA entry 0 must point at the scratchpad buffer array or every
+         * command fails with a Host Controller Error on controllers that
+         * declare MaxScratchpadBuffers > 0 */
+        u64 *spa = (u64 *)palloc(4096);
+        if (spa) {
+            for (u32 i = 0; i < maxsp; i++) {
+                void *sb = palloc(4096);
+                spa[i] = sb ? (u64)PA(sb) : 0;
+            }
+            dcbaa[0] = (u64)PA(spa);
+            klog("usb: %u scratchpad buffers allocated", maxsp);
+        }
+    }
     wr64((volatile u32 *)(op + 0x30), (u64)PA(dcbaa));
 
     cmd_ring = (volatile u32 *)palloc(4096);
@@ -717,19 +763,21 @@ void usb_init(void)
     erst[2] = EVT_TRBS;
     erst[3] = 0;
     volatile u32 *ir = (volatile u32 *)(rt + 0x20);
-    ir[2] = 1;                               /* ERSTSZ */
-    ir[3] = EVT_TRBS;                        /* event ring size */
+    ir[2] = 1;                               /* ERSTSZ (0x2C is reserved:
+                                                never write it) */
     wr64(ir + 4, (u64)PA(erst));             /* ERSTBA */
     wr64(ir + 6, (u64)PA(evt_ring));         /* ERDP */
 
     cmd[0] = 1;                              /* run */
     t0 = now_ms();
-    while (now_ms() - t0 < 100 && (sts[0] & (1u << 2))) cpu_hlt();
-    if (sts[0] & (1u << 2)) {
+    while (now_ms() - t0 < 100 && (sts[0] & 1u)) cpu_hlt();       /* HCHalted */
+    if (sts[0] & 1u) {
         strcpy(status_line, "usb: xHCI would not start");
-        klog("%s", status_line);
+        klog("%s (usbsts %x)", status_line, sts[0]);
         return;
     }
+    if (sts[0] & (1u << 12))
+        klog("usb: WARNING host controller error (usbsts %x)", sts[0]);
     have_xhci = 1;
 
     /* Power EVERY port unconditionally, like every real OS does. Connect

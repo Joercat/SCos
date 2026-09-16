@@ -179,6 +179,7 @@ static void sm_open(struct window *w, void *arg)
 {
     (void)arg;
     struct smon *m = palloc(sizeof(*m));
+    if (!m) return;              /* OOM: wm_open_app reports it centrally */
     memset(m, 0, sizeof(*m));
     m->sel = -1;
     m->hover_btn = 0;
@@ -191,7 +192,7 @@ static void sm_close(struct window *w)
 }
 
 struct app app_sysmon = {
-    .id = "sysmon", .title = "System Monitor", .icon = ICON_CHART, .single = 1,
+    .uses_data = 1, .id = "sysmon", .title = "System Monitor", .icon = ICON_CHART, .single = 1,
     .def_w = 640, .def_h = 480,
     .open = sm_open, .paint = sm_paint, .key = sm_key,
     .mouse = sm_mouse, .tick = sm_tick, .close = sm_close,

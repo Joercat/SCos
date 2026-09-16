@@ -29,6 +29,7 @@ static void st_open(struct window *w, void *arg)
 {
     (void)arg;
     struct settings_ui *ui = palloc(sizeof(*ui));
+    if (!ui) return;             /* OOM: wm_open_app reports it centrally */
     ui->hover_tile = -1;
     ui->hover_reset = -1;
     w->data = ui;
@@ -214,8 +215,8 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
 static void st_key(struct window *w, struct key_event *e) { (void)w; (void)e; }
 
 struct app app_settings = {
-    .id = "settings", .title = "Settings", .icon = ICON_SETTINGS, .single = 0,
-    .def_w = 620, .def_h = 480,
+    .uses_data = 1, .id = "settings", .title = "Settings", .icon = ICON_SETTINGS, .single = 0,
+    .def_w = 620, .def_h = 600, .min_w = 430, .min_h = 580,
     .open = st_open, .paint = st_paint, .key = st_key,
     .mouse = st_mouse, .close = st_close,
 };

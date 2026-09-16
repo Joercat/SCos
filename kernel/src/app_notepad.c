@@ -16,9 +16,11 @@ struct notepad {
 static void np_open(struct window *w, void *arg)
 {
     struct notepad *np = palloc(sizeof(*np));
+    if (!np) return;             /* OOM: wm_open_app reports it centrally */
     memset(np, 0, sizeof(*np));
     np->cap = 4096;
     np->text = palloc(np->cap);
+    if (!np->text) { pfree(np, sizeof(*np)); return; }
     np->text[0] = 0;
     np->hover_btn = -1;
     np->scroll = 0;
@@ -255,7 +257,7 @@ static void np_mouse(struct window *w, struct mouse_event *e, int x, int y)
 }
 
 struct app app_notepad = {
-    .id = "notepad", .title = "Notepad", .icon = ICON_NOTEPAD, .single = 0,
+    .uses_data = 1, .id = "notepad", .title = "Notepad", .icon = ICON_NOTEPAD, .single = 0,
     .def_w = 700, .def_h = 500,
     .open = np_open, .paint = np_paint, .key = np_key,
     .mouse = np_mouse, .close = np_close,

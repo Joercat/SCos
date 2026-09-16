@@ -339,6 +339,7 @@ static void sl_open(struct window *w, void *arg)
 {
     (void)arg;
     struct sol *g = palloc(sizeof(*g));
+    if (!g) return;              /* OOM: wm_open_app reports it centrally */
     memset(g, 0, sizeof(*g));
     struct rtc_time rt;
     rtc_read(&rt);
@@ -356,7 +357,7 @@ static void sl_close(struct window *w)
 }
 
 struct app app_solitaire = {
-    .id = "solitaire", .title = "Solitaire", .icon = ICON_SOL, .single = 1,
+    .uses_data = 1, .id = "solitaire", .title = "Solitaire", .icon = ICON_SOL, .single = 1,
     .def_w = 700, .def_h = 500,
     .open = sl_open, .paint = sl_paint, .key = sl_key,
     .mouse = sl_mouse, .close = sl_close,

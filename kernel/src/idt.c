@@ -128,6 +128,8 @@ void isr_handler(struct regs *r)
         irq_rate[irq]++;
         if (irq == 0) irq_storm_sweep();
     }
-    if (irq_handlers[irq]) irq_handlers[irq](r);
-    pic_send_eoi(irq);
+    if (irq < 16) {
+        if (irq_handlers[irq]) irq_handlers[irq](r);
+        pic_send_eoi(irq);
+    }
 }

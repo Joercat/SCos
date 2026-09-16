@@ -1019,6 +1019,7 @@ static void term_open(struct window *w, void *arg)
 {
     (void)arg;
     struct term *t = palloc(sizeof(struct term));
+    if (!t) return;              /* OOM: wm_open_app reports it centrally */
     memset(t, 0, sizeof(*t));
     strcpy(t->cwd, "/");
     t->scroll = -1;
@@ -1310,7 +1311,7 @@ static void term_tick(struct window *w)
 }
 
 struct app app_terminal = {
-    .id = "terminal", .title = "Terminal", .icon = ICON_TERMINAL, .single = 0,
+    .uses_data = 1, .id = "terminal", .title = "Terminal", .icon = ICON_TERMINAL, .single = 0,
     .def_w = 700, .def_h = 450,
     .open = term_open, .paint = term_paint, .key = term_key,
     .mouse = term_mouse, .tick = term_tick, .close = term_close,

@@ -69,6 +69,7 @@ u32  cpu_thread_count(void);
 u32  cpu_signature(void);
 
 /* pci */
+u8   pci_read8(u8 bus, u8 dev, u8 fn, u8 off);
 u32  pci_read32(u8 bus, u8 dev, u8 fn, u8 off);
 void pci_write32(u8 bus, u8 dev, u8 fn, u8 off, u32 v);
 int  pci_find_class(u8 class, u8 subclass, u8 progif,
@@ -79,6 +80,7 @@ void usb_poll(void);
 void usb_status(char *out, int max);
 int  usb_diag_flag(void);
 void diag_run(void);
+int  is_v86_box(void);              /* running inside the v86 emulator box? */
 void diag_manual(void);
 void error_screen(const char *subsys, const char *msg,
                   const char *const *dump, int ndump);
@@ -312,6 +314,8 @@ struct app {
     int  icon;
     int  single;                    /* only one instance */
     int  def_w, def_h;              /* default window size */
+    int  min_w, min_h;              /* smallest usable size (0 = 320x200) */
+    int  uses_data;                 /* open() must set w->data (OOM check) */
     void (*open)(struct window *w, void *arg);   /* arg: app-specific (e.g. file path) */
     void (*paint)(struct window *w);
     void (*key)(struct window *w, struct key_event *e);

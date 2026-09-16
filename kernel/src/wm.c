@@ -137,10 +137,10 @@ static void win_alloc_buf(struct window *w)
     int cw = wm_content_w(w), ch = wm_content_h(w);
     if (cw < 8) cw = 8;
     if (ch < 8) ch = 8;
-    w->surf.px = palloc(cw * ch * 4);
+    w->surf.px = palloc((u32)cw * ch * 4);
     w->surf.w = cw;
     w->surf.h = ch;
-    memset(w->surf.px, 0, cw * ch * 4);
+    if (w->surf.px) memset(w->surf.px, 0, (u32)cw * ch * 4);
 }
 
 static void win_free_buf(struct window *w)
@@ -230,8 +230,22 @@ struct window *wm_open_app(const char *app_id, void *arg)
     w->z = ++next_z;
     w->state = WIN_STATE_NORMAL;
     win_alloc_buf(w);
+    if (!w->surf.px) {
+        win_count--;
+        err_notify(app->id,
+                   "Not enough memory to open this window. Close some "
+                   "windows or apps and try again.", NULL, 0);
+        return NULL;
+    }
     w->dirty = 1;
     if (app->open) app->open(w, arg);
+    if (app->uses_data && !w->data) {
+        win_count--;             /* app could not allocate its state */
+        err_notify(app->id,
+                   "Not enough memory to open this app. Close some "
+                   "windows or apps and try again.", NULL, 0);
+        return NULL;
+    }
     focused_w = w;
     wm_full();
     return w;
@@ -303,6 +317,24 @@ static void paint_wallpaper(void)
         memcpy(screen.px, wp_cache.px, (u32)screen_w * screen_h * 4);
     else
         s_fill(&screen, 0, 0, screen_w, screen_h, t->bg_top);
+}
+
+/* restore one rectangle of clean wallpaper into the back buffer (used by
+ * partial repaints to erase stale hover/selection/cursor pixels) */
+static void wp_restore_rect(int x, int y, int w, int h)
+{
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > screen_w) w = screen_w - x;
+    if (y + h > screen_h) h = screen_h - y;
+    if (w <= 0 || h <= 0) return;
+    if (wp_valid) {
+        for (int r = 0; r < h; r++)
+            memcpy(screen.px + (u32)(y + r) * screen_w + x,
+                   wp_cache.px + (u32)(y + r) * screen_w + x, (u32)w * 4);
+    } else {
+        s_fill(&screen, x, y, w, h, theme_current()->bg_top);
+    }
 }
 
 /* ---- desktop items: app launchers + pinned files on a snap grid ---- */
@@ -515,6 +547,8 @@ static void paint_icons(void)
         int x, y, w, h;
         icon_rect(i, &x, &y, &w, &h);
         if (desk_drag == i && desk_drag_moved) { x = mx - desk_drag_ox; y = my - desk_drag_oy; }
+        else wp_restore_rect(x, y, w, h);   /* clean slate: no stale hover,
+                                               selection or cursor pixels */
         if (desk_sel & (1u << i)) {
             s_fill(&screen, x, y, w, h, blend(t->bg_top, t->main, 30));
             s_frame_rect(&screen, x, y, w, h, t->main);
@@ -567,6 +601,7 @@ static void paint_win_chrome(struct window *w)
 
 static void paint_win_content(struct window *w)
 {
+    if (!w->surf.px) return;     /* allocation failed - chrome only */
     s_blit(&screen, &w->surf, w->x + 1, w->y + WIN_TITLEBAR);
 }
 
@@ -613,6 +648,15 @@ static int rect_hits_cursor(int x, int y, int w, int h)
     return cur_have && x < mx + CUR_W && mx < x + w && y < my + CUR_H && my < y + h;
 }
 
+static int dmg_intersects(int x, int y, int w, int h)
+{
+    for (int i = 0; i < ndmg; i++)
+        if (x < dmg[i].x + dmg[i].w && dmg[i].x < x + w &&
+            y < dmg[i].y + dmg[i].h && dmg[i].y < y + h)
+            return 1;
+    return 0;
+}
+
 static void paint_partial(void)
 {
     if (icons_dirty) {
@@ -620,35 +664,61 @@ static void paint_partial(void)
         damage_add(0, 0, screen_w, 16 + 2 * 96 + 24);
         icons_dirty = 0;
     }
-    for (int i = 0; i < win_count; i++) {
-        struct window *w = &wins[i];
-        if (w->state == WIN_STATE_MIN) continue;
-        if (w->dirty && w->app && w->app->paint) {
-            w->app->paint(w);
-            w->dirty = 0;
-            paint_win_content(w);
-            damage_add(w->x + 1, w->y + WIN_TITLEBAR, w->w - 2,
-                       w->h - WIN_TITLEBAR - 1);
+    /* Pass 1: repaint dirty windows bottom-up in z-order, so a higher dirty
+     * window always blits after a lower one it overlaps. */
+    static u8 drawn[MAX_WINDOWS];
+    for (int i = 0; i < win_count; i++) drawn[i] = 0;
+    for (int pass = 0; pass < win_count; pass++) {
+        struct window *lowest = NULL;
+        for (int i = 0; i < win_count; i++) {
+            if (drawn[i] || wins[i].state == WIN_STATE_MIN) continue;
+            if (!lowest || wins[i].z < lowest->z) lowest = &wins[i];
         }
-        if (w->chrome_dirty) {
-            w->chrome_dirty = 0;
+        if (!lowest) break;
+        drawn[lowest - wins] = 1;
+        if (lowest->dirty && lowest->app && lowest->app->paint) {
+            lowest->app->paint(lowest);
+            lowest->dirty = 0;
+            paint_win_content(lowest);
+            damage_add(lowest->x + 1, lowest->y + WIN_TITLEBAR, lowest->w - 2,
+                       lowest->h - WIN_TITLEBAR - 1);
+        }
+        if (lowest->chrome_dirty) {
+            lowest->chrome_dirty = 0;
             /* chrome paints the whole frame background first, so the content
              * surface must be re-blitted over it in the same pass */
-            paint_window(w);
-            damage_add(w->x, w->y, w->w + 4, w->h + 4);
+            paint_window(lowest);
+            damage_add(lowest->x, lowest->y, lowest->w + 4, lowest->h + 4);
         }
     }
-    if (tb_dirty) {
+    /* Pass 2: occlusion repair. Any window overlapping accumulated damage
+     * that was NOT repainted gets re-blitted, so a lower window's repaint
+     * (or icon/cursor erase) can never bleed through a window above it. */
+    for (int i = 0; i < win_count; i++) drawn[i] = 0;
+    for (int pass = 0; pass < win_count; pass++) {
+        struct window *lowest = NULL;
+        for (int i = 0; i < win_count; i++) {
+            if (drawn[i] || wins[i].state == WIN_STATE_MIN) continue;
+            if (!lowest || wins[i].z < lowest->z) lowest = &wins[i];
+        }
+        if (!lowest) break;
+        drawn[lowest - wins] = 1;
+        if (dmg_intersects(lowest->x, lowest->y, lowest->w + 4, lowest->h + 4))
+            paint_window(lowest);
+    }
+    for (int i = 0; i < win_count; i++) drawn[i] = 0;
+    if (tb_dirty || dmg_intersects(0, screen_h - TASKBAR_H, screen_w, TASKBAR_H)) {
         paint_taskbar();
         damage_add(0, screen_h - TASKBAR_H, screen_w, TASKBAR_H);
         tb_dirty = 0;
     }
-    if (menu.active && menu_dirty) {
+    if (menu.active && (menu_dirty || dmg_intersects(menu.x, menu.y, menu.w, menu.h))) {
         paint_menu();
         damage_add(menu.x, menu.y, menu.w, menu.h);
         menu_dirty = 0;
     }
-    if (launch.active && launch_dirty) {
+    if (launch.active && (launch_dirty ||
+        dmg_intersects(8, screen_h - 348, 300, 308))) {
         paint_launcher();
         damage_add(8, screen_h - 348, 300, 308);
         launch_dirty = 0;
@@ -935,8 +1005,13 @@ static void handle_mouse(struct mouse_event *e)
         if (resize_win) {
             struct window *w = resize_win;
             int nw = mx - w->x, nh = my - w->y;
-            if (nw < 320) nw = 320;
-            if (nh < 200) nh = 200;
+            int minw = 320, minh = 200;
+            if (w->app) {
+                if (w->app->min_w > minw) minw = w->app->min_w;
+                if (w->app->min_h > minh) minh = w->app->min_h;
+            }
+            if (nw < minw) nw = minw;
+            if (nh < minh) nh = minh;
             if (nw > screen_w) nw = screen_w;
             if (nh > screen_h - TASKBAR_H) nh = screen_h - TASKBAR_H;
             if (nw != w->w || nh != w->h) {
@@ -1044,8 +1119,10 @@ static void handle_mouse(struct mouse_event *e)
             if (desk_drag_moved) {
                 int gx = (mx - desk_drag_ox + 40 - 16) / 88;
                 int gy = (my - desk_drag_oy + 44 - 16) / 96;
-                if (gx < 0) gx = 0; if (gx > DESK_COLS - 1) gx = DESK_COLS - 1;
-                if (gy < 0) gy = 0; if (gy > DESK_ROWS - 1) gy = DESK_ROWS - 1;
+                if (gx < 0) gx = 0;
+                if (gx > DESK_COLS - 1) gx = DESK_COLS - 1;
+                if (gy < 0) gy = 0;
+                if (gy > DESK_ROWS - 1) gy = DESK_ROWS - 1;
                 if (cell_taken(gx, gy, desk_drag)) {       /* nearest free cell */
                     for (int r = 1; r < 8 && cell_taken(gx, gy, desk_drag); r++)
                         for (int dy = -r; dy <= r && cell_taken(gx, gy, desk_drag); dy++)
@@ -1360,7 +1437,7 @@ void wm_theme_changed(void)
     wm_full();
 }
 
-static int is_v86_box(void)
+int is_v86_box(void)
 {
     const char *m = ata_model();
     return m && strstr(m, "v86");

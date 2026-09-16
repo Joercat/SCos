@@ -219,6 +219,7 @@ static void bj_open(struct window *w, void *arg)
 {
     (void)arg;
     struct bj *b = palloc(sizeof(*b));
+    if (!b) return;              /* OOM: wm_open_app reports it centrally */
     memset(b, 0, sizeof(*b));
     struct rtc_time rt;
     rtc_read(&rt);
@@ -235,7 +236,7 @@ static void bj_close(struct window *w)
 }
 
 struct app app_blackjack = {
-    .id = "blackjack", .title = "Blackjack", .icon = ICON_CARDS, .single = 1,
+    .uses_data = 1, .id = "blackjack", .title = "Blackjack", .icon = ICON_CARDS, .single = 1,
     .def_w = 640, .def_h = 480,
     .open = bj_open, .paint = bj_paint, .key = bj_key,
     .mouse = bj_mouse, .close = bj_close,

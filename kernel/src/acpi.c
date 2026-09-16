@@ -19,6 +19,9 @@ struct rsdp {
 } __attribute__((packed));
 
 static u32 pm1_cnt;
+static u32 pm1_evt;
+static u32 smi_cmd;
+static u8  acpi_enable_val;
 static u16 slp_typa;
 static int acpi_ok;
 
@@ -78,7 +81,19 @@ static int parse_s5(const u8 *dsdt, u32 len)
             while (j < len && (dsdt[j] == 0x08 || dsdt[j] == 0x5B)) j++;
             if (j >= len) return 0;
             if (dsdt[j] == 0x12) {                 /* PackageOp */
-                u32 k = j + 2;
+                /* Package(PkgLength, NumElements, elements...) - the old code
+                 * read j+2, which lands on NumElements (often 4/5) and yields
+                 * a wrong SLP_TYP the firmware silently ignores. Walk the
+                 * real structure: PkgLength (1-4 bytes by its top 2 bits),
+                 * then NumElements, then the first element. */
+                u32 k = j + 1;
+                u8 lb = dsdt[k];
+                if ((lb & 0xC0) == 0x40)      k += 2;
+                else if ((lb & 0xC0) == 0x80) k += 3;
+                else if ((lb & 0xC0) == 0xC0) k += 4;
+                else                          k += 1;
+                k += 1;                        /* NumElements */
+                if (k + 2 >= len) return 0;
                 if (dsdt[k] == 0x0A) slp_typa = dsdt[k + 1];
                 else if (dsdt[k] == 0x0B) slp_typa = dsdt[k + 1] | (dsdt[k + 2] << 8);
                 else slp_typa = dsdt[k];
@@ -101,6 +116,9 @@ void acpi_init(void)
     u32 fadt = find_table(rsdt, xsdt, "FACP");
     if (!fadt) { klog("acpi: no FADT"); return; }
     pm1_cnt = *(u32 *)(fadt + 64);
+    pm1_evt = *(u32 *)(fadt + 56);
+    smi_cmd = *(u32 *)(fadt + 48);
+    acpi_enable_val = *(u8 *)(fadt + 52);
     u32 dsdt = *(u32 *)(fadt + 40);
     if (!pm1_cnt || !dsdt) { klog("acpi: incomplete FADT"); return; }
     u32 dsdt_len = *(u32 *)(dsdt + 4);
@@ -114,7 +132,28 @@ void acpi_init(void)
 
 int acpi_shutdown(void)
 {
-    if (!acpi_ok) return 0;
+    if (!acpi_ok) {
+        /* emulator-only fallback: QEMU/v86-style debug port power-off */
+        if (is_v86_box()) { outw(0x604, 0x2000); sleep_ms(500); }
+        klog("acpi: shutdown unavailable (no ACPI tables)");
+        return 0;
+    }
+    /* make sure the chipset is in ACPI mode (SCI_EN set) - firmware may
+     * hand over in legacy mode, where PM1 writes do nothing */
+    if (!(inw(pm1_cnt) & 1) && smi_cmd && acpi_enable_val) {
+        outb(smi_cmd, acpi_enable_val);
+        for (int i = 0; i < 50 && !(inw(pm1_cnt) & 1); i++) sleep_ms(1);
+    }
+    if (!(inw(pm1_cnt) & 1))
+        klog("acpi: warning - SCI_EN not set, S5 write may be ignored");
+    /* clear pending PM1 status bits, then request S5 */
+    if (pm1_evt) outw(pm1_evt, 0xFFFF);
     outw(pm1_cnt, (u16)((slp_typa << 10) | (1 << 13)));
+    for (int i = 0; i < 30; i++) sleep_ms(10);   /* give SMI time to act */
+    if (pm1_evt) outw(pm1_evt, 0xFFFF);          /* retry once */
+    outw(pm1_cnt, (u16)((slp_typa << 10) | (1 << 13)));
+    for (int i = 0; i < 20; i++) sleep_ms(10);
+    if (is_v86_box()) outw(0x604, 0x2000);
+    klog("acpi: S5 write done but machine still running (slp_typ=%u)", slp_typa);
     return 1;
 }
