@@ -1109,6 +1109,12 @@ static void handle_mouse(struct mouse_event *e)
 
 static void handle_key(struct key_event *e)
 {
+    /* Ctrl+Alt+Del: the escape hatch firmware used to provide */
+    if (e->pressed && e->ctrl && e->alt &&
+        (e->keycode == KEY_DELETE || e->keycode == 0x7F)) {
+        klog("wm: ctrl+alt+del - rebooting");
+        cpu_reboot_8042();
+    }
     if (menu.active && e->pressed && e->keycode == 27) {
         menu.active = 0;
         dirty = 1;

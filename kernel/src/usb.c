@@ -160,7 +160,7 @@ static int proc_events(void)
                 volatile u32 *ps =
                     (volatile u32 *)(op + 0x400 + 0x10 * (port - 1));
                 u32 v = ps[0];
-                ps[0] = v | (1u << 21) | (1u << 22) | (1u << 23);
+                ps[0] = (1u << 21) | (1u << 22) | (1u << 23);
                 if (v & 1) enumerate_port((int)port);   /* hot plug */
             }
         }
@@ -365,15 +365,17 @@ static u32 portsc(int port)
 static void port_reset(int port)
 {
     volatile u32 *ps = (volatile u32 *)(op + 0x400 + 0x10 * (port - 1));
-    ps[0] = ps[0] | (1u << 9);            /* PP: port power */
-    for (int i = 0; i < 4; i++) {         /* clear stale change bits */
-        u32 v = ps[0];
-        ps[0] = v | (1u << 21) | (1u << 22) | (1u << 23);
-    }
-    ps[0] = ps[0] | (1u << 4);            /* PR: reset */
+    /* PORTSC mixes RW, RW1S and RW1C (PED, PRC, PLC, CEC) bits: every write
+     * below sets ONLY the bits it means, never a read-modify-write, or a
+     * completed reset's PED=1 gets written back as 1 and disables the port
+     * (the exact failure seen on the H510M-A: "reset failed (not enabled)"). */
+    ps[0] = 1u << 9;                      /* PP: port power */
+    for (int i = 0; i < 4; i++)           /* clear stale change bits */
+        ps[0] = (1u << 21) | (1u << 22) | (1u << 23);
+    ps[0] = 1u << 4;                      /* PR: reset */
     u64 t0 = now_ms();
     while (now_ms() - t0 < 400 && !(ps[0] & (1u << 21))) cpu_hlt();
-    ps[0] = ps[0] | (1u << 21);           /* clear PRC */
+    ps[0] = 1u << 21;                     /* clear PRC alone (PED survives) */
 }
 
 static int port_speed(int port) { return (int)((portsc(port) >> 10) & 0xF); }
@@ -708,7 +710,7 @@ void usb_init(void)
      * and left keyboards/mice dark. VBUS ramp + attach debounce ~200 ms. */
     for (int p = 1; p <= max_ports; p++) {
         volatile u32 *ps = (volatile u32 *)(op + 0x400 + 0x10 * (p - 1));
-        ps[0] = ps[0] | (1u << 9);              /* PP */
+        ps[0] = 1u << 9;        /* PP alone: PORTSC has W1C bits, never RMW */
     }
     sleep_ms(250);
     {
