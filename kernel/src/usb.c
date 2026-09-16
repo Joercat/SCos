@@ -255,6 +255,106 @@ static int ctrl_xfer(int slot, u8 rt_, u8 rq, u16 val, u16 idx,
     return -1;
 }
 
+
+/* ------------------------------------------------- 32-bit BAR relocation --
+ * Some firmware parks the xHCI registers above 4 GB ("Above 4G decoding"),
+ * which a 32-bit protected-mode kernel cannot reach at all. We can move the
+ * BAR ourselves: map every occupied bus-0 memory window by sizing each BAR,
+ * then pick a free, aligned slot inside the 32-bit MMIO hole (at or above
+ * the lowest occupied MMIO base, so never inside RAM, and below the
+ * LAPIC/IOAPIC/config reserve at 0xF8000000).
+ */
+struct mrange { u32 base, len; };
+static struct mrange occ[24];
+static int n_occ;
+
+static int bar_probe(u8 b, u8 d, u8 f, u8 off, u32 *base, u32 *len)
+{
+    u32 lo = pci_read32(b, d, f, off);
+    *base = *len = 0;
+    if (lo & 0x1) return 0;                       /* IO bar: not our problem */
+    int is64 = ((lo & 0x6) == 0x4);
+    u32 hi = is64 ? pci_read32(b, d, f, off + 4) : 0;
+    pci_write32(b, d, f, off, 0xFFFFFFFFu);       /* size probe */
+    if (is64) pci_write32(b, d, f, off + 4, 0xFFFFFFFFu);
+    u32 mlo = pci_read32(b, d, f, off) & 0xFFFFFFF0u;
+    u32 mhi = is64 ? pci_read32(b, d, f, off + 4) : 0;
+    pci_write32(b, d, f, off, lo);                /* restore */
+    if (is64) pci_write32(b, d, f, off + 4, hi);
+    *base = lo & 0xFFFFFFF0u;
+    if (is64) {
+        if (mhi == 0xFFFFFFFFu) return is64;      /* window > 4 GB: unusable */
+        u64 sz = ~(((u64)mhi << 32) | mlo) + 1;
+        if (!sz || sz > 0xFFFFFFFFu) return is64;
+        *len = (u32)sz;
+    } else {
+        if (!mlo) return 0;
+        *len = ~mlo + 1;
+    }
+    if (!*base) *len = 0;
+    return is64;
+}
+
+static void occ_collect(u8 skip_dev)
+{
+    n_occ = 0;
+    for (u16 d = 0; d < 32; d++) {
+        for (u8 f = 0; f < 8; f++) {
+            u32 id = pci_read32(0, (u8)d, f, 0);
+            if (id == 0xFFFFFFFFu) { if (!f) break; continue; }
+            for (u8 bar = 0; bar < 6; bar++) {
+                u32 base, len;
+                int is64 = bar_probe(0, (u8)d, f, 0x10 + bar * 4, &base, &len);
+                if (is64) bar++;
+                if (!len || !base || base >= 0xF8000000u) continue;
+                if ((u8)d == skip_dev && !f) continue;
+                if (n_occ < 24) { occ[n_occ].base = base; occ[n_occ].len = len; n_occ++; }
+            }
+            if (!(pci_read8(0, (u8)d, f, 0x0E) & 0x80)) break;
+        }
+    }
+}
+
+static int occ_free(u32 base, u32 len)
+{
+    for (int i = 0; i < n_occ; i++) {
+        u32 oe = occ[i].base + occ[i].len;
+        u32 ne = base + len;
+        if (base < oe && occ[i].base < ne) return 0;
+    }
+    return 1;
+}
+
+static u32 relocate_bar(u8 d, u32 bar0, u32 want_len)
+{
+    occ_collect(d);
+    u32 lowest = 0xF8000000u;
+    for (int i = 0; i < n_occ; i++)
+        if (occ[i].base < lowest) lowest = occ[i].base;
+    if (lowest == 0xF8000000u) lowest = 0xA0000000u;
+    if (!want_len) want_len = 0x10000;
+    u32 start = (lowest + want_len - 1) & ~(want_len - 1);
+    for (int tries = 0; tries < 256; tries++, start += want_len) {
+        if (start + want_len > 0xF8000000u) break;
+        if (!occ_free(start, want_len)) continue;
+        pci_write32(0, d, 0, 0x10, start | (bar0 & 0xFu));
+        pci_write32(0, d, 0, 0x14, 0);
+        u32 rb = pci_read32(0, d, 0, 0x10) & 0xFFFFFFF0u;
+        if (rb != start) continue;
+        volatile u32 *c = (volatile u32 *)start;
+        u32 caplen = c[0] & 0xFF;
+        u32 ver = (c[2] >> 16) & 0xFFFF;          /* HCIVERSION */
+        if (caplen < 0x20 || caplen > 0xFF || ver < 0x0096 || ver > 0x0200)
+            continue;                              /* garbage: wrong window */
+        klog("usb: relocated xHCI BAR to %x (len %x, %d mmio windows mapped)",
+             start, want_len, n_occ);
+        return start;
+    }
+    for (int i = 0; i < n_occ && i < 6; i++)
+        klog("pci mmio window %d: %x + %x", i, occ[i].base, occ[i].len);
+    return 0;
+}
+
 /* --------------------------------------------------------- enumeration ---- */
 static u32 portsc(int port)
 {
@@ -464,11 +564,33 @@ void usb_init(void)
     u32 bar0 = pci_read32(bus[0], dev[0], fn[0], 0x10);
     u32 bar0h = pci_read32(bus[0], dev[0], fn[0], 0x14);
     if ((bar0 & 0x6) == 0x4 && bar0h) {
-        strcpy(status_line,
-               "usb: xHCI BAR above 4 GB - 32-bit kernel cannot map it");
-        fail_flag = 1;
-        klog("usb: BAR0 = %x:%x (64-bit, above 4G)", bar0h, bar0 & ~0xFu);
-        return;
+        klog("usb: BAR0 = %x:%x (64-bit, above 4G) - relocating into 32-bit hole",
+             bar0h, bar0 & ~0xFu);
+        u32 lo = bar0 & 0xFFFFFFF0u;
+        u32 len = 0;
+        {   /* size of the xHCI window itself */
+            u32 b2, l2;
+            pci_write32(bus[0], dev[0], fn[0], 0x10, 0xFFFFFFFFu);
+            pci_write32(bus[0], dev[0], fn[0], 0x14, 0xFFFFFFFFu);
+            u32 mlo = pci_read32(bus[0], dev[0], fn[0], 0x10) & 0xFFFFFFF0u;
+            u32 mhi = pci_read32(bus[0], dev[0], fn[0], 0x14);
+            pci_write32(bus[0], dev[0], fn[0], 0x10, lo | (bar0 & 0xF));
+            pci_write32(bus[0], dev[0], fn[0], 0x14, bar0h);
+            if (mhi != 0xFFFFFFFFu) {
+                u64 sz = ~(((u64)mhi << 32) | mlo) + 1;
+                if (sz && sz <= 0xFFFFFFFFu) len = (u32)sz;
+            }
+        }
+        u32 nb = relocate_bar(dev[0], bar0, len);
+        if (!nb) {
+            strcpy(status_line,
+                   "usb: xHCI above 4 GB, no free 32-bit window - disable Above 4G Decoding in BIOS");
+            fail_flag = 1;
+            klog("%s", status_line);
+            return;
+        }
+        bar0 = nb | (bar0 & 0xFu);
+        bar0h = 0;
     }
     if ((bar0 & 0x7) != 0) {
         strcpy(status_line, "usb: xHCI BAR not memory-mapped");
