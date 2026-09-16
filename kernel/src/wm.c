@@ -97,6 +97,7 @@ static void power_menu_cb(int item, void *ud)
 {
     (void)ud;
     sleep_ms(400);
+    usb_kbd_leds_off();                    /* no lit LEDs on standby power */
     if (item == 0) {                       /* Restart */
         cpu_reboot_8042();
         for (;;) cpu_hlt();
@@ -319,6 +320,9 @@ static void paint_wallpaper(void)
         s_fill(&screen, 0, 0, screen_w, screen_h, t->bg_top);
 }
 
+static int icon_band = 232;   /* px height of the icon region actually in use */
+static int in_full;           /* paint_all is running: skip partial restores */
+
 /* restore one rectangle of clean wallpaper into the back buffer (used by
  * partial repaints to erase stale hover/selection/cursor pixels) */
 static void wp_restore_rect(int x, int y, int w, int h)
@@ -539,6 +543,19 @@ static void paint_icons(void)
 {
     const struct theme *t = theme_current();
     icon_hover = -1;
+    /* restore the whole icon band from clean wallpaper, not just the cells:
+     * a cursor burnt into a GAP between cells used to survive the repaint,
+     * get baked into cur_buf as fake "background", and stamp sticky ghost
+     * spots everywhere the cursor went afterwards */
+    int band = 16;
+    for (int i = 0; i < nitems; i++) {
+        if (items[i].hidden) continue;
+        int bot = 16 + items[i].gy * 96 + 88;
+        if (bot > band) band = bot;
+    }
+    band += 8;
+    icon_band = band;
+    if (!in_full) wp_restore_rect(0, 0, screen_w, band);
     /* no hover feedback while dragging/resizing/modally busy: the pointer is
      * occupied and highlighting launch buttons underneath is misleading */
     int interactive = !drag_win && !resize_win && !menu.active && !modal_w;
@@ -547,8 +564,6 @@ static void paint_icons(void)
         int x, y, w, h;
         icon_rect(i, &x, &y, &w, &h);
         if (desk_drag == i && desk_drag_moved) { x = mx - desk_drag_ox; y = my - desk_drag_oy; }
-        else wp_restore_rect(x, y, w, h);   /* clean slate: no stale hover,
-                                               selection or cursor pixels */
         if (desk_sel & (1u << i)) {
             s_fill(&screen, x, y, w, h, blend(t->bg_top, t->main, 30));
             s_frame_rect(&screen, x, y, w, h, t->main);
@@ -661,7 +676,7 @@ static void paint_partial(void)
 {
     if (icons_dirty) {
         paint_icons();
-        damage_add(0, 0, screen_w, 16 + 2 * 96 + 24);
+        damage_add(0, 0, screen_w, icon_band);
         icons_dirty = 0;
     }
     /* Pass 1: repaint dirty windows bottom-up in z-order, so a higher dirty
@@ -883,7 +898,9 @@ static void paint_launcher(void)
 static void paint_all(void)
 {
     paint_wallpaper();
+    in_full = 1;
     paint_icons();
+    in_full = 0;
     /* windows in z order (bottom first) */
     static u8 drawn[MAX_WINDOWS];
     for (int i = 0; i < win_count; i++) drawn[i] = 0;
@@ -978,10 +995,49 @@ static int move_needs_composite(struct window **wout)
     return 0;
 }
 
+/* one frame of a window drag / resize / rubber-band / icon drag: restore the
+ * union region to clean wallpaper, mark everything overlapping it for the
+ * damage compositor, and let paint_partial do a targeted repaint. Replaces
+ * the old full-screen wm_full() per mouse-move (which burned ~80% CPU). */
+static void interact_repaint(int x, int y, int w, int h)
+{
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > screen_w) w = screen_w - x;
+    if (y + h > screen_h) h = screen_h - y;
+    if (w <= 0 || h <= 0) return;
+    wp_restore_rect(x, y, w, h);
+    if (y < icon_band + 8) icons_dirty = 1;
+    for (int i = 0; i < win_count; i++) {
+        struct window *v = &wins[i];
+        if (v->state == WIN_STATE_MIN) continue;
+        if (x < v->x + v->w + 4 && v->x < x + w + 4 &&
+            y < v->y + v->h + 4 && v->y < y + h + 4)
+            v->chrome_dirty = 1;
+    }
+    damage_add(x, y, w, h);
+    dirty = 1;
+}
+
 /* -------------------------------------------------------------- input ---- */
 static void handle_mouse(struct mouse_event *e)
 {
     if (e->type == MEV_MOVE) {
+        /* pre-move geometry for the interaction damage union */
+        int omx = mx, omy = my;
+        int odrag = 0, odx = 0, ody = 0, odw = 0, odh = 0;
+        if (drag_win) {
+            odrag = 1;
+            odx = drag_win->x; ody = drag_win->y;
+            odw = drag_win->w; odh = drag_win->h;
+        }
+        int ores = 0, orx = 0, ory = 0, orw = 0, orh = 0;
+        if (resize_win) {
+            ores = 1;
+            orx = resize_win->x; ory = resize_win->y;
+            orw = resize_win->w; orh = resize_win->h;
+        }
+        int obx1 = band_x1, oby1 = band_y1;
         int sens = prefs_get()->mouse_sens;
         mx += e->dx * sens / 3; my -= e->dy * sens / 3;  /* PS/2: +dy is up */
         if (mx < 0) mx = 0;
@@ -997,7 +1053,6 @@ static void handle_mouse(struct mouse_event *e)
         }
         if (band_active) {
             band_x1 = mx; band_y1 = my;
-            wm_full();
         }
         if (desk_drag >= 0 && !desk_drag_moved &&
             (mx - desk_sx > 6 || mx - desk_sx < -6 || my - desk_sy > 6 || my - desk_sy < -6))
@@ -1028,7 +1083,44 @@ static void handle_mouse(struct mouse_event *e)
             }
         }
         if (drag_win || band_active || resize_win || desk_drag >= 0) {
-            wm_full();
+            int x0 = omx < mx ? omx : mx, y0 = omy < my ? omy : my;
+            int x1 = (omx > mx ? omx : mx) + CUR_W;
+            int y1 = (omy > my ? omy : my) + CUR_H;
+#define UN(ux, uy, uw, uh) do { \
+                int a0_ = (ux), b0_ = (uy), a1_ = (ux) + (uw), b1_ = (uy) + (uh); \
+                if (a0_ < x0) { x0 = a0_; } \
+                if (b0_ < y0) { y0 = b0_; } \
+                if (a1_ > x1) { x1 = a1_; } \
+                if (b1_ > y1) { y1 = b1_; } \
+            } while (0)
+            if (odrag) UN(odx, ody, odw + 4, odh + 4);
+            if (drag_win) UN(drag_win->x, drag_win->y, drag_win->w + 4, drag_win->h + 4);
+            if (ores) UN(orx, ory, orw + 4, orh + 4);
+            if (resize_win) UN(resize_win->x, resize_win->y,
+                               resize_win->w + 4, resize_win->h + 4);
+            if (band_active) {
+                int bx = band_x0 < band_x1 ? band_x0 : band_x1;
+                int by = band_y0 < band_y1 ? band_y0 : band_y1;
+                int bw = (band_x0 < band_x1 ? band_x1 - band_x0 : band_x0 - band_x1) + 2;
+                int bh = (band_y0 < band_y1 ? band_y1 - band_y0 : band_y0 - band_y1) + 2;
+                UN(bx, by, bw, bh);
+                int ox = band_x0 < obx1 ? band_x0 : obx1;
+                int oy = band_y0 < oby1 ? band_y0 : oby1;
+                int ow = (band_x0 < obx1 ? obx1 - band_x0 : band_x0 - obx1) + 2;
+                int oh = (band_y0 < oby1 ? oby1 - band_y0 : band_y0 - oby1) + 2;
+                UN(ox, oy, ow, oh);
+            }
+            if (desk_drag >= 0) {
+                int ix, iy, iw, ih;
+                icon_rect(desk_drag, &ix, &iy, &iw, &ih);
+                UN(ix, iy, iw, ih);
+                if (desk_drag_moved) {
+                    UN(omx - desk_drag_ox, omy - desk_drag_oy, iw + 2, ih + 2);
+                    UN(mx - desk_drag_ox, my - desk_drag_oy, iw + 2, ih + 2);
+                }
+            }
+#undef UN
+            interact_repaint(x0, y0, x1 - x0, y1 - y0);
             return;
         }
         struct window *hw = NULL;

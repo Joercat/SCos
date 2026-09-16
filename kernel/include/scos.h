@@ -81,6 +81,7 @@ void usb_status(char *out, int max);
 int  usb_diag_flag(void);
 void diag_run(void);
 int  is_v86_box(void);              /* running inside the v86 emulator box? */
+void usb_kbd_leds_off(void);        /* drive keyboard LEDs off (shutdown) */
 void diag_manual(void);
 void error_screen(const char *subsys, const char *msg,
                   const char *const *dump, int ndump);

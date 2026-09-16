@@ -20,7 +20,7 @@
  */
 #include "scos.h"
 
-#define MAX_SLOTS 4
+#define MAX_SLOTS 8
 #define CMD_TRBS 64
 #define EVT_TRBS 64
 #define EP0_TRBS 16
@@ -32,6 +32,7 @@
 #define TRB_STATUS      4
 #define TRB_LINK        6
 #define TRB_ENABSLOT    9
+#define TRB_DISABLESLOT 10
 #define TRB_ADDRDEV     11
 #define TRB_CFGEP       12
 #define EV_TRANSFER     32
@@ -119,10 +120,11 @@ static int proc_events(void)
             continue;
         }
         if (type == EV_CMDCOMP) {
-            cc_code = (t[2] >> 24) & 0xFF;      /* completion code: status dw */
-            cc_slot = (t[0] >> 24) & 0xFF;      /* slot id: PARAMETER dword,
-                                                 * not dword3 (that is the TRB
-                                                 * type - always 33 here!) */
+            cc_code = (t[2] >> 24) & 0xFF;      /* completion code: dw2[31:24] */
+            cc_slot = (t[3] >> 24) & 0xFF;      /* slot id: dw3[31:24] (the
+                                                 * TRB type is dw3[15:10]=33;
+                                                 * dw0/1 is the command TRB
+                                                 * pointer, NOT the slot!) */
             cc_valid = 1;
         } else if (type == EV_TRANSFER) {
             u32 slot = (t[3] >> 24) & 0xFF;
@@ -219,6 +221,16 @@ static int run_cmd(u32 d0, u32 d1, u32 d2, u32 d3, u64 timeout)
     }
     *(volatile u32 *)db = 0;             /* command ring doorbell */
     return wait_event(timeout);
+}
+
+/* give an enabled-but-unusable slot back to the controller, or the slot
+ * table fills up and later Enable Slot commands fail (No Slots/Bandwidth) */
+static void disable_slot(int slot)
+{
+    if (slot >= 1 && slot <= MAX_SLOTS) {
+        run_cmd(0, 0, 0, (u32)(TRB_DISABLESLOT << 10) | ((u32)slot << 24), 500);
+        devs[slot].used = 0;
+    }
 }
 
 /* ------------------------------------------------------- control pipe ---- */
@@ -440,10 +452,11 @@ static int enumerate_port(int port)
         return 0;
     }
     int slot = (int)cc_slot;
-    if (slot < 1 || slot > MAX_SLOTS || devs[slot].used) {
+    if (slot < 1 || slot > MAX_SLOTS) {
         klog("usb: slot %d unusable (max %d)", slot, MAX_SLOTS);
         return 0;
     }
+    if (devs[slot].used) disable_slot(slot);   /* stale entry: free and reuse */
 
     struct xdev *d = &devs[slot];
     d->used = 1;
@@ -451,7 +464,7 @@ static int enumerate_port(int port)
     d->ep0 = (volatile u32 *)palloc(4096);
     devctx[slot] = palloc(csz * 4);
     inctx[slot] = palloc(csz * 8);
-    if (!d->ep0 || !devctx[slot] || !inctx[slot]) { d->used = 0; return 0; }
+    if (!d->ep0 || !devctx[slot] || !inctx[slot]) { disable_slot(slot); return 0; }
     memset((void *)d->ep0, 0, 4096);
     memset(devctx[slot], 0, csz * 4);
     memset(inctx[slot], 0, csz * 8);
@@ -482,31 +495,31 @@ static int enumerate_port(int port)
                  (u32)(TRB_ADDRDEV << 10) | ((u32)slot << 24), 800);
     if (rc != 1) {
         klog("usb: address device failed (port %d code %d)", port, rc);
-        d->used = 0;
+        disable_slot(slot);
         return 0;
     }
 
     if (ctrl_xfer(slot, 0x80, 6, 0x0100, 0, desc_buf, 18, 1) != 1) {
         klog("usb: device descriptor failed slot %d", slot);
-        d->used = 0;
+        disable_slot(slot);
         return 0;
     }
     if (ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, 9, 1) != 1) {
         klog("usb: config descriptor failed slot %d", slot);
-        d->used = 0; return 0;
+        disable_slot(slot); return 0;
     }
     if (desc_buf[4] == 9) {
         klog("usb: port %d is a HUB - devices behind hubs are not walked yet",
              port);
         hub_count++;
         fail_flag = 1;
-        d->used = 0;
+        disable_slot(slot);
         return 3;
     }
     u16 tot = (u16)(desc_buf[2] | (desc_buf[3] << 8));
     if (tot > sizeof(desc_buf)) tot = sizeof(desc_buf);
     if (ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, tot, 1) != 1) {
-        d->used = 0; return 0;
+        disable_slot(slot); return 0;
     }
     u8 cfg_val = desc_buf[5];
     int iface = -1, proto = -1, ep_addr = 0, ep_mps = 8;
@@ -533,19 +546,24 @@ static int enumerate_port(int port)
     }
     if (iface < 0 || !ep_addr) {
         klog("usb: slot %d not a boot HID device", slot);
-        d->used = 0;
+        disable_slot(slot);
         return 0;
     }
     ctrl_xfer(slot, 0x00, 9, cfg_val, 0, 0, 0, 0);         /* set configuration */
     ctrl_xfer(slot, 0x21, 0x0B, 0, (u16)iface, 0, 0, 0);   /* boot protocol */
     ctrl_xfer(slot, 0x21, 0x0A, 0, (u16)iface, 0, 0, 0);   /* set idle */
+    if (proto == 1) {
+        u8 leds = 0;   /* BIOS often leaves NumLock lit: SCos has no NumLock
+                        * state, so drive the LEDs off explicitly */
+        ctrl_xfer(slot, 0x21, 0x09, 0x0200, (u16)iface, &leds, 1, 0);
+    }
 
     d->iface = iface;
     d->ep_addr = ep_addr;
     d->kind = (proto == 2) ? 2 : 1;
 
     d->inr = (volatile u32 *)palloc(4096);
-    if (!d->inr) { d->used = 0; return 0; }
+    if (!d->inr) { disable_slot(slot); return 0; }
     memset((void *)d->inr, 0, 4096);
     for (int b = 0; b < IN_TRBS; b++) d->in_buf[b] = palloc(16);
     d->inr_idx = 0;
@@ -566,8 +584,12 @@ static int enumerate_port(int port)
     epw[4] = 16;
     rc = run_cmd(PA(ic), 0, 0,
                  (u32)(TRB_CFGEP << 10) | ((u32)slot << 24), 800);
-    if (rc != 1)
+    if (rc != 1) {
         klog("usb: configure endpoint failed slot %d (code %d)", slot, rc);
+        fail_flag = 1;
+        disable_slot(slot);
+        return 0;
+    }
 
     /* pre-queue interrupt IN TRBs (all usable slots), link at the end */
     for (int b = 0; b < IN_TRBS - 1; b++) {
@@ -591,6 +613,20 @@ static int enumerate_port(int port)
 }
 
 /* -------------------------------------------------------------- public ---- */
+void usb_kbd_leds_off(void)
+{
+    if (!have_xhci) return;
+    for (int sl = 1; sl <= MAX_SLOTS; sl++) {
+        struct xdev *d = &devs[sl];
+        if (d->used && d->kind == 1) {
+            u8 leds = 0;
+            /* HID SET_REPORT(Output) so no LED stays lit on USB standby
+             * power after shutdown */
+            ctrl_xfer(sl, 0x21, 0x09, 0x0200, (u16)d->iface, &leds, 1, 0);
+        }
+    }
+}
+
 void usb_poll(void)
 {
     static u32 hb;

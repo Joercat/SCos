@@ -1300,12 +1300,14 @@ static void term_tick(struct window *w)
     }
     if (t->shutting_down == 1) {
         sleep_ms(1200);
+        usb_kbd_leds_off();
         if (acpi_shutdown()) { /* may return on machines without ACPI */ }
         wm_poweroff_screen();
         for (;;) cpu_hlt();
     }
     if (t->shutting_down == 2) {
         sleep_ms(1200);
+        usb_kbd_leds_off();
         cpu_reboot_8042();
     }
 }
