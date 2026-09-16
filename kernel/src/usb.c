@@ -33,6 +33,7 @@
 #define TRB_LINK        6
 #define TRB_ENABSLOT    9
 #define TRB_DISABLESLOT 10
+#define TRB_EVALCTX     13
 #define TRB_ADDRDEV     11
 #define TRB_CFGEP       12
 #define EV_TRANSFER     32
@@ -130,7 +131,8 @@ static int proc_events(void)
             u32 slot = (t[3] >> 24) & 0xFF;
             u32 ep = (t[3] >> 16) & 0x1F;
             u32 code = (t[2] >> 24) & 0xFF;
-            u32 len = t[2] & 0xFFFFFF;
+            u32 rem = t[2] & 0xFFFFFF;       /* bytes NOT transferred */
+            u32 len = rem <= 16u ? 16u - rem : 0u;
             u32 ptr = t[0];
             cc_code = code;
             cc_slot = slot | (ep << 8) | 0x10000u;
@@ -160,7 +162,11 @@ static int proc_events(void)
                 tr[0] = PA(d->in_buf[d->inr_idx]);
                 tr[1] = 0;
                 tr[2] = 16;
-                tr[3] = (TRB_NORMAL << 10) | d->inr_cycle;
+                /* IOC + ISP exactly like the pre-queued TRBs: without IOC no
+                 * event fires, without ISP the always-short HID report never
+                 * completes - input would die after the first ring lap */
+                tr[3] = (TRB_NORMAL << 10) | (1u << 5) | (1u << 2) |
+                        d->inr_cycle;
                 d->inr_idx++;
                 if (d->inr_idx == IN_TRBS - 1) {
                     d->inr_idx = 0;
@@ -173,7 +179,8 @@ static int proc_events(void)
                 volatile u32 *ps =
                     (volatile u32 *)(op + 0x400 + 0x10 * (port - 1));
                 u32 v = ps[0];
-                ps[0] = (1u << 21) | (1u << 22) | (1u << 23);
+                ps[0] = (1u << 17) | (1u << 18) | (1u << 20) |
+                        (1u << 21) | (1u << 22) | (1u << 23);
                 if (v & 1) enumerate_port((int)port);   /* hot plug */
             }
         }
@@ -196,10 +203,26 @@ static int wait_event(u64 timeout_ms)
     cc_valid = 0;
     while (now_ms() - t0 < timeout_ms) {
         proc_events();
-        if (cc_valid) return (int)cc_code;
+        /* bit16 marks a TRANSFER event - not a command completion */
+        if (cc_valid && !(cc_slot & 0x10000u)) return (int)cc_code;
         cpu_hlt();
     }
     return -1;
+}
+
+/* the xHC halted under us (e.g. after a doorbell/TD error): flip RS back on
+ * and let the command ring resume where it stopped */
+static void xhci_restart(void)
+{
+    volatile u32 *cmdr = (volatile u32 *)op;
+    volatile u32 *sts = (volatile u32 *)(op + 4);
+    if (!(sts[0] & 1u)) return;
+    klog("usb: xHC halted (usbsts %x) - restarting", sts[0]);
+    cmdr[0] |= 1u;                       /* RS */
+    u64 t0 = now_ms();
+    while (now_ms() - t0 < 200 && (sts[0] & 1u)) cpu_hlt();
+    if (sts[0] & 1u) klog("usb: restart FAILED (usbsts %x)", sts[0]);
+    else klog("usb: xHC running again");
 }
 
 static void ring_db(u32 slot, u32 target)
@@ -220,7 +243,9 @@ static int run_cmd(u32 d0, u32 d1, u32 d2, u32 d3, u64 timeout)
         cmd_cycle ^= 1;
     }
     *(volatile u32 *)db = 0;             /* command ring doorbell */
-    return wait_event(timeout);
+    int rc = wait_event(timeout);
+    if (rc < 0) xhci_restart();          /* timed out: un-wedge if halted */
+    return rc;
 }
 
 /* give an enabled-but-unusable slot back to the controller, or the slot
@@ -231,6 +256,25 @@ static void disable_slot(int slot)
         run_cmd(0, 0, 0, (u32)(TRB_DISABLESLOT << 10) | ((u32)slot << 24), 500);
         devs[slot].used = 0;
     }
+}
+
+/* the device's real EP0 max packet size differs from what we assumed at
+ * Address Device time (full/low-speed HID devices usually say 8): patch the
+ * controller's own EP0 context and Evaluate it, the same dance Linux does */
+static int eval_ep0_mps(int slot, u32 mps)
+{
+    u8 *ic = inctx[slot];
+    memset(ic, 0, csz * 34);
+    ic[0] = (1u << 1);                       /* Add EP0 (DCI 1) only */
+    memcpy(ic + csz * 2, devctx[slot] + csz, csz);  /* devctx: [0]=slot [1]=EP0 */
+    u32 *epw = (u32 *)(ic + csz * 2);
+    epw[1] = (epw[1] & 0x0000FFFFu) | ((mps & 0xFFFF) << 16);
+    int rc = run_cmd(PA(ic), 0, 0,
+                     (u32)(TRB_EVALCTX << 10) | ((u32)slot << 24), 500);
+    if (rc != 1)
+        klog("usb: evaluate ctx (ep0 mps %u) failed slot %d code %d",
+             mps, slot, rc);
+    return rc;
 }
 
 /* ------------------------------------------------------- control pipe ---- */
@@ -268,7 +312,9 @@ static int ctrl_xfer(int slot, u8 rt_, u8 rq, u16 val, u16 idx,
     stat[3] = (TRB_STATUS << 10) | (1u << 5) |
               (len ? (in ? 0u : (1u << 16)) : (1u << 16)) | d->ep0_cycle;
     cc_code = 0xFF; cc_slot = 0; cc_valid = 0;
-    ring_db((u32)slot, 0);
+    ring_db((u32)slot, 1);      /* DCI 1 = default control pipe (EP0);
+                                 * target 0 is RESERVED on slot doorbells
+                                 * and silently never starts the TD */
     u64 t0 = now_ms();
     while (now_ms() - t0 < 800) {
         proc_events();
@@ -463,11 +509,11 @@ static int enumerate_port(int port)
     d->slot = slot;
     d->ep0 = (volatile u32 *)palloc(4096);
     devctx[slot] = palloc(csz * 4);
-    inctx[slot] = palloc(csz * 8);
+    inctx[slot] = palloc(csz * 34);
     if (!d->ep0 || !devctx[slot] || !inctx[slot]) { disable_slot(slot); return 0; }
     memset((void *)d->ep0, 0, 4096);
     memset(devctx[slot], 0, csz * 4);
-    memset(inctx[slot], 0, csz * 8);
+    memset(inctx[slot], 0, csz * 34);
     d->ep0_idx = 0;
     d->ep0_cycle = 1;
     dcbaa[slot] = (u64)PA(devctx[slot]);
@@ -499,13 +545,32 @@ static int enumerate_port(int port)
         return 0;
     }
 
-    if (ctrl_xfer(slot, 0x80, 6, 0x0100, 0, desc_buf, 18, 1) != 1) {
-        klog("usb: device descriptor failed slot %d", slot);
+    int drc = ctrl_xfer(slot, 0x80, 6, 0x0100, 0, desc_buf, 18, 1);
+    if (drc != 1 && drc != 13) {   /* 13 = Success with Short Packet: normal
+                                    * when the device's EP0 packets are
+                                    * smaller than the 64 we assumed */
+        klog("usb: device descriptor failed slot %d (code %d)", slot, drc);
         disable_slot(slot);
         return 0;
     }
-    if (ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, 9, 1) != 1) {
-        klog("usb: config descriptor failed slot %d", slot);
+    {   /* FS/LS devices cut the fetch short at their real EP0 max packet
+         * (usually 8): honor it and refetch, or the config descriptor read
+         * desyncs the pipe */
+        u32 mps0 = desc_buf[7];
+        if (speed != 4 && (mps0 == 8 || mps0 == 16 || mps0 == 32)) {
+            if (eval_ep0_mps(slot, mps0) == 1) {
+                drc = ctrl_xfer(slot, 0x80, 6, 0x0100, 0, desc_buf, 18, 1);
+                if (drc != 1 && drc != 13) {
+                    klog("usb: descriptor refetch failed slot %d", slot);
+                    disable_slot(slot);
+                    return 0;
+                }
+            }
+        }
+    }
+    drc = ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, 9, 1);
+    if (drc != 1 && drc != 13) {
+        klog("usb: config descriptor failed slot %d (code %d)", slot, drc);
         disable_slot(slot); return 0;
     }
     if (desc_buf[4] == 9) {
@@ -518,7 +583,9 @@ static int enumerate_port(int port)
     }
     u16 tot = (u16)(desc_buf[2] | (desc_buf[3] << 8));
     if (tot > sizeof(desc_buf)) tot = sizeof(desc_buf);
-    if (ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, tot, 1) != 1) {
+    drc = ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, tot, 1);
+    if (drc != 1 && drc != 13) {
+        klog("usb: full config descriptor failed slot %d (code %d)", slot, drc);
         disable_slot(slot); return 0;
     }
     u8 cfg_val = desc_buf[5];
@@ -569,12 +636,13 @@ static int enumerate_port(int port)
     d->inr_idx = 0;
     d->inr_cycle = 1;
 
-    memset(ic, 0, csz * 8);
-    ic[0] = 0x01 | (1u << 5);        /* add slot + ep ctx index 5 (EP ID 3) */
+    u32 dci = (u32)(ep_addr * 2 + 1);        /* EP 0x81 -> DCI 3, 0x82 -> 5 */
+    memset(ic, 0, csz * 34);
+    ic[0] = 0x01 | (1u << dci);              /* Add: slot ctx + this EP ctx */
     slw = (u32 *)(ic + csz);
-    slw[0] = ((u32)(speed & 0xF) << 20) | (4u << 27); /* entries through EPID 3 */
+    slw[0] = ((u32)(speed & 0xF) << 20) | (dci << 27); /* Context Entries = last DCI */
     slw[1] = ((u32)port & 0xFF) << 16;
-    epw = (u32 *)(ic + csz * 5);
+    epw = (u32 *)(ic + csz * (dci + 1));     /* input ctx array: index DCI+1 */
     /* dw0: Interval [23:16] = 3 (4 ms FS / 250 us HS polling);
      * dw1: EP Type [5:3] = 6 (Interrupt IN), CErr [2:1] = 3, MPS [31:16] */
     epw[0] = (3u << 16);
