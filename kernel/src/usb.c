@@ -60,6 +60,9 @@ struct xdev {
     u32 route;                /* xHCI route string (hub path) */
     u8 root_port;             /* root hub port number */
     u8 mtt;                   /* FS/LS child of a multi-TT HS hub */
+    u8 tt_slot;               /* TT Hub Slot ID: slot of the HS hub this
+                               * FS/LS device hangs under (0 = none) */
+    u8 tt_port;               /* TT Port Number: our port on that hub */
     u8 speed;                 /* xHCI port speed id (1 FS 2 LS 3 HS 4 SS) */
     u8 tier;                  /* hub tiers above it (0 = on the root hub) */
     u8 is_hub;
@@ -94,7 +97,9 @@ static char status_line[128];
 /* ring-24 forensics: counted and shown on the status line / diagnostics */
 static u32 evt_seen;        /* events consumed from the ring */
 static u32 evt_hcevent;     /* Host Controller Events (TRB type 37) */
-static u32 ring_full_hits;  /* code-17 (Event Ring Full) sightings */
+static u32 ring_full_hits;  /* code-21 (Event Ring Full) sightings - 21 is
+                             * the real ring-full code; 17 = Parameter Error
+                             * (invalid input-context field, Intel-strict) */
 static u32 restart_count;   /* xHC restarts after a halt */
 static u8 desc_buf[512];
 
@@ -135,7 +140,7 @@ static int proc_events(void)
              * an event earlier (ring full). dw2[31:24] carries the code. */
             u32 hc = (t[2] >> 24) & 0xFF;
             evt_hcevent++;
-            if (hc == 17) ring_full_hits++;
+            if (hc == 21) ring_full_hits++;
             klog("usb: HC event code %u (ring-full total %u)",
                  hc, ring_full_hits);
         } else if (type == EV_CMDCOMP) {
@@ -145,7 +150,7 @@ static int proc_events(void)
                                                  * dw0/1 is the command TRB
                                                  * pointer, NOT the slot!) */
             cc_valid = 1;
-            if (cc_code == 17) ring_full_hits++;
+            if (cc_code == 21) ring_full_hits++;
         } else if (type == EV_TRANSFER) {
             u32 slot = (t[3] >> 24) & 0xFF;
             u32 ep = (t[3] >> 16) & 0x1F;
@@ -253,13 +258,21 @@ static int wait_event(u64 timeout_ms)
          * cc_want_slot rejects stale/foreign completions entirely */
         if (cc_valid && !(cc_slot & 0x10000u) &&
             (!cc_want_slot || (cc_slot & 0xFF) == (u32)cc_want_slot)) {
-            if (cc_code == 17) {
+            if (cc_code == 21) {
                 /* Event-Ring-Full Error completion: the command stalled
                  * while the ring was jammed; its true completion follows
                  * once space frees (we drain every loop). Keep waiting. */
-                klog("usb: cmd completion code 17 (ring full) - waiting on");
+                klog("usb: cmd completion code 21 (ring full) - waiting on");
                 cc_valid = 0;
-            } else return (int)cc_code;
+            } else {
+                /* r25.2: code 17 is PARAMETER ERROR (the xHC rejected an
+                 * input-context field), NOT ring full - decode it on the
+                 * spot so the boot log names the real failure */
+                if (cc_code == 17)
+                    klog("usb: completion code 17 = PARAMETER ERROR"
+                         " (invalid input-context field)");
+                return (int)cc_code;
+            }
         }
         cpu_hlt();
     }
@@ -576,26 +589,50 @@ static struct xdev *slot_alloc(int slot)
     d->ep0_cycle = 1;
     d->reported = 0;
     d->silent_logged = 0;
+    /* stale-state guard: a slot reused after a hub or hub-child device
+     * must not keep the old hub/TT topology fields */
+    d->is_hub = 0;
+    d->hub_ports = 0;
+    d->hub_mtt = 0;
+    d->hub_p2g = 0;
+    d->tt_slot = 0;
+    d->tt_port = 0;
     dcbaa[slot] = (u64)PA(devctx[slot]);
     return d;
 }
 
-/* Address Device with the slot's saved topology (route string, root port,
- * MTT) and the given EP0 max packet size; is_hub sets the Hub bit so the
- * xHC can route children through this slot. */
+/* Address Device with the slot's saved topology and the given EP0 max
+ * packet size.  Linux (xhci_setup_addressable_virt_dev) semantics, which
+ * the Intel xHC enforces:
+ *  - the Hub bit is NEVER set here: Address Device with Hub=1 and no
+ *    Number-of-Ports field is a Parameter Error (code 17) on Intel xHCI
+ *    1.2 - hubs announce themselves later via Configure Endpoint
+ *    (hub_enable), exactly like Linux's xhci_update_hub_device
+ *  - the route string is only evaluated by the xHC for SuperSpeed
+ *  - FS/LS children of an external HS hub carry TT info in slot dw2
+ *    (TT Hub Slot ID | TT Port Number << 8) for split transactions
+ *  - input control context: dw0 = DROP flags, dw1 = ADD flags (xHCI
+ *    spec 6.2.5 / Linux struct xhci_input_control_ctx).  r25.1 wrote
+ *    the add mask into dw0: Address Device tolerates that on Intel,
+ *    Configure Endpoint does not. */
 /* bsr = Block Set Request: build the slot WITHOUT sending SET_ADDRESS
  * on the wire (the device stays reachable at the default address) */
-static int address_slot(struct xdev *d, u32 mps0, int is_hub, int bsr)
+static int address_slot(struct xdev *d, u32 mps0, int bsr)
 {
     u8 *ic = inctx[d->slot];
-    ic[0] = 0x03;                        /* add: slot ctx + ep0 */
+    ((u32 *)ic)[0] = 0;                  /* Drop Context Flags (dw0) */
+    ((u32 *)ic)[1] = 0x03;               /* ADD: slot ctx + ep0 (dw1) */
     u32 *slw = (u32 *)(ic + csz);
-    /* dw0: Route String [19:0], Speed [23:20], MTT [25], Hub [26],
-     * Context Entries [31:27] = 1 (EP0 only); dw1: Root Hub Port [23:16] */
-    slw[0] = (d->route & 0xFFFFFu) | ((u32)(d->speed & 0xF) << 20) |
-             ((u32)(d->mtt & 1) << 25) | ((u32)(is_hub & 1) << 26) |
-             (1u << 27);
+    /* dw0: Route String [19:0] (SS only), Speed [23:20], MTT [25],
+     * Context Entries [31:27] = 1 (EP0 only)
+     * dw1: Root Hub Port [23:16] - the ROOT port, even for hub children
+     * dw2: TT Hub Slot [7:0] | TT Port [15:8] (FS/LS behind a HS hub) */
+    slw[0] = ((d->speed == 4) ? (d->route & 0xFFFFFu) : 0u) |
+             ((u32)(d->speed & 0xF) << 20) |
+             ((u32)(d->mtt & 1) << 25) | (1u << 27);
     slw[1] = ((u32)d->root_port & 0xFF) << 16;
+    slw[2] = (u32)d->tt_slot | ((u32)d->tt_port << 8);
+    slw[3] = 0;                          /* dev_state: xHC-owned */
     u32 *epw = (u32 *)(ic + csz * 2);
     epw[0] = 0;                          /* state: disabled */
     epw[1] = (4u << 3) | (3u << 1) | ((mps0 & 0xFFFF) << 16);
@@ -650,9 +687,41 @@ static int hub_port_reset(struct xdev *h, int p)
 /* reset + enumerate one connected downstream port of hub h */
 static int hub_attach(struct xdev *h, int p);
 
-/* full hub bring-up: the slot was already addressed with Hub=1 (the
- * BSR bootstrap learned the class before the real Address Device), so
- * all that remains is config, hub descriptor, port power and the walk.
+/* Linux xhci_update_hub_device, in spirit: once the hub descriptor is
+ * known, a Configure Endpoint command re-adds the slot context with the
+ * Hub bit set - plus the fields Intel validates for hubs that cannot
+ * exist at Address-Device time:
+ *   dw1[31:24] Number of Ports  (xHCI 1.2 table 6-8, hubs only)
+ *   dw2[17:16] TT Think Time    (8/16/24/32-FS-bit-times encoding, from
+ *                                wHubCharacteristics bits 6:5)
+ *   dw0[25]    MTT              (hub has multiple TTs)
+ * The slot context starts from the xHC's own OUT copy (like Linux's
+ * xhci_slot_copy from out_ctx), dev_state is zeroed, and only the slot
+ * flag is ADDed - the EP contexts stay zero and are ignored. */
+static int hub_enable(struct xdev *d, int nports, int ttt, int multi)
+{
+    u8 *ic = inctx[d->slot];
+    u32 *out_slot = (u32 *)devctx[d->slot];   /* xHC-maintained slot ctx */
+    memset(ic, 0, csz * 34);
+    ((u32 *)ic)[0] = 0;                  /* Drop Context Flags (dw0) */
+    ((u32 *)ic)[1] = 0x01;               /* ADD: slot ctx only (dw1) */
+    u32 *slw = (u32 *)(ic + csz);
+    slw[0] = out_slot[0] | (1u << 26) | ((u32)(multi & 1) << 25);
+    slw[1] = (out_slot[1] & 0x00FFFFFFu) | ((u32)(nports & 0xFF) << 24);
+    slw[2] = (out_slot[2] & ~(3u << 16)) | ((u32)(ttt & 3) << 16);
+    slw[3] = 0;
+    int rc = run_cmd(PA(ic), 0, 0,
+                     (u32)(TRB_CFGEP << 10) | ((u32)d->slot << 24),
+                     800, d->slot);
+    klog("usb: hub %d slot-ctx update Hub=1 ports=%d ttt=%d mtt=%d rc %d",
+         d->slot, nports, ttt, multi, rc);
+    return rc == 1;
+}
+
+/* full hub bring-up: the slot was addressed WITHOUT the Hub bit (Intel
+ * rejects Hub=1 at Address-Device time with Parameter Error); the flag
+ * goes in via hub_enable once the hub descriptor has been read, exactly
+ * like Linux.  Then config, port power and the walk.
  * Returns 3 (the "hub" kind). */
 static int hub_walk(struct xdev *d, u8 hproto)
 {
@@ -662,9 +731,6 @@ static int hub_walk(struct xdev *d, u8 hproto)
         fail_flag = 1;
         return 3;
     }
-    if (!d->is_hub)
-        klog("usb: hub %d WARNING: addressed without the Hub bit -"
-             " children may not route", d->slot);
     int ns = d->slot;
     d->hub_mtt = (hproto == 2) ? 1 : 0;
     klog("usb: hub slot %d bring-up (multi-TT %d)", ns, d->hub_mtt);
@@ -694,8 +760,18 @@ static int hub_walk(struct xdev *d, u8 hproto)
     }
     d->hub_ports = (u8)nports;
     d->hub_p2g = (u8)p2g;
+    int chars = (int)(desc_buf[3] | (desc_buf[4] << 8));
     klog("usb: hub %d: %d ports, chars %04x, pwr2good %d ms", ns, nports,
-         (u32)(desc_buf[3] | (desc_buf[4] << 8)), p2g * 2);
+         (u32)chars, p2g * 2);
+    /* announce the hub to the xHC BEFORE any child is addressed: the
+     * children's TT fields point at this slot, and the xHC must already
+     * know it is a hub (Number of Ports included - Intel validates it) */
+    if (!hub_enable(d, nports, (chars >> 5) & 3, d->hub_mtt)) {
+        klog("usb: hub %d: xHC rejected the hub slot context -"
+             " children will not enumerate", ns);
+        fail_flag = 1;
+        return 3;
+    }
     for (int p = 1; p <= nports; p++)
         ctrl_xfer(ns, 0x23, 3, 8, (u16)p, 0, 0, 0);   /* PORT_POWER */
     drain_ms((u32)(p2g * 2 + 110));
@@ -831,6 +907,16 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
     d->mtt = (u8)mtt;
     d->root_port = (u8)root_port;
     d->tier = (u8)tier;
+    /* TT info (Linux xhci_setup_addressable_virt_dev): FS/LS devices
+     * under an external HS hub name the hub's slot and their port on
+     * it, so the xHC can build split-transaction tokens.  HS children
+     * and root-attached devices keep both fields 0. */
+    if (phub && (speed == 1 || speed == 2) && phub->speed == 3) {
+        d->tt_slot = (u8)phub->slot;
+        d->tt_port = (u8)hport;
+        klog("usb: slot %d TT: hub slot %d port %d (FS/LS behind HS hub)",
+             slot, d->tt_slot, d->tt_port);
+    }
     last_enum_slot = slot;
 
     /* USB spec: LS control EP is ALWAYS 8 bytes; HS always 64; SS 512
@@ -842,14 +928,16 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
     /* BSR bootstrap (the Linux method): Address Device with Block Set
      * Request builds the slot WITHOUT sending SET_ADDRESS on the wire.
      * The device still answers at the default address, so we read the
-     * first 8 descriptor bytes to learn the real EP0 max packet size
-     * AND whether this is a hub - then issue the one and only real
-     * Address Device carrying both facts. Every second-touch command
-     * we have tried on an already-addressed device (Evaluate Context
-     * in r23, Disable+re-Address in r25) came back with completion
-     * code 17 on this Intel xHC; addressing exactly once sidesteps it
-     * completely. */
-    rc = address_slot(d, mps, 0, 1);
+     * first 8 descriptor bytes to learn the real EP0 max packet size -
+     * then issue the one and only real Address Device.
+     * r25.2, from the real Linux source: completion code 17 is
+     * PARAMETER ERROR, not "event ring full" (that is 21).  The r25.1
+     * hub failure was our Hub bit in the Address-Device slot context:
+     * Intel wants the Number-of-Ports field with Hub=1, and that only
+     * exists after the hub descriptor is read.  Linux NEVER sets Hub at
+     * address time - it addresses hubs like any device and flips the
+     * Hub bit afterwards with a Configure Endpoint (hub_enable). */
+    rc = address_slot(d, mps, 1);
     if (rc != 1) {
         klog("usb: bootstrap address failed slot %d (code %d)", slot, rc);
         disable_slot(slot);
@@ -864,10 +952,9 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
                  (speed == 4 && mps0 == 9));
     if (have8) {
         devclass = desc_buf[4];
-        klog("usb: slot %d boot8: vid:pid %04x:%04x class %d mps0 %u",
-             slot, (u32)(desc_buf[8] | (desc_buf[9] << 8)),
-             (u32)(desc_buf[10] | (desc_buf[11] << 8)),
-             devclass, mps0);
+        /* only 8 bytes were fetched - vid:pid live in bytes 8..11 and
+         * are reported from the real 18-byte fetch below */
+        klog("usb: slot %d boot8: class %d mps0 %u", slot, devclass, mps0);
     } else {
         klog("usb: slot %d boot8 unusable (code %d b0 %02x b1 %02x mps %u)"
              " - assuming default MPS", slot, drc,
@@ -875,7 +962,7 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
         mps0 = mps;
     }
     if (speed == 4) mps0 = 512;          /* SS: EP0 is always 2^9 */
-    rc = address_slot(d, mps0, devclass == 9, 0);
+    rc = address_slot(d, mps0, 0);       /* Hub bit NEVER goes in here */
     if (rc != 1) {
         klog("usb: address device failed slot %d (code %d)", slot, rc);
         disable_slot(slot);
@@ -980,13 +1067,16 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
 
     u32 dci = (u32)(ep_addr * 2 + 1);        /* EP 0x81 -> DCI 3, 0x82 -> 5 */
     memset(ic, 0, csz * 34);
-    ic[0] = 0x01 | (1u << dci);              /* Add: slot ctx + this EP ctx */
+    ((u32 *)ic)[0] = 0;                      /* Drop Context Flags (dw0) */
+    ((u32 *)ic)[1] = 0x01u | (1u << dci);    /* ADD: slot ctx + this EP */
     slw = (u32 *)(ic + csz);
-    /* keep the FULL topology: dropping route/MTT here would cut a
+    /* keep the FULL topology: dropping route/MTT/TT here would cut a
      * hub-attached device off the moment its interrupt EP is added */
-    slw[0] = (route & 0xFFFFFu) | ((u32)(speed & 0xF) << 20) |
+    slw[0] = ((speed == 4) ? (route & 0xFFFFFu) : 0u) |
+             ((u32)(speed & 0xF) << 20) |
              ((u32)(mtt & 1) << 25) | (dci << 27);
     slw[1] = ((u32)root_port & 0xFF) << 16;
+    slw[2] = (u32)d->tt_slot | ((u32)d->tt_port << 8);
     epw = (u32 *)(ic + csz * (dci + 1));     /* input ctx array: index DCI+1 */
     /* dw0: Interval [23:16] = 3 (4 ms FS / 250 us HS polling);
      * dw1: EP Type [5:3] = 6 (Interrupt IN), CErr [2:1] = 3, MPS [31:16] */
