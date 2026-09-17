@@ -133,13 +133,16 @@ void *palloc(u32 bytes)
 
 static long sim_kbd_reports, sim_mouse_reports;
 
+static u8 sim_m_btn; static i32 sim_m_dx, sim_m_dy, sim_m_wh;
+static u8 sim_k_mod, sim_k_key0;
 void mouse_inject(u8 buttons, i32 dx, i32 dy, i32 wheel)
 {
-    (void)buttons; (void)dx; (void)dy; (void)wheel;
+    sim_m_btn = buttons; sim_m_dx = dx; sim_m_dy = dy; sim_m_wh = wheel;
     sim_mouse_reports++;
 }
 void kbd_inject_hid(u8 mod, const u8 *keys, u8 *prev_keys, u8 *prev_mod)
 {
+    sim_k_mod = mod; sim_k_key0 = keys[0];
     sim_kbd_reports++;
     memcpy(prev_keys, keys, 6);
     *prev_mod = mod;
@@ -382,11 +385,12 @@ static void test_parser(void)
     CHECK(n == 2, "holtek: expected 2 boot ifaces, got %d", n);
     if (n == 2) {
         CHECK(c[0].iface == 0 && c[0].proto == 2 && c[0].ep_addr == 1 &&
-              c[0].ep_mps == 8 && c[0].ep_interval == 1,
-              "holtek iface0: want mouse proto2 ep81 mps8 bInt1, "
-              "got %d/%d/ep%x/%d/bInt%d",
+              c[0].ep_mps == 8 && c[0].ep_interval == 1 &&
+              c[0].rid_len == 67 && c[1].rid_len == 47,
+              "holtek iface0: want mouse proto2 ep81 mps8 bInt1 rdesc 67, "
+              "got %d/%d/ep%x/%d/bInt%d/rd%d",
               c[0].iface, c[0].proto, c[0].ep_addr, c[0].ep_mps,
-              c[0].ep_interval);
+              c[0].ep_interval, c[0].rid_len);
         CHECK(c[1].iface == 1 && c[1].proto == 1 && c[1].ep_addr == 2 &&
               c[1].ep_mps == 8 && c[1].ep_interval == 2,
               "holtek iface1: want kbd proto1 ep82 mps8 bInt2, "
@@ -473,9 +477,20 @@ static void test_interrupt_rings(void)
         h->ep_mps = 8;
         h->binterval = (u8)(j == 0 ? 2 : 1);  /* field: kbd 2, mouse 1 */
         h->inr = (volatile u32 *)palloc(4096);
+        /* r33: model the field devices - reports carry a Report ID
+         * prefix byte, so the payload sits one byte up.  The inject
+         * stubs record what arrived, so a wrong report offset fails
+         * T3 on CONTENT, not just on counts. */
+        h->has_id = 1;
         for (int b = 0; b < IN_TRBS; b++) {
             h->in_buf[b] = palloc(16);
-            h->in_buf[b][1] = 1;      /* recognizable report payload */
+            if (j == 0) {             /* kbd: [ID][mods][rsvd][key...] */
+                h->in_buf[b][0] = 1; h->in_buf[b][1] = 0;
+                h->in_buf[b][2] = 0; h->in_buf[b][3] = 0x04;
+            } else {                  /* mouse: [ID][btn][dx][dy] */
+                h->in_buf[b][0] = 2; h->in_buf[b][1] = 0;
+                h->in_buf[b][2] = 0x5A; h->in_buf[b][3] = 0x3C;
+            }
         }
         h->inr_idx = 0; h->inr_cycle = 1;
         h->link_pend = 0; h->link_pend_cycle = 1;
@@ -519,9 +534,61 @@ static void test_interrupt_rings(void)
           "mouse delivered %ld/500 reports", sim_mouse_reports);
     CHECK(ck->tds == 500 && cm->tds == 500,
           "consumer TD counts %ld/%ld, want 500/500", ck->tds, cm->tds);
+    /* content proof: the Report ID prefix must be skipped, so the axes
+     * and keys arrive from the byte AFTER the ID (r33 field bug: with
+     * off=0 the ID lands in buttons/mods and every axis shifts) */
+    CHECK(sim_m_btn == 0 && sim_m_dx == 0x5A && sim_m_dy == 0x3C,
+          "mouse content wrong: btn %u dx %d dy %d (report ID not "
+          "skipped?)", sim_m_btn, sim_m_dx, sim_m_dy);
+    CHECK(sim_k_mod == 0 && sim_k_key0 == 0x04,
+          "kbd content wrong: mod %u key0 %02x (report ID not skipped?)",
+          sim_k_mod, sim_k_key0);
     printf("  interrupt rings: 2 EPs x 500 reports (~71 laps each) - "
            "kbd %ld, mouse %ld delivered\n",
            sim_kbd_reports, sim_mouse_reports);
+}
+
+/* ===== TEST 5: Report ID detection from report descriptors (r33) ======== */
+/* The r32 field round: mouse axes shifted by one byte and the keyboard
+ * behaved like Ctrl-stuck - both devices prefix a HID Report ID byte to
+ * every report even in boot protocol.  hid_report_id_present() walks the
+ * report descriptor (fetched with GET_DESCRIPTOR 0x22) so the driver knows
+ * to skip the prefix.  These vectors exercise the item walk, truncation
+ * safety and long-item skipping. */
+static void test_report_id(void)
+{
+    static const u8 with_id[] = {      /* mouse desc with Report ID 2 */
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01,
+        0x85, 0x02,                    /* Report ID 2 */
+        0x09, 0x01, 0xA1, 0x00,
+        0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
+        0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x03,
+        0x81, 0x02,
+        0xC0, 0xC0,
+    };
+    static const u8 no_id[] = {        /* plain boot keyboard desc */
+        0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
+        0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7,
+        0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08,
+        0x81, 0x02,
+        0x75, 0x08, 0x95, 0x06, 0x15, 0x00, 0x25, 0x65,
+        0x19, 0x00, 0x29, 0x65, 0x81, 0x00,
+        0xC0,
+    };
+    /* long item: 0xFE, bDataSize=2, bLongTag, 2 data bytes = 5 bytes */
+    static const u8 longitem[] = { 0xFE, 0x02, 0xAA, 0xBB, 0xCC,
+                                   0x85, 0x01 };
+    CHECK(hid_report_id_present(with_id, (int)sizeof(with_id)) == 1,
+          "desc with Report ID tag not detected");
+    CHECK(hid_report_id_present(no_id, (int)sizeof(no_id)) == 0,
+          "plain desc falsely reports IDs");
+    CHECK(hid_report_id_present(with_id, 6) == 0,
+          "truncated before the ID tag must say no ID");
+    CHECK(hid_report_id_present(no_id, 0) == 0, "empty desc");
+    CHECK(hid_report_id_present(longitem, (int)sizeof(longitem)) == 1,
+          "long-item walk missed the ID tag");
+    printf("  report-ID detection: tag walk, truncation + long items\n");
 }
 
 /* ===== TEST 4: EP context words exactly as Linux writes them (r31) ====== */
@@ -595,6 +662,8 @@ int main(int argc, char **argv)
     test_interrupt_rings();
     printf("usb_sim: EP context bytes (r31 root fix)...\n");
     test_ep_ctx();
+    printf("usb_sim: Report ID detection (r33)...\n");
+    test_report_id();
     if (failures) {
         printf("USB SIM: %d FAILURE(S)\n", failures);
         return 1;

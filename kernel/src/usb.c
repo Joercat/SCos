@@ -57,6 +57,8 @@ struct hid_ep {
     u8 binterval;             /* descriptor bInterval (r31: EP ctx interval) */
     u8 ctx_dumped;            /* watchdog one-shot ctx dump done (r31) */
     u8 ev_logged;             /* rate limit for the r32 event log lines */
+    u8 has_id;                /* reports carry a HID Report ID prefix (r33) */
+    u8 rep_logged;            /* rate limit for first-report hex dumps */
     u32 ctx_copy[5];          /* the EP ctx CFGEP got - photo diagnostics */
     u32 dci;                  /* endpoint context index = ep_addr*2+1 */
     volatile u32 *inr;
@@ -231,13 +233,26 @@ static int proc_events(void)
                                      h->kind == 2 ? "mouse" : "keyboard",
                                      h->iface);
                             }
-                            if (h->kind == 2 && len >= 3)
-                                mouse_inject(r[0], (i32)(i8)r[1],
-                                             (i32)(i8)r[2],
-                                             len >= 4 ? (i32)(i8)r[3] : 0);
-                            else if (h->kind == 1 && len >= 8)
-                                kbd_inject_hid(r[0], r + 2, h->prev_keys,
-                                               &h->prev_mod);
+                            /* r33: raw bytes of the first two reports per
+                             * EP, so a future offset/format question is
+                             * answerable from ONE photo - no guessing */
+                            if (h->rep_logged < 2) {
+                                h->rep_logged++;
+                                klog("usb: rep slot %d dci %u len %u id %d: "
+                                     "%02x %02x %02x %02x %02x %02x %02x "
+                                     "%02x %02x", slot, ep, len,
+                                     (u32)h->has_id, r[0], r[1], r[2],
+                                     r[3], r[4], r[5], r[6], r[7], r[8]);
+                            }
+                            int off = h->has_id ? 1 : 0;
+                            if (h->kind == 2 && len >= (u32)off + 3)
+                                mouse_inject(r[off], (i32)(i8)r[off + 1],
+                                             (i32)(i8)r[off + 2],
+                                             len >= (u32)off + 4
+                                                 ? (i32)(i8)r[off + 3] : 0);
+                            else if (h->kind == 1 && len >= (u32)off + 8)
+                                kbd_inject_hid(r[off], r + off + 2,
+                                               h->prev_keys, &h->prev_mod);
                         }
                     }
                     /* Deferred link-TRB maintenance (r28): this event is
@@ -1116,7 +1131,36 @@ static int enumerate_port(int port)
 }
 
 /* a boot-protocol HID interface candidate found in a config descriptor */
-struct hid_cand { int iface, proto, ep_addr, ep_mps, ep_interval; };
+struct hid_cand { int iface, proto, ep_addr, ep_mps, ep_interval, rid_len; };
+
+/* Does the interface's HID report descriptor use Report IDs (tag 0x85)?
+ * PURE LOGIC - unit-tested in tests/usb_sim.c T5.  Devices that do keep
+ * the ID byte prefixed to every report EVEN IN BOOT PROTOCOL (the r33
+ * field round: both the Holtek combo and the Razer keyboard do), which
+ * shifts the boot report by one byte: the ID lands in the buttons/
+ * modifier slot (stuck button / stuck Ctrl) and every axis/key moves one
+ * byte up.  Short-item walk per HID spec 6.2.2: prefix byte, size =
+ * 1<<(b[1:0]) with 3 meaning 4, 0xFE = long item. */
+int hid_report_id_present(const u8 *rd, int len)
+{
+    int off = 0;
+    while (off < len) {
+        u8 p = rd[off];
+        if (p == 0xFE) {                    /* long item */
+            if (off + 2 >= len) return 0;
+            off += 3 + rd[off + 1];
+            continue;
+        }
+        int sz = p & 3u;
+        if (sz == 3) sz = 4;
+        if ((p & 0xFCu) == 0x84u)           /* Report ID (global, tag 0x85
+                                             * includes the size bits:
+                                             * 0x85 = tag 0x84 | size 1) */
+            return 1;
+        off += 1 + sz;
+    }
+    return 0;
+}
 
 /* Parse a full configuration descriptor for boot-protocol HID interfaces
  * (class 3, subclass 1, protocol 1=keyboard / 2=mouse), each paired with
@@ -1161,10 +1205,16 @@ int usb_hid_parse(const u8 *desc, int tot, struct hid_cand *c, int maxc,
                     c[n].ep_addr = 0;
                     c[n].ep_mps = 8;
                     c[n].ep_interval = 1;
+                    c[n].rid_len = 0;
                     open = n;
                     n++;
                 }
             }
+        } else if (dt == 0x21 && dl >= 9 && open >= 0) {
+            /* class HID descriptor: wDescriptorLength of the report
+             * descriptor sits at bytes 7-8 (r33: needed to fetch it and
+             * detect Report-ID-prefixed boot reports) */
+            c[open].rid_len = desc[off + 7] | (desc[off + 8] << 8);
         } else if (dt == 5 && dl >= 7 && open >= 0 && !c[open].ep_addr) {
             u8 ea = desc[off + 2];                       /* endpoint */
             if (ea & 0x80) {
@@ -1431,6 +1481,32 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
         if (!h->binterval) h->binterval = 1;
         h->ctx_dumped = 0;
         h->ev_logged = 0;
+        h->rep_logged = 0;
+        /* r33: fetch the HID report descriptor and detect Report IDs.
+         * Devices that use IDs keep the ID byte prefixed to every report
+         * EVEN IN BOOT PROTOCOL (both field devices do): the ID then lands
+         * in the buttons/modifier slot and shifts every axis/key by one -
+         * exactly the r32 field symptoms (side-to-side motion moving the
+         * cursor vertically, "dead" keyboard = stuck Ctrl + shifted keys,
+         * stuck button = drag storms). */
+        h->has_id = 0;
+        if (cand[j].rid_len >= 1 && cand[j].rid_len <= 256) {
+            static u8 rdesc[256];
+            int rl = cand[j].rid_len;
+            int rrc = ctrl_xfer(slot, 0x81, 6, 0x2200, (u16)cand[j].iface,
+                                rdesc, (u16)rl, 1);
+            if (rrc == 1) {
+                h->has_id = (u8)hid_report_id_present(rdesc, rl);
+                klog("usb: slot %d iface %d report desc %d bytes: %s",
+                     slot, cand[j].iface, rl,
+                     h->has_id ? "reports carry a Report ID prefix"
+                               : "plain boot reports");
+            } else {
+                klog("usb: slot %d iface %d report desc fetch rc %d - "
+                     "assuming plain boot reports",
+                     slot, cand[j].iface, rrc);
+            }
+        }
         h->dci = (u32)(h->ep_addr * 2 + 1);   /* EP 0x81 -> DCI 3 */
         h->inr = (volatile u32 *)palloc(4096);
         if (!h->inr) { h->iface = -1; continue; }

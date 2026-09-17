@@ -19,7 +19,7 @@ static void ab_paint(struct window *w)
 
     int y = 66;
     char line[120];
-    strcpy(line, "SCos 2.0.0 - build r32");
+    strcpy(line, "SCos 2.0.0 - build r33");
     s_text(s, cx - s_text_width(line) / 2, y, line, t->main); y += 24;
 
     s_line(s, 24, y, s->w - 24, y, t->main); y += 14;

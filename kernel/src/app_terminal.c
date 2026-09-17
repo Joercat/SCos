@@ -1014,7 +1014,7 @@ static void run_command(struct term *t, const char *command)
         int ni = 0;
         strcpy(info[ni++], "user@scos");
         strcpy(info[ni++], "---------------------");
-        strcpy(info[ni++], "OS:      SCos 2.0.0 (build r32)");
+        strcpy(info[ni++], "OS:      SCos 2.0.0 (build r33)");
         strcpy(info[ni],   "CPU:     "); strncpy(info[ni] + 9, cpu, 40); ni++;
         strcpy(info[ni],   "Speed:   ");
         fmt_u32(n, cpu_mhz()); strcat(info[ni], n); strcat(info[ni], " MHz (TSC-measured)"); ni++;
