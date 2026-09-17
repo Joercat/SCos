@@ -379,6 +379,7 @@ struct window *wm_open_app(const char *app_id, void *arg);
 void wm_close_window(struct window *w);
 void wm_set_title(struct window *w, const char *title);
 void wm_redraw(struct window *w);
+void wm_request_full(void);     /* full repaint after a held overlay exits */
 void wm_theme_changed(void);
 void wm_focus(struct window *w);
 struct window *wm_focused(void);

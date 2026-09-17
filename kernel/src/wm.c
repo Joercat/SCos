@@ -30,6 +30,13 @@ static int tb_dirty, icons_dirty, menu_dirty, launch_dirty;
 
 static void wm_full(void) { dirty = 1; full_dirty = 1; }
 
+/* held full-screen overlays (diagnostics, error screen) paint straight to
+ * the framebuffer; when they hand control back, the WM's dirty-region
+ * bookkeeping is stale and partial repaints (the taskbar clock) would draw
+ * OVER the leftover overlay until some unrelated event dirtied everything.
+ * Overlay code calls this on exit so the next paint is a full one. */
+void wm_request_full(void) { wm_full(); }
+
 static int mx = 300, my = 300;
 static u8 mbuttons;
 static struct window *drag_win, *resize_win;

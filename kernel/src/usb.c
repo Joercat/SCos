@@ -49,8 +49,15 @@ struct xdev {
     int ep_addr;              /* endpoint number of the interrupt IN ep */
     volatile u32 *ep0;
     int ep0_idx; u32 ep0_cycle;
+    u32 trb_cycle;            /* cycle of the TRB ep0_next just handed out:
+                               * captured BEFORE the wrap flip, because the
+                               * caller stamps the TRB afterwards */
     volatile u32 *inr;
     int inr_idx; u32 inr_cycle;
+    u8 link_pend;             /* interrupt ring: link TRB rewrite deferred
+                               * until the consumer has provably passed the
+                               * previous link (first event of the new lap) */
+    u32 link_pend_cycle;
     u8 *in_buf[IN_TRBS];
     u8 prev_mod;
     u8 prev_keys[6];
@@ -125,6 +132,7 @@ static void ring_link(volatile u32 *ring, int last_idx, u32 cycle)
 static int enumerate_port(int port);
 static int enumerate_device(int root_port, u32 route, int speed, int mtt,
                             int tier, struct xdev *phub, int hport);
+static void ring_db(u32 slot, u32 target);
 
 /* ------------------------------------------------------------- events ---- */
 static int proc_events(void)
@@ -187,6 +195,19 @@ static int proc_events(void)
                     else if (d->kind == 1 && len >= 8)
                         kbd_inject_hid(r[0], r + 2, d->prev_keys, &d->prev_mod);
                 }
+                /* Deferred link-TRB maintenance: the consumer passes the
+                 * link ONCE per lap, asynchronously.  Rewriting it at wrap
+                 * time (when the slot-6 event fires) races the consumer,
+                 * which may still be about to cross it with the OLD lap's
+                 * cycle.  This event is from the NEW lap, so the previous
+                 * link has provably been consumed - only now is the
+                 * rewrite safe.  Without it the consumer meets a stale
+                 * cycle at the link after the first lap and input dies
+                 * permanently after ~14 reports. */
+                if (d->link_pend) {
+                    ring_link(d->inr, IN_TRBS - 1, d->link_pend_cycle);
+                    d->link_pend = 0;
+                }
                 /* round-robin re-arm of the interrupt ring (skip link slot) */
                 volatile u32 *tr = d->inr + (u32)d->inr_idx * 4;
                 tr[0] = PA(d->in_buf[d->inr_idx]);
@@ -199,9 +220,15 @@ static int proc_events(void)
                         d->inr_cycle;
                 d->inr_idx++;
                 if (d->inr_idx == IN_TRBS - 1) {
+                    d->link_pend_cycle = d->inr_cycle;
+                    d->link_pend = 1;
                     d->inr_idx = 0;
                     d->inr_cycle ^= 1;
                 }
+                /* Linux rings the doorbell on every interrupt re-queue: if
+                 * the xHC ever found a not-ready TRB and idled the endpoint,
+                 * only a doorbell restarts it */
+                ring_db(slot, (u32)(d->ep_addr * 2 + 1));
             }
         } else if (type == EV_PORTCHANGE) {
             u32 port = (t[3] >> 24) & 0xFF;
@@ -362,20 +389,36 @@ static void disable_slot(int slot)
  * MPS) uses only commands proven to work on this board. */
 
 /* ------------------------------------------------------- control pipe ---- */
+/* THE ring-wrap bug that killed the hub on real hardware (r28 root cause):
+ * the TRB handed out here belongs to the CURRENT lap and must be stamped
+ * with the CURRENT cycle bit - but the caller stamps it AFTER this function
+ * returns.  When the hand-out crosses the wrap boundary the old code had
+ * already flipped ep0_cycle, so the last usable slot got the NEXT lap's
+ * cycle bit.  The xHC consumer arrives expecting the old cycle, sees a
+ * mismatch, decides the TRB is "not ready" and stops silently - every later
+ * transfer on that ring times out (rc -1) with the device perfectly healthy.
+ * With EP0_TRBS=16 the hub's 15th TRB (first SET_PORT_FEATURE after the
+ * 14-TRB descriptor dance) landed exactly on that slot, every single time,
+ * on every recovery re-enumeration.  v86 never caught it: no xHCI there,
+ * and no root-port device issues enough EP0 TRBs to wrap a ring. */
 static volatile u32 *ep0_next(struct xdev *d)
 {
     volatile u32 *t = d->ep0 + (u32)d->ep0_idx * 4;
+    d->trb_cycle = d->ep0_cycle;      /* lap this slot belongs to */
     d->ep0_idx++;
     if (d->ep0_idx == EP0_TRBS - 1) {
-        ring_link(d->ep0, EP0_TRBS - 1, d->ep0_cycle);
+        ring_link(d->ep0, EP0_TRBS - 1, d->trb_cycle);
         d->ep0_idx = 0;
         d->ep0_cycle ^= 1;
     }
     return t;
 }
 
-static int ctrl_xfer(int slot, u8 rt_, u8 rq, u16 val, u16 idx,
-                     u8 *buf, u16 len, int in)
+/* to_ms: completion wait budget; kick: run xhci_restart() on timeout
+ * (enumeration wants the un-wedge, the 1 Hz background probe must not
+ * stall the window manager for ~1 s per silent port). */
+static int ctrl_xfer_to(int slot, u8 rt_, u8 rq, u16 val, u16 idx,
+                        u8 *buf, u16 len, int in, u32 to_ms, int kick)
 {
     struct xdev *d = &devs[slot];
     volatile u32 *setup = ep0_next(d);
@@ -383,31 +426,37 @@ static int ctrl_xfer(int slot, u8 rt_, u8 rq, u16 val, u16 idx,
     setup[1] = (u32)idx | ((u32)len << 16);
     setup[2] = 8;
     setup[3] = (TRB_SETUP << 10) | (1u << 6) |
-               (len ? (in ? 3u : 2u) << 16 : 0) | d->ep0_cycle;
+               (len ? (in ? 3u : 2u) << 16 : 0) | d->trb_cycle;
     if (len) {
         volatile u32 *data = ep0_next(d);
         data[0] = PA(buf);
         data[1] = 0;
         data[2] = len;
-        data[3] = (TRB_DATA << 10) | (in ? (1u << 16) : 0) | d->ep0_cycle;
+        data[3] = (TRB_DATA << 10) | (in ? (1u << 16) : 0) | d->trb_cycle;
     }
     volatile u32 *stat = ep0_next(d);
     stat[0] = 0; stat[1] = 0; stat[2] = 0;
     stat[3] = (TRB_STATUS << 10) | (1u << 5) |
-              (len ? (in ? 0u : (1u << 16)) : (1u << 16)) | d->ep0_cycle;
+              (len ? (in ? 0u : (1u << 16)) : (1u << 16)) | d->trb_cycle;
     cc_code = 0xFF; cc_slot = 0; cc_valid = 0;
     ring_db((u32)slot, 1);      /* DCI 1 = default control pipe (EP0);
                                  * target 0 is RESERVED on slot doorbells
                                  * and silently never starts the TD */
     u64 t0 = now_ms();
-    while (now_ms() - t0 < 800) {
+    while (now_ms() - t0 < to_ms) {
         proc_events();
         if ((cc_slot & 0x10000u) && (cc_slot & 0xFF) == (u32)slot)
             return (int)cc_code;
         cpu_hlt();
     }
-    xhci_restart();                      /* ring-full/halt recovery kick */
+    if (kick) xhci_restart();            /* ring-full/halt recovery kick */
     return -1;
+}
+
+static int ctrl_xfer(int slot, u8 rt_, u8 rq, u16 val, u16 idx,
+                     u8 *buf, u16 len, int in)
+{
+    return ctrl_xfer_to(slot, rt_, rq, val, idx, buf, len, in, 800, 1);
 }
 
 
@@ -588,6 +637,11 @@ static struct xdev *slot_alloc(int slot)
     memset(d->child_slot, 0, sizeof(d->child_slot));
     d->ep0_idx = 0;
     d->ep0_cycle = 1;
+    d->trb_cycle = 1;
+    d->inr_idx = 0;
+    d->inr_cycle = 1;
+    d->link_pend = 0;
+    d->link_pend_cycle = 1;
     d->reported = 0;
     d->silent_logged = 0;
     /* stale-state guard: a slot reused after a hub or hub-child device
@@ -685,7 +739,11 @@ static int hub_port_status_r(int hslot, int p, u32 *st, u32 *chg)
 
 static int hub_port_status(int hslot, int p, u32 *st, u32 *chg)
 {
-    int rc = ctrl_xfer(hslot, 0xA3, 0, 0, (u16)p, desc_buf, 4, 1);
+    /* background 1 Hz probe: SHORT budget and no controller restart -
+     * this runs inside the WM loop (and inside the diag/error hold
+     * loops); an 800 ms stall + restart per silent port froze the whole
+     * UI at a ~3 s cadence behind a deaf hub (r28 field report) */
+    int rc = ctrl_xfer_to(hslot, 0xA3, 0, 0, (u16)p, desc_buf, 4, 1, 120, 0);
     if (rc != 1 && rc != 12 && rc != 13) return rc;
     *st = (u32)(desc_buf[0] | (desc_buf[1] << 8));
     *chg = (u32)(desc_buf[2] | (desc_buf[3] << 8));
@@ -780,8 +838,11 @@ static int hub_recover(int root_port, int dead_slot)
         return -1;              /* -1 = recovery did NOT run */
     }
     hub_recoveries++;
+    int rec_n = hub_recoveries;     /* nested recoveries share the counter;
+                                     * log OUR number or the "result" lines
+                                     * duplicate with the innermost one */
     klog("usb: hub recovery %d: freeing slot %d, resetting root port %d",
-         hub_recoveries, dead_slot, root_port);
+         rec_n, dead_slot, root_port);
     if (dead_slot >= 1 && dead_slot <= MAX_SLOTS && devs[dead_slot].used) {
         for (int i = 0; i < 8; i++) {
             u8 cs = devs[dead_slot].child_slot[i];
@@ -793,7 +854,7 @@ static int hub_recover(int root_port, int dead_slot)
     port_slot[root_port] = 0;
     drain_ms(80);
     int kind = enumerate_port(root_port);
-    klog("usb: hub recovery %d result: kind %d", hub_recoveries, kind);
+    klog("usb: hub recovery %d result: kind %d", rec_n, kind);
     return kind;
 }
 
@@ -864,15 +925,29 @@ static int hub_walk(struct xdev *d, u8 hproto)
      * all four ports were gang-powered (fast code-4 style failures on
      * every GET_PORT_STATUS right after). */
     for (int p = 1; p <= nports; p++) {
-        hub_xfer(ns, 0x23, 3, 8, (u16)p, 0, 0, 0, 3);   /* PORT_POWER */
+        int prc = hub_xfer(ns, 0x23, 3, 8, (u16)p, 0, 0, 0, 3); /* PORT_POWER */
+        if (prc == -1) {
+            /* hub stopped completing transfers: powering the remaining
+             * ports would burn 3 retries x 800 ms each for nothing */
+            klog("usb: hub %d deaf at port %d power-on - skipping rest",
+                 ns, p);
+            break;
+        }
         drain_ms(30);
     }
     drain_ms((u32)(p2g * 2 + 150));
     int alive = 0;
     for (int p = 1; p <= nports; p++) {
         u32 st = 0, chg = 0;
-        if (hub_port_status_r(ns, p, &st, &chg) != 1)
-            continue;               /* hub_xfer already logged rc + port */
+        int prc = hub_port_status_r(ns, p, &st, &chg);
+        if (prc != 1) {             /* hub_xfer already logged rc + port */
+            if (prc == -1) {
+                klog("usb: hub %d deaf at port %d status - skipping rest",
+                     ns, p);
+                break;
+            }
+            continue;
+        }
         alive++;
         klog("usb: hub %d port %d: status %04x change %04x%s", ns, p,
              st, chg, (st & 1) ? " CONNECTED" : "");
@@ -1180,6 +1255,7 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
     for (int b = 0; b < IN_TRBS; b++) d->in_buf[b] = palloc(16);
     d->inr_idx = 0;
     d->inr_cycle = 1;
+    d->link_pend = 0;
 
     u32 dci = (u32)(ep_addr * 2 + 1);        /* EP 0x81 -> DCI 3, 0x82 -> 5 */
     memset(ic, 0, csz * 34);
@@ -1269,10 +1345,19 @@ void usb_poll(void)
     for (int sl = 1; sl <= MAX_SLOTS; sl++) {   /* hub-port hotplug, 1 Hz */
         struct xdev *h = &devs[sl];
         if (!h->used || !h->is_hub) continue;
+        if (h->dead_polls < 0) continue;   /* gave up: NO more probes at all -
+                                            * each one blocks the WM/diag loop
+                                            * for its full timeout */
         int alive = 0;
         for (int p = 1; p <= h->hub_ports && p <= 8; p++) {
             u32 st = 0, chg = 0;
-            if (hub_port_status(sl, p, &st, &chg) != 1) continue;
+            int prc = hub_port_status(sl, p, &st, &chg);
+            if (prc != 1) {
+                /* port 1 timing out means the HUB is silent - probing the
+                 * other ports just multiplies the stall */
+                if (prc == -1 && p == 1) break;
+                continue;
+            }
             alive++;
             if (!(chg & 0x13)) continue;        /* conn/enable/reset changes */
             klog("usb: hub %d port %d change %04x status %04x", sl, p,
@@ -1292,7 +1377,6 @@ void usb_poll(void)
             }
         }
         if (alive) { h->dead_polls = 0; continue; }
-        if (h->dead_polls < 0) continue;          /* gave up already */
         if (++h->dead_polls < 4) continue;
         /* 4 s with no answer on ANY port: the hub died after boot
          * (brownout/wedge).  Revive it from the root port - the

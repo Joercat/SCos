@@ -71,6 +71,9 @@ static void diag_hold(void)
         }
         sleep_ms(60);
     }
+    /* the countdown screen is stale now - make the WM repaint everything,
+     * or its next partial paint (taskbar clock) draws over this screen */
+    wm_request_full();
 }
 
 void diag_run(void)

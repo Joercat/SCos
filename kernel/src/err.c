@@ -120,6 +120,7 @@ void error_screen(const char *subsys, const char *msg,
             if (++elapsed >= 20) break;
         }
     }
+    wm_request_full();      /* dismissed: WM must repaint over this screen */
 }
 
 void err_notify(const char *subsys, const char *msg,
