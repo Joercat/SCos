@@ -41,30 +41,43 @@
 #define EV_CMDCOMP      33
 #define EV_PORTCHANGE   34
 
-struct xdev {
-    int used;
-    int slot;
-    int kind;                 /* 1 = keyboard, 2 = mouse */
-    int iface;
-    int ep_addr;              /* endpoint number of the interrupt IN ep */
-    volatile u32 *ep0;
-    int ep0_idx; u32 ep0_cycle;
-    u32 trb_cycle;            /* cycle of the TRB ep0_next just handed out:
-                               * captured BEFORE the wrap flip, because the
-                               * caller stamps the TRB afterwards */
+#define MAX_HID_EPS 3
+
+/* one boot-protocol HID interface of a device.  Composite devices are the
+ * NORM, not the exception (r29 field capture: the user's Holtek keyboard
+ * presents boot-mouse iface 0 + boot-keyboard iface 1 + a vendor iface;
+ * the Razer presents boot-keyboard iface 0 + consumer-control ifaces).
+ * Every boot interface gets its own interrupt ring and state. */
+struct hid_ep {
+    int active;
+    int iface;                /* bInterfaceNumber */
+    int kind;                 /* 1 = boot keyboard, 2 = boot mouse */
+    u8 ep_addr;               /* IN endpoint number (0x81 -> 1) */
+    u8 ep_mps;
+    u32 dci;                  /* endpoint context index = ep_addr*2+1 */
     volatile u32 *inr;
     int inr_idx; u32 inr_cycle;
-    u8 link_pend;             /* interrupt ring: link TRB rewrite deferred
-                               * until the consumer has provably passed the
-                               * previous link (first event of the new lap) */
+    u8 link_pend;             /* deferred link-TRB rewrite pending (r28) */
     u32 link_pend_cycle;
     u8 *in_buf[IN_TRBS];
     u8 prev_mod;
     u8 prev_keys[6];
     u32 last_rep_tick;
-    u8 reported, silent_logged;
-    u32 arm_tick;             /* tick when the interrupt ring was armed */
-    u8 kick1;                 /* one-shot doorbell nudge already sent */
+    u8 reported, silent_logged, kick1;
+    u32 arm_tick;             /* tick when this ring was armed */
+};
+
+struct xdev {
+    int used;
+    int slot;
+    int kind;                 /* OR of hid[] kinds: 1 kbd, 2 mouse, 3 both */
+    int nhid;                 /* boot-HID interfaces found (hid[0..nhid-1]) */
+    struct hid_ep hid[MAX_HID_EPS];
+    volatile u32 *ep0;
+    int ep0_idx; u32 ep0_cycle;
+    u32 trb_cycle;            /* cycle of the TRB ep0_next just handed out:
+                               * captured BEFORE the wrap flip, because the
+                               * caller stamps the TRB afterwards */
     /* round 25: topology - where this device hangs in the tree */
     u32 route;                /* xHCI route string (hub path) */
     u8 root_port;             /* root hub port number */
@@ -171,66 +184,71 @@ static int proc_events(void)
             u32 ptr = t[0];
             cc_code = code;
             cc_slot = slot | (ep << 8) | 0x10000u;
-            /* devs[slot].inr: until the HID ring is armed, ep_addr==0
-             * would match every EP0 control transfer event (DCI 1) and
-             * the re-arm below would scribble through a NULL ring into
-             * low physical memory - survived only because page 0 is
-             * identity-mapped and holds nothing live anymore */
-            if (slot <= MAX_SLOTS && devs[slot].used && devs[slot].inr &&
-                ep == (u32)(devs[slot].ep_addr * 2 + 1) &&
-                (code == 1 || code == 12 || code == 13)) {
+            /* per-HID-interface rings: an event's EP field (DCI) selects
+             * which boot interface completed.  The pre-r29 code keyed off
+             * a single per-device ep_addr and scribbled low memory when
+             * the ring was not armed - the guard now demands an ACTIVE
+             * hid_ep whose DCI matches. */
+            if (slot <= MAX_SLOTS && devs[slot].used) {
                 struct xdev *d = &devs[slot];
-                int i = -1;
-                for (int b = 0; b < IN_TRBS; b++)
-                    if (PA(d->in_buf[b]) == ptr) i = b;
-                if (i >= 0) {
-                    u8 *r = d->in_buf[i];
-                    d->last_rep_tick = tick_count;
-                    if (!d->reported) {
-                        d->reported = 1;
-                        klog("usb: first report from slot %d (%s)", slot,
-                             d->kind == 2 ? "mouse" : "keyboard");
+                for (int j = 0; j < d->nhid; j++) {
+                    struct hid_ep *h = &d->hid[j];
+                    if (!h->active || !h->inr || ep != h->dci) continue;
+                    if (code == 1 || code == 12 || code == 13) {
+                        int i = -1;
+                        for (int b = 0; b < IN_TRBS; b++)
+                            if (PA(h->in_buf[b]) == ptr) i = b;
+                        if (i >= 0) {
+                            u8 *r = h->in_buf[i];
+                            h->last_rep_tick = tick_count;
+                            if (!h->reported) {
+                                h->reported = 1;
+                                klog("usb: first report from slot %d (%s "
+                                     "iface %d)", slot,
+                                     h->kind == 2 ? "mouse" : "keyboard",
+                                     h->iface);
+                            }
+                            if (h->kind == 2 && len >= 3)
+                                mouse_inject(r[0], (i32)(i8)r[1],
+                                             (i32)(i8)r[2],
+                                             len >= 4 ? (i32)(i8)r[3] : 0);
+                            else if (h->kind == 1 && len >= 8)
+                                kbd_inject_hid(r[0], r + 2, h->prev_keys,
+                                               &h->prev_mod);
+                        }
                     }
-                    if (d->kind == 2 && len >= 3)
-                        mouse_inject(r[0], (i32)(i8)r[1], (i32)(i8)r[2],
-                                     len >= 4 ? (i32)(i8)r[3] : 0);
-                    else if (d->kind == 1 && len >= 8)
-                        kbd_inject_hid(r[0], r + 2, d->prev_keys, &d->prev_mod);
+                    /* Deferred link-TRB maintenance (r28): this event is
+                     * from the new lap, so the consumer has provably
+                     * passed the previous link - only now is rewriting
+                     * it race-free.  Re-arm on EVERY completion (even
+                     * error codes) or producer/consumer positions skew. */
+                    if (h->link_pend) {
+                        ring_link(h->inr, IN_TRBS - 1, h->link_pend_cycle);
+                        h->link_pend = 0;
+                    }
+                    volatile u32 *tr = h->inr + (u32)h->inr_idx * 4;
+                    tr[0] = PA(h->in_buf[h->inr_idx]);
+                    tr[1] = 0;
+                    tr[2] = 16;
+                    /* IOC + ISP exactly like the pre-queued TRBs: without
+                     * IOC no event fires, without ISP the always-short
+                     * HID report never completes - input would die after
+                     * the first ring lap */
+                    tr[3] = (TRB_NORMAL << 10) | (1u << 5) | (1u << 2) |
+                            h->inr_cycle;
+                    h->inr_idx++;
+                    if (h->inr_idx == IN_TRBS - 1) {
+                        h->link_pend_cycle = h->inr_cycle;
+                        h->link_pend = 1;
+                        h->inr_idx = 0;
+                        h->inr_cycle ^= 1;
+                    }
+                    /* Linux rings the doorbell on every interrupt
+                     * re-queue: an endpoint that idled on a not-ready
+                     * TRB only restarts on a doorbell */
+                    ring_db(slot, h->dci);
+                    break;
                 }
-                /* Deferred link-TRB maintenance: the consumer passes the
-                 * link ONCE per lap, asynchronously.  Rewriting it at wrap
-                 * time (when the slot-6 event fires) races the consumer,
-                 * which may still be about to cross it with the OLD lap's
-                 * cycle.  This event is from the NEW lap, so the previous
-                 * link has provably been consumed - only now is the
-                 * rewrite safe.  Without it the consumer meets a stale
-                 * cycle at the link after the first lap and input dies
-                 * permanently after ~14 reports. */
-                if (d->link_pend) {
-                    ring_link(d->inr, IN_TRBS - 1, d->link_pend_cycle);
-                    d->link_pend = 0;
-                }
-                /* round-robin re-arm of the interrupt ring (skip link slot) */
-                volatile u32 *tr = d->inr + (u32)d->inr_idx * 4;
-                tr[0] = PA(d->in_buf[d->inr_idx]);
-                tr[1] = 0;
-                tr[2] = 16;
-                /* IOC + ISP exactly like the pre-queued TRBs: without IOC no
-                 * event fires, without ISP the always-short HID report never
-                 * completes - input would die after the first ring lap */
-                tr[3] = (TRB_NORMAL << 10) | (1u << 5) | (1u << 2) |
-                        d->inr_cycle;
-                d->inr_idx++;
-                if (d->inr_idx == IN_TRBS - 1) {
-                    d->link_pend_cycle = d->inr_cycle;
-                    d->link_pend = 1;
-                    d->inr_idx = 0;
-                    d->inr_cycle ^= 1;
-                }
-                /* Linux rings the doorbell on every interrupt re-queue: if
-                 * the xHC ever found a not-ready TRB and idled the endpoint,
-                 * only a doorbell restarts it */
-                ring_db(slot, (u32)(d->ep_addr * 2 + 1));
             }
         } else if (type == EV_PORTCHANGE) {
             u32 port = (t[3] >> 24) & 0xFF;
@@ -626,9 +644,9 @@ static struct xdev *slot_alloc(int slot)
     d->used = 1;
     d->slot = slot;
     d->kind = 0;
-    d->iface = -1;
-    d->ep_addr = 0;
-    d->inr = 0;
+    d->nhid = 0;
+    memset(d->hid, 0, sizeof(d->hid));
+    for (int j = 0; j < MAX_HID_EPS; j++) d->hid[j].iface = -1;
     d->ep0 = (volatile u32 *)palloc(4096);
     devctx[slot] = palloc(csz * 4);
     inctx[slot] = palloc(csz * 34);
@@ -640,14 +658,6 @@ static struct xdev *slot_alloc(int slot)
     d->ep0_idx = 0;
     d->ep0_cycle = 1;
     d->trb_cycle = 1;
-    d->inr_idx = 0;
-    d->inr_cycle = 1;
-    d->link_pend = 0;
-    d->link_pend_cycle = 1;
-    d->reported = 0;
-    d->silent_logged = 0;
-    d->arm_tick = 0;
-    d->kick1 = 0;
     /* stale-state guard: a slot reused after a hub or hub-child device
      * must not keep the old hub/TT topology fields */
     d->is_hub = 0;
@@ -1082,6 +1092,96 @@ static int enumerate_port(int port)
     return kind;
 }
 
+/* a boot-protocol HID interface candidate found in a config descriptor */
+struct hid_cand { int iface, proto, ep_addr, ep_mps; };
+
+/* Parse a full configuration descriptor for boot-protocol HID interfaces
+ * (class 3, subclass 1, protocol 1=keyboard / 2=mouse), each paired with
+ * its first IN endpoint.  PURE LOGIC except the optional iface log lines -
+ * unit-tested against real field-captured descriptors in tests/usb_sim.c.
+ *
+ * r30 root fix: composite devices are the norm.  The user's Holtek
+ * keyboard presents boot-mouse iface 0 + boot-keyboard iface 1 + a vendor
+ * iface 2 (3/0/0); the Razer presents boot-keyboard iface 0 + two
+ * consumer-control ifaces (3/0/1, 3/0/2).  The old single-slot parser
+ * CLEARED the found boot interface when any later interface was not
+ * bootable ("else iface = -1"), so both devices were rejected with
+ * "not a boot HID device" despite their endpoints being found and logged.
+ * A non-boot interface must only end ITS OWN candidacy - never erase a
+ * completed candidate. */
+int usb_hid_parse(const u8 *desc, int tot, struct hid_cand *c, int maxc,
+                  int logif)
+{
+    int n = 0;
+    int open = -1;          /* candidate still seeking its IN endpoint */
+    int off = 9;            /* skip the config descriptor header */
+    while (off + 2 <= tot) {
+        int dl = desc[off];
+        if (dl < 2) break;              /* 0 or 1 would stall the walk */
+        u8 dt = desc[off + 1];
+        if (dt == 4 && dl >= 9) {                       /* interface */
+            open = -1;
+            int ifn = desc[off + 2], cls = desc[off + 5];
+            int sub = desc[off + 6], proto = desc[off + 7];
+            if (logif)
+                klog("usb:   iface %d alt %d: class %d/%d/%d eps %d%s",
+                     ifn, desc[off + 3], cls, sub, proto, desc[off + 4],
+                     (cls == 3 && sub == 1 && (proto == 1 || proto == 2))
+                         ? " boot-HID" : "");
+            if (cls == 3 && sub == 1 && (proto == 1 || proto == 2)) {
+                int dup = 0;            /* extra alt setting: keep first */
+                for (int j = 0; j < n; j++)
+                    if (c[j].iface == ifn) { dup = 1; break; }
+                if (!dup && n < maxc) {
+                    c[n].iface = ifn;
+                    c[n].proto = proto;
+                    c[n].ep_addr = 0;
+                    c[n].ep_mps = 8;
+                    open = n;
+                    n++;
+                }
+            }
+        } else if (dt == 5 && dl >= 7 && open >= 0 && !c[open].ep_addr) {
+            u8 ea = desc[off + 2];                       /* endpoint */
+            if (ea & 0x80) {
+                c[open].ep_addr = ea & 0xF;
+                c[open].ep_mps = desc[off + 4] | (desc[off + 5] << 8);
+            }
+        }
+        off += dl;
+    }
+    int w = 0;              /* drop boot ifaces that never showed an IN ep */
+    for (int j = 0; j < n; j++)
+        if (c[j].ep_addr) c[w++] = c[j];
+    return w;
+}
+
+/* Pre-queue a boot-HID ring's IN TRBs, terminate with the link and ring
+ * the doorbell.  Shared by enumeration AND the native simulator harness
+ * (tests/usb_sim.c) so the tested code path is the real one. */
+static void hid_arm_ring(struct xdev *d, int j)
+{
+    struct hid_ep *h = &d->hid[j];
+    for (int b = 0; b < IN_TRBS - 1; b++) {
+        volatile u32 *tr = h->inr + (u32)b * 4;
+        tr[0] = PA(h->in_buf[b]);
+        tr[1] = 0;
+        tr[2] = 16;
+        /* IOC: a completion event per report; ISP: complete on the
+         * always-short HID report - without ISP no event ever fires and
+         * input is silently dead */
+        tr[3] = (TRB_NORMAL << 10) | (1u << 5) | (1u << 2) | h->inr_cycle;
+    }
+    ring_link(h->inr, IN_TRBS - 1, h->inr_cycle);
+    h->inr_cycle ^= 1;
+    h->arm_tick = tick_count;
+    h->kick1 = 0;
+    ring_db((u32)d->slot, h->dci);
+    klog("usb: slot %d %s iface %d ep %02x ring armed (doorbell %u)",
+         d->slot, h->kind == 2 ? "mouse" : "keyboard", h->iface,
+         (u32)(0x80 | h->ep_addr), h->dci);
+}
+
 static int enumerate_device(int root_port, u32 route, int speed, int mtt,
                             int tier, struct xdev *phub, int hport)
 {
@@ -1216,84 +1316,96 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
     }
     hexdump("cfg", slot, desc_buf, (int)(tot > 64 ? 64 : tot));
     u8 cfg_val = desc_buf[5];
-    int iface = -1, proto = -1, ep_addr = 0, ep_mps = 8;
-    int off = 9;
-    while (off + 2 <= (int)tot) {
-        u8 dl = desc_buf[off];
-        if (!dl) break;
-        u8 dt = desc_buf[off + 1];
-        if (dt == 4 && dl >= 9) {
-            klog("usb:   iface %d alt %d: class %d/%d/%d eps %d %s",
-                 desc_buf[off + 2], desc_buf[off + 3], desc_buf[off + 5],
-                 desc_buf[off + 6], desc_buf[off + 7], desc_buf[off + 4],
-                 (desc_buf[off + 5] == 3 && desc_buf[off + 6] == 1 &&
-                  desc_buf[off + 7] <= 2) ? "boot-HID candidate" : "");
-            if (desc_buf[off + 5] == 3 && desc_buf[off + 6] == 1 &&
-                (desc_buf[off + 7] == 1 || desc_buf[off + 7] == 2)) {
-                iface = desc_buf[off + 2];
-                proto = desc_buf[off + 7];
-                ep_addr = 0;
-            } else iface = -1;
-        } else if (dt == 5 && dl >= 7 && iface >= 0 && !ep_addr) {
-            u8 ea = desc_buf[off + 2];
-            if (ea & 0x80) {
-                ep_addr = ea & 0xF;
-                ep_mps = desc_buf[off + 4] | (desc_buf[off + 5] << 8);
-                klog("usb:   HID ep %02x IN mps %u", ea, ep_mps);
-            }
-        }
-        off += dl;
-    }
-    if (iface < 0 || !ep_addr) {
+    struct hid_cand cand[MAX_HID_EPS];
+    int ncand = usb_hid_parse(desc_buf, (int)tot, cand, MAX_HID_EPS, 1);
+    for (int j = 0; j < ncand; j++)
+        klog("usb:   boot-HID iface %d proto %d ep %02x IN mps %d",
+             cand[j].iface, cand[j].proto, (u32)(0x80 | cand[j].ep_addr),
+             cand[j].ep_mps);
+    if (!ncand) {
         klog("usb: slot %d not a boot HID device", slot);
         disable_slot(slot);
         return 0;
     }
+
     int srcc;
     srcc = ctrl_xfer(slot, 0x00, 9, cfg_val, 0, 0, 0, 0);  /* set config */
     klog("usb: slot %d SET_CONFIGURATION(%d) rc %d", slot, cfg_val, srcc);
-    srcc = ctrl_xfer(slot, 0x21, 0x0B, 0, (u16)iface, 0, 0, 0); /* boot proto */
-    klog("usb: slot %d SET_PROTOCOL(boot) rc %d", slot, srcc);
-    srcc = ctrl_xfer(slot, 0x21, 0x0A, 0, (u16)iface, 0, 0, 0); /* set idle */
-    klog("usb: slot %d SET_IDLE rc %d", slot, srcc);
-    if (proto == 1) {
-        u8 leds = 0;   /* BIOS often leaves NumLock lit: SCos has no NumLock
-                        * state, so drive the LEDs off explicitly */
-        ctrl_xfer(slot, 0x21, 0x09, 0x0200, (u16)iface, &leds, 1, 0);
+    for (int j = 0; j < ncand; j++) {
+        /* per-interface boot handoff: boot protocol, no idle rate, and
+         * keyboards get their BIOS NumLock LED explicitly extinguished */
+        srcc = ctrl_xfer(slot, 0x21, 0x0B, 0, (u16)cand[j].iface, 0, 0, 0);
+        klog("usb: slot %d iface %d SET_PROTOCOL(boot) rc %d",
+             slot, cand[j].iface, srcc);
+        ctrl_xfer(slot, 0x21, 0x0A, 0, (u16)cand[j].iface, 0, 0, 0);
+        if (cand[j].proto == 1) {
+            u8 leds = 0;
+            ctrl_xfer(slot, 0x21, 0x09, 0x0200, (u16)cand[j].iface,
+                      &leds, 1, 0);
+        }
     }
 
-    d->iface = iface;
-    d->ep_addr = ep_addr;
-    d->kind = (proto == 2) ? 2 : 1;
+    /* allocate one interrupt ring per boot interface */
+    d->nhid = ncand;
+    for (int j = 0; j < ncand; j++) {
+        struct hid_ep *h = &d->hid[j];
+        h->iface = cand[j].iface;
+        h->kind = (cand[j].proto == 2) ? 2 : 1;
+        h->ep_addr = (u8)cand[j].ep_addr;
+        h->ep_mps = (u8)(cand[j].ep_mps & 0xFFFF);
+        h->dci = (u32)(h->ep_addr * 2 + 1);   /* EP 0x81 -> DCI 3 */
+        h->inr = (volatile u32 *)palloc(4096);
+        if (!h->inr) { h->iface = -1; continue; }
+        memset((void *)h->inr, 0, 4096);
+        for (int b = 0; b < IN_TRBS; b++) h->in_buf[b] = palloc(16);
+        if (!h->in_buf[0]) { h->iface = -1; continue; }
+        h->inr_idx = 0;
+        h->inr_cycle = 1;
+        h->link_pend = 0;
+        h->link_pend_cycle = 1;
+        h->active = 1;
+        d->kind |= h->kind;
+    }
+    if (!d->kind) {
+        klog("usb: slot %d ring allocation failed", slot);
+        disable_slot(slot);
+        return 0;
+    }
 
-    d->inr = (volatile u32 *)palloc(4096);
-    if (!d->inr) { disable_slot(slot); return 0; }
-    memset((void *)d->inr, 0, 4096);
-    for (int b = 0; b < IN_TRBS; b++) d->in_buf[b] = palloc(16);
-    d->inr_idx = 0;
-    d->inr_cycle = 1;
-    d->link_pend = 0;
-
-    u32 dci = (u32)(ep_addr * 2 + 1);        /* EP 0x81 -> DCI 3, 0x82 -> 5 */
+    /* ONE Configure Endpoint ADDs every boot EP context - the Linux way
+     * to configure interfaces - keeping the FULL topology: dropping
+     * route/MTT/TT here would cut a hub-attached device off the moment
+     * its interrupt EPs are added */
+    int maxdci = 0;
+    u32 addf = 0x01u;                    /* slot context */
+    for (int j = 0; j < ncand; j++) {
+        struct hid_ep *h = &d->hid[j];
+        if (!h->active) continue;
+        addf |= 1u << h->dci;
+        if ((int)h->dci > maxdci) maxdci = (int)h->dci;
+    }
     memset(ic, 0, csz * 34);
-    ((u32 *)ic)[0] = 0;                      /* Drop Context Flags (dw0) */
-    ((u32 *)ic)[1] = 0x01u | (1u << dci);    /* ADD: slot ctx + this EP */
+    ((u32 *)ic)[0] = 0;                  /* Drop Context Flags (dw0) */
+    ((u32 *)ic)[1] = addf;               /* ADD: slot ctx + every boot EP */
     slw = (u32 *)(ic + csz);
-    /* keep the FULL topology: dropping route/MTT/TT here would cut a
-     * hub-attached device off the moment its interrupt EP is added */
     slw[0] = ((speed == 4) ? (route & 0xFFFFFu) : 0u) |
              ((u32)(speed & 0xF) << 20) |
-             ((u32)(mtt & 1) << 25) | (dci << 27);
+             ((u32)(mtt & 1) << 25) | ((u32)maxdci << 27);
     slw[1] = ((u32)root_port & 0xFF) << 16;
     slw[2] = (u32)d->tt_slot | ((u32)d->tt_port << 8);
-    epw = (u32 *)(ic + csz * (dci + 1));     /* input ctx array: index DCI+1 */
-    /* dw0: Interval [23:16] = 3 (4 ms FS / 250 us HS polling);
-     * dw1: EP Type [5:3] = 6 (Interrupt IN), CErr [2:1] = 3, MPS [31:16] */
-    epw[0] = (3u << 16);
-    epw[1] = (6u << 3) | (3u << 1) | ((u32)(ep_mps & 0xFFFF) << 16);
-    epw[2] = PA(d->inr) | 1;
-    epw[3] = 0;
-    epw[4] = 0;   /* Max Burst: SuperSpeed-only, 0 for FS/LS/HS like Linux */
+    for (int j = 0; j < ncand; j++) {
+        struct hid_ep *h = &d->hid[j];
+        if (!h->active) continue;
+        epw = (u32 *)(ic + csz * (h->dci + 1));
+        /* dw0: Interval [23:16] = 3 (4 ms FS / 500 us HS polling);
+         * dw1: EP Type [5:3] = 6 (Interrupt IN), CErr [2:1] = 3, MPS;
+         * dw4: Max Burst 0 - SuperSpeed-only field, Linux writes 0 */
+        epw[0] = (3u << 16);
+        epw[1] = (6u << 3) | (3u << 1) | ((u32)(h->ep_mps & 0xFFFF) << 16);
+        epw[2] = PA(h->inr) | 1;
+        epw[3] = 0;
+        epw[4] = 0;
+    }
     rc = run_cmd(PA(ic), 0, 0,
                  (u32)(TRB_CFGEP << 10) | ((u32)slot << 24), 800, slot);
     if (rc != 1) {
@@ -1303,28 +1415,14 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
         return 0;
     }
 
-    /* pre-queue interrupt IN TRBs (all usable slots), link at the end */
-    for (int b = 0; b < IN_TRBS - 1; b++) {
-        volatile u32 *tr = d->inr + (u32)b * 4;
-        tr[0] = PA(d->in_buf[b]);
-        tr[1] = 0;
-        tr[2] = 16;
-        /* IOC: get a completion event per report; ISP: also complete on
-         * short packets - an 8-byte keyboard report into a 16-byte buffer
-         * is ALWAYS short, without ISP no event ever fires and input is
-         * silently dead */
-        tr[3] = (TRB_NORMAL << 10) | (1u << 5) | (1u << 2) | d->inr_cycle;
-    }
-    ring_link(d->inr, IN_TRBS - 1, d->inr_cycle);
-    d->inr_cycle ^= 1;
-    d->arm_tick = tick_count;
-    d->kick1 = 0;
-    ring_db((u32)slot, (u32)(d->ep_addr * 2 + 1));     /* doorbell = EP ID */
-    klog("usb: slot %d int ring armed, doorbell %d - waiting for reports",
-         slot, d->ep_addr * 2 + 1);
+    for (int j = 0; j < ncand; j++)
+        if (d->hid[j].active)
+            hid_arm_ring(d, j);
     n_devs++;
-    klog("usb: slot %d = HID %s (ep %d mps %d)", slot,
-         d->kind == 2 ? "mouse" : "keyboard", ep_addr, ep_mps);
+    klog("usb: slot %d = HID %s (%d boot iface(s))", slot,
+         d->kind == 3 ? "keyboard+mouse" : d->kind == 2 ? "mouse"
+                                                        : "keyboard",
+         ncand);
     return d->kind;
 }
 
@@ -1334,11 +1432,14 @@ void usb_kbd_leds_off(void)
     if (!have_xhci) return;
     for (int sl = 1; sl <= MAX_SLOTS; sl++) {
         struct xdev *d = &devs[sl];
-        if (d->used && d->kind == 1) {
+        if (!d->used) continue;
+        for (int j = 0; j < d->nhid; j++) {
+            struct hid_ep *h = &d->hid[j];
+            if (!h->active || h->kind != 1) continue;
             u8 leds = 0;
             /* HID SET_REPORT(Output) so no LED stays lit on USB standby
              * power after shutdown */
-            ctrl_xfer(sl, 0x21, 0x09, 0x0200, (u16)d->iface, &leds, 1, 0);
+            ctrl_xfer(sl, 0x21, 0x09, 0x0200, (u16)h->iface, &leds, 1, 0);
         }
     }
 }
@@ -1420,25 +1521,31 @@ void usb_poll(void)
     }
     for (int sl = 1; sl <= MAX_SLOTS; sl++) {
         struct xdev *d = &devs[sl];
-        if (!d->used || !d->kind || !d->inr) continue;
-        if (!d->reported) {
-            /* a healthy idle keyboard/mouse sends nothing until touched,
-             * but an endpoint that idled on a not-ready TRB before we
-             * noticed needs a doorbell to restart - ring it once, 3 s
-             * after arming (a no-op hint on a running EP) */
-            if (!d->kick1 && tick_count - d->arm_tick > 300) {
-                d->kick1 = 1;
-                ring_db((u32)sl, (u32)(d->ep_addr * 2 + 1));
-                klog("usb: slot %d armed 3 s, no first report yet - "
-                     "doorbell nudge sent", sl);
+        if (!d->used || !d->nhid) continue;
+        for (int j = 0; j < d->nhid; j++) {
+            struct hid_ep *h = &d->hid[j];
+            if (!h->active || !h->inr) continue;
+            if (!h->reported) {
+                /* a healthy idle keyboard/mouse sends nothing until
+                 * touched, but an endpoint that idled on a not-ready TRB
+                 * needs a doorbell to restart - ring it once, 3 s after
+                 * arming (a no-op hint on a running EP) */
+                if (!h->kick1 && tick_count - h->arm_tick > 300) {
+                    h->kick1 = 1;
+                    ring_db((u32)sl, h->dci);
+                    klog("usb: slot %d %s armed 3 s, no first report yet - "
+                         "doorbell nudge sent", sl,
+                         h->kind == 2 ? "mouse" : "keyboard");
+                }
+                continue;
             }
-            continue;
-        }
-        if (!d->silent_logged && tick_count - d->last_rep_tick > 500) {
-            d->silent_logged = 1;
-            ring_db((u32)sl, (u32)(d->ep_addr * 2 + 1));
-            klog("usb: slot %d silent - no reports for 5 s (pipe stalled?)"
-                 " - doorbell nudge sent", sl);
+            if (!h->silent_logged && tick_count - h->last_rep_tick > 500) {
+                h->silent_logged = 1;
+                ring_db((u32)sl, h->dci);
+                klog("usb: slot %d %s silent - no reports for 5 s "
+                     "(pipe stalled?) - doorbell nudge sent", sl,
+                     h->kind == 2 ? "mouse" : "keyboard");
+            }
         }
     }
 }
@@ -1652,8 +1759,9 @@ void usb_init(void)
     int mk = 0, mm = 0;
     for (int sl = 1; sl <= MAX_SLOTS; sl++) {
         if (!devs[sl].used) continue;
-        if (devs[sl].kind == 1) mk++;
-        else if (devs[sl].kind == 2) mm++;
+        if (devs[sl].kind & 1) mk++;     /* composite devices count once
+                                          * for each interface kind */
+        if (devs[sl].kind & 2) mm++;
     }
     pending_portc = 0;   /* our own boot-time resets queued stale changes */
     char nl[128], tmp[8];

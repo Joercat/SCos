@@ -57,8 +57,21 @@ $(BUILD)/scos.img: $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $
 font:
 	$(PYTHON) tools/fontgen.py kernel/src/font_data.c
 
-test: all
+test: all usbtest
 	node tests/run_tests.mjs
+
+# native USB-logic simulator: runs the REAL usb.c against a mini xHC and
+# the field-captured descriptors of the user's actual devices (see the
+# header of tests/usb_sim.c).  Catches ring/cycle/parser regressions
+# without a flash-and-boot cycle.
+usbtest: build/usb_sim
+	./build/usb_sim
+
+build/usb_sim: tests/usb_sim.c kernel/src/usb.c kernel/include/scos.h
+	@mkdir -p build
+	gcc -std=gnu11 -no-pie -Wall -Wextra -Wno-unused-parameter \
+	    -Wno-pointer-to-int-cast -Wno-unused-but-set-variable \
+	    -Ikernel/include -o $@ tests/usb_sim.c
 
 vendor:
 	./tools/setup_preview.sh
