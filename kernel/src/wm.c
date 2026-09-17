@@ -1520,6 +1520,7 @@ static void irq_watchdog(void)
 
 static u32 wm_t0;
 static int diag_tried;
+static u64 diag_last;        /* tick when diagnostics were last shown */
 static u32 last_paint_tick;
 volatile int wm_in_idle;
 
@@ -1539,17 +1540,32 @@ void wm_run(void)
 {
     wm_t0 = tick_count;
     input_guard_armed = 1;
-    if (usb_diag_flag()) diag_run();   /* enumeration already reported trouble */
+    if (usb_diag_flag()) {      /* enumeration already reported trouble */
+        diag_tried = 1;
+        diag_last = tick_count;
+        diag_run();
+    }
 
     klog("wm: entering main loop");
     for (;;) {
         irq_watchdog();
         if (err_pending()) err_show_pending();
         usb_poll();
-        if (!diag_tried && !input_last_tick && !is_v86_box() &&
-            tick_count - wm_t0 > 600) {   /* 6 s of total silence on real HW */
-            diag_tried = 1;
-            diag_run();
+        if (!input_last_tick && !is_v86_box()) {
+            /* r26: no input ever - the live diagnostics screen is the
+             * user's window into the background hub-recovery attempts
+             * (usb_poll revives silent hubs every few seconds). Show it
+             * first after 6 s of silence, then re-show every 40 s, so
+             * the LATEST attempt results are always photographable
+             * without reflashing or rebooting. */
+            if (!diag_tried && tick_count - wm_t0 > 600) {
+                diag_tried = 1;
+                diag_last = tick_count;
+                diag_run();
+            } else if (diag_tried && tick_count - diag_last > 4000) {
+                diag_last = tick_count;
+                diag_run();
+            }
         }
         struct mouse_event me;
         while (mouse_poll(&me)) handle_mouse(&me);

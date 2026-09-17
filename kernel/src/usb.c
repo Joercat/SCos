@@ -70,6 +70,7 @@ struct xdev {
     u8 hub_mtt;               /* hub itself has multiple TTs */
     u8 hub_p2g;               /* bPwrOn2PwrGood, 2 ms units */
     u8 child_slot[8];         /* hub: slot id per downstream port */
+    int dead_polls;           /* hub: consecutive 1 Hz polls with no answer */
 };
 static u8 port_slot[32];      /* root port -> live slot (hotplug guard) */
 static int last_enum_slot;    /* slot of the last enumerate_device */
@@ -650,6 +651,38 @@ static int address_slot(struct xdev *d, u32 mps0, int bsr)
 }
 
 /* ------------------------------------------------------------- hub bits ---- */
+/* One hub wire transfer with Linux-style retry + backoff: a cheap hub
+ * restarting its port state machines goes briefly deaf, and a single
+ * attempt cannot tell "busy" from "dead".  Final failures are logged
+ * with the completion code so the boot photo names the culprit:
+ * 4 = device not answering, 5 = TRB error (our ring), 6 = hub stalled
+ * the request, -1 = no completion at all (timeout). */
+static int hub_xfer(int slot, u8 rt, u8 rq, u16 val, u16 idx,
+                    u8 *buf, u16 len, int in, int tries)
+{
+    int rc = -1;
+    for (int i = 0; i < tries; i++) {
+        rc = ctrl_xfer(slot, rt, rq, val, idx, buf, len, in);
+        if (rc == 1 || rc == 12 || rc == 13) return 1;
+        if (i + 1 < tries) drain_ms((u32)(80 + i * 160));
+    }
+    klog("usb: hub slot %d req %02x/%u idx %u: rc %d after %d tries",
+         slot, (u32)rt, (u32)rq, (u32)idx, rc, tries);
+    return rc;
+}
+
+/* GET_PORT_STATUS with retry - for one-shot bring-up paths.  The 1 Hz
+ * poll uses the single-shot hub_port_status so a deaf hub cannot stall
+ * the window manager (its dead_polls counter triggers recovery). */
+static int hub_port_status_r(int hslot, int p, u32 *st, u32 *chg)
+{
+    int rc = hub_xfer(hslot, 0xA3, 0, 0, (u16)p, desc_buf, 4, 1, 3);
+    if (rc != 1) return rc;
+    *st = (u32)(desc_buf[0] | (desc_buf[1] << 8));
+    *chg = (u32)(desc_buf[2] | (desc_buf[3] << 8));
+    return 1;
+}
+
 static int hub_port_status(int hslot, int p, u32 *st, u32 *chg)
 {
     int rc = ctrl_xfer(hslot, 0xA3, 0, 0, (u16)p, desc_buf, 4, 1);
@@ -661,12 +694,23 @@ static int hub_port_status(int hslot, int p, u32 *st, u32 *chg)
 
 static int hub_port_reset(struct xdev *h, int p)
 {
-    ctrl_xfer(h->slot, 0x23, 3, 4, (u16)p, 0, 0, 0);   /* PORT_RESET */
+    hub_xfer(h->slot, 0x23, 3, 4, (u16)p, 0, 0, 0, 3);   /* PORT_RESET */
     u64 t0 = now_ms();
+    int deaf = 0;
     while (now_ms() - t0 < 600) {
         drain_ms(5);
         u32 st = 0, chg = 0;
-        if (hub_port_status(h->slot, p, &st, &chg) != 1) return 0;
+        if (hub_port_status(h->slot, p, &st, &chg) != 1) {
+            /* transient misses while the hub churns the reset are normal;
+             * only a persistently deaf hub ends the attempt */
+            if (++deaf >= 6) {
+                klog("usb: hub %d port %d: hub deaf during reset",
+                     h->slot, p);
+                return 0;
+            }
+            continue;
+        }
+        deaf = 0;
         if ((chg & 0x10) && !(st & 0x10)) {            /* C_RESET, done */
             ctrl_xfer(h->slot, 0x23, 1, 20, (u16)p, 0, 0, 0);  /* clr */
             u32 s2 = 0, c2 = 0;
@@ -718,6 +762,41 @@ static int hub_enable(struct xdev *d, int nports, int ttt, int multi)
     return rc == 1;
 }
 
+static int hub_recoveries;      /* capped: never loop forever */
+static int hub_walk_recovered;  /* hub_walk delegated to hub_recover and
+                                 * its own slot was freed underneath it */
+
+/* Hard-revive a silent hub: free its slot (and any children), reset the
+ * root port so the hub comes back through a clean power-on reset, and
+ * re-enumerate the whole branch.  A hub that browned out or wedged its
+ * firmware during reconfiguration answers again afterwards - this is
+ * what Linux's khubd does via usb_reset_device + re-enumeration.
+ * At most 2 recoveries per boot. */
+static int hub_recover(int root_port, int dead_slot)
+{
+    if (hub_recoveries >= 2) {
+        klog("usb: hub recovery limit reached - port %d left alone",
+             root_port);
+        return -1;              /* -1 = recovery did NOT run */
+    }
+    hub_recoveries++;
+    klog("usb: hub recovery %d: freeing slot %d, resetting root port %d",
+         hub_recoveries, dead_slot, root_port);
+    if (dead_slot >= 1 && dead_slot <= MAX_SLOTS && devs[dead_slot].used) {
+        for (int i = 0; i < 8; i++) {
+            u8 cs = devs[dead_slot].child_slot[i];
+            if (cs && cs <= MAX_SLOTS && devs[cs].used) disable_slot(cs);
+        }
+        disable_slot(dead_slot);
+    }
+    if (hub_count > 0) hub_count--;      /* re-walk counts it again */
+    port_slot[root_port] = 0;
+    drain_ms(80);
+    int kind = enumerate_port(root_port);
+    klog("usb: hub recovery %d result: kind %d", hub_recoveries, kind);
+    return kind;
+}
+
 /* full hub bring-up: the slot was addressed WITHOUT the Hub bit (Intel
  * rejects Hub=1 at Address-Device time with Parameter Error); the flag
  * goes in via hub_enable once the hub descriptor has been read, exactly
@@ -743,9 +822,14 @@ static int hub_walk(struct xdev *d, u8 hproto)
     u8 cfg_val = desc_buf[5];
     drc = ctrl_xfer(ns, 0x00, 9, cfg_val, 0, 0, 0, 0);
     klog("usb: hub %d SET_CONFIGURATION(%d) rc %d", ns, cfg_val, drc);
+    /* Hub-spec: (re)configuring drops every downstream port to the
+     * Powered-off state - THIS is the moment the mouse LEDs die.  Give
+     * the firmware a beat to restart its port state machines before we
+     * talk to it again (Linux has natural probe delays right here). */
+    drain_ms(100);
     /* class descriptor: GET_DESCRIPTOR(Hub) = type 0x29 */
-    drc = ctrl_xfer(ns, 0xA0, 6, 0x2900, 0, desc_buf, 9, 1);
-    if (drc != 1 && drc != 12 && drc != 13) {
+    drc = hub_xfer(ns, 0xA0, 6, 0x2900, 0, desc_buf, 9, 1, 3);
+    if (drc != 1) {
         klog("usb: hub %d descriptor failed (code %d)", ns, drc);
         fail_flag = 1;
         return 3;
@@ -772,20 +856,45 @@ static int hub_walk(struct xdev *d, u8 hproto)
         fail_flag = 1;
         return 3;
     }
-    for (int p = 1; p <= nports; p++)
-        ctrl_xfer(ns, 0x23, 3, 8, (u16)p, 0, 0, 0);   /* PORT_POWER */
-    drain_ms((u32)(p2g * 2 + 110));
+    drain_ms(30);
+    /* Power the ports ONE AT A TIME.  Simultaneous cold-start of a
+     * keyboard + mouse + boot stick behind a bus-powered hub inrushes
+     * enough current to brown out the hub's own upstream VBUS - the
+     * r25.2 real-hardware failure: hub goes deaf on EP0 the instant
+     * all four ports were gang-powered (fast code-4 style failures on
+     * every GET_PORT_STATUS right after). */
+    for (int p = 1; p <= nports; p++) {
+        hub_xfer(ns, 0x23, 3, 8, (u16)p, 0, 0, 0, 3);   /* PORT_POWER */
+        drain_ms(30);
+    }
+    drain_ms((u32)(p2g * 2 + 150));
+    int alive = 0;
     for (int p = 1; p <= nports; p++) {
         u32 st = 0, chg = 0;
-        if (hub_port_status(ns, p, &st, &chg) != 1) {
-            klog("usb: hub %d port %d status read failed", ns, p);
-            continue;
-        }
+        if (hub_port_status_r(ns, p, &st, &chg) != 1)
+            continue;               /* hub_xfer already logged rc + port */
+        alive++;
         klog("usb: hub %d port %d: status %04x change %04x%s", ns, p,
              st, chg, (st & 1) ? " CONNECTED" : "");
         if (chg & 1) ctrl_xfer(ns, 0x23, 1, 16, (u16)p, 0, 0, 0); /* C_CONN */
         if (!(st & 1)) continue;
         hub_attach(d, p);
+    }
+    if (!alive) {
+        /* The hub went silent right after reconfiguration - firmware
+         * wedge or VBUS brownout.  Only cure: free everything, reset
+         * the root port (clean power-on for the hub) and re-walk the
+         * whole branch, exactly like Linux's usb_reset_device path. */
+        int rp = d->root_port;
+        klog("usb: hub %d DEAD on all %d ports (root %d portsc %08x)",
+             ns, nports, rp, portsc(rp));
+        fail_flag = 1;
+        /* Set the flag only AFTER the recovery ran (and only if it ran):
+         * the inner enumerate_device frames clear it on their way out,
+         * so setting it beforehand would be stomped and this frame
+         * would "restore" last_enum_slot to an already-freed slot. */
+        if (hub_recover(rp, ns) >= 0)
+            hub_walk_recovered = 1;
     }
     return 3;
 }
@@ -794,11 +903,11 @@ static int hub_walk(struct xdev *d, u8 hproto)
 static int hub_attach(struct xdev *h, int p)
 {
     u32 st = 0, chg = 0;
-    if (hub_port_status(h->slot, p, &st, &chg) != 1) return 0;
+    if (hub_port_status_r(h->slot, p, &st, &chg) != 1) return 0;
     if (!(st & 1)) return 0;
     drain_ms(20);                              /* USB debounce */
     u32 st2 = 0, chg2 = 0;
-    if (hub_port_status(h->slot, p, &st2, &chg2) != 1) return 0;
+    if (hub_port_status_r(h->slot, p, &st2, &chg2) != 1) return 0;
     if (!(st2 & 1)) {
         klog("usb: hub %d port %d connect bounced away", h->slot, p);
         return 0;
@@ -810,7 +919,7 @@ static int hub_attach(struct xdev *h, int p)
         return 0;
     }
     u32 s3 = 0, c3 = 0;
-    hub_port_status(h->slot, p, &s3, &c3);
+    hub_port_status_r(h->slot, p, &s3, &c3);
     /* USB2 hub port status: bit 9 = low-speed, bit 10 = high-speed */
     int raw = (int)((s3 >> 9) & 3);
     int cspeed = (raw == 0) ? 1 : (raw == 1) ? 2 : (raw == 2) ? 3 : 0;
@@ -990,7 +1099,14 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
         klog("usb: slot %d WARNING: desc type %u != 1", slot, desc_buf[1]);
     if (desc_buf[4] == 9) {   /* bDeviceClass 9 = hub: walk it */
         hub_count++;
-        return hub_walk(d, desc_buf[6]);
+        int k = hub_walk(d, desc_buf[6]);
+        /* nested child enumeration (or a full hub recovery) overwrote
+         * last_enum_slot; callers book THIS device against it.  Skip
+         * the restore when the walk delegated to hub_recover and this
+         * slot was freed underneath us. */
+        if (!hub_walk_recovered) last_enum_slot = slot;
+        hub_walk_recovered = 0;
+        return k;
     }
     drc = ctrl_xfer(slot, 0x80, 6, 0x0200, 0, desc_buf, 9, 1);
     if ((drc != 1 && drc != 12 && drc != 13)) {
@@ -1153,9 +1269,11 @@ void usb_poll(void)
     for (int sl = 1; sl <= MAX_SLOTS; sl++) {   /* hub-port hotplug, 1 Hz */
         struct xdev *h = &devs[sl];
         if (!h->used || !h->is_hub) continue;
+        int alive = 0;
         for (int p = 1; p <= h->hub_ports && p <= 8; p++) {
             u32 st = 0, chg = 0;
             if (hub_port_status(sl, p, &st, &chg) != 1) continue;
+            alive++;
             if (!(chg & 0x13)) continue;        /* conn/enable/reset changes */
             klog("usb: hub %d port %d change %04x status %04x", sl, p,
                  chg, st);
@@ -1173,6 +1291,29 @@ void usb_poll(void)
                 if (st & 1) hub_attach(h, p);
             }
         }
+        if (alive) { h->dead_polls = 0; continue; }
+        if (h->dead_polls < 0) continue;          /* gave up already */
+        if (++h->dead_polls < 4) continue;
+        /* 4 s with no answer on ANY port: the hub died after boot
+         * (brownout/wedge).  Revive it from the root port - the
+         * diagnostics screen redraws live, so the recovery is
+         * visible on the photo without reflashing. */
+        if (hub_recoveries >= 2) {
+            klog("usb: hub %d silent, recovery limit reached - giving up",
+                 sl);
+            h->dead_polls = -1;                   /* never re-trigger:
+                                                   * keeps the log ring
+                                                   * readable for photos */
+            continue;
+        }
+        {
+            int rp = h->root_port;
+            klog("usb: hub %d silent 4 s - reviving via root port %d",
+                 sl, rp);
+            h->dead_polls = 0;
+            hub_recover(rp, sl);
+        }
+        break;                /* slot table churned; next tick rescans */
     }
     for (int sl = 1; sl <= MAX_SLOTS; sl++) {
         struct xdev *d = &devs[sl];
@@ -1379,16 +1520,22 @@ void usb_init(void)
         klog("usb: ports powered %d/%d, connected %d", pw, max_ports, cc);
     }
 
-    int mk = 0, mm = 0;
     for (int p = 1; p <= max_ports; p++) {
         u32 psc = portsc(p);
         if (!(psc & 1)) continue;
         klog("usb: enumerate port %d (portsc %08x speed %d)",
              p, psc, (int)((psc >> 10) & 0xF));
         port_slot[p] = 0;
-        int k = enumerate_port(p);
-        if (k == 1) mk++;
-        if (k == 2) mm++;
+        enumerate_port(p);
+    }
+    /* count from the device table, not from return values: hub children
+     * never surface through enumerate_port's kind (and hub recoveries
+     * re-walk whole branches deep inside a single enumerate_port call) */
+    int mk = 0, mm = 0;
+    for (int sl = 1; sl <= MAX_SLOTS; sl++) {
+        if (!devs[sl].used) continue;
+        if (devs[sl].kind == 1) mk++;
+        else if (devs[sl].kind == 2) mm++;
     }
     pending_portc = 0;   /* our own boot-time resets queued stale changes */
     char nl[128], tmp[8];
