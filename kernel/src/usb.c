@@ -63,6 +63,8 @@ struct xdev {
     u8 prev_keys[6];
     u32 last_rep_tick;
     u8 reported, silent_logged;
+    u32 arm_tick;             /* tick when the interrupt ring was armed */
+    u8 kick1;                 /* one-shot doorbell nudge already sent */
     /* round 25: topology - where this device hangs in the tree */
     u32 route;                /* xHCI route string (hub path) */
     u8 root_port;             /* root hub port number */
@@ -644,6 +646,8 @@ static struct xdev *slot_alloc(int slot)
     d->link_pend_cycle = 1;
     d->reported = 0;
     d->silent_logged = 0;
+    d->arm_tick = 0;
+    d->kick1 = 0;
     /* stale-state guard: a slot reused after a hub or hub-child device
      * must not keep the old hub/TT topology fields */
     d->is_hub = 0;
@@ -698,7 +702,10 @@ static int address_slot(struct xdev *d, u32 mps0, int bsr)
      * the 18-byte fetch would "complete" from the replayed short TD */
     epw[2] = PA(d->ep0 + (u32)d->ep0_idx * 4) | d->ep0_cycle;
     epw[3] = 0;
-    epw[4] = 8;
+    /* Tx Info dw4 = Max Burst Size[7:0] | Avg TRB Length[31:16]: burst
+     * is SuperSpeed-only; Linux writes 0 for every non-SS endpoint (the
+     * old 8 here was tolerated by the H510M-A but is out-of-spec) */
+    epw[4] = 0;
     return run_cmd(PA(ic), 0, 0,
                    (u32)(TRB_ADDRDEV << 10) | ((u32)d->slot << 24) |
                    (bsr ? (1u << 9) : 0u), 800, d->slot);
@@ -773,7 +780,11 @@ static int hub_port_reset(struct xdev *h, int p)
             ctrl_xfer(h->slot, 0x23, 1, 20, (u16)p, 0, 0, 0);  /* clr */
             u32 s2 = 0, c2 = 0;
             hub_port_status(h->slot, p, &s2, &c2);
-            if (!(s2 & 4)) {
+            /* USB2 hub port status bit 1 = ENABLE (bit 2 is SUSPEND - the
+             * r28 field log proved the old `& 4` check rejected perfectly
+             * enabled ports: status 0x103/0x503 = connected+ENABLED+powered
+             * yet "reset done but not enabled") */
+            if (!(s2 & 2)) {
                 klog("usb: hub %d port %d reset done but not enabled (%04x)",
                      h->slot, p, s2);
                 return 0;
@@ -989,9 +1000,15 @@ static int hub_attach(struct xdev *h, int p)
     }
     klog("usb: hub %d port %d attaching (status %04x)", h->slot, p, st2);
     if (!hub_port_reset(h, p)) {
-        klog("usb: hub %d port %d reset failed", h->slot, p);
-        fail_flag = 1;
-        return 0;
+        /* Linux retries a flaky port reset once; cheap FS/LS devices
+         * occasionally miss the first attempt */
+        drain_ms(100);
+        klog("usb: hub %d port %d reset retry", h->slot, p);
+        if (!hub_port_reset(h, p)) {
+            klog("usb: hub %d port %d reset failed", h->slot, p);
+            fail_flag = 1;
+            return 0;
+        }
     }
     u32 s3 = 0, c3 = 0;
     hub_port_status_r(h->slot, p, &s3, &c3);
@@ -1276,7 +1293,7 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
     epw[1] = (6u << 3) | (3u << 1) | ((u32)(ep_mps & 0xFFFF) << 16);
     epw[2] = PA(d->inr) | 1;
     epw[3] = 0;
-    epw[4] = 16;
+    epw[4] = 0;   /* Max Burst: SuperSpeed-only, 0 for FS/LS/HS like Linux */
     rc = run_cmd(PA(ic), 0, 0,
                  (u32)(TRB_CFGEP << 10) | ((u32)slot << 24), 800, slot);
     if (rc != 1) {
@@ -1300,6 +1317,8 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
     }
     ring_link(d->inr, IN_TRBS - 1, d->inr_cycle);
     d->inr_cycle ^= 1;
+    d->arm_tick = tick_count;
+    d->kick1 = 0;
     ring_db((u32)slot, (u32)(d->ep_addr * 2 + 1));     /* doorbell = EP ID */
     klog("usb: slot %d int ring armed, doorbell %d - waiting for reports",
          slot, d->ep_addr * 2 + 1);
@@ -1401,10 +1420,25 @@ void usb_poll(void)
     }
     for (int sl = 1; sl <= MAX_SLOTS; sl++) {
         struct xdev *d = &devs[sl];
-        if (!d->used || !d->reported || d->silent_logged) continue;
-        if (tick_count - d->last_rep_tick > 500) {
+        if (!d->used || !d->kind || !d->inr) continue;
+        if (!d->reported) {
+            /* a healthy idle keyboard/mouse sends nothing until touched,
+             * but an endpoint that idled on a not-ready TRB before we
+             * noticed needs a doorbell to restart - ring it once, 3 s
+             * after arming (a no-op hint on a running EP) */
+            if (!d->kick1 && tick_count - d->arm_tick > 300) {
+                d->kick1 = 1;
+                ring_db((u32)sl, (u32)(d->ep_addr * 2 + 1));
+                klog("usb: slot %d armed 3 s, no first report yet - "
+                     "doorbell nudge sent", sl);
+            }
+            continue;
+        }
+        if (!d->silent_logged && tick_count - d->last_rep_tick > 500) {
             d->silent_logged = 1;
-            klog("usb: slot %d silent - no reports for 5 s (pipe stalled?)", sl);
+            ring_db((u32)sl, (u32)(d->ep_addr * 2 + 1));
+            klog("usb: slot %d silent - no reports for 5 s (pipe stalled?)"
+                 " - doorbell nudge sent", sl);
         }
     }
 }
