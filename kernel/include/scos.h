@@ -231,6 +231,7 @@ const char *card_rank_str(int rank);
 /* ------------------------------------------------------------------ mm ---- */
 void  mm_init(void);
 void mm_stats(u32 *total_kb, u32 *free_kb);
+void mm_ops(u32 *allocs, u32 *frees);      /* live palloc/pfree counters */
 void *palloc(u32 bytes);                   /* page-granular, zeroed not guaranteed */
 void  pfree(void *p, u32 bytes);
 u32   mm_total_kb(void);

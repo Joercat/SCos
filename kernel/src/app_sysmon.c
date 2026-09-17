@@ -48,16 +48,24 @@ u32 proc_wm_mem_kb(void)
 
 /* sckern shows the honest remainder: everything the page allocator has
  * handed out that is NOT a window surface, the WM buffers or vfs file
- * data - i.e. kernel image data, rings, USB buffers, heaps, stacks. */
+ * data - i.e. kernel image data, rings, USB buffers, heaps, stacks.
+ * Every subtraction is clamped (r31): page-rounded allocations and the
+ * per-window KB truncation can overshoot the real used total by a few
+ * KB, and an unclamped u32 subtraction would wrap to ~4 billion. */
 u32 proc_kernel_mem_kb(void)
 {
     u32 tot = 0, fre = 0;
     mm_stats(&tot, &fre);
+    if (fre > tot) fre = tot;
     u32 used = tot - fre;
-    for (int i = 0; i < wm_win_count(); i++)
-        used -= proc_win_mem_kb(wm_win_at(i));
-    used -= proc_wm_mem_kb();
-    used -= vfs_usage_bytes() / 1024u;
+    for (int i = 0; i < wm_win_count(); i++) {
+        u32 sub = proc_win_mem_kb(wm_win_at(i));
+        used = (sub < used) ? used - sub : 0;
+    }
+    u32 sub = proc_wm_mem_kb();
+    used = (sub < used) ? used - sub : 0;
+    sub = vfs_usage_bytes() / 1024u;
+    used = (sub < used) ? used - sub : 0;
     return used;
 }
 
@@ -98,6 +106,9 @@ static void sm_paint(struct window *w)
     s_text(s, 12, y, line, t->text); y += 18;
     strcpy(line, "  speed:  ");
     fmt_u32(n, cpu_mhz()); strcat(line, n); strcat(line, " MHz (TSC calibrated against PIT)");
+    s_text(s, 12, y, line, t->text);   /* r31: this row was built but never
+                                        * drawn - the MHz line silently
+                                        * vanished from the CPU panel */
     y += 18;
     strcpy(line, "cpu cores: ");
     fmt_u32(n, cpu_core_count()); strcat(line, n);
@@ -125,8 +136,17 @@ static void sm_paint(struct window *w)
     s_fill(s, 31, y + 1, (int)((bw - 2) * (tot - fre)) / (int)(tot ? tot : 1), 10, t->main);
     y += 22;
 
+    /* r31: live allocator counters ride on the Uptime row (no layout
+     * shift): proof the heap numbers are REAL and moving - every window
+     * open/resize/save bumps these, and allocs tracking frees is the
+     * leak check the user can watch in real time. */
+    u32 aops = 0, fops = 0;
+    mm_ops(&aops, &fops);
     strcpy(line, "Uptime: ");
     fmt_u32(n, uptime_ms() / 1000); strcat(line, n); strcat(line, " s");
+    strcat(line, "    heap: ");
+    fmt_u32(n, aops); strcat(line, n); strcat(line, " allocs / ");
+    fmt_u32(n, fops); strcat(line, n); strcat(line, " frees (live)");
     s_text(s, 12, y, line, t->text); y += 24;
 
     s_text(s, 12, y, "Tasks", t->main); y += 20;

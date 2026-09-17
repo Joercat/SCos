@@ -39,6 +39,16 @@ void mm_init(void)
     klog("mm: %u KB managed (%u pages) at %x", managed_pages * 4, managed_pages, base);
 }
 
+/* live allocator op counters (r31): SysMon shows these so the user can
+ * SEE the heap working in real time - every window open/resize/save moves
+ * them, and allocs-frees staying bounded is the leak check. */
+static u32 palloc_ops, pfree_ops;
+void mm_ops(u32 *allocs, u32 *frees)
+{
+    if (allocs) *allocs = palloc_ops;
+    if (frees) *frees = pfree_ops;
+}
+
 void *palloc(u32 bytes)
 {
     u32 pages = (bytes + PAGE - 1) / PAGE;
@@ -57,6 +67,7 @@ void *palloc(u32 bytes)
                 b->pages = pages;
             }
             free_pages -= pages;
+            palloc_ops++;
             irq_enable();
             return b;
         }
@@ -77,6 +88,7 @@ void pfree(void *p, u32 bytes)
     if (!p) return;
     u32 pages = (bytes + PAGE - 1) / PAGE;
     if (!pages) pages = 1;
+    pfree_ops++;
     struct block *b = p;
     b->pages = pages;
     irq_disable();

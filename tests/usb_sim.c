@@ -243,6 +243,36 @@ static struct sim_consumer *sim_add_consumer(volatile u32 *ring, int trbs,
     return c;
 }
 
+/* The mini "Configure Endpoint" a REAL xHC performs (r31).  The driver
+ * hands it an input endpoint context; the xHC decodes type / interval /
+ * ESIT payload and only then puts the EP on its schedule.  The r30 field
+ * failure is modeled here: an Intel xHC ACCEPTED a Bulk-IN-typed context
+ * with zero Max ESIT Payload (command rc 1, rings armed, doorbells rung)
+ * but NEVER scheduled it - zero transfer events, input dead, no error
+ * anywhere.  sim_cfg_ep reproduces that silent death: returns NULL and
+ * no consumer exists, so T3 delivers 0 reports and fails loudly.  PA()
+ * is the identity in the sim, so the dequeue word maps straight back. */
+static struct sim_consumer *sim_cfg_ep(const u32 *epw, u32 slot, u32 dci,
+                                       u32 replen)
+{
+    u32 interval = (epw[0] >> 16) & 0xFFu;
+    u32 type     = (epw[1] >> 3) & 7u;
+    u32 mps      = (epw[1] >> 16) & 0xFFFFu;
+    u32 deq      = epw[2];
+    u32 esit     = (epw[4] >> 16) & 0xFFFFu;
+    u32 avg_trb  = epw[4] & 0xFFFFu;
+    if (type != 7) return NULL;          /* not INT_IN: never scheduled */
+    if (esit < mps || avg_trb < mps) return NULL;   /* zero bandwidth */
+    if (interval < 3 || interval > 10) return NULL; /* FS periodic limits */
+    if (!(deq & ~0xFu)) return NULL;                 /* no dequeue ptr */
+    struct sim_consumer *c = sim_add_consumer(
+        (volatile u32 *)(unsigned long)(deq & ~0xFu), IN_TRBS, slot, dci,
+        replen);
+    c->deq = 0;                          /* dequeue = ring start here */
+    c->cycle = deq & 1u;                 /* xHC takes the cycle from ctx */
+    return c;
+}
+
 /* ------------------------------------------------------------ harness -- */
 static int failures;
 #define CHECK(cond, ...) do { if (!(cond)) { \
@@ -347,22 +377,28 @@ static void test_parser(void)
     CHECK(n == 2, "holtek: expected 2 boot ifaces, got %d", n);
     if (n == 2) {
         CHECK(c[0].iface == 0 && c[0].proto == 2 && c[0].ep_addr == 1 &&
-              c[0].ep_mps == 8,
-              "holtek iface0: want mouse proto2 ep81 mps8, got %d/%d/ep%x/%d",
-              c[0].iface, c[0].proto, c[0].ep_addr, c[0].ep_mps);
+              c[0].ep_mps == 8 && c[0].ep_interval == 1,
+              "holtek iface0: want mouse proto2 ep81 mps8 bInt1, "
+              "got %d/%d/ep%x/%d/bInt%d",
+              c[0].iface, c[0].proto, c[0].ep_addr, c[0].ep_mps,
+              c[0].ep_interval);
         CHECK(c[1].iface == 1 && c[1].proto == 1 && c[1].ep_addr == 2 &&
-              c[1].ep_mps == 8,
-              "holtek iface1: want kbd proto1 ep82 mps8, got %d/%d/ep%x/%d",
-              c[1].iface, c[1].proto, c[1].ep_addr, c[1].ep_mps);
+              c[1].ep_mps == 8 && c[1].ep_interval == 2,
+              "holtek iface1: want kbd proto1 ep82 mps8 bInt2, "
+              "got %d/%d/ep%x/%d/bInt%d",
+              c[1].iface, c[1].proto, c[1].ep_addr, c[1].ep_mps,
+              c[1].ep_interval);
     }
 
     n = usb_hid_parse(desc_razer, (int)sizeof(desc_razer), c, MAX_HID_EPS, 0);
     CHECK(n == 1, "razer: expected 1 boot iface, got %d", n);
     if (n == 1)
         CHECK(c[0].iface == 0 && c[0].proto == 1 && c[0].ep_addr == 1 &&
-              c[0].ep_mps == 8,
-              "razer iface0: want kbd proto1 ep81 mps8, got %d/%d/ep%x/%d",
-              c[0].iface, c[0].proto, c[0].ep_addr, c[0].ep_mps);
+              c[0].ep_mps == 8 && c[0].ep_interval == 1,
+              "razer iface0: want kbd proto1 ep81 mps8 bInt1, "
+              "got %d/%d/ep%x/%d/bInt%d",
+              c[0].iface, c[0].proto, c[0].ep_addr, c[0].ep_mps,
+              c[0].ep_interval);
 
     n = usb_hid_parse(desc_aura, (int)sizeof(desc_aura), c, MAX_HID_EPS, 0);
     CHECK(n == 0, "aura LED: expected 0 boot ifaces, got %d", n);
@@ -421,6 +457,7 @@ static void test_interrupt_rings(void)
     if (!d) return;
     d->nhid = 2;
     d->kind = 3;
+    struct sim_consumer *ck = NULL, *cm = NULL;
     for (int j = 0; j < 2; j++) {
         struct hid_ep *h = &d->hid[j];
         h->active = 1;
@@ -429,6 +466,7 @@ static void test_interrupt_rings(void)
         h->ep_addr = (u8)(j + 1);
         h->dci = (u32)(h->ep_addr * 2 + 1);
         h->ep_mps = 8;
+        h->binterval = (u8)(j == 0 ? 2 : 1);  /* field: kbd 2, mouse 1 */
         h->inr = (volatile u32 *)palloc(4096);
         for (int b = 0; b < IN_TRBS; b++) {
             h->in_buf[b] = palloc(16);
@@ -437,11 +475,27 @@ static void test_interrupt_rings(void)
         h->inr_idx = 0; h->inr_cycle = 1;
         h->link_pend = 0; h->link_pend_cycle = 1;
         hid_arm_ring(d, j);           /* the REAL arming code */
+        /* r31: build the endpoint context with the REAL enumerate_device
+         * builder, then let the sim xHC schedule from those exact bytes.
+         * The old manual sim_add_consumer here never looked at the
+         * context - which is precisely how the Bulk-typed / zero-ESIT
+         * bug sailed through the suite and died on the H510M-A. */
+        u32 epw[5];
+        hid_fill_ep_ctx(epw, h, 1);   /* FullSpeed, like the field */
+        struct sim_consumer *c =
+            sim_cfg_ep(epw, 2, h->dci, j == 0 ? 8u : 4u);
+        CHECK(c != NULL,
+              "xHC would NOT schedule slot 2 dci %u: type %u interval %u "
+              "esit %u avg %u (r30-style silent input death)", h->dci,
+              (epw[1] >> 3) & 7u, (epw[0] >> 16) & 0xFFu, epw[4] >> 16,
+              epw[4] & 0xFFFFu);
+        if (!c) continue;
+        if (j == 0) ck = c; else cm = c;
     }
-    struct sim_consumer *ck =
-        sim_add_consumer(d->hid[0].inr, IN_TRBS, 2, d->hid[0].dci, 8);
-    struct sim_consumer *cm =
-        sim_add_consumer(d->hid[1].inr, IN_TRBS, 2, d->hid[1].dci, 4);
+    if (!ck || !cm) {
+        printf("  interrupt rings: NOT SCHEDULED by the sim xHC\n");
+        return;
+    }
 
     sim_kbd_reports = sim_mouse_reports = 0;
     /* 500 reports per endpoint = ~71 laps of a 7-slot ring.  The old code
@@ -465,6 +519,64 @@ static void test_interrupt_rings(void)
            sim_kbd_reports, sim_mouse_reports);
 }
 
+/* ===== TEST 4: EP context words exactly as Linux writes them (r31) ====== */
+static void test_ep_ctx(void)
+{
+    struct hid_ep h;
+    u32 w[5];
+    memset(&h, 0, sizeof h);
+    h.ep_mps = 8;
+    h.inr = (volatile u32 *)palloc(4096);
+
+    /* FullSpeed, bInterval 1 (the Holtek mouse / Razer kbd case) */
+    h.binterval = 1;
+    hid_fill_ep_ctx(w, &h, 1);
+    CHECK(((w[1] >> 3) & 7u) == 7, "FS: EP type %u, want 7 (INT_IN) - "
+          "type 6 was the r30 silent-death bug", (w[1] >> 3) & 7u);
+    CHECK(((w[1] >> 1) & 3u) == 3, "FS: CErr %u, want 3", (w[1] >> 1) & 3u);
+    CHECK(((w[1] >> 16) & 0xFFFFu) == 8, "FS: MPS %u, want 8",
+          (w[1] >> 16) & 0xFFFFu);
+    CHECK(((w[0] >> 16) & 0xFFu) == 3, "FS bInt1: interval %u, want 3 "
+          "(fls(8*1)-1)", (w[0] >> 16) & 0xFFu);
+    CHECK((w[4] >> 16) == 8, "FS: Max ESIT Payload %u, want 8 (= mps)",
+          w[4] >> 16);
+    CHECK((w[4] & 0xFFFFu) == 8, "FS: Avg TRB Length %u, want 8",
+          w[4] & 0xFFFFu);
+    CHECK(w[2] == ((u32)(unsigned long)h.inr | 1u), "FS: dequeue|cycle");
+    CHECK(w[3] == 0, "FS: dequeue hi");
+
+    /* FullSpeed, bInterval 2 (the Holtek keyboard iface): fls(16)-1 = 4 */
+    h.binterval = 2;
+    hid_fill_ep_ctx(w, &h, 1);
+    CHECK(((w[0] >> 16) & 0xFFu) == 4, "FS bInt2: interval %u, want 4",
+          (w[0] >> 16) & 0xFFu);
+
+    /* bInterval 0 (defensive): treated as 1 */
+    h.binterval = 0;
+    hid_fill_ep_ctx(w, &h, 1);
+    CHECK(((w[0] >> 16) & 0xFFu) == 3, "FS bInt0: interval %u, want 3",
+          (w[0] >> 16) & 0xFFu);
+
+    /* HighSpeed exponent: Linux clamp(bi,1,16)-1 */
+    h.binterval = 1;
+    hid_fill_ep_ctx(w, &h, 3);
+    CHECK(((w[0] >> 16) & 0xFFu) == 0, "HS bInt1: interval %u, want 0",
+          (w[0] >> 16) & 0xFFu);
+    h.binterval = 4;
+    hid_fill_ep_ctx(w, &h, 3);
+    CHECK(((w[0] >> 16) & 0xFFu) == 3, "HS bInt4: interval %u, want 3",
+          (w[0] >> 16) & 0xFFu);
+
+    /* SuperSpeed: field = clamp(bi,1,16) */
+    h.binterval = 5;
+    hid_fill_ep_ctx(w, &h, 4);
+    CHECK(((w[0] >> 16) & 0xFFu) == 5, "SS bInt5: interval %u, want 5",
+          (w[0] >> 16) & 0xFFu);
+
+    printf("  ep ctx: INT_IN type 7, CErr 3, ESIT/AvgTRB = mps, "
+           "FS/HS/SS intervals Linux-exact\n");
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -476,6 +588,8 @@ int main(int argc, char **argv)
     test_ep0_ring();
     printf("usb_sim: composite interrupt rings across ~71 laps...\n");
     test_interrupt_rings();
+    printf("usb_sim: EP context bytes (r31 root fix)...\n");
+    test_ep_ctx();
     if (failures) {
         printf("USB SIM: %d FAILURE(S)\n", failures);
         return 1;

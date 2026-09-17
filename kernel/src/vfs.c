@@ -131,8 +131,18 @@ static void node_set_data(struct vfs_node *n, const char *data, u32 len)
     if (n->cap < len + 1) {
         u32 cap = len + 1 + 64;
         char *nd = palloc(cap);
+        if (!nd) return;                 /* OOM: keep the old buffer */
+        char *old = n->data;
+        u32 oldcap = n->cap;
         n->data = nd;
         n->cap = cap;
+        /* r31 leak fix: growing a file NEVER freed the old buffer - every
+         * save that outgrew the cap leaked it (settings.json/desktop.json
+         * rewrites, notepad saves, /system copies...). Skip the free only
+         * if the source pointer lives INSIDE the old buffer. */
+        if (old && !((const char *)data >= old &&
+                     (const char *)data < old + oldcap))
+            pfree(old, oldcap);
     }
     memcpy(n->data, data, len);
     n->data[len] = 0;

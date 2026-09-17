@@ -54,6 +54,9 @@ struct hid_ep {
     int kind;                 /* 1 = boot keyboard, 2 = boot mouse */
     u8 ep_addr;               /* IN endpoint number (0x81 -> 1) */
     u8 ep_mps;
+    u8 binterval;             /* descriptor bInterval (r31: EP ctx interval) */
+    u8 ctx_dumped;            /* watchdog one-shot ctx dump done (r31) */
+    u32 ctx_copy[5];          /* the EP ctx CFGEP got - photo diagnostics */
     u32 dci;                  /* endpoint context index = ep_addr*2+1 */
     volatile u32 *inr;
     int inr_idx; u32 inr_cycle;
@@ -712,9 +715,9 @@ static int address_slot(struct xdev *d, u32 mps0, int bsr)
      * the 18-byte fetch would "complete" from the replayed short TD */
     epw[2] = PA(d->ep0 + (u32)d->ep0_idx * 4) | d->ep0_cycle;
     epw[3] = 0;
-    /* Tx Info dw4 = Max Burst Size[7:0] | Avg TRB Length[31:16]: burst
-     * is SuperSpeed-only; Linux writes 0 for every non-SS endpoint (the
-     * old 8 here was tolerated by the H510M-A but is out-of-spec) */
+    /* Tx Info dw4 = Avg TRB Length[15:0] | Max ESIT Payload[31:16];
+     * Linux writes 0 for control endpoints (r31 comment fix: Max Burst
+     * actually lives in dw1[15:8] and is SuperSpeed-only) */
     epw[4] = 0;
     return run_cmd(PA(ic), 0, 0,
                    (u32)(TRB_ADDRDEV << 10) | ((u32)d->slot << 24) |
@@ -1093,7 +1096,7 @@ static int enumerate_port(int port)
 }
 
 /* a boot-protocol HID interface candidate found in a config descriptor */
-struct hid_cand { int iface, proto, ep_addr, ep_mps; };
+struct hid_cand { int iface, proto, ep_addr, ep_mps, ep_interval; };
 
 /* Parse a full configuration descriptor for boot-protocol HID interfaces
  * (class 3, subclass 1, protocol 1=keyboard / 2=mouse), each paired with
@@ -1137,6 +1140,7 @@ int usb_hid_parse(const u8 *desc, int tot, struct hid_cand *c, int maxc,
                     c[n].proto = proto;
                     c[n].ep_addr = 0;
                     c[n].ep_mps = 8;
+                    c[n].ep_interval = 1;
                     open = n;
                     n++;
                 }
@@ -1146,6 +1150,7 @@ int usb_hid_parse(const u8 *desc, int tot, struct hid_cand *c, int maxc,
             if (ea & 0x80) {
                 c[open].ep_addr = ea & 0xF;
                 c[open].ep_mps = desc[off + 4] | (desc[off + 5] << 8);
+                c[open].ep_interval = desc[off + 6];   /* bInterval (r31) */
             }
         }
         off += dl;
@@ -1180,6 +1185,55 @@ static void hid_arm_ring(struct xdev *d, int j)
     klog("usb: slot %d %s iface %d ep %02x ring armed (doorbell %u)",
          d->slot, h->kind == 2 ? "mouse" : "keyboard", h->iface,
          (u32)(0x80 | h->ep_addr), h->dci);
+}
+
+/* Build one interrupt-IN endpoint context exactly the way Linux's
+ * xhci_endpoint_init does.  r31 ROOT FIX: the r30 context was EP Type 6
+ * (BULK IN!) with Max ESIT Payload 0 and Avg TRB Length 0.  An Intel xHC
+ * ACCEPTS Configure Endpoint with those values (rc 1 - the r30 field log
+ * proves the command succeeded and the rings armed) but a bulk-typed
+ * context on a periodic-class device with zero ESIT payload never gets
+ * scheduled: zero transfer events, input dead, "ev 84 rf 0 hc 0 rs 0"
+ * frozen forever.  Type 7 (INT_IN_EP) + real Max ESIT Payload (FS/LS =
+ * max packet size) is what puts the EP on the xHC's periodic schedule.
+ *
+ * Interval, straight from Linux:
+ *   FS/LS interrupt: bInterval is in FRAMES; the ctx field is an exponent
+ *     of 125 us microframes: N = fls(8*bInterval)-1, clamped [3,10]
+ *     (xhci_parse_frame_interval + the interval-limit quirk; NEC xHCs
+ *     reject FS periodic intervals below 3 = one frame).
+ *   HS: exponent, field = clamp(bInterval,1,16)-1.
+ *   SS: field = clamp(bInterval,1,16).
+ * bInterval 1 (FS) -> 3, which is exactly what r30 hardcoded and the
+ * H510M-A accepted - so interval was never the killer; TYPE and ESIT
+ * were.  tests/usb_sim.c T3/T4 decode these words like a real xHC. */
+static void hid_fill_ep_ctx(u32 *epw, const struct hid_ep *h, int speed)
+{
+    int bi = h->binterval ? h->binterval : 1;
+    int interval;
+    if (speed == 4) {                      /* SuperSpeed */
+        interval = bi;
+        if (interval < 1) interval = 1;
+        if (interval > 16) interval = 16;
+    } else if (speed == 3) {               /* HighSpeed: exponent */
+        interval = bi - 1;                 /* Linux: clamp(bi,1,16)-1 */
+        if (interval < 0) interval = 0;
+        if (interval > 15) interval = 15;
+    } else {                               /* Full/LowSpeed: frames */
+        int v = 8 * bi, n = 0;
+        while (v >>= 1) n++;               /* n = fls(8*bi) - 1 */
+        interval = n;
+        if (interval < 3) interval = 3;
+        if (interval > 10) interval = 10;
+    }
+    u32 mps = (u32)h->ep_mps & 0x7FF;
+    u32 burst = ((u32)h->ep_mps >> 11) & 3;   /* HS wMaxPacketSize bits */
+    u32 esit = mps * (burst + 1);             /* FS/LS: burst 0 -> mps */
+    epw[0] = (u32)(interval & 0xFF) << 16;    /* Interval [23:16] */
+    epw[1] = (7u << 3) | (3u << 1) | (mps << 16);  /* INT_IN, CErr 3 */
+    epw[2] = PA(h->inr) | 1;                  /* dequeue | cycle bit */
+    epw[3] = 0;
+    epw[4] = (esit << 16) | esit;             /* ESIT [31:16] | AvgTRB */
 }
 
 static int enumerate_device(int root_port, u32 route, int speed, int mtt,
@@ -1353,6 +1407,9 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
         h->kind = (cand[j].proto == 2) ? 2 : 1;
         h->ep_addr = (u8)cand[j].ep_addr;
         h->ep_mps = (u8)(cand[j].ep_mps & 0xFFFF);
+        h->binterval = (u8)(cand[j].ep_interval & 0xFF);
+        if (!h->binterval) h->binterval = 1;
+        h->ctx_dumped = 0;
         h->dci = (u32)(h->ep_addr * 2 + 1);   /* EP 0x81 -> DCI 3 */
         h->inr = (volatile u32 *)palloc(4096);
         if (!h->inr) { h->iface = -1; continue; }
@@ -1397,14 +1454,11 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
         struct hid_ep *h = &d->hid[j];
         if (!h->active) continue;
         epw = (u32 *)(ic + csz * (h->dci + 1));
-        /* dw0: Interval [23:16] = 3 (4 ms FS / 500 us HS polling);
-         * dw1: EP Type [5:3] = 6 (Interrupt IN), CErr [2:1] = 3, MPS;
-         * dw4: Max Burst 0 - SuperSpeed-only field, Linux writes 0 */
-        epw[0] = (3u << 16);
-        epw[1] = (6u << 3) | (3u << 1) | ((u32)(h->ep_mps & 0xFFFF) << 16);
-        epw[2] = PA(h->inr) | 1;
-        epw[3] = 0;
-        epw[4] = 0;
+        /* r31: full Linux-style INT_IN context (type 7 + ESIT payload);
+         * the old type-6/zero-ESIT context was accepted by the xHC but
+         * never scheduled - see hid_fill_ep_ctx */
+        hid_fill_ep_ctx(epw, h, speed);
+        for (int q = 0; q < 5; q++) h->ctx_copy[q] = epw[q];
     }
     rc = run_cmd(PA(ic), 0, 0,
                  (u32)(TRB_CFGEP << 10) | ((u32)slot << 24), 800, slot);
@@ -1536,6 +1590,22 @@ void usb_poll(void)
                     klog("usb: slot %d %s armed 3 s, no first report yet - "
                          "doorbell nudge sent", sl,
                          h->kind == 2 ? "mouse" : "keyboard");
+                }
+                /* r31: if the xHC STILL never scheduled the ring, put the
+                 * exact endpoint context + ring head in the log ring so one
+                 * photo of the diagnostics screen shows what it was given
+                 * (type 7? ESIT? dequeue?) - no reflash needed to diagnose */
+                if (!h->ctx_dumped && tick_count - h->arm_tick > 800) {
+                    h->ctx_dumped = 1;
+                    klog("usb: slot %d dci %u STILL silent 8 s after arm - "
+                         "dumping what the xHC was given", sl, h->dci);
+                    klog("usb:   ep ctx: %x %x %x %x %x",
+                         h->ctx_copy[0], h->ctx_copy[1], h->ctx_copy[2],
+                         h->ctx_copy[3], h->ctx_copy[4]);
+                    klog("usb:   ring: idx %d cycle %u trb0: %x %x %x %x",
+                         h->inr_idx, h->inr_cycle,
+                         (u32)h->inr[0], (u32)h->inr[1],
+                         (u32)h->inr[2], (u32)h->inr[3]);
                 }
                 continue;
             }
