@@ -25,7 +25,7 @@ void boot_screen_init(void)
     msg_x = (screen_w - 560) / 2;
     msg_y = bar_y + 40;
     s_frame_rect(&screen, bar_x, bar_y, 300, 20, t->main);
-    s_text(&screen, msg_x, msg_y - 22, "SCos 2.0 r25 - native kernel boot log", t->text);
+    s_text(&screen, msg_x, msg_y - 22, "SCos 2.0 r25.1 - native kernel boot log", t->text);
     draw_logo(0);
     fb_flip();
     msg_line = 0;
