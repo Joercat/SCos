@@ -204,11 +204,16 @@ static int sim_consume_td(struct sim_consumer *c)
             continue;
         }
         u32 ioc = (t[3] >> 5) & 1u;
-        u32 ptr = t[0];
+        /* REAL xHC semantics (r32): a transfer event's TRB Transfer
+         * Pointer is the address of the COMPLETED TRB in the ring - not
+         * the data buffer.  The old sim posted t[0] (the data pointer),
+         * which is exactly why the driver's data-pointer-only matching
+         * passed every test and discarded every report on hardware. */
+        u32 trb_addr = (u32)(unsigned long)(c->ring + c->deq * 4);
         c->deq++;
         if (ioc) {
             c->tds++;
-            sim_post_event(c->slot, c->dci, 1, ptr, 0);
+            sim_post_event(c->slot, c->dci, 1, trb_addr, 0);
             return 1;
         }
     }

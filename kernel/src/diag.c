@@ -14,7 +14,7 @@ static void diag_draw(int secs_left)
 {
     const struct theme *t = theme_current();
     fb_clear(0x000000);
-    s_text_scaled(&screen, 24, 10, "SCos INPUT DIAGNOSTICS  -  build r31", t->main, 2);
+    s_text_scaled(&screen, 24, 10, "SCos INPUT DIAGNOSTICS  -  build r32", t->main, 2);
     s_text(&screen, 24, 42,
            "PHOTOGRAPH THIS WHOLE SCREEN and send it - the log names the failing stage.",
            t->text);

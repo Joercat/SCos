@@ -56,6 +56,7 @@ struct hid_ep {
     u8 ep_mps;
     u8 binterval;             /* descriptor bInterval (r31: EP ctx interval) */
     u8 ctx_dumped;            /* watchdog one-shot ctx dump done (r31) */
+    u8 ev_logged;             /* rate limit for the r32 event log lines */
     u32 ctx_copy[5];          /* the EP ctx CFGEP got - photo diagnostics */
     u32 dci;                  /* endpoint context index = ep_addr*2+1 */
     volatile u32 *inr;
@@ -197,10 +198,29 @@ static int proc_events(void)
                 for (int j = 0; j < d->nhid; j++) {
                     struct hid_ep *h = &d->hid[j];
                     if (!h->active || !h->inr || ep != h->dci) continue;
+                    if (h->ev_logged < 4) {
+                        h->ev_logged++;
+                        klog("usb: ev slot %d dci %u code %u rem %u ptr %x",
+                             slot, ep, code, rem, ptr);
+                    }
                     if (code == 1 || code == 12 || code == 13) {
+                        /* r31 field round 2 ROOT FIX: a real xHC posts the
+                         * COMPLETED TRB'S OWN ADDRESS in a transfer event
+                         * (Linux converts it with xhci_dma_to_trb); the
+                         * pre-r32 code only accepted the DATA buffer
+                         * address - which is what the simulator posts -
+                         * so every real report matched i = -1 and was
+                         * silently discarded while the ring re-armed.
+                         * Accept both semantics; the TRB index IS the
+                         * buffer index (in_buf[b] is what TRB b carries). */
                         int i = -1;
                         for (int b = 0; b < IN_TRBS; b++)
-                            if (PA(h->in_buf[b]) == ptr) i = b;
+                            if (ptr == PA(h->inr) + (u32)b * 16u ||
+                                ptr == PA(h->in_buf[b])) { i = b; break; }
+                        if (i < 0 && h->ev_logged <= 4)
+                            klog("usb: ev ptr %x not in ring %x..%x",
+                                 ptr, (u32)PA(h->inr),
+                                 (u32)PA(h->inr) + IN_TRBS * 16u);
                         if (i >= 0) {
                             u8 *r = h->in_buf[i];
                             h->last_rep_tick = tick_count;
@@ -1410,6 +1430,7 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
         h->binterval = (u8)(cand[j].ep_interval & 0xFF);
         if (!h->binterval) h->binterval = 1;
         h->ctx_dumped = 0;
+        h->ev_logged = 0;
         h->dci = (u32)(h->ep_addr * 2 + 1);   /* EP 0x81 -> DCI 3 */
         h->inr = (volatile u32 *)palloc(4096);
         if (!h->inr) { h->iface = -1; continue; }
@@ -1429,44 +1450,47 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
         return 0;
     }
 
-    /* ONE Configure Endpoint ADDs every boot EP context - the Linux way
-     * to configure interfaces - keeping the FULL topology: dropping
-     * route/MTT/TT here would cut a hub-attached device off the moment
-     * its interrupt EPs are added */
+    /* ONE Configure Endpoint PER boot EP (r32): the r30/r31 batched
+     * add_flags = slot|EP3|EP5 form was accepted (rc 1) but the only
+     * field device that ever produced transfer events (the Razer) was
+     * the single-EP one, while the two-EP Holtek stayed silent.  Per-EP
+     * Configure is exactly as spec-legal (add flags = slot ctx + one EP,
+     * Context Entries still covers the highest DCI) and matches the
+     * field-observed working shape; each command is independently
+     * logged so a photo names the EP that failed. */
     int maxdci = 0;
-    u32 addf = 0x01u;                    /* slot context */
     for (int j = 0; j < ncand; j++) {
         struct hid_ep *h = &d->hid[j];
         if (!h->active) continue;
-        addf |= 1u << h->dci;
         if ((int)h->dci > maxdci) maxdci = (int)h->dci;
     }
-    memset(ic, 0, csz * 34);
-    ((u32 *)ic)[0] = 0;                  /* Drop Context Flags (dw0) */
-    ((u32 *)ic)[1] = addf;               /* ADD: slot ctx + every boot EP */
-    slw = (u32 *)(ic + csz);
-    slw[0] = ((speed == 4) ? (route & 0xFFFFFu) : 0u) |
-             ((u32)(speed & 0xF) << 20) |
-             ((u32)(mtt & 1) << 25) | ((u32)maxdci << 27);
-    slw[1] = ((u32)root_port & 0xFF) << 16;
-    slw[2] = (u32)d->tt_slot | ((u32)d->tt_port << 8);
     for (int j = 0; j < ncand; j++) {
         struct hid_ep *h = &d->hid[j];
         if (!h->active) continue;
+        memset(ic, 0, csz * 34);
+        ((u32 *)ic)[0] = 0;                  /* Drop Context Flags (dw0) */
+        ((u32 *)ic)[1] = 0x01u | (1u << h->dci);   /* ADD: slot + this EP */
+        slw = (u32 *)(ic + csz);
+        slw[0] = ((speed == 4) ? (route & 0xFFFFFu) : 0u) |
+                 ((u32)(speed & 0xF) << 20) |
+                 ((u32)(mtt & 1) << 25) | ((u32)maxdci << 27);
+        slw[1] = ((u32)root_port & 0xFF) << 16;
+        slw[2] = (u32)d->tt_slot | ((u32)d->tt_port << 8);
         epw = (u32 *)(ic + csz * (h->dci + 1));
         /* r31: full Linux-style INT_IN context (type 7 + ESIT payload);
          * the old type-6/zero-ESIT context was accepted by the xHC but
          * never scheduled - see hid_fill_ep_ctx */
         hid_fill_ep_ctx(epw, h, speed);
         for (int q = 0; q < 5; q++) h->ctx_copy[q] = epw[q];
-    }
-    rc = run_cmd(PA(ic), 0, 0,
-                 (u32)(TRB_CFGEP << 10) | ((u32)slot << 24), 800, slot);
-    if (rc != 1) {
-        klog("usb: configure endpoint failed slot %d (code %d)", slot, rc);
-        fail_flag = 1;
-        disable_slot(slot);
-        return 0;
+        rc = run_cmd(PA(ic), 0, 0,
+                     (u32)(TRB_CFGEP << 10) | ((u32)slot << 24), 800, slot);
+        if (rc != 1) {
+            klog("usb: configure endpoint failed slot %d dci %u (code %d)",
+                 slot, h->dci, rc);
+            fail_flag = 1;
+            disable_slot(slot);
+            return 0;
+        }
     }
 
     for (int j = 0; j < ncand; j++)
