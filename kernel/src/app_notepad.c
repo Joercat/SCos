@@ -9,6 +9,7 @@ struct notepad {
     char filepath[256];
     int has_path;
     int hover_btn;          /* 0 save, 1 save as */
+    struct window *win;     /* for memory attribution + appstrt console */
 };
 
 #define NP_TOOL_H 34
@@ -44,7 +45,20 @@ static void np_open(struct window *w, void *arg)
         }
     }
     np->pos = np->len;
+    np->win = w;
     w->data = np;
+    wm_track_mem(w, (int)(sizeof(*np) + np->cap));
+    {   /* real launch-console events (visible when started via appstrt) */
+        char lg[300];
+        if (np->has_path) {
+            strcpy(lg, "opened ");
+            strncat(lg, np->filepath, 240);
+            char n[12];
+            strcat(lg, " ("); fmt_u32(n, np->len); strcat(lg, n);
+            strcat(lg, " bytes)");
+        } else strcpy(lg, "new empty document");
+        app_log(w, lg);
+    }
 }
 
 static void np_close(struct window *w)
@@ -65,6 +79,7 @@ static void np_insert(struct notepad *np, char c)
         memcpy(nt, np->text, np->len);
         pfree(np->text, np->cap);
         np->text = nt;
+        wm_track_mem(np->win, (int)(ncap - np->cap));  /* doc really grew */
         np->cap = ncap;
     }
     for (u32 i = np->len; i > np->pos; i--) np->text[i] = np->text[i - 1];
@@ -139,6 +154,14 @@ static void save_as_cb(int ok, const char *text, void *ud)
     strcpy(title, "Notepad - ");
     strcat(title, base);
     wm_set_title(w, title);
+    {
+        char lg[300], n[12];
+        strcpy(lg, "saved ");
+        strncat(lg, text, 240);
+        strcat(lg, " ("); fmt_u32(n, np->len); strcat(lg, n);
+        strcat(lg, " bytes)");
+        app_log(w, lg);
+    }
     wm_dialog("Notepad", "File saved successfully!", NULL, saved_cb, NULL);
 }
 
@@ -147,6 +170,12 @@ static void np_save(struct window *w, int as)
     struct notepad *np = w->data;
     if (!as && np->has_path) {
         vfs_write(np->filepath, np->text, np->len);
+        char lg[300], n[12];
+        strcpy(lg, "saved ");
+        strncat(lg, np->filepath, 240);
+        strcat(lg, " ("); fmt_u32(n, np->len); strcat(lg, n);
+        strcat(lg, " bytes)");
+        app_log(w, lg);
         wm_dialog("Notepad", "File saved successfully!", NULL, saved_cb, NULL);
         return;
     }

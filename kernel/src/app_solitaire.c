@@ -51,6 +51,7 @@ struct sol {
     int won;
     u32 seed;
     u32 t0;
+    struct window *owner;      /* appstrt console + memory attribution */
 };
 
 static u32 sl_rand(struct sol *g)
@@ -84,11 +85,21 @@ static void sl_new(struct sol *g)
     g->sel_src = -1; g->sel_idx = 0;
     g->moves = 0; g->won = 0;
     g->t0 = (u32)(uptime_ms() / 1000);
+    app_log(g->owner, "new game dealt");
 }
 
 static void sl_check_win(struct sol *g)
 {
+    int was = g->won;
     g->won = (g->foundn[0] + g->foundn[1] + g->foundn[2] + g->foundn[3]) == 52;
+    if (g->won && !was) {
+        char lg[80], n[12];
+        strcpy(lg, "game won in ");
+        fmt_u32(n, (u32)g->moves); strcat(lg, n); strcat(lg, " moves, ");
+        fmt_u32(n, (u32)(uptime_ms() / 1000 - g->t0)); strcat(lg, n);
+        strcat(lg, " s");
+        app_log(g->owner, lg);
+    }
 }
 
 static void sl_flip_top(struct sol *g, int c)
@@ -347,7 +358,9 @@ static void sl_open(struct window *w, void *arg)
     if (!g->seed) g->seed = 7;
     g->sel_src = -1;
     g->hover = -1;
+    g->owner = w;
     w->data = g;
+    wm_track_mem(w, (int)sizeof(*g));
     sl_new(g);
 }
 

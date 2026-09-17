@@ -1,15 +1,22 @@
 /*
- * SCos native - Terminal app.
+ * SCos Terminal.
  *
- * Faithful port of the web simulation's terminal: same command set and
- * behaviour (including the typewriter output effect and the simulated
- * network ping driven by system/network.json).
+ * Ported from the web simulation and then made real: every command runs
+ * against the live kernel (VFS, CMOS/RTC, PIT, page allocator, WM).
+ * r27: in-window TABS (click the strip, Ctrl+T / Ctrl+Tab / Ctrl+W),
+ * `appstrt` launching apps with their logs streaming into the launching
+ * tab like a Linux console, a real process table (`procs`) and `kill`.
+ * Nothing is simulated - `ping` honestly reports there is no TCP/IP
+ * stack instead of inventing latency.
  */
 #include "scos.h"
 
 #define TERM_LINES 512
 #define TERM_LINE 256
 #define HIST 16
+#define TERM_MAX_TABS 6
+#define TERM_TAB_H 22
+#define TAB_BTN_W 74
 
 struct term {
     char lines[TERM_LINES][TERM_LINE];
@@ -32,7 +39,29 @@ struct term {
     char ed_path[192];
     char ed_buf[128][96];
     int ed_lines, ed_row, ed_col, ed_scroll, ed_modified;
+    struct window *win;        /* back-pointer: tab ops + console redraws */
 };
+
+/* one terminal window = a strip of tabs, each an independent shell with
+ * its own scrollback, cwd, history and aliases */
+struct termwin {
+    struct term *tabs[TERM_MAX_TABS];
+    int ntabs;
+    int active;
+};
+
+static inline struct termwin *TW(struct window *w)
+{
+    return (struct termwin *)w->data;
+}
+static inline struct term *WT(struct window *w)
+{
+    struct termwin *tw = TW(w);
+    return tw->tabs[tw->active];
+}
+
+static void term_new_tab(struct window *w);
+static void term_close_tab(struct window *w, int i);
 
 static void term_push_line(struct term *t, const char *s)
 {
@@ -139,29 +168,29 @@ static const char *help_text =
     "mv        - Move or rename a file\n"
     "rm [-s]   - Delete file (-s also allows system files)\n"
     "edit <f>  - Full-screen editor (nano-like: ^O save, ^X exit)\n"
+    "appstrt   - Launch an app; its logs stream into this tab\n"
+    "apps      - List installed apps and running instances\n"
+    "procs     - Process table with real per-task memory\n"
+    "kill <pid>- Terminate an app task (see 'procs')\n"
+    "tab       - new | close | <n>: terminal tabs (also Ctrl+T)\n"
     "whoami    - Show current user\n"
     "version   - Show system version\n"
     "uptime    - Time since boot (PIT)\n"
     "free      - Memory usage (real page allocator)\n"
-    "cpu       - CPU brand from CPUID\n"
+    "cpu       - CPU brand, measured speed and load\n"
     "df        - Filesystem usage\n"
     "disks     - Detected ATA disks (IDENTIFY)\n"
     "neofetch  - System summary with logo\n"
-    "dmesg     - Kernel log ring (USB/input diagnostics)\n"
+    "klog      - Kernel log ring (USB/input diagnostics)\n"
     "diag [sub]- Full hardware scan; sub = pci|usb|input for a quick\n"
             "            subsystem scan printed right here in the terminal\n"
     "sysrq <a> - System request: a = panic|reboot|error|dump|time\n"
-    "sysmon    - Open the System Monitor app\n"
     "theme     - List or switch themes\n"
     "calc      - Perform basic arithmetic\n"
     "ping      - Honest answer: this kernel has no TCP/IP stack\n"
-    "sysinfo   - Display system information\n"
+    "scinfo    - Display system information\n"
     "alias     - Create command aliases\n"
     "history   - Show command history\n"
-    "edit      - Open a file in Notepad\n"
-    "open      - Launch a desktop app\n"
-    "blackjack - Play blackjack\n"
-    "solitaire - Play Klondike solitaire\n"
     "save      - Write the filesystem image to disk\n"
     "shutdown  - Power the machine off\n"
     "reboot    - Restart the machine\n"
@@ -510,7 +539,7 @@ static void run_command(struct term *t, const char *command)
             strcat(response, "' - use pci, usb, input or all");
         }
     }
-    else if (!strcmp(cmd, "dmesg")) {
+    else if (!strcmp(cmd, "klog") || !strcmp(cmd, "dmesg")) {
         int n = klog_ring_count();
         int start = n > 14 ? n - 14 : 0;
         response[0] = 0;
@@ -577,7 +606,7 @@ static void run_command(struct term *t, const char *command)
         }
     }
     else if (!strcmp(cmd, "whoami")) strcpy(response, "user");
-    else if (!strcmp(cmd, "version")) strcpy(response, "SCos version 2.0.0, Terminal v2.0 (native)");
+    else if (!strcmp(cmd, "version")) strcpy(response, "SCos version 2.0.0 - terminal v2.0");
     else if (!strcmp(cmd, "calc")) {
         if (nargs != 4) strcpy(response, "Usage: calc <number1> <operator> <number2>");
         else {
@@ -606,7 +635,7 @@ static void run_command(struct term *t, const char *command)
         strcpy(response, "ping: this kernel has no TCP/IP stack - network unreachable.\n"
                          "No network interface driver is present (see 'disks'/'cpu' for real hardware).");
     }
-    else if (!strcmp(cmd, "sysinfo")) {
+    else if (!strcmp(cmd, "scinfo") || !strcmp(cmd, "sysinfo")) {
         char a[32], b[32];
         struct rtc_time rt;
         rtc_read(&rt);
@@ -614,7 +643,7 @@ static void run_command(struct term *t, const char *command)
         fmt_pad2(b, rt.hour);
         strcpy(response, "SCos System Information:\n");
         strcat(response, "OS Version: 2.0.0\n");
-        strcat(response, "Kernel: SCos-2.0.0-native\n");
+        strcat(response, "Kernel: sckern (SCos 2.0.0)\n");
         strcat(response, "Architecture: x86 (32-bit protected mode)\n");
         strcat(response, "Uptime: "); fmt_u32(b, uptime_ms() / 60000); strcat(response, b); strcat(response, " minutes\n");
         strcat(response, "Total Memory: "); fmt_u32(b, mm_total_kb() / 1024); strcat(response, b); strcat(response, " MB\n");
@@ -664,12 +693,48 @@ static void run_command(struct term *t, const char *command)
             }
         }
     }
-    else if (!strcmp(cmd, "open")) {
-        if (nargs < 2) strcpy(response, "Usage: open <app-id>  (files, terminal, notepad, browser, calendar, settings, about)");
-        else if (app_find(args[1]) && args[1][0] != '_') {
-            wm_open_app(args[1], NULL);
-            strcpy(response, "Launched "); strcat(response, args[1]);
-        } else { strcpy(response, "Unknown app: "); strcat(response, args[1]); }
+    else if (!strcmp(cmd, "appstrt") || !strcmp(cmd, "open")) {
+        /* r27: THE way to launch apps from the terminal. Like running a
+         * program from a Linux shell: the window opens, this tab becomes
+         * its console, and the app's real events stream in here. */
+        if (nargs < 2) {
+            strcpy(response, "Usage: appstrt <app> [file]\nInstalled:");
+            for (int i2 = 0; i2 < app_count(); i2++) {
+                struct app *a = app_at(i2);
+                if (!a || a->id[0] == '_') continue;
+                strcat(response, " ");
+                strcat(response, a->id);
+            }
+        } else {
+            struct app *a = app_find(args[1]);
+            if (!a || a->id[0] == '_') {
+                strcpy(response, "app "); strcat(response, args[1]);
+                strcat(response, " failed to launch: unknown app");
+            } else {
+                int already = wm_app_running(a->id);
+                wm_set_pending_console(t);     /* open()-time logs land here */
+                struct window *nw = wm_open_app(a->id,
+                                                nargs > 2 ? args[2] : NULL);
+                if (!nw) {
+                    strcpy(response, "app "); strcat(response, args[1]);
+                    strcat(response, " failed to launch");
+                } else {
+                    strcpy(response, "app "); strcat(response, args[1]);
+                    strcat(response, already ? " already running - focused"
+                                             : " started successfully");
+                }
+            }
+        }
+    }
+    else if (!strcmp(cmd, "blackjack") || !strcmp(cmd, "solitaire") ||
+             !strcmp(cmd, "sysmon")) {
+        /* legacy one-word launchers - same path as appstrt (solitaire and
+         * sysmon were listed in the old help but never implemented!) */
+        wm_set_pending_console(t);
+        struct window *nw = wm_open_app(cmd, NULL);
+        strcpy(response, "app "); strcat(response, cmd);
+        if (nw) strcat(response, " started successfully");
+        else strcat(response, " failed to launch");
     }
     else if (!strcmp(cmd, "save")) {
         if (!ata_present()) strcpy(response, "No ATA disk detected.");
@@ -949,7 +1014,7 @@ static void run_command(struct term *t, const char *command)
         int ni = 0;
         strcpy(info[ni++], "user@scos");
         strcpy(info[ni++], "---------------------");
-        strcpy(info[ni++], "OS:      SCos 2.0.0 (native x86 kernel)");
+        strcpy(info[ni++], "OS:      SCos 2.0.0 (build r27)");
         strcpy(info[ni],   "CPU:     "); strncpy(info[ni] + 9, cpu, 40); ni++;
         strcpy(info[ni],   "Speed:   ");
         fmt_u32(n, cpu_mhz()); strcat(info[ni], n); strcat(info[ni], " MHz (TSC-measured)"); ni++;
@@ -974,7 +1039,7 @@ static void run_command(struct term *t, const char *command)
         strcpy(info[ni],   "Theme:   ");
         strncpy(info[ni] + 9, theme_current()->name, 40); ni++;
         strcpy(info[ni++], "Shell:   scos-sh");
-        strcpy(info[ni++], "WM:      SCos WM (VBE framebuffer)");
+        strcpy(info[ni++], "WM:      scwm (VBE framebuffer compositor)");
         response[0] = 0;
         int rows = neofetch_art_lines > ni ? neofetch_art_lines : ni;
         for (int i = 0; i < rows; i++) {
@@ -990,18 +1055,134 @@ static void run_command(struct term *t, const char *command)
         }
         response[strlen(response) - 1] = 0;
     }
-    else if (!strcmp(cmd, "edit")) {
-        if (nargs < 2) strcpy(response, "Usage: edit <file>");
-        else {
-            char a[256];
-            resolve_path(t, args[1], a);
-            wm_open_app("notepad", a);
-            strcpy(response, "Opened in Notepad: "); strcat(response, a);
+    else if (!strcmp(cmd, "panic")) {
+        /* was listed in help since v1 but never implemented - now real */
+        term_print(t, "Triggering kernel panic as requested...");
+        sleep_ms(600);
+        kernel_panic("panic requested from terminal");
+        return;
+    }
+    else if (!strcmp(cmd, "make")) {
+        /* inside joke from the os.html days - deliberately not in help */
+        if (nargs == 2 && !strcmp(args[1], "real")) strcpy(response, "real!!!");
+        else strcpy(response, "make: nothing to be done");
+    }
+    else if (!strcmp(cmd, "tab")) {
+        struct termwin *tw = TW(t->win);
+        if (nargs < 2) {
+            char n[8];
+            strcpy(response, "tabs: ");
+            fmt_u32(n, (u32)tw->ntabs); strcat(response, n);
+            strcat(response, ", active #");
+            fmt_u32(n, (u32)(tw->active + 1)); strcat(response, n);
+            strcat(response, "\nusage: tab new | tab close | tab <n>");
+        } else if (!strcmp(args[1], "new")) {
+            term_new_tab(t->win);
+            return;
+        } else if (!strcmp(args[1], "close")) {
+            if (tw->ntabs <= 1) strcpy(response, "cannot close the last tab");
+            else {
+                term_close_tab(t->win, tw->active);
+                term_print(WT(t->win), "tab closed");
+                wm_redraw(t->win);
+                return;              /* this command's own tab may be gone */
+            }
+        } else {
+            int n2 = (int)str_to_u32(args[1]);
+            if (n2 >= 1 && n2 <= tw->ntabs) { tw->active = n2 - 1; return; }
+            strcpy(response, "no such tab: ");
+            strncat(response, args[1], 8);
         }
     }
-    else if (!strcmp(cmd, "blackjack")) {
-        wm_open_app("blackjack", NULL);
-        strcpy(response, "Blackjack table opened.");
+    else if (!strcmp(cmd, "apps")) {
+        strcpy(response, "ID          TITLE                 RUNNING\n");
+        for (int i2 = 0; i2 < app_count(); i2++) {
+            struct app *a = app_at(i2);
+            if (!a || a->id[0] == '_') continue;
+            char row[80];
+            strcpy(row, a->id);
+            while ((int)strlen(row) < 12) strcat(row, " ");
+            strncat(row, a->title, 21);
+            while ((int)strlen(row) < 34) strcat(row, " ");
+            char n[8];
+            fmt_u32(n, (u32)wm_app_running(a->id));
+            strcat(row, n); strcat(row, "\n");
+            if (strlen(response) + strlen(row) < sizeof(response) - 2)
+                strcat(response, row);
+        }
+        response[strlen(response) - 1] = 0;
+    }
+    else if (!strcmp(cmd, "procs")) {
+        strcpy(response, "PID  NAME        TYPE    STATE      MEM\n");
+        for (int i2 = 0; i2 < proc_sys_count(); i2++) {
+            char row[96], n[16];
+            fmt_u32(n, (u32)i2);
+            strcpy(row, n);
+            while ((int)strlen(row) < 5) strcat(row, " ");
+            strcat(row, proc_sys_name(i2));
+            while ((int)strlen(row) < 16) strcat(row, " ");
+            strcat(row, "system  running  ");
+            u32 kb = 0;
+            int show = 0;
+            if (i2 == 0) { kb = proc_kernel_mem_kb(); show = 1; }
+            else if (i2 == 2) { kb = proc_wm_mem_kb(); show = 1; }
+            else if (i2 == 3) { kb = vfs_usage_bytes() / 1024; show = 1; }
+            if (show) { fmt_u32(n, kb); strcat(row, n); strcat(row, " KB"); }
+            else strcat(row, "-");
+            strcat(row, "\n");
+            if (strlen(response) + strlen(row) < sizeof(response) - 64)
+                strcat(response, row);
+        }
+        int nw = wm_win_count();
+        for (int i2 = 0; i2 < nw && i2 < 20; i2++) {
+            struct window *aw = wm_win_at(i2);
+            char row[112], n[16];
+            fmt_u32(n, (u32)(10 + i2));
+            strcpy(row, n);
+            while ((int)strlen(row) < 5) strcat(row, " ");
+            strncat(row, aw->app ? aw->app->id : "?", 11);
+            while ((int)strlen(row) < 16) strcat(row, " ");
+            strcat(row, "app     ");
+            strcat(row, aw->state == WIN_STATE_MIN ? "minimized  "
+                                                   : "running    ");
+            fmt_u32(n, proc_win_mem_kb(aw));
+            strcat(row, n); strcat(row, " KB\n");
+            if (strlen(response) + strlen(row) < sizeof(response) - 64)
+                strcat(response, row);
+        }
+        if (nw > 20 && strlen(response) < sizeof(response) - 40)
+            strcat(response, "(more windows - see sysmon)\n");
+        response[strlen(response) - 1] = 0;
+    }
+    else if (!strcmp(cmd, "kill")) {
+        if (nargs < 2) strcpy(response, "Usage: kill <pid>  (see 'procs')");
+        else {
+            int pid = (int)str_to_u32(args[1]);
+            if (pid >= 0 && pid < proc_sys_count()) {
+                strcpy(response, "cannot kill system task ");
+                strcat(response, proc_sys_name(pid));
+            } else if (pid >= 10 && pid - 10 < wm_win_count()) {
+                struct window *v = wm_win_at(pid - 10);
+                if (v == t->win)
+                    strcpy(response, "refusing to kill this terminal - "
+                                     "close the window instead");
+                else if (v->app && v->app->id[0] == '_')
+                    strcpy(response, "cannot kill a system dialog");
+                else {
+                    strcpy(response, "terminated ");
+                    strcat(response, v->app ? v->app->id : "?");
+                    strcat(response, " (pid ");
+                    char n[8];
+                    fmt_u32(n, (u32)pid);
+                    strcat(response, n);
+                    strcat(response, ")");
+                    wm_close_window(v);
+                }
+            } else {
+                strcpy(response, "no such pid: ");
+                strncat(response, args[1], 8);
+            }
+        }
     }
     else {
         strcpy(response, "Command not found: "); strcat(response, cmd);
@@ -1015,29 +1196,111 @@ static void run_command(struct term *t, const char *command)
 }
 
 /* ------------------------------------------------------------- app glue -- */
-static void term_open(struct window *w, void *arg)
+static void term_init_shell(struct term *t, struct window *w, const char *banner)
 {
-    (void)arg;
-    struct term *t = palloc(sizeof(struct term));
-    if (!t) return;              /* OOM: wm_open_app reports it centrally */
     memset(t, 0, sizeof(*t));
     strcpy(t->cwd, "/");
     t->scroll = -1;
     t->hindex = 0;
-    w->data = t;
-    term_print(t, "SCos Terminal v2.0 (native kernel)");
-    term_print(t, "Type 'help' for available commands.");
+    t->win = w;
+    if (banner) term_print(t, banner);
+    term_print(t, "Type 'help' for commands.  Tabs: [+] or Ctrl+T, cycle "
+                  "Ctrl+Tab, close Ctrl+W.");
+}
+
+static void term_open(struct window *w, void *arg)
+{
+    (void)arg;
+    struct termwin *tw = palloc(sizeof(*tw));
+    if (!tw) return;             /* OOM: wm_open_app reports it centrally */
+    memset(tw, 0, sizeof(*tw));
+    struct term *t = palloc(sizeof(struct term));
+    if (!t) { pfree(tw, sizeof(*tw)); return; }
+    w->data = tw;
+    term_init_shell(t, w, "SCos Terminal v2.0");
+    tw->tabs[0] = t;
+    tw->ntabs = 1;
+    tw->active = 0;
+    /* real attribution so sysmon/procs show this window's true footprint */
+    wm_track_mem(w, (int)(sizeof(*tw) + sizeof(struct term)));
 }
 
 static void term_close(struct window *w)
 {
-    if (w->data) pfree(w->data, sizeof(struct term));
+    struct termwin *tw = TW(w);
+    if (tw) {
+        for (int i = 0; i < tw->ntabs; i++) {
+            /* apps launched from this tab must not log into freed memory */
+            wm_clear_console(tw->tabs[i]);
+            pfree(tw->tabs[i], sizeof(struct term));
+        }
+        pfree(tw, sizeof(*tw));
+    }
     w->data = NULL;
+}
+
+static void term_new_tab(struct window *w)
+{
+    struct termwin *tw = TW(w);
+    if (tw->ntabs >= TERM_MAX_TABS) {
+        term_print(WT(w), "tab limit reached (6 per window) - close one first");
+        wm_redraw(w);
+        return;
+    }
+    struct term *t = palloc(sizeof(struct term));
+    if (!t) {
+        term_print(WT(w), "out of memory - cannot open a new tab");
+        wm_redraw(w);
+        return;
+    }
+    char banner[48];
+    strcpy(banner, "SCos Terminal v2.0 - tab ");
+    char n[4];
+    fmt_u32(n, (u32)(tw->ntabs + 1));
+    strcat(banner, n);
+    term_init_shell(t, w, banner);
+    tw->tabs[tw->ntabs++] = t;
+    tw->active = tw->ntabs - 1;
+    wm_track_mem(w, (int)sizeof(struct term));
+    wm_redraw(w);
+}
+
+static void term_close_tab(struct window *w, int i)
+{
+    struct termwin *tw = TW(w);
+    if (i < 0 || i >= tw->ntabs || tw->ntabs <= 1) return;
+    struct term *t = tw->tabs[i];
+    wm_clear_console(t);
+    wm_track_mem(w, -(int)sizeof(struct term));
+    pfree(t, sizeof(struct term));
+    for (int k = i; k < tw->ntabs - 1; k++) tw->tabs[k] = tw->tabs[k + 1];
+    tw->ntabs--;
+    if (tw->active >= tw->ntabs) tw->active = tw->ntabs - 1;
+    else if (tw->active > i) tw->active--;
+    wm_redraw(w);
+}
+
+/* console sink for apps launched with `appstrt` (called by the WM) */
+void term_console_line(void *term, const char *line)
+{
+    struct term *t = (struct term *)term;
+    if (!t || !t->win || !TW(t->win)) return;
+    term_push_line(t, line);
+    if (WT(t->win) == t) wm_redraw(t->win);
+}
+
+void term_console_exit(void *term, const char *app_id)
+{
+    char buf[96];
+    strcpy(buf, "[");
+    strncat(buf, app_id ? app_id : "app", 24);
+    strcat(buf, "] exited");
+    term_console_line(term, buf);
 }
 
 static int term_visible_rows(struct window *w)
 {
-    return (wm_content_h(w) - 24) / (FONT_H + 2);
+    return (wm_content_h(w) - 24 - TERM_TAB_H) / (FONT_H + 2);
 }
 
 static void ed_clamp_cursor(struct term *t)
@@ -1065,7 +1328,7 @@ static void ed_save(struct term *t)
 
 static void ed_key(struct window *w, struct key_event *e)
 {
-    struct term *t = w->data;
+    struct term *t = WT(w);
     if (!e->pressed) return;
     char c = (char)e->keycode;
     if (e->ctrl && (c == 15 || c == 'o' || c == 'O')) { ed_save(t); wm_redraw(w); return; }
@@ -1145,7 +1408,7 @@ static void ed_key(struct window *w, struct key_event *e)
 
 static void term_paint_editor(struct window *w)
 {
-    struct term *t = w->data;
+    struct term *t = WT(w);
     struct surface *s = &w->surf;
     const struct theme *th = theme_current();
     s_fill(s, 0, 0, s->w, s->h, 0x000000);
@@ -1176,13 +1439,40 @@ static void term_paint_editor(struct window *w)
            0x888888);
 }
 
+static void term_paint_tabstrip(struct window *w)
+{
+    struct termwin *tw = TW(w);
+    struct surface *s = &w->surf;
+    const struct theme *th = theme_current();
+    s_fill(s, 0, 0, s->w, TERM_TAB_H, 0x141414);
+    int x = 4;
+    for (int i = 0; i < tw->ntabs && x + TAB_BTN_W <= s->w - 8; i++) {
+        int act = (i == tw->active);
+        s_fill(s, x, 2, TAB_BTN_W - 3, TERM_TAB_H - 4, act ? 0x000000 : 0x202020);
+        s_frame_rect(s, x, 2, TAB_BTN_W - 3, TERM_TAB_H - 4,
+                     act ? th->main : 0x3a3a3a);
+        char lbl[12];
+        fmt_u32(lbl, (u32)(i + 1));
+        strcat(lbl, ":term");
+        s_text(s, x + 5, 5, lbl, act ? th->main : 0x8a8a8a);
+        s_text(s, x + TAB_BTN_W - 16, 5, "x", 0xb06060);
+        x += TAB_BTN_W;
+    }
+    if (x + 26 <= s->w - 4) {
+        s_fill(s, x, 2, 24, TERM_TAB_H - 4, 0x202020);
+        s_frame_rect(s, x, 2, 24, TERM_TAB_H - 4, 0x3a3a3a);
+        s_text(s, x + 7, 4, "+", th->main);
+    }
+}
+
 static void term_paint(struct window *w)
 {
-    if (((struct term *)w->data)->edit_mode) { term_paint_editor(w); return; }
-    struct term *t = w->data;
+    if (WT(w)->edit_mode) { term_paint_editor(w); return; }
+    struct term *t = WT(w);
     struct surface *s = &w->surf;
     const struct theme *th = theme_current();
     s_fill(s, 0, 0, s->w, s->h, 0x000000);
+    term_paint_tabstrip(w);      /* after the background clear */
 
     int rows = term_visible_rows(w);
     /* pending typewriter text may span several lines */
@@ -1202,7 +1492,7 @@ static void term_paint(struct window *w)
     if (t->scroll < 0) t->scroll = 0;
     t->follow = (t->scroll >= total - rows);
 
-    int y = 4;
+    int y = TERM_TAB_H + 4;
     for (int r = t->scroll; r < total && r < t->scroll + rows; r++, y += FONT_H + 2) {
         if (r < t->nlines) {
             s_clip_text(s, 6, y, t->lines[r], th->main, s->w - 12);
@@ -1234,9 +1524,25 @@ static void term_paint(struct window *w)
 
 static void term_key(struct window *w, struct key_event *e)
 {
-    if (((struct term *)w->data)->edit_mode) { ed_key(w, e); return; }
-    struct term *t = w->data;
+    if (WT(w)->edit_mode) { ed_key(w, e); return; }
+    struct term *t = WT(w);
     if (!e->pressed) return;
+    /* tab shortcuts (before line editing swallows the keys) */
+    if (e->ctrl) {
+        struct termwin *tw = TW(w);
+        if (e->keycode == 't' || e->keycode == 'T') { term_new_tab(w); return; }
+        if ((e->keycode == 'w' || e->keycode == 'W') && tw->ntabs > 1) {
+            term_close_tab(w, tw->active);
+            return;
+        }
+        if (e->keycode == '\t') {
+            tw->active = e->shift
+                ? (tw->active + tw->ntabs - 1) % tw->ntabs
+                : (tw->active + 1) % tw->ntabs;
+            wm_redraw(w);
+            return;
+        }
+    }
     /* never swallow keystrokes: finish any typewriter output instantly */
     if (t->pending_active) {
         term_push_line(t, t->pending);
@@ -1274,8 +1580,25 @@ static void term_key(struct window *w, struct key_event *e)
 
 static void term_mouse(struct window *w, struct mouse_event *e, int x, int y)
 {
-    struct term *t = w->data;
-    (void)x; (void)y;
+    struct termwin *tw = TW(w);
+    /* tab strip: click selects, [x] closes, [+] opens (not in editor mode -
+     * the nano-style editor owns the whole surface like real nano) */
+    if (e->type == MEV_BUTTON && e->down && e->button == MBTN_LEFT &&
+        y < TERM_TAB_H && !WT(w)->edit_mode) {
+        if (x >= 4) {
+            int i = (x - 4) / TAB_BTN_W;
+            int inx = (x - 4) % TAB_BTN_W;
+            if (i < tw->ntabs && inx < TAB_BTN_W - 3) {
+                if (inx >= TAB_BTN_W - 18) term_close_tab(w, i);
+                else { tw->active = i; wm_redraw(w); }
+                return;
+            }
+            int px = 4 + tw->ntabs * TAB_BTN_W;
+            if (x >= px && x <= px + 24) { term_new_tab(w); return; }
+        }
+        return;
+    }
+    struct term *t = WT(w);
     if (e->type == MEV_WHEEL) {
         int rows = term_visible_rows(w);
         t->scroll -= e->wheel;
@@ -1289,7 +1612,7 @@ static void term_mouse(struct window *w, struct mouse_event *e, int x, int y)
 
 static void term_tick(struct window *w)
 {
-    struct term *t = w->data;
+    struct term *t = WT(w);
     if (t->pending_active) {
         t->pend_shown += 40;                     /* typewriter speed */
         if (t->pend_shown >= t->pend_len) {

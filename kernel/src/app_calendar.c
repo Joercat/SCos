@@ -23,6 +23,7 @@ static void cal_open(struct window *w, void *arg)
     c->hover_day = -1;
     c->hover_btn = -1;
     w->data = c;
+    wm_track_mem(w, (int)sizeof(*c));
 }
 
 static void cal_close(struct window *w)

@@ -23,6 +23,7 @@ struct bj {
     int wins, losses, pushes;
     u32 seed;
     int hover;
+    struct window *win;        /* appstrt console + memory attribution */
 };
 
 static u32 bj_rand(struct bj *b)
@@ -71,6 +72,7 @@ static int hand_value(const u8 *h, int n)
 static void bj_new_round(struct bj *b)
 {
     bj_shuffle(b);
+    app_log(b->win, "new round dealt");
     b->pn = b->dn = 0;
     b->player[b->pn++] = bj_draw(b);
     b->dealer[b->dn++] = bj_draw(b);
@@ -92,6 +94,20 @@ static void bj_finish(struct bj *b, int result)
     if (result == 1 || result == 4) b->wins++;
     else if (result == 2) b->losses++;
     else b->pushes++;
+    /* real outcome to the launching console */
+    int p = hand_value(b->player, b->pn), d = hand_value(b->dealer, b->dn);
+    char lg[80], n[8];
+    if (result == 4) strcpy(lg, "blackjack! you win 3:2");
+    else if (result == 1) {
+        strcpy(lg, d > 21 ? "dealer busts - you win " : "you win ");
+        fmt_u32(n, (u32)p); strcat(lg, n); strcat(lg, " vs ");
+        fmt_u32(n, (u32)d); strcat(lg, n);
+    } else if (result == 2) {
+        strcpy(lg, p > 21 ? "you bust with " : "dealer wins ");
+        fmt_u32(n, (u32)(p > 21 ? p : d)); strcat(lg, n);
+        if (p <= 21) { strcat(lg, " vs "); fmt_u32(n, (u32)p); strcat(lg, n); }
+    } else strcpy(lg, "push - bet returned");
+    app_log(b->win, lg);
 }
 
 static void bj_stand(struct bj *b)
@@ -226,7 +242,9 @@ static void bj_open(struct window *w, void *arg)
     b->seed = (u32)tick_count * 2654435761u ^ (u32)rt.sec * 40503u ^ 0x9E3779B9u;
     if (!b->seed) b->seed = 1;
     b->hover = -1;
+    b->win = w;
     w->data = b;
+    wm_track_mem(w, (int)sizeof(*b));
     bj_new_round(b);
 }
 

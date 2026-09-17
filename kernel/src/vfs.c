@@ -42,11 +42,10 @@ void vfs_init_defaults(void)
     node_new("desktop", 1, home);
 
     static const char welcome[] =
-        "Welcome to SCos!\nThis is your personal computer system.\n"
-        "Now running as a native x86 kernel.";
+        "Welcome to SCos!\nThis is your personal computer system.";
     static const char changelog[] =
         "SCos 2.0.0 Changelog:\n"
-        "- Rebuilt from web simulation into a real bare-metal kernel\n"
+        "- Bare-metal x86 kernel: bootloader, drivers, window manager\n"
         "- VBE framebuffer desktop with mouse-driven window manager\n"
         "- PS/2 keyboard and mouse drivers, PIT clock, CMOS RTC\n"
         "- Terminal, Files, Notepad, Calendar, Settings, About apps\n"
@@ -66,8 +65,8 @@ void vfs_init_defaults(void)
     f->data = palloc(sizeof(settings)); f->size = sizeof(settings) - 1; f->cap = sizeof(settings);
     memcpy(f->data, settings, f->size); f->data[f->size] = 0;
     static const char about[] =
-        "SCos - a real bare-metal x86 operating system\n"
-        "Version 2.0.0 (native kernel)\n"
+        "SCos - bare-metal x86 operating system\n"
+        "Version 2.0.0\n"
         "Boots from an MBR bootloader into 32-bit protected mode.\n"
         "Type 'neofetch' in the Terminal for a live hardware report.";
     f = node_new("about.txt", 0, sys);

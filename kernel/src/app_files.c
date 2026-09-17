@@ -78,6 +78,13 @@ static void files_open(struct window *w, void *arg)
     f->hover_btn = -1;
     files_load(f);
     w->data = f;
+    wm_track_mem(w, (int)sizeof(*f));
+    {
+        char lg[260];
+        strcpy(lg, "browsing ");
+        strncat(lg, f->path, 240);
+        app_log(w, lg);
+    }
 }
 
 static void files_close(struct window *w)
@@ -120,6 +127,12 @@ static void newfolder_cb(int ok, const char *text, void *ud)
     if (full[strlen(full) - 1] != '/') strcat(full, "/");
     strcat(full, text);
     vfs_mkdir(full);
+    {
+        char lg[320];
+        strcpy(lg, "created folder ");
+        strncat(lg, full, 300);
+        app_log(files_dialog_win, lg);
+    }
     files_load(f);
     wm_redraw(files_dialog_win);
 }
@@ -133,6 +146,12 @@ static void delete_confirm_cb(int ok, const char *text, void *ud)
         char full[300];
         files_full_path(f, ctx->row, full);
         vfs_delete(full);
+        {
+            char lg[320];
+            strcpy(lg, "deleted ");
+            strncat(lg, full, 300);
+            app_log(ctx->w, lg);
+        }
         files_load(f);
         wm_redraw(ctx->w);
     }

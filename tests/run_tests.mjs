@@ -354,17 +354,18 @@ test(16, "sysmon: metrics + end task", async (state) => {
     /* sysmon icon sits in row 2 at x=56, left of every cascaded window */
     const sp = ICON_POS(ICON.sysmon);
     await state.click(sp.x, sp.y); await sleep(120); await state.click(sp.x, sp.y); await sleep(900);
-    const sw = win_pos(3, 640, 480);
+    const sw = win_pos(3, 640, 540);
     shot(state, "42_sysmon");
     /* load bar frame present around (30..330, y) of content */
     const bar = px(state, sw.x + 1 + 30, sw.y + TITLEBAR + 102);
     if (bar[0] + bar[1] + bar[2] < 40) throw new Error("cpu load bar missing");
-    /* select files row (apps start at row 5; files = win1 -> row 6) and end it */
-    await state.click(sw.x + 1 + 200, sw.y + TITLEBAR + 240 + 6 * 18 + 8); await sleep(400);
+    /* select files row (r27: 7 system rows, so apps start at row 7;
+     * terminal=7, files=8) and end it */
+    await state.click(sw.x + 1 + 200, sw.y + TITLEBAR + 240 + 8 * 18 + 8); await sleep(400);
     shot(state, "43_sysmon_sel");
     const row = () => state.framebuffer().mem.slice((748 * 1024 + 185) * 4, (748 * 1024 + 295) * 4);
     const before = row();
-    await state.click(sw.x + 1 + 67, sw.y + TITLEBAR + 430); await sleep(600);
+    await state.click(sw.x + 1 + 67, sw.y + TITLEBAR + 490); await sleep(600);
     const after = row();
     let diff = 0;
     for (let i = 0; i < before.length; i += 41) if (before[i] !== after[i]) diff++;
@@ -392,7 +393,10 @@ test(18, "terminal: wheel scroll + paged help", async (state) => {
     await state.type("help\n"); await sleep(1200);
     await state.type("help --p3\n"); await sleep(1200);
     shot(state, "46_help_p3");
-    const grab = () => state.framebuffer().mem.slice(300 * 1024 * 4, 301 * 1024 * 4);
+    /* rows 305..308 land inside a text line's glyph band for both the
+     * pre-r27 (text from y=80) and r27 (text from y=102, below the tab
+     * strip) geometries - row 300 used to work but is now line padding */
+    const grab = () => state.framebuffer().mem.slice(305 * 1024 * 4, 308 * 1024 * 4);
     const a = grab();
     await state.move(w.x + 350, w.y + 200);
     await state.wheel(6); await sleep(400);
@@ -580,6 +584,80 @@ test(25, "terminal: /system files + sysrq + diag subsystems", async (state) => {
     if (textPx() < 20) throw new Error("diag input produced no output");
     shot(state, "60_sysrq_diag");
     if (!(await live(state))) throw new Error("frozen after sysrq/diag");
+});
+
+/* ---------------------------------------------------------------- 26 ---- */
+test(26, "terminal r27: tabs, appstrt console, procs, kill, easter egg", async (state) => {
+    const { execSync } = await import("node:child_process");
+    const REPO = new URL("./../", import.meta.url).pathname;
+    const p = ICON_POS(ICON.terminal);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
+    const w = win_pos(1, 700, 450);
+    /* decode the terminal text straight off the screenshot with the real
+     * font table: origin = border+pad, below titlebar AND the tab strip */
+    const dump = (name) => execSync(
+        `python3 tools/term_dump.py ${OUT}${name}.ppm ${w.x + 7} ${w.y + TITLEBAR + 26} 86 19`,
+        { cwd: REPO }).toString();
+
+    await state.type("make real\n"); await sleep(800);
+    shot(state, "60_make_real");
+    if (!dump("60_make_real").includes("real!!!"))
+        throw new Error("make real easter egg missing");
+
+    /* new tab: probe tab 1's background at a glyph-free spot (surface
+     * x=68, y=12). Active tab = black; once tab 2 exists, tab 1 goes
+     * inactive gray (0x202020). The [+] button sits elsewhere, so this
+     * cannot be fooled by it. */
+    const tabpx = () => {
+        const q = px(state, w.x + 69, w.y + TITLEBAR + 12);
+        return q[0] + q[1] + q[2];
+    };
+    if (tabpx() > 70) throw new Error("tab 1 not active/black before 'tab new'");
+    await state.type("tab new\n"); await sleep(500);
+    if (tabpx() <= 70) throw new Error("tab new did not deactivate tab 1");
+    shot(state, "61_tabs");
+
+    /* launch notepad from tab 2: success line + open-time console log */
+    await state.type("appstrt notepad\n"); await sleep(1500);
+    /* notepad took focus and covers the terminal - its top edge starts
+     * below the terminal titlebar, so click that to bring us forward */
+    await state.click(w.x + 200, w.y + 13); await sleep(400);
+    shot(state, "62_appstrt");
+    const d2 = dump("62_appstrt");
+    if (!d2.includes("app notepad started successfully"))
+        throw new Error("appstrt success line missing: " + JSON.stringify(d2.slice(0, 300)));
+    if (!d2.includes("[notepad] new empty document"))
+        throw new Error("app open-time console log missing");
+
+    /* real process table with the r27 service names */
+    await state.type("procs\n"); await sleep(1200);
+    shot(state, "63_procs");
+    const d3 = dump("63_procs");
+    for (const want of ["sckern", "intsck", "scwm", "notepad"])
+        if (!d3.includes(want))
+            throw new Error("procs missing '" + want + "': " + JSON.stringify(d3.slice(0, 400)));
+
+    /* kill notepad (pid 11 = second window): the termination notice must
+     * stream into the launching tab, like a Linux child process exiting */
+    await state.type("kill 11\n"); await sleep(1200);
+    shot(state, "64_kill");
+    const d4 = dump("64_kill");
+    if (!d4.includes("terminated notepad")) throw new Error("kill output missing");
+    if (!d4.includes("[notepad] exited")) throw new Error("exit console log missing");
+
+    /* legacy alias still alive (hidden from help on purpose) */
+    await state.type("dmesg\n"); await sleep(1000);
+    shot(state, "65_dmesg");
+    if (dump("65_dmesg").includes("Command not found"))
+        throw new Error("dmesg compatibility alias broke");
+
+    /* close tab 2 -> tab 1 returns with its OWN untouched scrollback */
+    await state.type("tab close\n"); await sleep(700);
+    shot(state, "66_tab_close");
+    const d6 = dump("66_tab_close");
+    if (!d6.includes("real!!!")) throw new Error("tab 1 scrollback lost after tab close");
+    if (!(await live(state))) throw new Error("frozen during tabs scenario");
+    await state.click(w.x + 700 - 13, w.y + 13); await sleep(400);
 });
 
 /* ------------------------------------------------------------- runner ---- */

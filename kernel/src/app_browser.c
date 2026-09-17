@@ -30,7 +30,7 @@ static void br_paint(struct window *w)
         "Together far beyond this project's scope (10k+ lines),",
         "so this app was intentionally skipped.",
         "",
-        "All other desktop apps run natively on this kernel.",
+        "All other desktop apps run directly on this kernel.",
     };
     int y = 50;
     for (unsigned i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {

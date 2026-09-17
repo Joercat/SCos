@@ -343,10 +343,35 @@ struct window {
     int  dirty;
     int  closing;
     int chrome_dirty;
+    u32  data_bytes;                /* heap this app attributed to itself
+                                     * (wm_track_mem) - real, live number
+                                     * shown by sysmon/procs */
+    void *console;                  /* terminal tab that launched this app
+                                     * via `appstrt`: receives its logs */
 };
 
 int  wm_win_count(void);
 struct window *wm_win_at(int i);
+int  wm_app_running(const char *app_id);       /* windows open for an id */
+
+/* per-window real memory attribution (shown by sysmon + terminal `procs`) */
+void wm_track_mem(struct window *w, int delta);
+
+/* appstrt console: the launching terminal tab receives the app's logs */
+void wm_set_console(struct window *w, void *term);
+void wm_set_pending_console(void *term);       /* attach BEFORE open */
+void wm_clear_console(void *term);             /* term tab/window died */
+void app_log(struct window *w, const char *line);   /* real app events */
+/* implemented by the terminal (console sink) */
+void term_console_line(void *term, const char *line);
+void term_console_exit(void *term, const char *app_id);
+
+/* process table shared by sysmon and the terminal (app_sysmon.c) */
+int  proc_sys_count(void);
+const char *proc_sys_name(int i);
+u32 proc_win_mem_kb(struct window *w);
+u32 proc_wm_mem_kb(void);
+u32 proc_kernel_mem_kb(void);
 
 void wm_init(void);
 void wm_run(void);                              /* main loop: never returns */

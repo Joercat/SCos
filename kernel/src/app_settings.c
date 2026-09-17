@@ -33,6 +33,7 @@ static void st_open(struct window *w, void *arg)
     ui->hover_tile = -1;
     ui->hover_reset = -1;
     w->data = ui;
+    wm_track_mem(w, (int)sizeof(*ui));
 }
 
 static void st_close(struct window *w)
@@ -106,7 +107,7 @@ static void st_paint(struct window *w)
     int iy = sy + 116;
     s_text(s, 16, iy, "System Information", t->main);
     char line[96];
-    strcpy(line, "OS Version: 2.0.0 (native kernel)");
+    strcpy(line, "OS Version: 2.0.0");
     s_text(s, 16, iy + 22, line, t->text);
     char sz[32];
     u32 used = vfs_usage_bytes();
@@ -186,6 +187,12 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
         theme_set_index(ui->hover_tile);
         wm_theme_changed();
         settings_save();
+        {
+            char lg[80];
+            strcpy(lg, "theme switched to ");
+            strncat(lg, theme_current()->name, 40);
+            app_log(w, lg);
+        }
         wm_redraw(w);
     } else if (ui->hover_pref == 0) {
         prefs_set_mouse(prefs_get()->mouse_sens - 1);

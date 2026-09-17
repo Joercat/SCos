@@ -179,10 +179,60 @@ static struct window *win_at_point(int x, int y)
     return best;
 }
 
+int wm_app_running(const char *app_id)
+{
+    struct app *a = app_find(app_id);
+    if (!a) return 0;
+    int n = 0;
+    for (int i = 0; i < win_count; i++)
+        if (wins[i].app == a) n++;
+    return n;
+}
+
+void wm_track_mem(struct window *w, int delta)
+{
+    if (!w) return;
+    int v = (int)w->data_bytes + delta;
+    w->data_bytes = (u32)(v < 0 ? 0 : v);
+}
+
+void wm_set_console(struct window *w, void *term)
+{
+    if (w) w->console = term;
+}
+
+static void *pending_console;      /* consumed by the next wm_open_app */
+void wm_set_pending_console(void *term)
+{
+    pending_console = term;
+}
+
+void wm_clear_console(void *term)
+{
+    for (int i = 0; i < win_count; i++)
+        if (wins[i].console == term) wins[i].console = NULL;
+}
+
+/* one real app event -> the terminal tab that launched this app, like a
+ * Linux program writing to the console it was started from */
+void app_log(struct window *w, const char *line)
+{
+    if (!w || !w->console || !line || !line[0]) return;
+    char buf[208];
+    strcpy(buf, "[");
+    strncat(buf, w->app ? w->app->id : "app", 24);
+    strcat(buf, "] ");
+    strncat(buf, line, sizeof(buf) - strlen(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    term_console_line(w->console, buf);
+}
+
 void wm_close_window(struct window *w)
 {
     if (!w || w->closing) return;
     w->closing = 1;
+    if (w->console && w->app)
+        term_console_exit(w->console, w->app->id);
     if (w->app && w->app->close) w->app->close(w);
     win_free_buf(w);
     int idx = -1;
@@ -206,18 +256,24 @@ void wm_close_window(struct window *w)
 
 struct window *wm_open_app(const char *app_id, void *arg)
 {
+    /* console hand-off: `appstrt` parks the launching terminal tab here so
+     * the app's open()-time log lines already reach it */
+    void *cons = pending_console;
+    pending_console = NULL;
     struct app *app = app_find(app_id);
     if (!app) return NULL;
     if (app->single)
         for (int i = 0; i < win_count; i++)
             if (wins[i].app == app) {
                 if (wins[i].state == WIN_STATE_MIN) wins[i].state = WIN_STATE_NORMAL;
+                if (cons) wins[i].console = cons;
                 wm_focus(&wins[i]);
                 return &wins[i];
             }
     if (win_count >= MAX_WINDOWS) return NULL;
     struct window *w = &wins[win_count++];
     memset(w, 0, sizeof(*w));
+    w->console = cons;
     w->id = next_id++;
     w->app = app;
     strncpy(w->title, app->title, sizeof(w->title) - 1);
@@ -308,9 +364,9 @@ static void paint_wallpaper(void)
                 s_fill(c, x, 0, 1, screen_h, grid);
             for (int y = 0; y < screen_h; y += 64)
                 s_fill(c, 0, y, screen_w, 1, grid);
-            /* soft corner glow: stacked discs, intensity falls off outward */
-            for (int r = 100, pc = 10; r >= 20; r -= 10, pc--)
-                s_disc(c, screen_w - 80, 90, r, blend(t->bg_top, t->main, pc));
+            /* r27: the decorative "corner glow" discs are gone - the user
+             * saw them as a weird circle floating in the top-right of the
+             * desktop. The wallpaper is now just gradient + grid. */
             wp_valid = 1;
         }
     }

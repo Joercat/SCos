@@ -10,10 +10,56 @@
  */
 #include "scos.h"
 
-#define SYS_TASKS 5
+/* r27: the service table with proper names - every entry is a subsystem
+ * that really exists and really runs on this machine:
+ *   sckern  the kernel core (mm, idt, panic, drivers' home)
+ *   intsck  init: the boot path that starts every service, then the WM
+ *   scwm    window compositor (owns the framebuffer + wallpaper cache)
+ *   vfsd    in-memory filesystem + ATA persistence
+ *   usbhcd  xHCI host controller driver (usb.c)
+ *   inputd  input server: PS/2 + USB HID report decoding
+ *   pitclk  PIT 100 Hz clock, uptime and CPU-load accounting */
+#define SYS_TASKS 7
 static const char *sys_names[SYS_TASKS] = {
-    "scos-kernel", "wm-compositor", "vfs+ata-fs", "pit-clock", "ps2-kbd/mouse",
+    "sckern", "intsck", "scwm", "vfsd", "usbhcd", "inputd", "pitclk",
 };
+
+int proc_sys_count(void) { return SYS_TASKS; }
+const char *proc_sys_name(int i)
+{
+    return (i >= 0 && i < SYS_TASKS) ? sys_names[i] : "?";
+}
+
+/* REAL per-window memory: the window's content surface + the window
+ * struct itself + every heap byte the app attributed to itself via
+ * wm_track_mem (document buffers, terminal tabs, ...). The old column
+ * showed only w*h*4, which made every app look like "~1 MB". */
+u32 proc_win_mem_kb(struct window *w)
+{
+    return ((u32)w->surf.w * (u32)w->surf.h * 4u +
+            (u32)sizeof(struct window) + w->data_bytes) / 1024u;
+}
+
+/* scwm really owns the back buffer and the wallpaper cache */
+u32 proc_wm_mem_kb(void)
+{
+    return ((u32)screen_w * (u32)screen_h * 4u * 2u) / 1024u;
+}
+
+/* sckern shows the honest remainder: everything the page allocator has
+ * handed out that is NOT a window surface, the WM buffers or vfs file
+ * data - i.e. kernel image data, rings, USB buffers, heaps, stacks. */
+u32 proc_kernel_mem_kb(void)
+{
+    u32 tot = 0, fre = 0;
+    mm_stats(&tot, &fre);
+    u32 used = tot - fre;
+    for (int i = 0; i < wm_win_count(); i++)
+        used -= proc_win_mem_kb(wm_win_at(i));
+    used -= proc_wm_mem_kb();
+    used -= vfs_usage_bytes() / 1024u;
+    return used;
+}
 
 struct smon {
     int sel;              /* selected row, -1 = none; >= SYS_TASKS = app */
@@ -107,7 +153,19 @@ static void sm_paint(struct window *w)
             s_text(s, 60, y, sys_names[i], t->text);
             s_text(s, 260, y, "system", ((t->main >> 1) & 0x7F7F7F));
             s_text(s, 360, y, "running", t->text);
-            s_text(s, 470, y, "-", t->text);
+            /* measured footprints where attribution is honest:
+             * sckern = allocator remainder, scwm = framebuffers,
+             * vfsd = live file data; the rest run inside sckern's
+             * address space and have no separate allocation */
+            char mb[24];
+            u32 kb = 0;
+            int show = 0;
+            if (i == 0) { kb = proc_kernel_mem_kb(); show = 1; }
+            else if (i == 2) { kb = proc_wm_mem_kb(); show = 1; }
+            else if (i == 3) { kb = vfs_usage_bytes() / 1024; show = 1; }
+            if (show) { fmt_u32(mb, kb); strcat(mb, " KB"); }
+            else strcpy(mb, "-");
+            s_text(s, 470, y, mb, t->text);
         } else {
             struct window *aw = wm_win_at(i - SYS_TASKS);
             fmt_u32(n, (u32)(10 + i - SYS_TASKS));
@@ -116,7 +174,7 @@ static void sm_paint(struct window *w)
             s_text(s, 260, y, "app", t->main);
             s_text(s, 360, y, aw->state == WIN_STATE_MIN ? "minimized" : "running", t->text);
             char mb[24];
-            fmt_u32(mb, (u32)(aw->surf.w * aw->surf.h * 4) / 1024);
+            fmt_u32(mb, proc_win_mem_kb(aw));
             strcat(mb, " KB");
             s_text(s, 470, y, mb, t->text);
         }
@@ -153,6 +211,10 @@ static void sm_mouse(struct window *w, struct mouse_event *e, int x, int y)
         } else if (m->hover_btn && m->sel >= SYS_TASKS) {
             struct window *victim = wm_win_at(m->sel - SYS_TASKS);
             if (victim && victim != w) {
+                char lg[64];
+                strcpy(lg, "ended task ");
+                strncat(lg, victim->app ? victim->app->id : "?", 32);
+                app_log(w, lg);
                 wm_close_window(victim);
                 m->sel = -1;
             } else if (victim == w) {
@@ -184,6 +246,7 @@ static void sm_open(struct window *w, void *arg)
     m->sel = -1;
     m->hover_btn = 0;
     w->data = m;
+    wm_track_mem(w, (int)sizeof(*m));
 }
 
 static void sm_close(struct window *w)
@@ -193,7 +256,7 @@ static void sm_close(struct window *w)
 
 struct app app_sysmon = {
     .uses_data = 1, .id = "sysmon", .title = "System Monitor", .icon = ICON_CHART, .single = 1,
-    .def_w = 640, .def_h = 480,
+    .def_w = 640, .def_h = 540,
     .open = sm_open, .paint = sm_paint, .key = sm_key,
     .mouse = sm_mouse, .tick = sm_tick, .close = sm_close,
 };
