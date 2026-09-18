@@ -59,6 +59,8 @@ struct hid_ep {
     u8 ev_logged;             /* rate limit for the r32 event log lines */
     u8 has_id;                /* reports carry a HID Report ID prefix (r33) */
     u8 rep_logged;            /* rate limit for first-report hex dumps */
+    u8 probe_n, probe_done;   /* r34 runtime offset probe state (mouse) */
+    u8 nz[3];                 /* nonzero counts for report bytes 1..3 */
     u32 ctx_copy[5];          /* the EP ctx CFGEP got - photo diagnostics */
     u32 dci;                  /* endpoint context index = ep_addr*2+1 */
     volatile u32 *inr;
@@ -155,6 +157,40 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
                             int tier, struct xdev *phub, int hport);
 static void ring_db(u32 slot, u32 target);
 
+/* r34: runtime report-offset probe for boot mice.
+ * The Report ID descriptor walk (r33) is the primary evidence, but the
+ * field firmware may reject or skip the descriptor fetch - and reports
+ * still arrive, so the DATA ITSELF can decide the layout.  A plain boot
+ * mouse report is at most 4 bytes ([btn][dx][dy][wheel]): across many
+ * moved-but-not-scrolled reports byte[3] stays zero while byte[1] (X
+ * delta) goes nonzero constantly.  With a Report ID prefix every field
+ * shifts up one: byte[1] is the button byte (rarely nonzero), byte[2]
+ * is dx, byte[3] is dy (nonzero on almost every moved report).  After
+ * 60 non-idle reports pick the layout the statistics support; the
+ * verdict lands in has_id, which already drives the parse offset. */
+static void mouse_probe(struct hid_ep *he, const u8 *data, u32 len)
+{
+    if (he->probe_done || he->has_id || he->kind != 2) return;
+    int any = 0;
+    for (u32 i = 0; i < len && i < 8; i++)
+        if (data[i]) { any = 1; break; }
+    if (!any) return;                       /* idle report: no evidence */
+    for (u32 i = 1; i <= 3 && i < len; i++)
+        if (data[i]) he->nz[i - 1]++;
+    if (++he->probe_n < 60) return;
+    he->probe_done = 1;
+    klog("usb: probe nz1 %u nz2 %u nz3 %u", (u32)he->nz[0], (u32)he->nz[1],
+         (u32)he->nz[2]);
+    if (he->nz[1] >= 3 && he->nz[2] >= 2 && he->nz[0] <= he->nz[2]) {
+        klog("usb: probe: byte 3 active, byte 1 quiet -> Report-ID "
+             "layout (off 1)");
+        he->has_id = 1;
+    } else if (he->nz[0] >= 3 && he->nz[1] >= 3 && he->nz[2] == 0) {
+        klog("usb: probe: plain boot-mouse layout confirmed (off 0)");
+    }
+    /* ambiguous: keep the descriptor verdict */
+}
+
 /* ------------------------------------------------------------- events ---- */
 static int proc_events(void)
 {
@@ -233,6 +269,20 @@ static int proc_events(void)
                                      h->kind == 2 ? "mouse" : "keyboard",
                                      h->iface);
                             }
+                            /* r34 runtime fallbacks in case the report-
+                             * descriptor evidence never arrived:
+                             * - boot keyboard: a plain boot report is
+                             *   EXACTLY 8 bytes ([mod][rsv][6 keys]), so
+                             *   a first report of 9+ bytes proves a
+                             *   Report ID prefix.
+                             * - boot mouse: statistical byte-position
+                             *   probe (mouse_probe) over 60 reports. */
+                            if (h->kind == 1 && !h->has_id && len >= 9) {
+                                h->has_id = 1;
+                                klog("usb: kbd report len %u >= 9 -> "
+                                     "Report-ID layout (off 1)", len);
+                            }
+                            mouse_probe(h, r, len);
                             /* r33: raw bytes of the first two reports per
                              * EP, so a future offset/format question is
                              * answerable from ONE photo - no guessing */
@@ -1501,6 +1551,11 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
                      slot, cand[j].iface, rl,
                      h->has_id ? "reports carry a Report ID prefix"
                                : "plain boot reports");
+                /* r34: raw head of the descriptor - if the walk ever
+                 * disagrees with reality, one photo shows why */
+                klog("usb: rdesc head %02x %02x %02x %02x %02x %02x "
+                     "%02x %02x", rdesc[0], rdesc[1], rdesc[2], rdesc[3],
+                     rdesc[4], rdesc[5], rdesc[6], rdesc[7]);
             } else {
                 klog("usb: slot %d iface %d report desc fetch rc %d - "
                      "assuming plain boot reports",

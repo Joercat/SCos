@@ -1,0 +1,395 @@
+/* SCos native - framebuffer: back buffer + 2D primitives + bitmap font text */
+#include "scos.h"
+
+struct surface screen;
+int screen_w, screen_h;
+static u32 *lfb;
+static u32 lfb_pitch_px;
+
+static u32 v_bpp;
+u32 fb_bpp(void) { return v_bpp; }
+
+static u64 rdmsr_l(u32 msr)
+{
+    u32 lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((u64)hi << 32) | lo;
+}
+static void wrmsr_l(u32 msr, u64 v)
+{
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"((u32)v), "d"((u32)(v >> 32)));
+}
+
+/* r34 PERF ROOT FIX: on real hardware the VBE linear framebuffer is
+ * UNCACHED memory - every composite flip becomes millions of separate
+ * bus transactions (a 1080p flip can take half a second or worse), so a
+ * window drag queues seconds of flip backlog: "small move locks the
+ * screen 5-10 s".  v86 can never show this because its LFB is plain RAM.
+ * Mapping the LFB range as write-combining via a variable MTRR (the
+ * classic framebuffer fix, exactly what BIOSes do for GPU BARs they know
+ * about) turns the same stores into burst writes: ms instead of s. */
+static void fb_set_wc(u32 base, u32 bytes)
+{
+    /* CPUID.01H:EDX[12] = MTRR support.  Touching the MSRs without it
+     * (or on an emulator that fakes the bit but traps rdmsr) would #GP,
+     * so probe the feature first and degrade to "LFB stays uncached". */
+    u32 ax, bx, cx, dx;
+    __asm__ volatile("movl $1, %%eax; cpuid"
+                     : "=a"(ax), "=b"(bx), "=c"(cx), "=d"(dx));
+    if (!(dx & (1u << 12))) {
+        klog("fb: no MTRR support - LFB stays uncached (flips slow)");
+        return;
+    }
+    u64 sz = 1u << 12;
+    while (sz < bytes) sz <<= 1;          /* variable MTRRs want pow2 */
+    u64 b = (u64)base & ~(sz - 1);
+    /* the pow2-aligned region must still COVER base..base+bytes */
+    while (b + sz < (u64)base + bytes && sz < (1ull << 40)) {
+        sz <<= 1;
+        b = (u64)base & ~(sz - 1);
+    }
+    if (sz >= (1ull << 40)) {
+        klog("fb: LFB too large for one variable MTRR - stays uncached");
+        return;
+    }
+    for (u32 i = 0; i < 8; i++) {
+        u64 m = rdmsr_l(0x201 + 2 * i);   /* MTRRphysMask(i) */
+        if (m & (1ull << 11)) continue;   /* valid bit: pair in use */
+        wrmsr_l(0x200 + 2 * i, b | 6ull); /* type 6 = write-combining */
+        wrmsr_l(0x201 + 2 * i,
+                (~(sz - 1) & 0x0000000FFFFFFFFFull) | (1ull << 11));
+        u64 d = rdmsr_l(0x2FF);           /* MTRRdefType */
+        if (!(d & (1ull << 10)))          /* MTRRenable */
+            wrmsr_l(0x2FF, d | (1ull << 10));
+        klog("fb: LFB %x +%u KB -> write-combining (MTRR%u) - flips are "
+             "now burst writes", (u32)b, (u32)(sz / 1024), i);
+        return;
+    }
+    klog("fb: no free variable MTRR - LFB stays uncached (flips slow)");
+}
+
+void fb_init(void)
+{
+    screen_w = boot_info.width;
+    screen_h = boot_info.height;
+    lfb = (u32 *)(u32)boot_info.lfb_base;
+    lfb_pitch_px = boot_info.pitch / 4;
+
+    screen.w = screen_w;
+    screen.h = screen_h;
+    v_bpp = boot_info.bpp;
+    screen.px = palloc(screen_w * screen_h * 4);
+    if (!screen.px) {
+        klog("fb: back buffer alloc failed");
+        for (;;) cpu_hlt();
+    }
+    klog("fb: %dx%d bpp%d lfb=%x pitch=%u", screen_w, screen_h, boot_info.bpp,
+         boot_info.lfb_base, boot_info.pitch);
+    fb_set_wc(boot_info.lfb_base, (u32)screen_h * boot_info.pitch);
+}
+
+void fb_flip_rect(int x, int y, int w, int h)
+{
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > screen_w) w = screen_w - x;
+    if (y + h > screen_h) h = screen_h - y;
+    u32 *src = screen.px + (u32)y * screen_w + x;
+    u32 *dst = lfb + (u32)y * lfb_pitch_px + x;
+    for (int r = 0; r < h; r++) {
+        memcpy(dst, src, (u32)w * 4);
+        src += screen_w;
+        dst += lfb_pitch_px;
+    }
+}
+
+void fb_flip(void)
+{
+    u32 *src = screen.px;
+    u32 *dst = lfb;
+    for (int y = 0; y < screen_h; y++) {
+        memcpy(dst, src, screen_w * 4);
+        src += screen_w;
+        dst += lfb_pitch_px;
+    }
+}
+
+void fb_clear(u32 color)
+{
+    for (int i = 0; i < screen_w * screen_h; i++) screen.px[i] = color;
+}
+
+/* ------------------------------------------------------------ surface ---- */
+void s_pixel(struct surface *s, int x, int y, u32 c)
+{
+    if (x < 0 || y < 0 || x >= s->w || y >= s->h) return;
+    s->px[y * s->w + x] = c;
+}
+
+void s_fill(struct surface *s, int x, int y, int w, int h, u32 c)
+{
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > s->w) w = s->w - x;
+    if (y + h > s->h) h = s->h - y;
+    for (int j = 0; j < h; j++) {
+        u32 *row = s->px + (y + j) * s->w + x;
+        for (int i = 0; i < w; i++) row[i] = c;
+    }
+}
+
+void s_frame_rect(struct surface *s, int x, int y, int w, int h, u32 c)
+{
+    s_fill(s, x, y, w, 1, c);
+    s_fill(s, x, y + h - 1, w, 1, c);
+    s_fill(s, x, y, 1, h, c);
+    s_fill(s, x + w - 1, y, 1, h, c);
+}
+
+void s_line(struct surface *s, int x0, int y0, int x1, int y1, u32 c)
+{
+    int dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    int dy = y1 > y0 ? y1 - y0 : y0 - y1;
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy;
+    for (;;) {
+        s_pixel(s, x0, y0, c);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 < dx)  { err += dx; y0 += sy; }
+    }
+}
+
+void s_circle(struct surface *s, int cx, int cy, int r, u32 c)
+{
+    int x = r, y = 0, err = 1 - r;
+    while (x >= y) {
+        s_pixel(s, cx + x, cy + y, c); s_pixel(s, cx - x, cy + y, c);
+        s_pixel(s, cx + x, cy - y, c); s_pixel(s, cx - x, cy - y, c);
+        s_pixel(s, cx + y, cy + x, c); s_pixel(s, cx - y, cy + x, c);
+        s_pixel(s, cx + y, cy - x, c); s_pixel(s, cx - y, cy - x, c);
+        y++;
+        if (err < 0) err += 2 * y + 1;
+        else { x--; err += 2 * (y - x) + 1; }
+    }
+}
+
+void s_disc(struct surface *s, int cx, int cy, int r, u32 c)
+{
+    for (int y = -r; y <= r; y++)
+        for (int x = -r; x <= r; x++)
+            if (x * x + y * y <= r * r) s_pixel(s, cx + x, cy + y, c);
+}
+
+static u32 blend(u32 a, u32 b, int t)      /* t 0..255 */
+{
+    u32 ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
+    u32 br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
+    u32 r = (ar * (255 - t) + br * t) / 255;
+    u32 g = (ag * (255 - t) + bg * t) / 255;
+    u32 bl = (ab * (255 - t) + bb * t) / 255;
+    return (r << 16) | (g << 8) | bl;
+}
+
+void s_vgrad(struct surface *s, int x, int y, int w, int h, u32 top, u32 bot)
+{
+    for (int j = 0; j < h; j++) {
+        u32 c = blend(top, bot, h > 1 ? (j * 255) / (h - 1) : 0);
+        s_fill(s, x, y + j, w, 1, c);
+    }
+}
+
+/* --------------------------------------------------------------- text ---- */
+void s_char_bg(struct surface *s, int x, int y, char ch, u32 fg, u32 bg)
+{
+    if (!bg) { s_char(s, x, y, ch, fg); return; }
+    const u8 *glyph = font8x16[(u8)ch];
+    for (int row = 0; row < FONT_H; row++) {
+        u8 bits = glyph[row];
+        for (int col = 0; col < FONT_W; col++)
+            s_pixel(s, x + col, y + row, (bits & (0x80 >> col)) ? fg : bg);
+    }
+}
+
+void s_char(struct surface *s, int x, int y, char ch, u32 fg)
+{
+    const u8 *glyph = font8x16[(u8)ch];
+    for (int row = 0; row < FONT_H; row++) {
+        u8 bits = glyph[row];
+        if (!bits) continue;
+        for (int col = 0; col < FONT_W; col++)
+            if (bits & (0x80 >> col)) s_pixel(s, x + col, y + row, fg);
+    }
+}
+
+void s_text(struct surface *s, int x, int y, const char *str, u32 fg)
+{
+    int x0 = x;
+    while (*str) {
+        if (*str == '\n') { x = x0; y += FONT_H + 2; str++; continue; }
+        s_char(s, x, y, *str, fg);
+        x += FONT_W;
+        str++;
+    }
+}
+
+void s_text_bg(struct surface *s, int x, int y, const char *str, u32 fg, u32 bg)
+{
+    int x0 = x;
+    while (*str) {
+        if (*str == '\n') { x = x0; y += FONT_H + 2; str++; continue; }
+        s_char_bg(s, x, y, *str, fg, bg);
+        x += FONT_W;
+        str++;
+    }
+}
+
+void s_text_scaled(struct surface *s, int x, int y, const char *str, u32 fg, int scale)
+{
+    while (*str) {
+        const u8 *glyph = font8x16[(u8)*str];
+        for (int row = 0; row < FONT_H; row++) {
+            u8 bits = glyph[row];
+            if (!bits) continue;
+            for (int col = 0; col < FONT_W; col++) {
+                if (bits & (0x80 >> col))
+                    s_fill(s, x + col * scale, y + row * scale, scale, scale, fg);
+            }
+        }
+        x += FONT_W * scale;
+        str++;
+    }
+}
+
+int s_text_width(const char *str)
+{
+    return (int)strlen(str) * FONT_W;
+}
+
+void s_clip_text(struct surface *s, int x, int y, const char *str, u32 fg, int max_w)
+{
+    int n = max_w / FONT_W;
+    int len = (int)strlen(str);
+    char tmp[128];
+    if (len <= n || n <= 1) {
+        if (len < (int)sizeof(tmp)) { s_text(s, x, y, str, fg); return; }
+    }
+    if (n > (int)sizeof(tmp) - 1) n = sizeof(tmp) - 1;
+    strncpy(tmp, str, n - 1);
+    tmp[n - 1] = 0;
+    tmp[n - 2] = '.';
+    tmp[n - 3] = '.';
+    s_text(s, x, y, tmp, fg);
+}
+
+/* -------------------------------------------------------------- icons ---- */
+void s_icon(struct surface *s, int id, int x, int y, u32 c)
+{
+    /* 24x24 procedural icons */
+    switch (id) {
+    case ICON_FOLDER:
+        s_fill(s, x + 2, y + 6, 8, 3, c);
+        s_frame_rect(s, x + 2, y + 8, 20, 12, c);
+        s_fill(s, x + 3, y + 9, 18, 10, (c & 0xFEFEFE) >> 1);
+        s_frame_rect(s, x + 2, y + 8, 20, 12, c);
+        break;
+    case ICON_TERMINAL:
+        s_frame_rect(s, x + 1, y + 3, 22, 18, c);
+        s_line(s, x + 4, y + 8, x + 8, y + 11, c);
+        s_line(s, x + 8, y + 11, x + 4, y + 14, c);
+        s_fill(s, x + 10, y + 14, 8, 2, c);
+        break;
+    case ICON_NOTEPAD:
+        s_frame_rect(s, x + 4, y + 2, 16, 20, c);
+        for (int i = 0; i < 4; i++)
+            s_fill(s, x + 7, y + 6 + i * 4, 10, 1, c);
+        break;
+    case ICON_BROWSER:
+        s_circle(s, x + 12, y + 12, 10, c);
+        s_line(s, x + 2, y + 12, x + 22, y + 12, c);
+        s_line(s, x + 12, y + 2, x + 12, y + 22, c);
+        s_circle(s, x + 12, y + 12, 5, c);
+        break;
+    case ICON_CALENDAR:
+        s_frame_rect(s, x + 2, y + 4, 20, 17, c);
+        s_fill(s, x + 3, y + 5, 18, 4, c);
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 4; j++)
+                s_fill(s, x + 5 + j * 4, y + 12 + i * 3, 2, 1, c);
+        break;
+    case ICON_SETTINGS:
+        s_circle(s, x + 12, y + 12, 5, c);
+        for (int i = 0; i < 8; i++) {
+            int dxs[8] = { 0, 3, 4, 3, 0, -3, -4, -3 };
+            int dys[8] = { -4, -3, 0, 3, 4, 3, 0, -3 };
+            s_fill(s, x + 12 + dxs[i] - 1, y + 12 + dys[i] * 2 - 1, 3, 3, c);
+        }
+        s_circle(s, x + 12, y + 12, 8, c);
+        break;
+    case ICON_INFO:
+        s_circle(s, x + 12, y + 12, 10, c);
+        s_fill(s, x + 11, y + 10, 2, 8, c);
+        s_fill(s, x + 11, y + 6, 2, 2, c);
+        break;
+    case ICON_SOL:
+        s_fill(s, x + 3, y + 6, 12, 16, (c & 0xFEFEFE) >> 1);
+        s_frame_rect(s, x + 3, y + 6, 12, 16, c);
+        s_fill(s, x + 8, y + 4, 12, 16, (c & 0xFEFEFE) >> 1);
+        s_frame_rect(s, x + 8, y + 4, 12, 16, c);
+        s_fill(s, x + 13, y + 2, 12, 16, (c & 0xFEFEFE) >> 1);
+        s_frame_rect(s, x + 13, y + 2, 12, 16, c);
+        break;
+    case ICON_CHART:
+        s_frame_rect(s, x + 2, y + 3, 20, 18, c);
+        s_fill(s, x + 5, y + 12, 3, 6, c);
+        s_fill(s, x + 10, y + 8, 3, 10, c);
+        s_fill(s, x + 15, y + 5, 3, 13, c);
+        break;
+    case ICON_CARDS:
+        s_fill(s, x + 8, y + 2, 14, 18, c);
+        s_frame_rect(s, x + 8, y + 2, 14, 18, c);
+        s_fill(s, x + 9, y + 3, 12, 16, (c & 0xFEFEFE) >> 1);
+        s_frame_rect(s, x + 4, y + 5, 14, 18, c);
+        s_fill(s, x + 5, y + 6, 12, 16, (c & 0xFEFEFE) >> 1);
+        s_disc(s, x + 11, y + 14, 2, c);
+        break;
+    }
+}
+
+void s_blit(struct surface *d, struct surface *s, int dx, int dy)
+{
+    int sx = 0, sy = 0, w = s->w, h = s->h;
+    if (dx < 0) { sx = -dx; w += dx; dx = 0; }
+    if (dy < 0) { sy = -dy; h += dy; dy = 0; }
+    if (dx + w > d->w) w = d->w - dx;
+    if (dy + h > d->h) h = d->h - dy;
+    for (int y = 0; y < h; y++)
+        memcpy(d->px + (dy + y) * d->w + dx,
+               s->px + (sy + y) * s->w + sx, w * 4);
+}
+
+/* The SCos logo: "SC" + spinning 'o' ring + "s", tightly kerned. */
+void s_scos_logo(struct surface *s, int x, int y, u32 color, int scale, int phase)
+{
+    int cw = 8 * scale;
+    s_text_scaled(s, x, y, "SC", color, scale);
+    int r = 4 * scale + 2;
+    int ox = x + 2 * cw + r + 2, oy = y + 6 * scale + r;
+    static const int dxs[8] = { 0, 7, 10, 7, 0, -7, -10, -7 };
+    static const int dys[8] = { -10, -7, 0, 7, 10, 7, 0, -7 };
+    for (int k = 0; k < 8; k++) {
+        int rel = (k - phase + 16) % 8;
+        int on = rel < 3;
+        int rr = (on ? 3 : 2) * scale / 2 + (on ? 1 : 0);
+        int px = ox + dxs[k] * r / 10, py = oy + dys[k] * r / 10;
+        s_disc(s, px, py, rr, on ? color : ((color >> 2) & 0x3F3F3F));
+    }
+    s_text_scaled(s, x + 2 * cw + 2 * r + 6, y, "s", color, scale);
+}
+
+u32 color_blend(u32 a, u32 b, int t)
+{
+    return blend(a, b, t);
+}

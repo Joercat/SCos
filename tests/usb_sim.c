@@ -649,6 +649,124 @@ static void test_ep_ctx(void)
            "FS/HS/SS intervals Linux-exact\n");
 }
 
+/* ===== TEST 6: r34 runtime report-offset fallbacks ====================== */
+/* r33 field round: the descriptor-based Report ID verdict produced NO
+ * observable change on the H510M-A - either the GET_DESCRIPTOR fetch
+ * failed or the item walk missed, and no photo was taken to prove which.
+ * r34 therefore lets the driver self-correct from the report STREAM:
+ *   - boot keyboard: a plain boot report is EXACTLY 8 bytes, so a first
+ *     report of 9+ bytes proves the Report ID prefix (length rule);
+ *   - boot mouse: mouse_probe() collects byte-position statistics over
+ *     60 non-idle reports and flips to the layout the data supports.
+ * These vectors drive the REAL proc_events path through sim consumers
+ * (like T3) and assert delivered CONTENT, so a disabled or inverted
+ * fallback fails loudly. */
+static struct sim_consumer *t6_arm(struct xdev *d, u32 slot, int j,
+                                   int kind, u32 replen, const u8 *pay)
+{
+    struct hid_ep *h = &d->hid[j];
+    memset(h, 0, sizeof *h);
+    h->active = 1;
+    h->iface = j;
+    h->kind = kind;
+    h->ep_addr = (u8)(j + 1);
+    h->dci = (u32)(h->ep_addr * 2 + 1);
+    h->ep_mps = 8;
+    h->binterval = 2;                   /* FS, like the field devices */
+    h->has_id = 0;                      /* descriptor evidence "failed" */
+    h->inr = (volatile u32 *)palloc(4096);
+    for (int b = 0; b < IN_TRBS; b++) {
+        h->in_buf[b] = palloc(16);
+        memset(h->in_buf[b], 0, 16);
+        memcpy(h->in_buf[b], pay, replen < 16 ? replen : 16);
+    }
+    h->inr_idx = 0; h->inr_cycle = 1;
+    h->link_pend = 0; h->link_pend_cycle = 1;
+    hid_arm_ring(d, j);
+    u32 epw[5];
+    hid_fill_ep_ctx(epw, h, 1);
+    return sim_cfg_ep(epw, slot, h->dci, replen);
+}
+
+static void test_runtime_fallbacks(void)
+{
+    /* 6a: Report-ID-prefixed mouse, descriptor verdict failed.
+     * Payload [ID=2][btn=0][dx][dy]: byte 1 quiet, bytes 2-3 active on
+     * every report -> the probe must flip to off 1 by report 60 and the
+     * remaining reports must deliver the true axes. */
+    struct xdev *dm = slot_alloc(3);
+    CHECK(dm != NULL, "6a: slot_alloc(3) failed");
+    if (dm) {
+        dm->nhid = 1; dm->kind = 2;
+        static const u8 pay_id[] = { 2, 0, 0x5A, 0x3C };
+        struct hid_ep *h = &dm->hid[0];
+        struct sim_consumer *c = t6_arm(dm, 3, 0, 2, 4, pay_id);
+        CHECK(c != NULL, "6a: sim xHC did not schedule the probe EP");
+        if (c) {
+            for (int i = 0; i < 70; i++) { sim_consume_td(c); proc_events(); }
+            CHECK(h->has_id == 1,
+                  "6a: probe left has_id %u after 70 prefixed reports "
+                  "(r33 field failure mode: silent wrong offset)",
+                  (u32)h->has_id);
+            CHECK(sim_m_btn == 0 && sim_m_dx == 0x5A && sim_m_dy == 0x3C,
+                  "6a: content wrong after probe: btn %u dx %d dy %d "
+                  "(off still 0 -> ID lands in buttons, axes shift)",
+                  sim_m_btn, sim_m_dx, sim_m_dy);
+            printf("  6a prefixed mouse: probe flipped off 0 -> 1, axes "
+                   "dx %d dy %d delivered\n", sim_m_dx, sim_m_dy);
+        }
+    }
+
+    /* 6b: PLAIN boot mouse - the probe must NOT flip the offset.
+     * Payload [btn=1][dx][dy][wheel=0]: bytes 1-2 active, byte 3 never
+     * -> plain layout confirmed, content parsed from byte 0. */
+    struct xdev *dp = slot_alloc(4);
+    CHECK(dp != NULL, "6b: slot_alloc(4) failed");
+    if (dp) {
+        dp->nhid = 1; dp->kind = 2;
+        static const u8 pay_plain[] = { 0x01, 0x2A, 0x14, 0 };
+        struct hid_ep *h = &dp->hid[0];
+        struct sim_consumer *c = t6_arm(dp, 4, 0, 2, 4, pay_plain);
+        CHECK(c != NULL, "6b: sim xHC did not schedule the plain EP");
+        if (c) {
+            for (int i = 0; i < 70; i++) { sim_consume_td(c); proc_events(); }
+            CHECK(h->has_id == 0,
+                  "6b: probe FALSELY flipped a plain mouse to has_id %u "
+                  "(would shift every axis by one)", (u32)h->has_id);
+            CHECK(sim_m_btn == 1 && sim_m_dx == 0x2A && sim_m_dy == 0x14,
+                  "6b: plain content wrong: btn %u dx %d dy %d",
+                  sim_m_btn, sim_m_dx, sim_m_dy);
+            printf("  6b plain mouse: probe confirmed off 0, btn %u dx %d "
+                   "dy %d delivered\n", sim_m_btn, sim_m_dx, sim_m_dy);
+        }
+    }
+
+    /* 6c: keyboard whose FIRST report is 9 bytes -> the length rule must
+     * flip to off 1 immediately (no 60-report wait) and parse mod/key
+     * from behind the ID byte. */
+    struct xdev *dk = slot_alloc(5);
+    CHECK(dk != NULL, "6c: slot_alloc(5) failed");
+    if (dk) {
+        dk->nhid = 1; dk->kind = 1;
+        static const u8 pay_kbd[] = { 1, 0x02, 0, 0x04, 0, 0, 0, 0, 0 };
+        struct hid_ep *h = &dk->hid[0];
+        struct sim_consumer *c = t6_arm(dk, 5, 0, 1, 9, pay_kbd);
+        CHECK(c != NULL, "6c: sim xHC did not schedule the kbd EP");
+        if (c) {
+            for (int i = 0; i < 10; i++) { sim_consume_td(c); proc_events(); }
+            CHECK(h->has_id == 1,
+                  "6c: length rule left has_id %u on 9-byte kbd reports "
+                  "(r33 field failure: keyboard frozen)", (u32)h->has_id);
+            CHECK(sim_k_mod == 0x02 && sim_k_key0 == 0x04,
+                  "6c: kbd content wrong: mod %u key0 %02x (ID byte "
+                  "parsed as modifier?)", sim_k_mod, sim_k_key0);
+            printf("  6c 9-byte keyboard: length rule flipped off 0 -> 1 "
+                   "on report 1, mod %02x key %02x delivered\n",
+                   sim_k_mod, sim_k_key0);
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -664,6 +782,9 @@ int main(int argc, char **argv)
     test_ep_ctx();
     printf("usb_sim: Report ID detection (r33)...\n");
     test_report_id();
+    printf("usb_sim: r34 runtime offset fallbacks (probe + kbd length "
+           "rule)...\n");
+    test_runtime_fallbacks();
     if (failures) {
         printf("USB SIM: %d FAILURE(S)\n", failures);
         return 1;
