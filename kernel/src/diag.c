@@ -14,7 +14,7 @@ static void diag_draw(int secs_left)
 {
     const struct theme *t = theme_current();
     fb_clear(0x000000);
-    s_text_scaled(&screen, 24, 10, "SCos INPUT DIAGNOSTICS  -  build r34", t->main, 2);
+    s_text_scaled(&screen, 24, 10, "SCos INPUT DIAGNOSTICS  -  build r35", t->main, 2);
     s_text(&screen, 24, 42,
            "PHOTOGRAPH THIS WHOLE SCREEN and send it - the log names the failing stage.",
            t->text);
@@ -103,11 +103,14 @@ void diag_manual(void)
         struct key_event ke;
         while (kbd_poll(&ke))
             if (ke.pressed && ke.keycode == 'a') kok = 1;
+        /* HID dy -12 = physically UP; mouse_inject flips to the queue's
+         * PS/2 convention (positive = up, WM does my -= dy), so the
+         * WM-visible dy must arrive as +12 (r35 axis-convention fix) */
         mouse_inject(0, 40, -12, 0);
         int mok = 0;
         struct mouse_event me;
         while (mouse_poll(&me))
-            if (me.type == MEV_MOVE && me.dx == 40 && me.dy == -12) mok = 1;
+            if (me.type == MEV_MOVE && me.dx == 40 && me.dy == 12) mok = 1;
         klog("diag: self-test kbd injection %s, mouse injection %s",
              kok ? "OK" : "FAILED", mok ? "OK" : "FAILED");
     }

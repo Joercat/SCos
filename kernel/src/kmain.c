@@ -10,7 +10,7 @@ void kmain(struct boot_info *bi)
 {
     boot_info = *bi;
 
-    klog("SCos kernel starting - build r34");
+    klog("SCos kernel starting - build r35");
     klog("  lfb %x %dx%d pitch %u, mem %u KB", bi->lfb_base, bi->width,
          bi->height, bi->pitch, bi->mem_kb);
 

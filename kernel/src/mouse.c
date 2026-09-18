@@ -98,7 +98,17 @@ static void handle_packet(void)
 /* USB HID boot mouse reports arrive here */
 void mouse_inject(u8 buttons, i32 dx, i32 dy, i32 wheel)
 {
-    mouse_apply(buttons, dx, dy, wheel);
+    /* r35 ROOT FIX - inverted vertical axis.  HID reports dy POSITIVE =
+     * physical DOWN, but the rest of SCos (the mouse_apply queue and the
+     * WM's `my -= e->dy`) runs on the PS/2 convention where positive dy
+     * = UP.  Passing HID dy through unflipped inverts the whole vertical
+     * axis on screen - the r34 field symptom: "moving left went
+     * diagonally DOWN-left", "no way to move the mouse up", "stuck under
+     * the screen" (physical up drove the cursor down into the bottom
+     * edge; the one time it moved "up" was a physical DOWN move).  The
+     * wheel sign already matches between HID and PS/2 (Linux maps both
+     * to REL_WHEEL unflipped), so only dy flips. */
+    mouse_apply(buttons, dx, -dy, wheel);
 }
 
 int mouse_present(void) { return mouse_ok; }

@@ -67,7 +67,8 @@ test: all usbtest
 usbtest: build/usb_sim
 	./build/usb_sim
 
-build/usb_sim: tests/usb_sim.c kernel/src/usb.c kernel/include/scos.h
+build/usb_sim: tests/usb_sim.c kernel/src/usb.c kernel/src/mouse.c \
+               kernel/src/kbd.c kernel/include/scos.h
 	@mkdir -p build
 	gcc -std=gnu11 -no-pie -Wall -Wextra -Wno-unused-parameter \
 	    -Wno-pointer-to-int-cast -Wno-unused-but-set-variable \

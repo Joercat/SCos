@@ -134,18 +134,57 @@ void *palloc(u32 bytes)
 static long sim_kbd_reports, sim_mouse_reports;
 
 static u8 sim_m_btn; static i32 sim_m_dx, sim_m_dy, sim_m_wh;
-static u8 sim_k_mod, sim_k_key0;
-void mouse_inject(u8 buttons, i32 dx, i32 dy, i32 wheel)
+static u16 sim_k_code; static u8 sim_k_ctrl, sim_k_pressed;
+
+/* r35: NO MORE STUBS at the inject boundary.  The real mouse.c and
+ * kbd.c are textually included exactly like usb.c, so every report the
+ * simulated xHC delivers flows through the REAL mouse_inject ->
+ * mouse_apply -> queue and kbd_inject_hid -> kbd_sc -> queue paths, and
+ * the tests assert the events the WM would dequeue (mouse_poll /
+ * kbd_poll).  The old stubs recorded only what usb.c handed them -
+ * blind to everything downstream, which is exactly where the r34
+ * inverted-vertical-axis bug lived (HID dy positive = DOWN, queue
+ * convention = UP) and where the keyboard's real key-event generation
+ * had never once been executed by any test. */
+#include "../kernel/src/mouse.c"
+#undef QUEUE                      /* mouse.c: 128 - kbd.c wants its own */
+/* mouse.c and kbd.c share static names (queue/q_head/q_tail) - harmless
+ * in the kernel (separate TUs), a hard error in this single-TU sim, so
+ * rename kbd.c's copies around its include */
+#define queue  kbd_sim_queue
+#define q_head kbd_sim_q_head
+#define q_tail kbd_sim_q_tail
+#include "../kernel/src/kbd.c"
+#undef queue
+#undef q_head
+#undef q_tail
+
+void irq_install(u8 irq, irq_handler_t h) { (void)irq; (void)h; }
+void pic_clear_mask(u8 irq) { (void)irq; }
+
+/* drain the real driver queues like the WM main loop does, recording
+ * what the WM would see */
+static void drain_input(void)
 {
-    sim_m_btn = buttons; sim_m_dx = dx; sim_m_dy = dy; sim_m_wh = wheel;
-    sim_mouse_reports++;
-}
-void kbd_inject_hid(u8 mod, const u8 *keys, u8 *prev_keys, u8 *prev_mod)
-{
-    sim_k_mod = mod; sim_k_key0 = keys[0];
-    sim_kbd_reports++;
-    memcpy(prev_keys, keys, 6);
-    *prev_mod = mod;
+    struct mouse_event me;
+    while (mouse_poll(&me)) {
+        if (me.type == MEV_MOVE) {
+            sim_mouse_reports++;
+            sim_m_dx = me.dx; sim_m_dy = me.dy;
+        } else if (me.type == MEV_BUTTON) {
+            if (me.down) sim_m_btn |= me.button;
+            else sim_m_btn &= (u8)~me.button;
+        } else if (me.type == MEV_WHEEL) {
+            sim_m_wh = me.wheel;
+        }
+    }
+    struct key_event ke;
+    while (kbd_poll(&ke)) {
+        sim_kbd_reports++;
+        sim_k_code = ke.keycode;
+        sim_k_pressed = ke.pressed ? 1 : 0;
+        sim_k_ctrl = ke.ctrl ? 1 : 0;
+    }
 }
 
 u8   pci_read8(u8 b, u8 d, u8 f, u8 o)  { (void)b;(void)d;(void)f;(void)o; return 0xFF; }
@@ -518,31 +557,42 @@ static void test_interrupt_rings(void)
     }
 
     sim_kbd_reports = sim_mouse_reports = 0;
+    sim_m_btn = 0; sim_m_dx = sim_m_dy = sim_m_wh = 0;
+    sim_k_code = 0; sim_k_ctrl = 0; sim_k_pressed = 0;
     /* 500 reports per endpoint = ~71 laps of a 7-slot ring.  The old code
      * never rewrote the Link TRB after lap 1: the consumer met a stale
      * cycle bit at the link and input died permanently after ~14
-     * reports.  Events flow through the REAL proc_events re-arm path. */
+     * reports.  Events flow through the REAL proc_events re-arm path,
+     * and (r35) through the REAL mouse.c/kbd.c queues. */
     for (int i = 0; i < 500; i++) {
         sim_consume_td(ck);
         sim_consume_td(cm);
         proc_events();
+        drain_input();
     }
-    CHECK(sim_kbd_reports == 500,
-          "keyboard delivered %ld/500 reports (ring stalled at a link?)",
-          sim_kbd_reports);
+    /* the kbd sends the SAME report 500 times: kbd_inject_hid diffs
+     * against prev, so exactly one 'a' make event is correct - the ring
+     * proof is the TD/event counts below, the content proof is the 'a' */
+    CHECK(sim_kbd_reports == 1,
+          "keyboard produced %ld key events for 500 identical reports "
+          "(want exactly 1 'a' make)", sim_kbd_reports);
     CHECK(sim_mouse_reports == 500,
-          "mouse delivered %ld/500 reports", sim_mouse_reports);
+          "mouse delivered %ld/500 move events", sim_mouse_reports);
     CHECK(ck->tds == 500 && cm->tds == 500,
           "consumer TD counts %ld/%ld, want 500/500", ck->tds, cm->tds);
     /* content proof: the Report ID prefix must be skipped, so the axes
      * and keys arrive from the byte AFTER the ID (r33 field bug: with
-     * off=0 the ID lands in buttons/mods and every axis shifts) */
-    CHECK(sim_m_btn == 0 && sim_m_dx == 0x5A && sim_m_dy == 0x3C,
-          "mouse content wrong: btn %u dx %d dy %d (report ID not "
-          "skipped?)", sim_m_btn, sim_m_dx, sim_m_dy);
-    CHECK(sim_k_mod == 0 && sim_k_key0 == 0x04,
-          "kbd content wrong: mod %u key0 %02x (report ID not skipped?)",
-          sim_k_mod, sim_k_key0);
+     * off=0 the ID lands in buttons/mods and every axis shifts) - and
+     * dy arrives in the QUEUE's PS/2 convention (r35: HID dy +0x3C =
+     * physical down = queue dy NEGATIVE, WM does my -= dy) */
+    CHECK(sim_m_btn == 0 && sim_m_dx == 0x5A && sim_m_dy == -0x3C,
+          "mouse content wrong: btn %u dx %d dy %d (want btn 0 dx 90 "
+          "dy -60: ID skipped + y flipped to PS/2 convention)",
+          sim_m_btn, sim_m_dx, sim_m_dy);
+    CHECK(sim_k_code == 'a' && !sim_k_ctrl && sim_k_pressed,
+          "kbd content wrong: keycode %u ctrl %u pressed %u (want 'a' "
+          "0x61, no stuck Ctrl - the r32 field symptom)",
+          sim_k_code, sim_k_ctrl, sim_k_pressed);
     printf("  interrupt rings: 2 EPs x 500 reports (~71 laps each) - "
            "kbd %ld, mouse %ld delivered\n",
            sim_kbd_reports, sim_mouse_reports);
@@ -703,17 +753,30 @@ static void test_runtime_fallbacks(void)
         struct sim_consumer *c = t6_arm(dm, 3, 0, 2, 4, pay_id);
         CHECK(c != NULL, "6a: sim xHC did not schedule the probe EP");
         if (c) {
-            for (int i = 0; i < 70; i++) { sim_consume_td(c); proc_events(); }
+            sim_mouse_reports = 0;
+            sim_m_btn = 0; sim_m_dx = sim_m_dy = sim_m_wh = 0;
+            for (int i = 0; i < 70; i++) {
+                sim_consume_td(c); proc_events(); drain_input();
+                if (i == 55)
+                    CHECK(sim_mouse_reports == 0,
+                          "6a: %ld moves injected BEFORE the probe verdict "
+                          "(hold broken: wrong-offset garbage would storm "
+                          "the WM with phantom drags)", sim_mouse_reports);
+            }
             CHECK(h->has_id == 1,
                   "6a: probe left has_id %u after 70 prefixed reports "
                   "(r33 field failure mode: silent wrong offset)",
                   (u32)h->has_id);
-            CHECK(sim_m_btn == 0 && sim_m_dx == 0x5A && sim_m_dy == 0x3C,
+            CHECK(sim_mouse_reports == 11,
+                  "6a: %ld moves delivered after the verdict (want 11: "
+                  "held through report 59; report 60 IS the verdict and "
+                  "already injects, then 61-70)", sim_mouse_reports);
+            CHECK(sim_m_btn == 0 && sim_m_dx == 0x5A && sim_m_dy == -0x3C,
                   "6a: content wrong after probe: btn %u dx %d dy %d "
-                  "(off still 0 -> ID lands in buttons, axes shift)",
-                  sim_m_btn, sim_m_dx, sim_m_dy);
-            printf("  6a prefixed mouse: probe flipped off 0 -> 1, axes "
-                   "dx %d dy %d delivered\n", sim_m_dx, sim_m_dy);
+                  "(want btn 0 dx 90 dy -60)", sim_m_btn, sim_m_dx, sim_m_dy);
+            printf("  6a prefixed mouse: held to verdict, probe flipped "
+                   "off 0 -> 1, axes dx %d dy %d delivered\n",
+                   sim_m_dx, sim_m_dy);
         }
     }
 
@@ -729,13 +792,20 @@ static void test_runtime_fallbacks(void)
         struct sim_consumer *c = t6_arm(dp, 4, 0, 2, 4, pay_plain);
         CHECK(c != NULL, "6b: sim xHC did not schedule the plain EP");
         if (c) {
-            for (int i = 0; i < 70; i++) { sim_consume_td(c); proc_events(); }
+            sim_mouse_reports = 0;
+            sim_m_btn = 0; sim_m_dx = sim_m_dy = sim_m_wh = 0;
+            for (int i = 0; i < 70; i++) {
+                sim_consume_td(c); proc_events(); drain_input();
+            }
             CHECK(h->has_id == 0,
                   "6b: probe FALSELY flipped a plain mouse to has_id %u "
                   "(would shift every axis by one)", (u32)h->has_id);
-            CHECK(sim_m_btn == 1 && sim_m_dx == 0x2A && sim_m_dy == 0x14,
-                  "6b: plain content wrong: btn %u dx %d dy %d",
-                  sim_m_btn, sim_m_dx, sim_m_dy);
+            CHECK(sim_mouse_reports == 11,
+                  "6b: %ld moves delivered (want 11: reports 60-70 after "
+                  "the plain verdict)", sim_mouse_reports);
+            CHECK(sim_m_btn == 1 && sim_m_dx == 0x2A && sim_m_dy == -0x14,
+                  "6b: plain content wrong: btn %u dx %d dy %d (want "
+                  "btn 1 dx 42 dy -20)", sim_m_btn, sim_m_dx, sim_m_dy);
             printf("  6b plain mouse: probe confirmed off 0, btn %u dx %d "
                    "dy %d delivered\n", sim_m_btn, sim_m_dx, sim_m_dy);
         }
@@ -753,18 +823,112 @@ static void test_runtime_fallbacks(void)
         struct sim_consumer *c = t6_arm(dk, 5, 0, 1, 9, pay_kbd);
         CHECK(c != NULL, "6c: sim xHC did not schedule the kbd EP");
         if (c) {
-            for (int i = 0; i < 10; i++) { sim_consume_td(c); proc_events(); }
+            sim_kbd_reports = 0; sim_k_code = 0; sim_k_ctrl = 0;
+            for (int i = 0; i < 10; i++) {
+                sim_consume_td(c); proc_events(); drain_input();
+            }
             CHECK(h->has_id == 1,
                   "6c: length rule left has_id %u on 9-byte kbd reports "
                   "(r33 field failure: keyboard frozen)", (u32)h->has_id);
-            CHECK(sim_k_mod == 0x02 && sim_k_key0 == 0x04,
-                  "6c: kbd content wrong: mod %u key0 %02x (ID byte "
-                  "parsed as modifier?)", sim_k_mod, sim_k_key0);
+            /* payload: [ID=1][mod=LeftShift][rsv][a] -> through the REAL
+             * kbd.c this must emerge as the shifted character 'A' */
+            CHECK(sim_k_code == 'A' && !sim_k_ctrl,
+                  "6c: kbd end-to-end wrong: keycode %u ctrl %u (want "
+                  "'A' 0x41 via shift - ID parsed as modifier would give "
+                  "keycode 0 / stuck Ctrl)", sim_k_code, sim_k_ctrl);
             printf("  6c 9-byte keyboard: length rule flipped off 0 -> 1 "
-                   "on report 1, mod %02x key %02x delivered\n",
-                   sim_k_mod, sim_k_key0);
+                   "on report 1, shift+'a' emerged as '%c'\n",
+                   (char)sim_k_code);
         }
     }
+}
+
+/* ===== TEST 7: axis + key semantics through the REAL drivers (r35) ====== */
+/* The r34 field report: "moving the physical mouse to the left made it
+ * go diagonally down to left", "no way to move the mouse up", "stuck
+ * under the screen".  Root cause: HID dy (positive = physical DOWN) was
+ * handed to a queue/WM built on the PS/2 convention (positive = UP) -
+ * the vertical axis was inverted, and because the WM clamps to the
+ * screen the cursor ended up pinned to the bottom edge.  These checks
+ * run the REAL mouse_inject -> mouse_apply -> mouse_poll and
+ * kbd_inject_hid -> kbd_sc -> kbd_poll chains and apply the WM's own
+ * update formula (wm.c: my -= dy * sens / 3, sens default 3). */
+/* poll until a MOVE event arrives, discarding button/wheel events (the
+ * queue may hold a leftover button-change from the previous test's
+ * constant button state) */
+static int t7_poll_move(struct mouse_event *out)
+{
+    struct mouse_event me;
+    int found = 0;
+    while (mouse_poll(&me))
+        if (me.type == MEV_MOVE) { *out = me; found = 1; }
+    return found;
+}
+
+static void test_direction_matrix(void)
+{
+    struct mouse_event me;
+    struct key_event ke;
+    { struct mouse_event d; while (mouse_poll(&d)); }   /* drain leftovers */
+    while (kbd_poll(&ke));
+
+    /* physical DOWN: HID dy = +10 -> queue dy must be -10 -> WM
+     * my -= (-10) => screen y GROWS => cursor moves down */
+    memset(&me, 0, sizeof me);
+    mouse_inject(0, 0, 10, 0);
+    int got = t7_poll_move(&me);
+    CHECK(got && me.type == MEV_MOVE && me.dy == -10,
+          "T7: HID dy +10 (physical DOWN) arrived as queue dy %d - want "
+          "-10 (r34 field bug: vertical axis inverted)", me.dy);
+    CHECK(got && -(int)me.dy * 3 / 3 > 0,
+          "T7: physical down must grow screen y (WM formula my -= dy)");
+
+    /* physical UP: HID dy = -10 -> queue dy = +10 -> screen y shrinks */
+    memset(&me, 0, sizeof me);
+    mouse_inject(0, 0, -10, 0);
+    got = t7_poll_move(&me);
+    CHECK(got && me.dy == 10,
+          "T7: HID dy -10 (physical UP) -> queue dy %d, want +10", me.dy);
+    CHECK(got && -(int)me.dy * 3 / 3 < 0,
+          "T7: physical up must shrink screen y");
+
+    /* horizontal passes through unflipped */
+    memset(&me, 0, sizeof me);
+    mouse_inject(0, 7, 0, 0);
+    got = t7_poll_move(&me);
+    CHECK(got && me.dx == 7 && me.dy == 0,
+          "T7: horizontal wrong: dx %d dy %d (want 7, 0)", me.dx, me.dy);
+
+    /* physical LEFT: dx = -7 -> screen x must shrink */
+    memset(&me, 0, sizeof me);
+    mouse_inject(0, -7, 0, 0);
+    got = t7_poll_move(&me);
+    CHECK(got && me.dx == -7,
+          "T7: physical left -> queue dx %d, want -7", me.dx);
+
+    /* modifier + key through the REAL kbd.c: Left Shift + 'a' = 'A' */
+    u8 pk[6] = { 0, 0, 0, 0, 0, 0 };
+    u8 pm = 0;
+    u8 keys[6] = { 0x04, 0, 0, 0, 0, 0 };
+    kbd_inject_hid(0x02, keys, pk, &pm);
+    int kgot = 0;
+    u16 last = 0;
+    u8 lastp = 0;
+    while (kbd_poll(&ke)) { kgot = 1; if (ke.pressed) { last = ke.keycode; lastp = 1; } }
+    CHECK(kgot && last == 'A' && lastp,
+          "T7: shift+'a' through real kbd.c -> keycode %u (want 'A' "
+          "0x41)", last);
+
+    /* release everything: empty report must emit breaks, not repeats */
+    u8 zk[6] = { 0, 0, 0, 0, 0, 0 };
+    kbd_inject_hid(0, zk, pk, &pm);
+    int saw_break = 0, saw_make = 0;
+    while (kbd_poll(&ke)) { if (ke.pressed) saw_make = 1; else saw_break = 1; }
+    CHECK(saw_break && !saw_make,
+          "T7: release report produced make %d break %d (want breaks "
+          "only)", saw_make, saw_break);
+    printf("  direction matrix: HID down/up -> queue -/+ , WM y grows/"
+           "shrinks; shift+a -> 'A'; release -> breaks only\n");
 }
 
 int main(int argc, char **argv)
@@ -785,6 +949,8 @@ int main(int argc, char **argv)
     printf("usb_sim: r34 runtime offset fallbacks (probe + kbd length "
            "rule)...\n");
     test_runtime_fallbacks();
+    printf("usb_sim: r35 direction matrix through real mouse.c/kbd.c...\n");
+    test_direction_matrix();
     if (failures) {
         printf("USB SIM: %d FAILURE(S)\n", failures);
         return 1;

@@ -61,6 +61,8 @@ struct hid_ep {
     u8 rep_logged;            /* rate limit for first-report hex dumps */
     u8 probe_n, probe_done;   /* r34 runtime offset probe state (mouse) */
     u8 nz[3];                 /* nonzero counts for report bytes 1..3 */
+    u8 b0nz;                  /* r35: count of evidence reports with byte0 != 0 */
+    u32 probe_t0;             /* r35: tick of first evidence report */
     u32 ctx_copy[5];          /* the EP ctx CFGEP got - photo diagnostics */
     u32 dci;                  /* endpoint context index = ep_addr*2+1 */
     volatile u32 *inr;
@@ -171,24 +173,44 @@ static void ring_db(u32 slot, u32 target);
 static void mouse_probe(struct hid_ep *he, const u8 *data, u32 len)
 {
     if (he->probe_done || he->has_id || he->kind != 2) return;
+    /* r35: evidence = a report carrying ACTIVITY in bytes 1+.  Byte 0 is
+     * excluded on purpose: on an ID-prefixed device it is the constant
+     * Report ID (always nonzero), so idle keepalives [ID,0,0,0] would
+     * otherwise burn the whole probe window with zero information. */
     int any = 0;
-    for (u32 i = 0; i < len && i < 8; i++)
+    for (u32 i = 1; i < len && i < 8; i++)
         if (data[i]) { any = 1; break; }
     if (!any) return;                       /* idle report: no evidence */
+    if (!he->probe_t0) he->probe_t0 = tick_count ? (u32)tick_count : 1;
+    if (data[0]) he->b0nz++;
     for (u32 i = 1; i <= 3 && i < len; i++)
         if (data[i]) he->nz[i - 1]++;
-    if (++he->probe_n < 60) return;
+    he->probe_n++;
+    /* verdict once 60 evidence reports are in - or after 4 s of probing
+     * with at least 8 of them, so a casually moved mouse never stays
+     * held indefinitely */
+    if (he->probe_n < 60 &&
+        !(he->probe_n >= 8 && (u32)tick_count - he->probe_t0 > 400))
+        return;
     he->probe_done = 1;
-    klog("usb: probe nz1 %u nz2 %u nz3 %u", (u32)he->nz[0], (u32)he->nz[1],
-         (u32)he->nz[2]);
+    klog("usb: probe n %u b0 %u nz1 %u nz2 %u nz3 %u", (u32)he->probe_n,
+         (u32)he->b0nz, (u32)he->nz[0], (u32)he->nz[1], (u32)he->nz[2]);
     if (he->nz[1] >= 3 && he->nz[2] >= 2 && he->nz[0] <= he->nz[2]) {
         klog("usb: probe: byte 3 active, byte 1 quiet -> Report-ID "
              "layout (off 1)");
         he->has_id = 1;
+    } else if (he->b0nz == he->probe_n && he->nz[0] <= 2 && he->nz[2] >= 2) {
+        /* byte 0 never zero (a Report ID), byte 1 quiet (that would be
+         * the buttons byte), byte 3 active (dy behind the prefix) - the
+         * prefix shows even for purely vertical movement */
+        klog("usb: probe: byte 0 constant, byte 3 active -> Report-ID "
+             "layout (off 1)");
+        he->has_id = 1;
     } else if (he->nz[0] >= 3 && he->nz[1] >= 3 && he->nz[2] == 0) {
         klog("usb: probe: plain boot-mouse layout confirmed (off 0)");
+    } else {
+        klog("usb: probe: ambiguous - keeping off %u", (u32)he->has_id);
     }
-    /* ambiguous: keep the descriptor verdict */
 }
 
 /* ------------------------------------------------------------- events ---- */
@@ -282,7 +304,20 @@ static int proc_events(void)
                                 klog("usb: kbd report len %u >= 9 -> "
                                      "Report-ID layout (off 1)", len);
                             }
-                            mouse_probe(h, r, len);
+                            /* r35: hold mouse injection while the offset
+                             * probe has no verdict yet - injecting with
+                             * the wrong offset produced the phantom
+                             * button storms (the ID byte parsed as
+                             * buttons = a permanent drag) and scrambled
+                             * axes; waiting ~0.6 s of movement is far
+                             * cheaper.  The keyboard needs no hold: its
+                             * length rule decides on report 1. */
+                            int hold = 0;
+                            if (h->kind == 2 && !h->has_id &&
+                                !h->probe_done) {
+                                mouse_probe(h, r, len);
+                                hold = !h->probe_done;
+                            }
                             /* r33: raw bytes of the first two reports per
                              * EP, so a future offset/format question is
                              * answerable from ONE photo - no guessing */
@@ -295,7 +330,7 @@ static int proc_events(void)
                                      r[3], r[4], r[5], r[6], r[7], r[8]);
                             }
                             int off = h->has_id ? 1 : 0;
-                            if (h->kind == 2 && len >= (u32)off + 3)
+                            if (!hold && h->kind == 2 && len >= (u32)off + 3)
                                 mouse_inject(r[off], (i32)(i8)r[off + 1],
                                              (i32)(i8)r[off + 2],
                                              len >= (u32)off + 4
@@ -1671,6 +1706,21 @@ void usb_poll(void)
                 pending_portc &= ~(1u << p);
             }
     }
+    /* r35 FREEZE ROOT FIX: the hub-port poll below runs BLOCKING control
+     * transfers (800 ms timeout each, and a timeout kicks xhci_restart)
+     * right here in the WM main loop.  On the field machine a single
+     * hiccup from the hub froze mouse, keyboard and clock for seconds
+     * ("random lag spikes... mouse stops moving until unfrozen"), and 4
+     * rounds of one port-1 timeout triggered hub_recover - a root-port
+     * reset + full branch re-enumeration = the 10 s lockup that also
+     * tore down and re-armed the live input endpoints.  Health-polling a
+     * hub is only needed while input is SILENT (the r26 recovery /
+     * diagnostics case); while reports are flowing, the bus is provably
+     * alive, so skip the blocking probes entirely.  Root-port hotplug
+     * (pending_portc above) is event-driven and stays live. */
+    int input_fresh = input_guard_armed && input_last_tick &&
+                      tick_count - (u64)input_last_tick < 300;
+    if (!input_fresh)
     for (int sl = 1; sl <= MAX_SLOTS; sl++) {   /* hub-port hotplug, 1 Hz */
         struct xdev *h = &devs[sl];
         if (!h->used || !h->is_hub) continue;
