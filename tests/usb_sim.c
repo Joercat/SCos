@@ -211,7 +211,7 @@ struct sim_consumer {
     int active;
     long tds;                   /* completed TDs (events posted) */
 };
-static struct sim_consumer cons[6];
+static struct sim_consumer cons[12];   /* r37: T6d + T8 grew the roster */
 static int ncons;
 
 static u32 sim_evt_idx;
@@ -255,7 +255,15 @@ static int sim_consume_td(struct sim_consumer *c)
         c->deq++;
         if (ioc) {
             c->tds++;
-            sim_post_event(c->slot, c->dci, 1, trb_addr, 0);
+            /* r37: post the TRUE transfer remainder, computed from the
+             * TRB's own length field, like a real xHC.  The old hardcoded
+             * rem=0 told the driver every report was a full 16 bytes -
+             * the length rule (kbd report >= 9 -> Report-ID prefix) then
+             * "passed" even for 8-byte plain reports, and the sim never
+             * exercised real length semantics at all. */
+            u32 trb_len = t[2] & 0x1FFFFu;
+            u32 rem = trb_len > c->report_len ? trb_len - c->report_len : 0;
+            sim_post_event(c->slot, c->dci, 1, trb_addr, rem);
             return 1;
         }
     }
@@ -280,6 +288,10 @@ void cpu_hlt(void)
 static struct sim_consumer *sim_add_consumer(volatile u32 *ring, int trbs,
                                              u32 slot, u32 dci, u32 replen)
 {
+    if (ncons >= (int)(sizeof cons / sizeof cons[0])) {
+        fprintf(stderr, "SIM: consumer table full (%d)\n", ncons);
+        exit(1);
+    }
     struct sim_consumer *c = &cons[ncons++];
     memset(c, 0, sizeof(*c));
     c->ring = ring; c->ring_trbs = trbs;
@@ -522,7 +534,8 @@ static void test_interrupt_rings(void)
          * T3 on CONTENT, not just on counts. */
         h->has_id = 1;
         for (int b = 0; b < IN_TRBS; b++) {
-            h->in_buf[b] = palloc(16);
+            h->in_buf[b] = palloc(IN_BUF_BYTES);
+            memset(h->in_buf[b], 0, IN_BUF_BYTES);
             if (j == 0) {             /* kbd: [ID][mods][rsvd][key...] */
                 h->in_buf[b][0] = 1; h->in_buf[b][1] = 0;
                 h->in_buf[b][2] = 0; h->in_buf[b][3] = 0x04;
@@ -541,8 +554,11 @@ static void test_interrupt_rings(void)
          * bug sailed through the suite and died on the H510M-A. */
         u32 epw[5];
         hid_fill_ep_ctx(epw, h, 1);   /* FullSpeed, like the field */
+        /* r37: true 9-byte kbd report ([ID][mod][rsv][6 keys]) - with the
+         * sim now posting the REAL remainder, an 8-byte replen would make
+         * the driver's len>=off+8 gate fail exactly like on hardware. */
         struct sim_consumer *c =
-            sim_cfg_ep(epw, 2, h->dci, j == 0 ? 8u : 4u);
+            sim_cfg_ep(epw, 2, h->dci, j == 0 ? 9u : 4u);
         CHECK(c != NULL,
               "xHC would NOT schedule slot 2 dci %u: type %u interval %u "
               "esit %u avg %u (r30-style silent input death)", h->dci,
@@ -726,9 +742,10 @@ static struct sim_consumer *t6_arm(struct xdev *d, u32 slot, int j,
     h->has_id = 0;                      /* descriptor evidence "failed" */
     h->inr = (volatile u32 *)palloc(4096);
     for (int b = 0; b < IN_TRBS; b++) {
-        h->in_buf[b] = palloc(16);
-        memset(h->in_buf[b], 0, 16);
-        memcpy(h->in_buf[b], pay, replen < 16 ? replen : 16);
+        h->in_buf[b] = palloc(IN_BUF_BYTES);
+        memset(h->in_buf[b], 0, IN_BUF_BYTES);
+        memcpy(h->in_buf[b], pay,
+               replen < IN_BUF_BYTES ? replen : IN_BUF_BYTES);
     }
     h->inr_idx = 0; h->inr_cycle = 1;
     h->link_pend = 0; h->link_pend_cycle = 1;
@@ -839,6 +856,450 @@ static void test_runtime_fallbacks(void)
             printf("  6c 9-byte keyboard: length rule flipped off 0 -> 1 "
                    "on report 1, shift+'a' emerged as '%c'\n",
                    (char)sim_k_code);
+        }
+    }
+
+    /* 6d (r37): PLAIN 8-byte keyboard reports - the length rule must NOT
+     * fire.  The old sim posted rem=0 for every transfer, so the driver
+     * saw len=16 even for an 8-byte report and this negative case was
+     * literally inexpressible; with true remainders it is a real gate on
+     * the exact rule that decides ID-prefixed keyboards. */
+    struct xdev *dk2 = slot_alloc(6);
+    CHECK(dk2 != NULL, "6d: slot_alloc(6) failed");
+    if (dk2) {
+        dk2->nhid = 1; dk2->kind = 1;
+        static const u8 pay_plain_kbd[] = { 0x02, 0, 0x04, 0, 0, 0, 0, 0 };
+        struct hid_ep *h = &dk2->hid[0];
+        struct sim_consumer *c = t6_arm(dk2, 6, 0, 1, 8, pay_plain_kbd);
+        CHECK(c != NULL, "6d: sim xHC did not schedule the plain kbd EP");
+        if (c) {
+            sim_kbd_reports = 0; sim_k_code = 0; sim_k_ctrl = 0;
+            for (int i = 0; i < 10; i++) {
+                sim_consume_td(c); proc_events(); drain_input();
+            }
+            CHECK(h->has_id == 0,
+                  "6d: length rule FALSELY flipped an 8-byte plain kbd to "
+                  "has_id %u (every key would parse one byte off)",
+                  (u32)h->has_id);
+            CHECK(sim_k_code == 'A' && !sim_k_ctrl,
+                  "6d: plain kbd content wrong: keycode %u (want 'A' 0x41 "
+                  "via shift at off 0)", sim_k_code);
+            printf("  6d plain 8-byte keyboard: length rule stayed off, "
+                   "'%c' delivered from byte 0\n", (char)sim_k_code);
+        }
+    }
+
+    /* 6e (r37): 16-bit-axis mouse with NO usable descriptor - the
+     * statistical probe must detect the wide layout from the report
+     * stream itself (Model C, the r36 field fingerprint).  The device
+     * already has has_id=1 (descriptor walk found an ID but the layout
+     * parse failed): the probe still runs, collecting X-high-byte
+     * evidence, and flips extraction to 16-bit LE pairs at the verdict.
+     * Report: [ID=1][btn=0][XL=FB][XH=FF][YL=06][YH=00] = dx -5, dy +6
+     * -> queue (-5, -6).  8-bit boot parsing of the same bytes gives
+     * dy = (i8)XH = -1 -> flipped = +1: the constant up-drift the user
+     * reported ("left goes diagonally UP-left"). */
+    struct xdev *dw = slot_alloc(10);
+    CHECK(dw != NULL, "6e: slot_alloc(10) failed");
+    if (dw) {
+        dw->nhid = 1; dw->kind = 2;
+        static const u8 pay_wide[] = { 1, 0, 0xFB, 0xFF, 0x06, 0x00 };
+        struct hid_ep *h = &dw->hid[0];
+        struct sim_consumer *c = t6_arm(dw, 10, 0, 2, 6, pay_wide);
+        CHECK(c != NULL, "6e: sim xHC did not schedule the wide16 EP");
+        if (c) {
+            h->has_id = 1;              /* descriptor said ID, parse failed */
+            sim_mouse_reports = 0;
+            sim_m_btn = 0; sim_m_dx = 0; sim_m_dy = 0; sim_m_wh = 0;
+            for (int i = 0; i < 70; i++) {
+                sim_consume_td(c); proc_events(); drain_input();
+                if (i == 30)
+                    CHECK(h->wide16 == 0,
+                          "6e: wide16 verdict fired at report %d (want it "
+                          "only at the probe verdict)", i);
+            }
+            CHECK(h->wide16 == 1,
+                  "6e: probe never detected 16-bit axes (xh00ff %u len6 %u "
+                  "nz4 %u nz5 %u of n %u)", (u32)h->xh00ff, (u32)h->len6,
+                  (u32)h->nz[3], (u32)h->nz[4], (u32)h->probe_n);
+            CHECK(sim_m_dx == -5 && sim_m_dy == -6,
+                  "6e: wide16 content wrong: dx %d dy %d (want -5, -6; "
+                  "dy +1 would be the r36 X-high-byte up-drift)",
+                  sim_m_dx, sim_m_dy);
+            printf("  6e 16-bit probe fallback: verdict at 60, dx %d dy %d "
+                   "delivered (no descriptor needed)\n",
+                   sim_m_dx, sim_m_dy);
+        }
+    }
+}
+
+/* ===== TEST 8: r37 report-descriptor layout parser + extraction ========= */
+/* The r36 field fingerprint: physical LEFT moved the cursor diagonally
+ * UP-left, RIGHT moved straight right, DOWN produced no vertical motion
+ * at all (only X jitter), UP drifted sideways depending on angle.  That
+ * is the exact signature of a 16-bit-axis REPORT-protocol mouse
+ * ([ID][btn][X lo][X hi][Y lo][Y hi]) parsed as 8-bit boot data:
+ * dx = X-lo (right looked right), dy = X-HI (0x00 moving right, 0xFF
+ * moving left = constant up-drift), real Y never reaching an axis.  No
+ * byte-offset probe can fix a FIELD-SIZE mismatch - the cure is the
+ * Linux model: parse the descriptor into a bit-accurate field map.
+ * These vectors replay a 16-bit gaming mouse, an NKRO keyboard and a
+ * plain boot keyboard through the REAL parse + extract + queue chain. */
+
+/* 16-bit gaming mouse, Report ID 1:
+ * report = [ID][btn 3 bits + 5 pad][X 16][Y 16][wheel 8] = 7 bytes */
+static const u8 rdesc_mouse16[] = {
+    0x05, 0x01,             /* Usage Page (Generic Desktop) */
+    0x09, 0x02,             /* Usage (Mouse) */
+    0xA1, 0x01,             /* Collection (Application) */
+    0x85, 0x01,             /*   Report ID (1) */
+    0x05, 0x09,             /*   Usage Page (Button) */
+    0x19, 0x01, 0x29, 0x03, /*   Usage Min 1 / Max 3 */
+    0x15, 0x00, 0x25, 0x01, /*   LogMin 0 / LogMax 1 */
+    0x75, 0x01, 0x95, 0x03, /*   Report Size 1, Count 3 */
+    0x81, 0x02,             /*   Input (Data,Var,Abs)  - buttons */
+    0x75, 0x05, 0x95, 0x01, /*   Report Size 5, Count 1 */
+    0x81, 0x03,             /*   Input (Const,Var,Abs) - padding */
+    0x05, 0x01,             /*   Usage Page (Generic Desktop) */
+    0x09, 0x01,             /*   Usage (Pointer) */
+    0xA1, 0x00,             /*   Collection (Physical) */
+    0x16, 0x00, 0x80,       /*     LogMin -32768 */
+    0x26, 0xFF, 0x7F,       /*     LogMax 32767 */
+    0x75, 0x10, 0x95, 0x02, /*     Report Size 16, Count 2 */
+    0x09, 0x30, 0x09, 0x31, /*     Usage X, Usage Y */
+    0x81, 0x06,             /*     Input (Data,Var,Rel) - X, Y */
+    0xC0,                   /*   End Collection */
+    0x09, 0x38,             /*   Usage (Wheel) */
+    0x15, 0x81, 0x25, 0x7F, /*   LogMin -127 / LogMax 127 */
+    0x75, 0x08, 0x95, 0x01, /*   Report Size 8, Count 1 */
+    0x81, 0x06,             /*   Input (Data,Var,Rel)  - wheel */
+    0xC0                    /* End Collection */
+};
+
+/* NKRO keyboard, Report ID 2:
+ * report = [ID][mod 8][rsv 8][bitmap 104] = 16 bytes */
+static const u8 rdesc_nkro[] = {
+    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,   /* GD / Keyboard / Application */
+    0x85, 0x02,                            /* Report ID 2 */
+    0x05, 0x07,                            /* Usage Page (Keyboard) */
+    0x19, 0xE0, 0x29, 0xE7,                /* Usage Min E0 / Max E7 */
+    0x15, 0x00, 0x25, 0x01,
+    0x75, 0x01, 0x95, 0x08,                /* Size 1, Count 8 */
+    0x81, 0x02,                            /* Input (Var) - modifiers */
+    0x75, 0x08, 0x95, 0x01,                /* Size 8, Count 1 */
+    0x81, 0x03,                            /* Input (Const) - reserved */
+    0x19, 0x00, 0x29, 0x67,                /* Usage Min 0 / Max 0x67 */
+    0x75, 0x01, 0x95, 0x68,                /* Size 1, Count 104 */
+    0x81, 0x02,                            /* Input (Var) - NKRO bitmap */
+    0xC0
+};
+
+/* plain boot keyboard (no Report IDs): [mod 8][rsv 8][keys 6x8] -
+ * the canonical 8-byte-boot-kbd descriptor INCLUDING the reserved byte */
+static const u8 rdesc_bootkbd[] = {
+    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
+    0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7,
+    0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08,
+    0x81, 0x02,
+    0x95, 0x01, 0x75, 0x08,             /* reserved byte (constant) */
+    0x81, 0x03,
+    0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65,
+    0x19, 0x00, 0x29, 0x65, 0x81, 0x00,
+    0xC0
+};
+
+/* consumer-control only: no mouse or keyboard fields - must NOT parse */
+static const u8 rdesc_consumer[] = {
+    0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01,
+    0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08,
+    0x81, 0x02, 0xC0
+};
+
+static struct sim_consumer *t8_arm(struct xdev *d, u32 slot, int j,
+                                   int kind, const struct hid_layout *lay,
+                                   u32 replen, const u8 *pay)
+{
+    struct hid_ep *h = &d->hid[j];
+    memset(h, 0, sizeof *h);
+    h->active = 1;
+    h->iface = j;
+    h->kind = kind;
+    h->ep_addr = (u8)(j + 1);
+    h->dci = (u32)(h->ep_addr * 2 + 1);
+    h->ep_mps = 8;
+    h->binterval = 1;
+    h->use_layout = 1;
+    h->lay = *lay;
+    h->inr = (volatile u32 *)palloc(4096);
+    for (int b = 0; b < IN_TRBS; b++) {
+        h->in_buf[b] = palloc(IN_BUF_BYTES);
+        memset(h->in_buf[b], 0, IN_BUF_BYTES);
+        memcpy(h->in_buf[b], pay,
+               replen < IN_BUF_BYTES ? replen : IN_BUF_BYTES);
+    }
+    h->inr_idx = 0; h->inr_cycle = 1;
+    h->link_pend = 0; h->link_pend_cycle = 1;
+    hid_arm_ring(d, j);
+    u32 epw[5];
+    hid_fill_ep_ctx(epw, h, 1);
+    return sim_cfg_ep(epw, slot, h->dci, replen);
+}
+
+/* refill every ring buffer with a new report + retune the consumer's
+ * simulated report length (the ring TRBs keep pointing at in_buf[b]) */
+static void t8_refill(struct xdev *d, int j, struct sim_consumer *c,
+                      u32 replen, const u8 *pay)
+{
+    struct hid_ep *h = &d->hid[j];
+    for (int b = 0; b < IN_TRBS; b++) {
+        memset(h->in_buf[b], 0, IN_BUF_BYTES);
+        memcpy(h->in_buf[b], pay,
+               replen < IN_BUF_BYTES ? replen : IN_BUF_BYTES);
+    }
+    c->report_len = replen;
+}
+
+static void t8_pump(struct sim_consumer *c, int n)
+{
+    for (int i = 0; i < n; i++) {
+        sim_consume_td(c); proc_events(); drain_input();
+    }
+}
+
+static void test_layout_parser(void)
+{
+    /* ---- 8a: bit extraction primitives ---- */
+    {
+        static const u8 pat[] = { 0xF0, 0x0F, 0x00, 0x00 };
+        CHECK(hid_bits(pat, 4, 4, 8) == 0xFF,
+              "8a: cross-byte bit extract got %02x want ff",
+              hid_bits(pat, 4, 4, 8));
+        CHECK(hid_signed(0xFF, 8) == -1, "8a: 8-bit sign extend");
+        CHECK(hid_signed(0x80, 8) == -128, "8a: 8-bit most negative");
+        CHECK(hid_signed(0xFFF, 12) == -1, "8a: 12-bit sign extend");
+        CHECK(hid_signed(0x012C, 16) == 300, "8a: 16-bit positive");
+        CHECK(hid_signed(0xFF88, 16) == -120, "8a: 16-bit negative");
+    }
+
+    /* ---- 8b: parse the 16-bit gaming mouse descriptor ---- */
+    struct hid_layout m16;
+    memset(&m16, 0, sizeof m16);
+    CHECK(hid_parse_layout(rdesc_mouse16, (int)sizeof rdesc_mouse16, 2,
+                           &m16) == 1,
+          "8b: 16-bit mouse descriptor did not parse");
+    CHECK(m16.rid == 1, "8b: mouse rid %u want 1", m16.rid);
+    CHECK(m16.btn_off == 0 && m16.btn_cnt == 3,
+          "8b: buttons @%u/%u want @0/3", m16.btn_off, m16.btn_cnt);
+    CHECK(m16.x_off == 8 && m16.x_sz == 16,
+          "8b: X @%u/%u want @8/16 - THE r36 field bug was parsing this "
+          "as an 8-bit byte", m16.x_off, m16.x_sz);
+    CHECK(m16.y_off == 24 && m16.y_sz == 16,
+          "8b: Y @%u/%u want @24/16", m16.y_off, m16.y_sz);
+    CHECK(m16.w_off == 40 && m16.w_sz == 8,
+          "8b: wheel @%u/%u want @40/8", m16.w_off, m16.w_sz);
+    CHECK(m16.rpt_bits == 48, "8b: rpt %u bits want 48", m16.rpt_bits);
+    CHECK(hid_parse_layout(rdesc_mouse16, (int)sizeof rdesc_mouse16, 1,
+                           &m16) == 0,
+          "8b: mouse descriptor falsely parsed as a keyboard");
+
+    /* ---- 8c: NKRO keyboard descriptor ---- */
+    struct hid_layout nk;
+    memset(&nk, 0, sizeof nk);
+    CHECK(hid_parse_layout(rdesc_nkro, (int)sizeof rdesc_nkro, 1, &nk) == 1,
+          "8c: NKRO descriptor did not parse");
+    CHECK(nk.rid == 2 && nk.mod_off == 0 && nk.mod_sz == 8,
+          "8c: NKRO rid %u mod @%u/%u want rid 2 @0/8",
+          nk.rid, nk.mod_off, nk.mod_sz);
+    CHECK(nk.key_off == 16 && nk.key_sz == 1 && nk.key_cnt == 104,
+          "8c: NKRO bitmap @%u sz %u cnt %u want @16/1/104",
+          nk.key_off, nk.key_sz, nk.key_cnt);
+    CHECK(nk.rpt_bits == 120, "8c: NKRO rpt %u bits want 120", nk.rpt_bits);
+
+    /* ---- 8d: plain boot keyboard descriptor ---- */
+    struct hid_layout bk;
+    memset(&bk, 0, sizeof bk);
+    CHECK(hid_parse_layout(rdesc_bootkbd, (int)sizeof rdesc_bootkbd, 1,
+                           &bk) == 1,
+          "8d: plain boot kbd descriptor did not parse");
+    CHECK(bk.rid == 0 && bk.mod_off == 0 && bk.mod_sz == 8 &&
+          bk.key_off == 16 && bk.key_sz == 8 && bk.key_cnt == 6,
+          "8d: boot kbd layout rid %u mod @%u/%u keys @%u/%ux%u want "
+          "rid 0 @0/8 @16/8x6", bk.rid, bk.mod_off, bk.mod_sz,
+          bk.key_off, bk.key_sz, bk.key_cnt);
+
+    /* ---- 8e: consumer-control-only descriptor must NOT parse ---- */
+    {
+        struct hid_layout junk;
+        CHECK(hid_parse_layout(rdesc_consumer, (int)sizeof rdesc_consumer,
+                               2, &junk) == 0,
+              "8e: consumer-control descriptor falsely parsed as a mouse");
+        CHECK(hid_parse_layout(rdesc_consumer, (int)sizeof rdesc_consumer,
+                               1, &junk) == 0,
+              "8e: consumer-control descriptor falsely parsed as a kbd");
+        CHECK(hid_parse_layout(rdesc_mouse16, 6, 2, &junk) == 0,
+              "8e: truncated descriptor must not parse");
+    }
+
+    /* ---- 8f: END-TO-END 16-bit mouse - the r36 field fingerprint ---- */
+    struct xdev *dm = slot_alloc(7);
+    CHECK(dm != NULL, "8f: slot_alloc(7) failed");
+    if (dm) {
+        dm->nhid = 1; dm->kind = 2;
+        static const u8 pay_left[] = { 1, 0, 0xFB, 0xFF, 0, 0, 0 };
+        struct hid_ep *h = &dm->hid[0];
+        struct sim_consumer *c = t8_arm(dm, 7, 0, 2, &m16, 7, pay_left);
+        CHECK(c != NULL, "8f: sim xHC did not schedule the layout EP");
+        if (c) {
+            /* physical LEFT, dx=-5 dy=0: X=0xFFFB LE {FB FF}.  Boot
+             * parsing saw dy = X-hi = 0xFF = -1 -> flipped = +1 = the
+             * constant UP-drift the user reported. */
+            sim_mouse_reports = 0;
+            sim_m_btn = 0; sim_m_dx = 12345; sim_m_dy = 12345; sim_m_wh = 0;
+            t8_pump(c, 1);
+            CHECK(sim_m_dx == -5 && sim_m_dy == 0,
+                  "8f: physical left dx -5 gave dx %d dy %d (want -5, 0 - "
+                  "dy nonzero is the r36 up-drift bug)", sim_m_dx, sim_m_dy);
+
+            /* physical DOWN, dy=+6 -> queue dy = -6 (r35 convention:
+             * positive queue dy = UP).  r36 field: "cannot move down at
+             * all" - boot parsing read Y-lo from the X-hi slot = 0. */
+            static const u8 pay_down[] = { 1, 0, 0, 0, 6, 0, 0 };
+            t8_refill(dm, 0, c, 7, pay_down);
+            sim_m_dx = 12345; sim_m_dy = 12345;
+            t8_pump(c, 1);
+            CHECK(sim_m_dx == 0 && sim_m_dy == -6,
+                  "8f: physical down gave dx %d dy %d (want 0, -6 - the "
+                  "r36 dead-vertical bug)", sim_m_dx, sim_m_dy);
+
+            /* diagonal: dx=+300 (0x012C), dy=-120 (0xFF88) -> queue
+             * (300, +120) */
+            static const u8 pay_diag[] = { 1, 0, 0x2C, 0x01, 0x88, 0xFF, 0 };
+            t8_refill(dm, 0, c, 7, pay_diag);
+            sim_m_dx = 0; sim_m_dy = 0;
+            t8_pump(c, 1);
+            CHECK(sim_m_dx == 300 && sim_m_dy == 120,
+                  "8f: diagonal 16-bit move gave dx %d dy %d (want 300, "
+                  "120 - beyond the 8-bit range entirely)",
+                  sim_m_dx, sim_m_dy);
+
+            /* wheel -2 */
+            static const u8 pay_wheel[] = { 1, 0, 0, 0, 0, 0, 0xFE };
+            t8_refill(dm, 0, c, 7, pay_wheel);
+            sim_m_wh = 0;
+            t8_pump(c, 1);
+            CHECK(sim_m_wh == -2, "8f: wheel got %d want -2", sim_m_wh);
+
+            /* foreign Report ID (consumer-control traffic on the shared
+             * EP) must be DROPPED, never misparsed as a move */
+            static const u8 pay_foreign[] = { 2, 0x55, 0x66, 0x77 };
+            t8_refill(dm, 0, c, 4, pay_foreign);
+            long before = sim_mouse_reports;
+            sim_m_dx = 0; sim_m_dy = 0;
+            t8_pump(c, 2);
+            CHECK(sim_mouse_reports == before && sim_m_dx == 0 &&
+                  sim_m_dy == 0,
+                  "8f: foreign report id 2 injected a move (dx %d dy %d) "
+                  "- shared-EP consumer traffic must be dropped",
+                  sim_m_dx, sim_m_dy);
+            CHECK(h->rid_skip_logged >= 1,
+                  "8f: foreign-ID drop was not logged (photo diagnostics)");
+
+            /* button press with the layout: btn bit 1 (right) */
+            static const u8 pay_btn[] = { 1, 0x02, 0, 0, 0, 0, 0 };
+            t8_refill(dm, 0, c, 7, pay_btn);
+            sim_m_btn = 0;
+            t8_pump(c, 1);
+            CHECK(sim_m_btn == 2, "8f: layout buttons got %u want 2",
+                  (u32)sim_m_btn);
+            printf("  8f 16-bit mouse end-to-end: left(-5,0) down(0,-6) "
+                   "diag(300,120) wheel -2 foreign-ID dropped btn 2\n");
+        }
+    }
+
+    /* ---- 8g: END-TO-END NKRO keyboard through the layout path ---- */
+    struct xdev *dk = slot_alloc(8);
+    CHECK(dk != NULL, "8g: slot_alloc(8) failed");
+    if (dk) {
+        dk->nhid = 1; dk->kind = 1;
+        /* [ID=2][mod 0][rsv 0][bitmap: bit 4 = usage 4 = 'a'] */
+        static const u8 pay_a[] = { 2, 0, 0, 0x10, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 0 };
+        struct sim_consumer *c = t8_arm(dk, 8, 0, 1, &nk, 16, pay_a);
+        CHECK(c != NULL, "8g: sim xHC did not schedule the NKRO EP");
+        if (c) {
+            static const u8 pay_up[] = { 2, 0, 0, 0, 0, 0, 0, 0,
+                                         0, 0, 0, 0, 0, 0, 0, 0 };
+            sim_kbd_reports = 0; sim_k_code = 0; sim_k_ctrl = 0;
+            t8_pump(c, 1);
+            CHECK(sim_k_code == 'a' && sim_k_pressed && !sim_k_ctrl,
+                  "8g: NKRO bitmap 'a' got keycode %u pressed %u ctrl %u",
+                  sim_k_code, sim_k_pressed, sim_k_ctrl);
+            /* all up: plain-letter breaks are NOT enqueued by kbd.c
+             * design (T7 owns release semantics) - the contract here is
+             * that the layout path produces NO spurious events */
+            {
+                long before = sim_kbd_reports;
+                t8_refill(dk, 0, c, 16, pay_up);
+                t8_pump(c, 1);
+                CHECK(sim_kbd_reports == before,
+                      "8g: NKRO all-up emitted %ld spurious events (want "
+                      "0 - letter breaks are by-design silent)",
+                      sim_kbd_reports - before);
+            }
+            /* shift + 'a' in ONE report -> 'A' (modifier field + bitmap
+             * bit 4; single-report semantics exactly like T6c - a mod
+             * change WHILE a key is held legitimately emits the raw
+             * shift scancode event by kbd.c design and is not part of
+             * the layout contract) */
+            static const u8 pay_A[] = { 2, 0x02, 0, 0x10, 0, 0, 0, 0,
+                                        0, 0, 0, 0, 0, 0, 0, 0 };
+            t8_refill(dk, 0, c, 16, pay_A);
+            t8_pump(c, 1);
+            CHECK(sim_k_code == 'A' && sim_k_pressed,
+                  "8g: NKRO shift+a got keycode %u want 'A'", sim_k_code);
+            /* all up again: the shift BREAK is enqueued (modifier), so
+             * the last event must be a release */
+            t8_refill(dk, 0, c, 16, pay_up);
+            t8_pump(c, 1);
+            CHECK(!sim_k_pressed, "8g: NKRO all-up after shift left a key "
+                  "pressed (the shift break must enqueue)");
+            /* 'd' alone (bitmap bit 7 -> usage 7) */
+            static const u8 pay_d[] = { 2, 0, 0, 0x80, 0, 0, 0, 0,
+                                        0, 0, 0, 0, 0, 0, 0, 0 };
+            t8_refill(dk, 0, c, 16, pay_d);
+            t8_pump(c, 1);
+            CHECK(sim_k_code == 'd' && sim_k_pressed,
+                  "8g: NKRO 'd' got keycode %u want 'd' make", sim_k_code);
+            {
+                long before = sim_kbd_reports;
+                t8_refill(dk, 0, c, 16, pay_up);
+                t8_pump(c, 1);
+                CHECK(sim_kbd_reports == before,
+                      "8g: NKRO final all-up emitted %ld spurious events "
+                      "(want 0)", sim_kbd_reports - before);
+            }
+            printf("  8g NKRO keyboard end-to-end: 'a', all-up, shift "
+                   "'A', 'd' through the bitmap layout\n");
+        }
+    }
+
+    /* ---- 8h: plain boot keyboard through the LAYOUT path (rid 0) ---- */
+    struct xdev *db = slot_alloc(9);
+    CHECK(db != NULL, "8h: slot_alloc(9) failed");
+    if (db) {
+        db->nhid = 1; db->kind = 1;
+        static const u8 pay_bk[] = { 0x02, 0, 0x04, 0, 0, 0, 0, 0 };
+        struct sim_consumer *c = t8_arm(db, 9, 0, 1, &bk, 8, pay_bk);
+        CHECK(c != NULL, "8h: sim xHC did not schedule the boot kbd EP");
+        if (c) {
+            sim_kbd_reports = 0; sim_k_code = 0; sim_k_ctrl = 0;
+            t8_pump(c, 1);
+            CHECK(sim_k_code == 'A' && !sim_k_ctrl,
+                  "8h: boot kbd via layout got keycode %u ctrl %u (want "
+                  "'A' - the layout path must serve classic reports too)",
+                  sim_k_code, sim_k_ctrl);
+            printf("  8h plain boot keyboard via layout path: shift+'a' "
+                   "-> '%c'\n", (char)sim_k_code);
         }
     }
 }
@@ -967,6 +1428,8 @@ int main(int argc, char **argv)
     printf("usb_sim: r34 runtime offset fallbacks (probe + kbd length "
            "rule)...\n");
     test_runtime_fallbacks();
+    printf("usb_sim: r37 report-descriptor layout parser + extraction...\n");
+    test_layout_parser();
     printf("usb_sim: r35 direction matrix through real mouse.c/kbd.c...\n");
     test_direction_matrix();
     if (failures) {

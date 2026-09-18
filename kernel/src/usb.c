@@ -25,6 +25,13 @@
 #define EVT_TRBS 256   /* 4 KiB segment, same as Linux: 64 filled up in the
                         * port-power link-training storm on the H510M-A */
 #define EP0_TRBS 16
+/* r37: report buffers/TRBs are 64 bytes, not 16.  A high-speed gaming
+ * keyboard can legally send reports longer than 16 bytes (NKRO bitmaps,
+ * macro banks, padded packets); with a 16-byte TRB every such transfer
+ * completes as a babble/buffer-overrun ERROR instead of a report - the
+ * endpoint looks armed and healthy yet delivers NOTHING.  64 bytes is
+ * the USB2 interrupt maximum, so no legal report can ever overflow. */
+#define IN_BUF_BYTES 64
 #define IN_TRBS 8
 
 #define TRB_NORMAL      1
@@ -43,6 +50,36 @@
 
 #define MAX_HID_EPS 3
 
+/* ------------------------------------------------------- r37: layout ----
+ * The r36 field round proved the boot-format assumption itself is the
+ * bug: the Holtek mouse answered with REPORT-protocol traffic whose axes
+ * are 16-bit ([ID][btn][X lo][X hi][Y lo][Y hi]) - parsing that as boot
+ * 8-bit made dx = X-lo (moving right looked right) and dy = X-HI (0x00
+ * moving right, 0xFF moving left = a constant up-drift after the r35
+ * flip), while physical Y went to the wheel slot: the exact field
+ * fingerprint "cannot move down at all, left goes diagonally UP-left,
+ * right goes straight right, down only jitters X".  No byte-offset probe
+ * can fix a FIELD-SIZE mismatch.
+ *
+ * The cure is what Linux does: parse the report descriptor into a real
+ * field map (bit offset + bit size for Buttons/X/Y/Wheel or Modifier/
+ * Keys, per Report ID) and extract fields bit-accurately - 8-bit boot
+ * mice, 12-bit and 16-bit gaming mice, 6KRO and NKRO keyboards all fall
+ * out of the same code.  PURE LOGIC: unit-tested in tests/usb_sim.c T8.
+ */
+struct hid_layout {
+    u8  ok;
+    u8  kind;              /* 1 keyboard, 2 mouse */
+    u8  rid;               /* Report ID of the selected report (0 = none) */
+    u16 btn_off, btn_cnt;  /* buttons: bit offset + total bits */
+    u16 x_off, x_sz;       /* X: bit offset + size */
+    u16 y_off, y_sz;
+    u16 w_off, w_sz;       /* wheel */
+    u16 mod_off, mod_sz;   /* keyboard modifier bitmap */
+    u16 key_off, key_sz, key_cnt;  /* key array (sz 8) or NKRO bitmap (sz 1) */
+    u16 rpt_bits;          /* total input bits for this report ID */
+};
+
 /* one boot-protocol HID interface of a device.  Composite devices are the
  * NORM, not the exception (r29 field capture: the user's Holtek keyboard
  * presents boot-mouse iface 0 + boot-keyboard iface 1 + a vendor iface;
@@ -58,9 +95,14 @@ struct hid_ep {
     u8 ctx_dumped;            /* watchdog one-shot ctx dump done (r31) */
     u8 ev_logged;             /* rate limit for the r32 event log lines */
     u8 has_id;                /* reports carry a HID Report ID prefix (r33) */
+    struct hid_layout lay;    /* r37: parsed report-descriptor field map */
+    u8 use_layout;            /* r37: extract via lay, not boot format */
+    u8 wide16;                /* r37: probe verdict: 16-bit axes behind ID */
+    u8 rid_skip_logged;       /* rate limit: foreign report-ID drop logs */
     u8 rep_logged;            /* rate limit for first-report hex dumps */
     u8 probe_n, probe_done;   /* r34 runtime offset probe state (mouse) */
-    u8 nz[3];                 /* nonzero counts for report bytes 1..3 */
+    u8 nz[5];                 /* nonzero counts for report bytes 1..5 */
+    u8 xh00ff, len6;          /* r37: 16-bit-axis evidence counters */
     u8 b0nz;                  /* r35: count of evidence reports with byte0 != 0 */
     u32 probe_t0;             /* r35: tick of first evidence report */
     u32 ctx_copy[5];          /* the EP ctx CFGEP got - photo diagnostics */
@@ -159,6 +201,196 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
                             int tier, struct xdev *phub, int hport);
 static void ring_db(u32 slot, u32 target);
 
+/* extract n bits at bit offset boff, HID/USB little-endian bit order */
+static u32 hid_bits(const u8 *r, u32 rlen, u16 boff, u16 n)
+{
+    u32 v = 0;
+    if (!n) return 0;
+    for (u16 i = 0; i < n; i++) {
+        u32 bit = (u32)boff + i;
+        if ((bit >> 3) >= rlen) break;
+        if (r[bit >> 3] & (1u << (bit & 7))) v |= 1u << i;
+    }
+    return v;
+}
+
+/* sign-extend an n-bit two's-complement value */
+static i32 hid_signed(u32 v, u16 n)
+{
+    if (n && n < 32 && (v & (1u << (n - 1))))
+        v |= ~((1u << n) - 1u);
+    return (i32)v;
+}
+
+/* Parse a HID report descriptor into the field map for want_kind
+ * (2 = mouse: a report with X+Y; 1 = keyboard: a report with a modifier
+ * or key field).  Walks short items per HID 1.11 6.2.2, tracking Usage
+ * Page / Usage / Report Size / Report Count / Report ID, and maps every
+ * non-constant Input main item's fields to absolute bit offsets.  Several
+ * Application collections sharing a Report ID (mouse + consumer control
+ * on one interface - the Holtek and Razer both do this) accumulate
+ * correctly because the bit position keeps running; fields of other
+ * usage pages simply map nothing. */
+int hid_parse_layout(const u8 *d, int len, int want_kind,
+                     struct hid_layout *out)
+{
+    struct hid_layout rs[8];
+    u16 bitpos[8];
+    memset(rs, 0, sizeof rs);
+    memset(bitpos, 0, sizeof bitpos);
+    u8 cur_id = 0;
+    u32 gsize = 0, gcount = 0, page = 0;
+    u32 usages[24];
+    int nusage = 0;
+    int p = 0;
+    while (p < len) {
+        u8 pre = d[p];
+        if (pre == 0xFE) {                     /* long item */
+            if (p + 2 >= len) break;
+            p += 3 + d[p + 1];
+            continue;
+        }
+        u8 bsz = (u8)(pre & 3);
+        if (bsz == 3) bsz = 4;
+        if (p + 1 + bsz > len) break;
+        u32 data = 0;
+        for (u8 i = 0; i < bsz; i++)
+            data |= (u32)d[p + 1 + i] << (8 * i);
+        p += 1 + bsz;
+        int id7 = cur_id & 7;
+        switch (pre & 0xFC) {
+        case 0x04: page = data; break;                    /* Usage Page */
+        case 0x08:                                        /* Usage */
+            if (nusage < 24) usages[nusage++] = (page << 16) | data;
+            break;
+        case 0x18: case 0x28: break;      /* Usage Min/Max: count-driven */
+        case 0x74: gsize = data; break;                   /* Report Size */
+        case 0x94: gcount = data; break;                  /* Report Count */
+        case 0x84:                                        /* Report ID */
+            cur_id = (u8)data;
+            bitpos[data & 7] = 0;
+            rs[data & 7].rid = cur_id;
+            nusage = 0;
+            break;
+        case 0xA0: case 0xC0: nusage = 0; break;  /* Collection / End */
+        case 0x80: {                                      /* Input */
+            struct hid_layout *L = &rs[id7];
+            u16 bp = bitpos[id7];
+            int constant = (int)(data & 1);
+            if (!constant && gsize && gcount) {
+                if (page == 0x01) {           /* Generic Desktop */
+                    for (u32 i = 0; i < gcount && i < 24; i++) {
+                        u32 u = (i < (u32)nusage) ? (usages[i] & 0xFFFF)
+                                : ((nusage == 1) ? (usages[0] & 0xFFFF) : 0);
+                        u16 fo = (u16)(bp + i * gsize);
+                        if (u == 0x30 && !L->x_sz) { L->x_off = fo; L->x_sz = (u16)gsize; }
+                        else if (u == 0x31 && !L->y_sz) { L->y_off = fo; L->y_sz = (u16)gsize; }
+                        else if (u == 0x38 && !L->w_sz) { L->w_off = fo; L->w_sz = (u16)gsize; }
+                    }
+                } else if (page == 0x09) {    /* Button */
+                    if (!L->btn_cnt) {
+                        L->btn_off = bp;
+                        L->btn_cnt = (u16)(gsize * gcount);
+                    }
+                } else if (page == 0x07) {    /* Keyboard */
+                    if (gsize == 1 && gcount >= 8 && !L->mod_sz) {
+                        L->mod_off = bp; L->mod_sz = (u16)gcount;
+                    } else if (gsize == 8 && !L->key_cnt) {
+                        L->key_off = bp; L->key_sz = 8; L->key_cnt = (u16)gcount;
+                    } else if (gsize == 1 && !L->key_cnt) {
+                        /* NKRO bitmap: bit index == usage id */
+                        L->key_off = bp; L->key_sz = 1; L->key_cnt = (u16)gcount;
+                    }
+                }
+            }
+            bitpos[id7] = (u16)(bp + gsize * gcount);
+            nusage = 0;
+            break; }
+        default: break;      /* Output/Feature/Push/Pop/strings: ignored */
+        }
+    }
+    for (int i = 0; i < 8; i++) {
+        struct hid_layout *L = &rs[i];
+        int hit = (want_kind == 2) ? (L->x_sz && L->y_sz)
+                                   : (L->key_cnt || L->mod_sz);
+        if (!hit) continue;
+        L->kind = (u8)want_kind;
+        L->ok = 1;
+        L->rpt_bits = bitpos[i];
+        *out = *L;
+        return 1;
+    }
+    return 0;
+}
+
+/* Inject one report through the parsed field map (report protocol).
+ * Returns 0 when a DIFFERENT Report ID arrived on a shared interrupt EP
+ * (consumer-control traffic on the mouse/keyboard interface) - dropped,
+ * never misparsed as axes or keys. */
+static int hid_inject_layout(struct hid_ep *h, const u8 *r, u32 len,
+                             int slot, u32 ep)
+{
+    const u8 *rp = r;
+    u32 rl = len;
+    if (h->lay.rid) {
+        if (rl < 1 || r[0] != h->lay.rid) {
+            if (h->rid_skip_logged < 3) {
+                h->rid_skip_logged++;
+                klog("usb: slot %d dci %u: dropped report id %u (layout "
+                     "id %u - consumer/other traffic)", slot, ep,
+                     rl ? r[0] : 0, h->lay.rid);
+            }
+            return 0;
+        }
+        rp++;
+        rl--;
+    }
+    if (h->kind == 2) {
+        u32 need = (u32)h->lay.x_off + h->lay.x_sz;
+        u32 ny = (u32)h->lay.y_off + h->lay.y_sz;
+        if (ny > need) need = ny;
+        if (rl * 8 < need) return 0;
+        i32 dx = hid_signed(hid_bits(rp, rl, h->lay.x_off, h->lay.x_sz),
+                            h->lay.x_sz);
+        i32 dy = hid_signed(hid_bits(rp, rl, h->lay.y_off, h->lay.y_sz),
+                            h->lay.y_sz);
+        i32 wh = 0;
+        if (h->lay.w_sz && rl * 8 >= (u32)h->lay.w_off + h->lay.w_sz)
+            wh = hid_signed(hid_bits(rp, rl, h->lay.w_off, h->lay.w_sz),
+                            h->lay.w_sz);
+        u32 btn = hid_bits(rp, rl, h->lay.btn_off, h->lay.btn_cnt) & 0x1F;
+        mouse_inject((u8)btn, dx, dy, wh);
+        return 1;
+    }
+    /* keyboard */
+    {
+        u32 need = (u32)h->lay.mod_off + (h->lay.mod_sz ? h->lay.mod_sz : 8);
+        u32 nk = (u32)h->lay.key_off + h->lay.key_sz * h->lay.key_cnt;
+        if (nk > need) need = nk;
+        if (rl * 8 < need) return 0;
+        u8 mod = (u8)hid_bits(rp, rl, h->lay.mod_off,
+                              h->lay.mod_sz ? h->lay.mod_sz : 8);
+        u8 keys[6];
+        memset(keys, 0, sizeof keys);
+        if (h->lay.key_sz == 8) {
+            int cnt = h->lay.key_cnt > 6 ? 6 : (int)h->lay.key_cnt;
+            for (int i = 0; i < cnt; i++)
+                keys[i] = (u8)hid_bits(rp, rl,
+                                       (u16)(h->lay.key_off + i * 8), 8);
+        } else if (h->lay.key_sz == 1) {
+            int n = 0;
+            for (u32 b = 0; b < h->lay.key_cnt && n < 6; b++) {
+                if (!hid_bits(rp, rl, (u16)(h->lay.key_off + b), 1))
+                    continue;
+                u8 u = (u8)b;
+                if (u >= 4) keys[n++] = u;   /* bit index == usage id */
+            }
+        }
+        kbd_inject_hid(mod, keys, h->prev_keys, &h->prev_mod);
+        return 1;
+    }
+}
+
 /* r34: runtime report-offset probe for boot mice.
  * The Report ID descriptor walk (r33) is the primary evidence, but the
  * field firmware may reject or skip the descriptor fetch - and reports
@@ -172,7 +404,12 @@ static void ring_db(u32 slot, u32 target);
  * verdict lands in has_id, which already drives the parse offset. */
 static void mouse_probe(struct hid_ep *he, const u8 *data, u32 len)
 {
-    if (he->probe_done || he->has_id || he->kind != 2) return;
+    /* r37: the probe now runs even when has_id came from the descriptor
+     * walk - the r36 field round proved the ID offset can be RIGHT and
+     * the field SIZES still wrong (16-bit axes parsed as 8-bit boot).
+     * The layout parser is the primary cure; this is the last-resort
+     * statistical fallback for when the descriptor fetch/parse failed. */
+    if (he->probe_done || he->use_layout || he->kind != 2) return;
     /* r35: evidence = a report carrying ACTIVITY in bytes 1+.  Byte 0 is
      * excluded on purpose: on an ID-prefixed device it is the constant
      * Report ID (always nonzero), so idle keepalives [ID,0,0,0] would
@@ -183,8 +420,16 @@ static void mouse_probe(struct hid_ep *he, const u8 *data, u32 len)
     if (!any) return;                       /* idle report: no evidence */
     if (!he->probe_t0) he->probe_t0 = tick_count ? (u32)tick_count : 1;
     if (data[0]) he->b0nz++;
-    for (u32 i = 1; i <= 3 && i < len; i++)
+    for (u32 i = 1; i <= 5 && i < len; i++)
         if (data[i]) he->nz[i - 1]++;
+    /* r37 16-bit-axis evidence: with [ID][btn][XL][XH][YL][YH] the
+     * candidate X-high byte (index 3) is 0x00 or 0xFF on essentially
+     * every moved report (two's-complement high half of a small delta),
+     * and reports are at least 6 bytes long. */
+    if (len >= 6) {
+        he->len6++;
+        if (data[3] == 0x00 || data[3] == 0xFF) he->xh00ff++;
+    }
     he->probe_n++;
     /* verdict once 60 evidence reports are in - or after 4 s of probing
      * with at least 8 of them, so a casually moved mouse never stays
@@ -193,23 +438,37 @@ static void mouse_probe(struct hid_ep *he, const u8 *data, u32 len)
         !(he->probe_n >= 8 && (u32)tick_count - he->probe_t0 > 400))
         return;
     he->probe_done = 1;
-    klog("usb: probe n %u b0 %u nz1 %u nz2 %u nz3 %u", (u32)he->probe_n,
-         (u32)he->b0nz, (u32)he->nz[0], (u32)he->nz[1], (u32)he->nz[2]);
-    if (he->nz[1] >= 3 && he->nz[2] >= 2 && he->nz[0] <= he->nz[2]) {
-        klog("usb: probe: byte 3 active, byte 1 quiet -> Report-ID "
-             "layout (off 1)");
-        he->has_id = 1;
-    } else if (he->b0nz == he->probe_n && he->nz[0] <= 2 && he->nz[2] >= 2) {
-        /* byte 0 never zero (a Report ID), byte 1 quiet (that would be
-         * the buttons byte), byte 3 active (dy behind the prefix) - the
-         * prefix shows even for purely vertical movement */
-        klog("usb: probe: byte 0 constant, byte 3 active -> Report-ID "
-             "layout (off 1)");
-        he->has_id = 1;
-    } else if (he->nz[0] >= 3 && he->nz[1] >= 3 && he->nz[2] == 0) {
-        klog("usb: probe: plain boot-mouse layout confirmed (off 0)");
-    } else {
-        klog("usb: probe: ambiguous - keeping off %u", (u32)he->has_id);
+    klog("usb: probe n %u b0 %u nz1 %u nz2 %u nz3 %u nz4 %u nz5 %u "
+         "len6 %u xh00ff %u", (u32)he->probe_n, (u32)he->b0nz,
+         (u32)he->nz[0], (u32)he->nz[1], (u32)he->nz[2], (u32)he->nz[3],
+         (u32)he->nz[4], (u32)he->len6, (u32)he->xh00ff);
+    if (!he->has_id) {
+        if (he->nz[1] >= 3 && he->nz[2] >= 2 && he->nz[0] <= he->nz[2]) {
+            klog("usb: probe: byte 3 active, byte 1 quiet -> Report-ID "
+                 "layout (off 1)");
+            he->has_id = 1;
+        } else if (he->b0nz == he->probe_n && he->nz[0] <= 2 && he->nz[2] >= 2) {
+            /* byte 0 never zero (a Report ID), byte 1 quiet (that would be
+             * the buttons byte), byte 3 active (dy behind the prefix) - the
+             * prefix shows even for purely vertical movement */
+            klog("usb: probe: byte 0 constant, byte 3 active -> Report-ID "
+                 "layout (off 1)");
+            he->has_id = 1;
+        } else if (he->nz[0] >= 3 && he->nz[1] >= 3 && he->nz[2] == 0) {
+            klog("usb: probe: plain boot-mouse layout confirmed (off 0)");
+        } else {
+            klog("usb: probe: ambiguous - keeping off %u", (u32)he->has_id);
+        }
+    }
+    /* r37: 16-bit-axis verdict (Model C - the r36 field fingerprint).
+     * Every evidence report was >= 6 bytes, the X-high candidate sat at
+     * 0x00/0xFF every single time, and the Y bytes behind it moved:
+     * extract dx/dy as 16-bit LE pairs instead of boot bytes. */
+    if (he->has_id && he->len6 == he->probe_n &&
+        he->xh00ff == he->probe_n && (he->nz[3] >= 2 || he->nz[4] >= 2)) {
+        he->wide16 = 1;
+        klog("usb: probe: 16-bit axes detected (off 1, dx=b2|b3 dy=b4|b5)"
+             " - field sizes, not boot format");
     }
 }
 
@@ -244,7 +503,7 @@ static int proc_events(void)
             u32 ep = (t[3] >> 16) & 0x1F;
             u32 code = (t[2] >> 24) & 0xFF;
             u32 rem = t[2] & 0xFFFFFF;       /* bytes NOT transferred */
-            u32 len = rem <= 16u ? 16u - rem : 0u;
+            u32 len = rem <= IN_BUF_BYTES ? IN_BUF_BYTES - rem : 0u;
             u32 ptr = t[0];
             cc_code = code;
             cc_slot = slot | (ep << 8) | 0x10000u;
@@ -299,7 +558,8 @@ static int proc_events(void)
                              *   Report ID prefix.
                              * - boot mouse: statistical byte-position
                              *   probe (mouse_probe) over 60 reports. */
-                            if (h->kind == 1 && !h->has_id && len >= 9) {
+                            if (!h->use_layout && h->kind == 1 &&
+                                !h->has_id && len >= 9) {
                                 h->has_id = 1;
                                 klog("usb: kbd report len %u >= 9 -> "
                                      "Report-ID layout (off 1)", len);
@@ -311,12 +571,17 @@ static int proc_events(void)
                              * buttons = a permanent drag) and scrambled
                              * axes; waiting ~0.6 s of movement is far
                              * cheaper.  The keyboard needs no hold: its
-                             * length rule decides on report 1. */
+                             * length rule decides on report 1.  r37: the
+                             * probe also runs when has_id came from the
+                             * descriptor, hunting 16-bit-axis evidence -
+                             * but then there is no hold (the offset is
+                             * already known; a wide16 verdict upgrades
+                             * the extraction mid-stream). */
                             int hold = 0;
-                            if (h->kind == 2 && !h->has_id &&
+                            if (!h->use_layout && h->kind == 2 &&
                                 !h->probe_done) {
                                 mouse_probe(h, r, len);
-                                hold = !h->probe_done;
+                                hold = !h->probe_done && !h->has_id;
                             }
                             /* r33: raw bytes of the first two reports per
                              * EP, so a future offset/format question is
@@ -330,7 +595,23 @@ static int proc_events(void)
                                      r[3], r[4], r[5], r[6], r[7], r[8]);
                             }
                             int off = h->has_id ? 1 : 0;
-                            if (!hold && h->kind == 2 && len >= (u32)off + 3)
+                            if (h->use_layout) {
+                                /* r37 PRIMARY: bit-accurate extraction via
+                                 * the parsed report-descriptor field map */
+                                hid_inject_layout(h, r, len, slot, ep);
+                            } else if (h->wide16 && h->kind == 2 &&
+                                       len >= (u32)off + 5) {
+                                /* r37 LAST RESORT: statistical 16-bit
+                                 * axes verdict (descriptor unavailable,
+                                 * r36 field fingerprint) */
+                                i32 dx = (i32)(i16)(u16)(r[off + 1] |
+                                            ((u16)r[off + 2] << 8));
+                                i32 dy = (i32)(i16)(u16)(r[off + 3] |
+                                            ((u16)r[off + 4] << 8));
+                                i32 wh = len >= (u32)off + 6
+                                         ? (i32)(i8)r[off + 5] : 0;
+                                mouse_inject(r[off], dx, dy, wh);
+                            } else if (!hold && h->kind == 2 && len >= (u32)off + 3)
                                 mouse_inject(r[off], (i32)(i8)r[off + 1],
                                              (i32)(i8)r[off + 2],
                                              len >= (u32)off + 4
@@ -352,7 +633,7 @@ static int proc_events(void)
                     volatile u32 *tr = h->inr + (u32)h->inr_idx * 4;
                     tr[0] = PA(h->in_buf[h->inr_idx]);
                     tr[1] = 0;
-                    tr[2] = 16;
+                    tr[2] = IN_BUF_BYTES;
                     /* IOC + ISP exactly like the pre-queued TRBs: without
                      * IOC no event fires, without ISP the always-short
                      * HID report never completes - input would die after
@@ -1326,7 +1607,7 @@ static void hid_arm_ring(struct xdev *d, int j)
         volatile u32 *tr = h->inr + (u32)b * 4;
         tr[0] = PA(h->in_buf[b]);
         tr[1] = 0;
-        tr[2] = 16;
+        tr[2] = IN_BUF_BYTES;
         /* IOC: a completion event per report; ISP: complete on the
          * always-short HID report - without ISP no event ever fires and
          * input is silently dead */
@@ -1540,19 +1821,12 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
     int srcc;
     srcc = ctrl_xfer(slot, 0x00, 9, cfg_val, 0, 0, 0, 0);  /* set config */
     klog("usb: slot %d SET_CONFIGURATION(%d) rc %d", slot, cfg_val, srcc);
-    for (int j = 0; j < ncand; j++) {
-        /* per-interface boot handoff: boot protocol, no idle rate, and
-         * keyboards get their BIOS NumLock LED explicitly extinguished */
-        srcc = ctrl_xfer(slot, 0x21, 0x0B, 0, (u16)cand[j].iface, 0, 0, 0);
-        klog("usb: slot %d iface %d SET_PROTOCOL(boot) rc %d",
-             slot, cand[j].iface, srcc);
-        ctrl_xfer(slot, 0x21, 0x0A, 0, (u16)cand[j].iface, 0, 0, 0);
-        if (cand[j].proto == 1) {
-            u8 leds = 0;
-            ctrl_xfer(slot, 0x21, 0x09, 0x0200, (u16)cand[j].iface,
-                      &leds, 1, 0);
-        }
-    }
+    /* r37: the per-interface protocol handoff moved INTO the ring-setup
+     * loop below - SET_PROTOCOL(boot) is now sent ONLY when the report
+     * descriptor fetch/parse failed.  When the layout parsed, the device
+     * stays in its native REPORT protocol and the descriptor is the
+     * truth (the Linux model); forcing boot protocol there is what made
+     * r33-r36 fight 16-bit-axis devices with an 8-bit boot parse. */
 
     /* allocate one interrupt ring per boot interface */
     d->nhid = ncand;
@@ -1567,41 +1841,77 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
         h->ctx_dumped = 0;
         h->ev_logged = 0;
         h->rep_logged = 0;
-        /* r33: fetch the HID report descriptor and detect Report IDs.
-         * Devices that use IDs keep the ID byte prefixed to every report
-         * EVEN IN BOOT PROTOCOL (both field devices do): the ID then lands
-         * in the buttons/modifier slot and shifts every axis/key by one -
-         * exactly the r32 field symptoms (side-to-side motion moving the
-         * cursor vertically, "dead" keyboard = stuck Ctrl + shifted keys,
-         * stuck button = drag storms). */
+        /* r37 LAYOUT-FIRST bring-up (the Linux model): fetch the HID
+         * report descriptor and parse it into a real field map.  Only
+         * when that fails do we fall back to boot protocol + the r33
+         * Report-ID walk + the r34 statistical probe.  The r33-r36
+         * field rounds proved the boot-format assumption itself breaks
+         * on 16-bit-axis gaming devices. */
         h->has_id = 0;
+        h->use_layout = 0;
+        h->wide16 = 0;
         if (cand[j].rid_len >= 1 && cand[j].rid_len <= 256) {
             static u8 rdesc[256];
             int rl = cand[j].rid_len;
             int rrc = ctrl_xfer(slot, 0x81, 6, 0x2200, (u16)cand[j].iface,
                                 rdesc, (u16)rl, 1);
             if (rrc == 1) {
-                h->has_id = (u8)hid_report_id_present(rdesc, rl);
-                klog("usb: slot %d iface %d report desc %d bytes: %s",
-                     slot, cand[j].iface, rl,
-                     h->has_id ? "reports carry a Report ID prefix"
-                               : "plain boot reports");
-                /* r34: raw head of the descriptor - if the walk ever
-                 * disagrees with reality, one photo shows why */
-                klog("usb: rdesc head %02x %02x %02x %02x %02x %02x "
-                     "%02x %02x", rdesc[0], rdesc[1], rdesc[2], rdesc[3],
-                     rdesc[4], rdesc[5], rdesc[6], rdesc[7]);
+                struct hid_layout lay;
+                if (hid_parse_layout(rdesc, rl, h->kind, &lay)) {
+                    h->lay = lay;
+                    h->use_layout = 1;
+                    klog("usb: slot %d iface %d rdesc %dB -> %s LAYOUT "
+                         "rid %u btn@%u/%u x@%u/%u y@%u/%u w@%u/%u",
+                         slot, cand[j].iface, rl,
+                         h->kind == 2 ? "mouse" : "kbd", lay.rid,
+                         lay.btn_off, lay.btn_cnt, lay.x_off, lay.x_sz,
+                         lay.y_off, lay.y_sz, lay.w_off, lay.w_sz);
+                    if (h->kind == 1)
+                        klog("usb:   kbd mod@%u/%u keys@%u sz %u cnt %u "
+                             "rpt %u bits", lay.mod_off, lay.mod_sz,
+                             lay.key_off, lay.key_sz, lay.key_cnt,
+                             lay.rpt_bits);
+                } else {
+                    h->has_id = (u8)hid_report_id_present(rdesc, rl);
+                    klog("usb: slot %d iface %d rdesc %dB: no usable %s "
+                         "layout - boot protocol (has_id %u)", slot,
+                         cand[j].iface, rl,
+                         h->kind == 2 ? "mouse" : "kbd", h->has_id);
+                    /* raw head of the descriptor - if the parser ever
+                     * disagrees with reality, one photo shows why */
+                    klog("usb: rdesc head %02x %02x %02x %02x %02x %02x "
+                         "%02x %02x", rdesc[0], rdesc[1], rdesc[2],
+                         rdesc[3], rdesc[4], rdesc[5], rdesc[6], rdesc[7]);
+                }
             } else {
-                klog("usb: slot %d iface %d report desc fetch rc %d - "
-                     "assuming plain boot reports",
-                     slot, cand[j].iface, rrc);
+                klog("usb: slot %d iface %d rdesc fetch rc %d - boot "
+                     "protocol fallback", slot, cand[j].iface, rrc);
             }
+        } else {
+            klog("usb: slot %d iface %d rdesc len %d unusable - boot "
+                 "protocol fallback", slot, cand[j].iface, cand[j].rid_len);
+        }
+        /* protocol handoff, AFTER the layout decision: boot protocol
+         * only when the descriptor did not give us a field map (when it
+         * did, forcing boot is what broke the 16-bit mouse).  SET_IDLE
+         * and the NumLock-LED extinguish apply either way. */
+        if (!h->use_layout) {
+            srcc = ctrl_xfer(slot, 0x21, 0x0B, 0, (u16)cand[j].iface,
+                             0, 0, 0);
+            klog("usb: slot %d iface %d SET_PROTOCOL(boot) rc %d",
+                 slot, cand[j].iface, srcc);
+        }
+        ctrl_xfer(slot, 0x21, 0x0A, 0, (u16)cand[j].iface, 0, 0, 0);
+        if (cand[j].proto == 1) {
+            u8 leds = 0;
+            ctrl_xfer(slot, 0x21, 0x09, 0x0200, (u16)cand[j].iface,
+                      &leds, 1, 0);
         }
         h->dci = (u32)(h->ep_addr * 2 + 1);   /* EP 0x81 -> DCI 3 */
         h->inr = (volatile u32 *)palloc(4096);
         if (!h->inr) { h->iface = -1; continue; }
         memset((void *)h->inr, 0, 4096);
-        for (int b = 0; b < IN_TRBS; b++) h->in_buf[b] = palloc(16);
+        for (int b = 0; b < IN_TRBS; b++) h->in_buf[b] = palloc(IN_BUF_BYTES);
         if (!h->in_buf[0]) { h->iface = -1; continue; }
         h->inr_idx = 0;
         h->inr_cycle = 1;

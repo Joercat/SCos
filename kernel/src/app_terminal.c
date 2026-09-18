@@ -185,8 +185,8 @@ static const char *help_text =
     "diag [sub]- Full hardware scan; sub = pci|usb|input for a quick\n"
             "            subsystem scan printed right here in the terminal\n"
     "sysrq <a> - System request: a = panic|reboot|error|dump|time\n"
-    "tty       - Kernel maintenance console (rescue shell, Linux-tty "
-            "style)\n"
+    "tty       - Kernel maintenance console (Linux-tty style; the whole "
+            "OS runs there, ctrl+alt+f1 also opens it)\n"
     "theme     - List or switch themes\n"
     "calc      - Perform basic arithmetic\n"
     "ping      - Honest answer: this kernel has no TCP/IP stack\n"
@@ -748,7 +748,8 @@ static void run_command(struct term *t, const char *command)
          * the WM main loop picks tty_request up, and 'wm' returns here */
         tty_request = 1;
         strcpy(response, "Entering the SCos maintenance console - "
-                         "type 'wm' there to return to the desktop");
+                         "type 'wm' or press ctrl+alt+f7 there to return "
+                         "to the desktop");
     }
     else if (!strcmp(cmd, "shutdown")) {
         term_print(t, "Shutting down SCos... Goodbye!");
@@ -1023,7 +1024,7 @@ static void run_command(struct term *t, const char *command)
         int ni = 0;
         strcpy(info[ni++], "user@scos");
         strcpy(info[ni++], "---------------------");
-        strcpy(info[ni++], "OS:      SCos 2.0.0 (build r36)");
+        strcpy(info[ni++], "OS:      SCos 2.0.0 (build " SCOS_BUILD_TAG ")");
         strcpy(info[ni],   "CPU:     "); strncpy(info[ni] + 9, cpu, 40); ni++;
         strcpy(info[ni],   "Speed:   ");
         fmt_u32(n, cpu_mhz()); strcat(info[ni], n); strcat(info[ni], " MHz (TSC-measured)"); ni++;

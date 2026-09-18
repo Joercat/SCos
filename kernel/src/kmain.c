@@ -10,7 +10,7 @@ void kmain(struct boot_info *bi)
 {
     boot_info = *bi;
 
-    klog("SCos kernel starting - build r36");
+    klog("SCos kernel starting - build " SCOS_BUILD_TAG);
     klog("  lfb %x %dx%d pitch %u, mem %u KB", bi->lfb_base, bi->width,
          bi->height, bi->pitch, bi->mem_kb);
 
@@ -86,6 +86,10 @@ void kmain(struct boot_info *bi)
     }
 
     klog("boot complete, handing over to window manager");
+    /* r37: error screens never depend on the WM - present any boot-time
+     * error right here (error_screen is fully self-contained: draws to
+     * the framebuffer and runs its own input hold loop) */
+    if (err_pending()) err_show_pending();
     wm_run();
 
     /* r36: wm_run is a for(;;) loop - landing here means the window

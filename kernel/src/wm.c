@@ -1517,6 +1517,16 @@ static void handle_key(struct key_event *e)
         klog("wm: ctrl+alt+del - rebooting");
         cpu_reboot_8042();
     }
+    /* r37: Ctrl+Alt+F1 - the Linux-style console switch.  Hands screen
+     * and keyboard to the kernel maintenance tty (Linux's VT1); from
+     * there Ctrl+Alt+F7 or the 'wm' command returns to the desktop.
+     * Gives the user a rescue console even when no terminal app is
+     * open or the WM's app layer is wedged. */
+    if (e->pressed && e->ctrl && e->alt && e->keycode == KEY_F1) {
+        klog("wm: ctrl+alt+f1 - switching to the kernel console (tty)");
+        tty_request = 1;
+        return;
+    }
     if (menu.active && e->pressed && e->keycode == 27) {
         menu.active = 0;
         wm_full();

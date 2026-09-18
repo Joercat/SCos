@@ -8,6 +8,12 @@
 #ifndef SCOS_H
 #define SCOS_H
 
+/* r37: ONE source of truth for the build tag.  The r36 field photo showed
+ * "SCos 2.0 r27" on the boot screen - boot_screen.c had never been in the
+ * per-round tag sweep, so nobody could tell which build was flashed.
+ * Every visible version string now concatenates this macro. */
+#define SCOS_BUILD_TAG "r37"
+
 typedef unsigned char      u8;
 typedef unsigned short     u16;
 typedef unsigned int       u32;
