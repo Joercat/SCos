@@ -19,6 +19,7 @@ struct rsdp {
 } __attribute__((packed));
 
 static u32 pm1_cnt;
+static u32 pm1b_cnt;
 static u32 pm1_evt;
 static u32 smi_cmd;
 static u8  acpi_enable_val;
@@ -74,11 +75,22 @@ static u32 find_table(u32 rsdt_phys, int is_xsdt, const char *sig)
 static int parse_s5(const u8 *dsdt, u32 len)
 {
     for (u32 i = 0; i + 6 < len; i++) {
-        if (mem_eq(dsdt + i, "_S5_", 4) && dsdt[i + 4] == 0x08) {
-            u32 j = i + 5;
-            /* skip name prefix bytes */
-            if (dsdt[j] == 0x5B) j++;
-            while (j < len && (dsdt[j] == 0x08 || dsdt[j] == 0x5B)) j++;
+        if (!mem_eq(dsdt + i, "_S5_", 4)) continue;
+        /* r38 ROOT FIX for "shutdown just says it is safe to turn off":
+         * Name(\_S5_, Package...) compiles to
+         *     0x08 [0x5C...] "_S5_" 0x12 PkgLength NumElements element...
+         * The NameOp 0x08 comes BEFORE the nameseg - the old check
+         * demanded dsdt[i+4] == 0x08 (a byte that is the PackageOp 0x12
+         * on every real DSDT), so _S5_ was never found on real hardware,
+         * slp_typa stayed 0 and the firmware silently ignored the S5
+         * write.  Require a NameOp within the 3 bytes before the
+         * nameseg and the PackageOp right after it. */
+        int named = 0;
+        for (u32 b = 1; b <= 3 && i >= b; b++)
+            if (dsdt[i - b] == 0x08) { named = 1; break; }
+        if (!named) continue;
+        {
+            u32 j = i + 4;
             if (j >= len) return 0;
             if (dsdt[j] == 0x12) {                 /* PackageOp */
                 /* Package(PkgLength, NumElements, elements...) - the old code
@@ -97,6 +109,8 @@ static int parse_s5(const u8 *dsdt, u32 len)
                 if (dsdt[k] == 0x0A) slp_typa = dsdt[k + 1];
                 else if (dsdt[k] == 0x0B) slp_typa = dsdt[k + 1] | (dsdt[k + 2] << 8);
                 else slp_typa = dsdt[k];
+                klog("acpi: _S5_ found at dsdt+%u: SLP_TYPa=%u", i,
+                     slp_typa);
                 return 1;
             }
         }
@@ -111,11 +125,17 @@ void acpi_init(void)
     if (!r) { klog("acpi: no RSDP"); return; }
     u32 rsdt = r->rsdt;
     int xsdt = 0;
-    if (r->revision >= 2 && r->xsdt) { rsdt = (u32)r->xsdt; xsdt = 1; }
+    /* a 64-bit XSDT parked above 4 GB is unreachable from this 32-bit
+     * kernel - fall back to the RSDT in that case instead of truncating */
+    if (r->revision >= 2 && r->xsdt && !(r->xsdt >> 32)) {
+        rsdt = (u32)r->xsdt;
+        xsdt = 1;
+    }
 
     u32 fadt = find_table(rsdt, xsdt, "FACP");
     if (!fadt) { klog("acpi: no FADT"); return; }
     pm1_cnt = *(u32 *)(fadt + 64);
+    pm1b_cnt = *(u32 *)(fadt + 68);
     pm1_evt = *(u32 *)(fadt + 56);
     smi_cmd = *(u32 *)(fadt + 48);
     acpi_enable_val = *(u8 *)(fadt + 52);
@@ -127,7 +147,8 @@ void acpi_init(void)
         slp_typa = 0;   /* try anyway with 0 on some firmware */
     }
     acpi_ok = 1;
-    klog("acpi: pm1_cnt=%x slp_typ=%u", pm1_cnt, slp_typa);
+    klog("acpi: pm1_cnt=%x pm1b_cnt=%x smi_cmd=%x enable=%u slp_typ=%u",
+         pm1_cnt, pm1b_cnt, smi_cmd, acpi_enable_val, slp_typa);
 }
 
 int acpi_shutdown(void)
@@ -146,12 +167,17 @@ int acpi_shutdown(void)
     }
     if (!(inw(pm1_cnt) & 1))
         klog("acpi: warning - SCI_EN not set, S5 write may be ignored");
-    /* clear pending PM1 status bits, then request S5 */
+    /* clear pending PM1 status bits, then request S5.  ACPI 6.4
+     * 4.8.10.3: when a PM1b_CNT block exists the SLP_TYP/SLP_EN write
+     * must go to BOTH blocks (split-brain chipsets ignore PM1a alone). */
+    u16 s5 = (u16)((slp_typa << 10) | (1 << 13));
     if (pm1_evt) outw(pm1_evt, 0xFFFF);
-    outw(pm1_cnt, (u16)((slp_typa << 10) | (1 << 13)));
+    outw(pm1_cnt, s5);
+    if (pm1b_cnt) outw(pm1b_cnt, s5);
     for (int i = 0; i < 30; i++) sleep_ms(10);   /* give SMI time to act */
     if (pm1_evt) outw(pm1_evt, 0xFFFF);          /* retry once */
-    outw(pm1_cnt, (u16)((slp_typa << 10) | (1 << 13)));
+    outw(pm1_cnt, s5);
+    if (pm1b_cnt) outw(pm1b_cnt, s5);
     for (int i = 0; i < 20; i++) sleep_ms(10);
     if (is_v86_box()) outw(0x604, 0x2000);
     klog("acpi: S5 write done but machine still running (slp_typ=%u)", slp_typa);

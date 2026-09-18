@@ -159,6 +159,16 @@ static u16 sim_k_code; static u8 sim_k_ctrl, sim_k_pressed;
 #undef q_head
 #undef q_tail
 
+/* r38: acpi.c joins the single-TU sim so parse_s5 (pure AML-walk logic)
+ * is unit-gated.  The r37 field report - "shutdown doesn't shut down,
+ * just says your pc is safe to shutdown" - traced to the _S5_ search
+ * demanding a NameOp byte AFTER the nameseg where every real DSDT has
+ * the PackageOp; slp_typa stayed 0 and firmware ignored the S5 write.
+ * The tests below call parse_s5 only; acpi_init/acpi_shutdown are never
+ * executed (their IO paths are the real inline-asm stubs). */
+int is_v86_box(void) { return 0; }
+#include "../kernel/src/acpi.c"
+
 void irq_install(u8 irq, irq_handler_t h) { (void)irq; (void)h; }
 void pic_clear_mask(u8 irq) { (void)irq; }
 
@@ -922,10 +932,10 @@ static void test_runtime_fallbacks(void)
                   "6e: probe never detected 16-bit axes (xh00ff %u len6 %u "
                   "nz4 %u nz5 %u of n %u)", (u32)h->xh00ff, (u32)h->len6,
                   (u32)h->nz[3], (u32)h->nz[4], (u32)h->probe_n);
-            CHECK(sim_m_dx == -5 && sim_m_dy == -6,
-                  "6e: wide16 content wrong: dx %d dy %d (want -5, -6; "
-                  "dy +1 would be the r36 X-high-byte up-drift)",
-                  sim_m_dx, sim_m_dy);
+            CHECK(sim_m_dx == -10 && sim_m_dy == -12,
+                  "6e: wide16 content wrong: dx %d dy %d (want -10, -12 "
+                  "with the r38 high-res gain; dy +2 would be the r36 "
+                  "X-high-byte up-drift)", sim_m_dx, sim_m_dy);
             printf("  6e 16-bit probe fallback: verdict at 60, dx %d dy %d "
                    "delivered (no descriptor needed)\n",
                    sim_m_dx, sim_m_dy);
@@ -1156,9 +1166,10 @@ static void test_layout_parser(void)
             sim_mouse_reports = 0;
             sim_m_btn = 0; sim_m_dx = 12345; sim_m_dy = 12345; sim_m_wh = 0;
             t8_pump(c, 1);
-            CHECK(sim_m_dx == -5 && sim_m_dy == 0,
-                  "8f: physical left dx -5 gave dx %d dy %d (want -5, 0 - "
-                  "dy nonzero is the r36 up-drift bug)", sim_m_dx, sim_m_dy);
+            CHECK(sim_m_dx == -10 && sim_m_dy == 0,
+                  "8f: physical left dx -5 gave dx %d dy %d (want -10 with "
+                  "the r38 high-res gain, 0 - dy nonzero is the r36 "
+                  "up-drift bug)", sim_m_dx, sim_m_dy);
 
             /* physical DOWN, dy=+6 -> queue dy = -6 (r35 convention:
              * positive queue dy = UP).  r36 field: "cannot move down at
@@ -1167,9 +1178,10 @@ static void test_layout_parser(void)
             t8_refill(dm, 0, c, 7, pay_down);
             sim_m_dx = 12345; sim_m_dy = 12345;
             t8_pump(c, 1);
-            CHECK(sim_m_dx == 0 && sim_m_dy == -6,
-                  "8f: physical down gave dx %d dy %d (want 0, -6 - the "
-                  "r36 dead-vertical bug)", sim_m_dx, sim_m_dy);
+            CHECK(sim_m_dx == 0 && sim_m_dy == -12,
+                  "8f: physical down gave dx %d dy %d (want 0, -12 with "
+                  "the r38 gain - the r36 dead-vertical bug)",
+                  sim_m_dx, sim_m_dy);
 
             /* diagonal: dx=+300 (0x012C), dy=-120 (0xFF88) -> queue
              * (300, +120) */
@@ -1177,10 +1189,10 @@ static void test_layout_parser(void)
             t8_refill(dm, 0, c, 7, pay_diag);
             sim_m_dx = 0; sim_m_dy = 0;
             t8_pump(c, 1);
-            CHECK(sim_m_dx == 300 && sim_m_dy == 120,
-                  "8f: diagonal 16-bit move gave dx %d dy %d (want 300, "
-                  "120 - beyond the 8-bit range entirely)",
-                  sim_m_dx, sim_m_dy);
+            CHECK(sim_m_dx == 600 && sim_m_dy == 240,
+                  "8f: diagonal 16-bit move gave dx %d dy %d (want 600, "
+                  "240 with the r38 gain - beyond the 8-bit range "
+                  "entirely)", sim_m_dx, sim_m_dy);
 
             /* wheel -2 */
             static const u8 pay_wheel[] = { 1, 0, 0, 0, 0, 0, 0xFE };
@@ -1211,8 +1223,9 @@ static void test_layout_parser(void)
             t8_pump(c, 1);
             CHECK(sim_m_btn == 2, "8f: layout buttons got %u want 2",
                   (u32)sim_m_btn);
-            printf("  8f 16-bit mouse end-to-end: left(-5,0) down(0,-6) "
-                   "diag(300,120) wheel -2 foreign-ID dropped btn 2\n");
+            printf("  8f 16-bit mouse end-to-end (r38 gain x2): left(-10,"
+                   "0) down(0,-12) diag(600,240) wheel -2 foreign-ID "
+                   "dropped btn 2\n");
         }
     }
 
@@ -1302,6 +1315,210 @@ static void test_layout_parser(void)
                    "-> '%c'\n", (char)sim_k_code);
         }
     }
+
+    /* ---- 8i: the r37 FIELD KEYBOARD BUG - hidden Report ID prefix ----
+     * Both field keyboards parse as rid 0 (their Report ID item belongs
+     * to the LED OUTPUT report), yet they prefix EVERY report with the
+     * ID byte on the wire (r35 proved it: the boot path with off=1
+     * typed).  r37 parsed the ID byte as the modifier bitmap: ID 1 =
+     * LeftCtrl = a permanent stuck Ctrl -> every letter became an
+     * invisible control character -> "keyboard no response, just power".
+     * The layout path must strip the hidden prefix, decided per report
+     * from the length evidence (9 bytes arrived, layout says 64 bits). */
+    struct xdev *dh = slot_alloc(11);
+    CHECK(dh != NULL, "8i: slot_alloc(11) failed");
+    if (dh) {
+        /* boot-kbd inputs with NO input Report ID + an LED output that
+         * DOES define one - the exact shape of the field descriptors */
+        static const u8 rdesc_hidkbd[] = {
+            0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
+            0x05, 0x07,
+            0x19, 0xE0, 0x29, 0xE7,
+            0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08,
+            0x81, 0x02,                    /* modifiers */
+            0x95, 0x01, 0x75, 0x08,
+            0x81, 0x03,                    /* reserved */
+            0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65,
+            0x05, 0x07, 0x19, 0x00, 0x29, 0x65,
+            0x81, 0x00,                    /* keys 6x8 */
+            0x85, 0x01,                    /* Report ID 1 - OUTPUT only */
+            0x95, 0x05, 0x75, 0x01,
+            0x05, 0x08, 0x19, 0x01, 0x29, 0x05,
+            0x91, 0x02,                    /* LED output */
+            0x95, 0x01, 0x75, 0x03,
+            0x91, 0x03,
+            0xC0
+        };
+        struct hid_layout hk;
+        memset(&hk, 0, sizeof hk);
+        CHECK(hid_parse_layout(rdesc_hidkbd, (int)sizeof rdesc_hidkbd, 1,
+                               &hk) == 1,
+              "8i: hidden-ID kbd descriptor did not parse");
+        CHECK(hk.rid == 0 && hk.saw_rid == 1,
+              "8i: layout rid %u saw_rid %u want 0/1 (the ID belongs to "
+              "the output report)", hk.rid, hk.saw_rid);
+        CHECK(hk.rpt_bits == 64 && hk.key_off == 16 && hk.key_sz == 8,
+              "8i: layout bits %u keys @%u/%u want 64 @16/8",
+              hk.rpt_bits, hk.key_off, hk.key_sz);
+        dh->nhid = 1; dh->kind = 1;
+        /* wire report: [ID=1][mod=LeftShift][rsv][a] = 9 bytes */
+        static const u8 pay_hid[] = { 1, 0x02, 0, 0x04, 0, 0, 0, 0, 0 };
+        struct hid_ep *h = &dh->hid[0];
+        struct sim_consumer *c = t8_arm(dh, 11, 0, 1, &hk, 9, pay_hid);
+        CHECK(c != NULL, "8i: sim xHC did not schedule the hidden-ID EP");
+        if (c) {
+            static const u8 pay_up9[] = { 1, 0, 0, 0, 0, 0, 0, 0, 0 };
+            sim_kbd_reports = 0; sim_k_code = 0; sim_k_ctrl = 0;
+            t8_pump(c, 1);
+            CHECK(sim_k_code == 'A' && sim_k_pressed && !sim_k_ctrl,
+                  "8i: hidden-prefix kbd got keycode %u ctrl %u (want 'A' "
+                  "with NO stuck Ctrl - r37 read the ID byte as the "
+                  "modifier: Ctrl stuck forever, letters invisible)",
+                  sim_k_code, sim_k_ctrl);
+            CHECK(h->hid_prefix_logged == 1,
+                  "8i: hidden-prefix strip was not logged (photo diag)");
+            /* all up (9-byte) */
+            t8_refill(dh, 0, c, 9, pay_up9);
+            t8_pump(c, 1);
+            /* same layout must ALSO serve an unprefixed 8-byte report:
+             * the strip is per-report length evidence, not a mode */
+            static const u8 pay_8[] = { 0, 0, 0x04, 0, 0, 0, 0, 0 };
+            t8_refill(dh, 0, c, 8, pay_8);
+            t8_pump(c, 1);
+            CHECK(sim_k_code == 'a' && sim_k_pressed && !sim_k_ctrl,
+                  "8i: 8-byte unprefixed report got keycode %u ctrl %u "
+                  "(want 'a' - per-report adaptation broken)",
+                  sim_k_code, sim_k_ctrl);
+            printf("  8i hidden Report-ID keyboard: 9-byte wire report "
+                   "-> '%c' no stuck Ctrl; 8-byte report -> '%c'\n",
+                   'A', (char)sim_k_code);
+        }
+    }
+}
+
+/* ===== TEST 9: r38 move coalescing - button events survive floods ======= */
+/* The r37 field cluster: "have to spam click for it to pick up", "double
+ * click doesn't pick up", "if something is still highlighted I can't
+ * interact until I click somewhere with no button".  A 1000 Hz mouse
+ * floods the 128-slot event queue between the WM's 100 Hz drains, and
+ * mouse_enqueue DROPS whatever arrives at a full queue - button
+ * transitions (especially the RELEASE that ends a drag) were evicted by
+ * move floods: stuck drag state, dead clicks.  Coalescing pending moves
+ * into the queued tail makes a move flood occupy ONE slot. */
+static void test_move_coalescing(void)
+{
+    struct mouse_event me;
+    /* sync the persistent button state and drain leftovers */
+    mouse_apply(0, 0, 0, 0);
+    while (mouse_poll(&me)) { }
+
+    /* 9a: two back-to-back moves coalesce into one summed event */
+    mouse_apply(0, 10, -3, 0);
+    mouse_apply(0, 5, 7, 0);
+    int n = 0;
+    i32 dx = 0, dy = 0;
+    while (mouse_poll(&me)) { n++; dx += me.dx; dy += me.dy; }
+    CHECK(n == 1, "9a: two back-to-back moves produced %d events (want 1 "
+          "coalesced)", n);
+    CHECK(dx == 15 && dy == 4, "9a: coalesced delta %d,%d want 15,4",
+          dx, dy);
+
+    /* 9b: a button event between moves breaks the merge chain - order
+     * and separation must survive */
+    mouse_apply(0, 1, 1, 0);
+    mouse_apply(1, 0, 0, 0);            /* button 1 down */
+    mouse_apply(1, 2, 2, 0);            /* still held: move only */
+    n = 0;
+    int t0 = -1, t1 = -1, t2 = -1;
+    while (mouse_poll(&me) && n < 4) {
+        if (n == 0) t0 = me.type;
+        else if (n == 1) t1 = me.type;
+        else if (n == 2) t2 = me.type;
+        n++;
+    }
+    CHECK(n == 3 && t0 == MEV_MOVE && t1 == MEV_BUTTON && t2 == MEV_MOVE,
+          "9b: move/button/move produced %d events types %d,%d,%d (want "
+          "3: MOVE,BUTTON,MOVE)", n, t0, t1, t2);
+    while (mouse_poll(&me)) { }         /* drain 9b events */
+    mouse_apply(0, 0, 0, 0);            /* release the held button */
+    while (mouse_poll(&me)) { }
+
+    /* 9c: THE field regression - a 200-move drag flood must not evict
+     * the button transitions bracketing it (queue is 128 slots: without
+     * coalescing the RELEASE is dropped and the WM sticks in drag mode) */
+    mouse_apply(1, 0, 0, 0);            /* press */
+    for (int i = 0; i < 200; i++) mouse_apply(1, 3, 0, 0);
+    mouse_apply(0, 0, 0, 0);            /* RELEASE - must survive */
+    int saw_down = 0, saw_up = 0;
+    i32 tot = 0;
+    while (mouse_poll(&me)) {
+        if (me.type == MEV_BUTTON && me.down) saw_down = 1;
+        if (me.type == MEV_BUTTON && !me.down) saw_up = 1;
+        if (me.type == MEV_MOVE) tot += me.dx;
+    }
+    CHECK(saw_down && saw_up,
+          "9c: button transition LOST in a 200-move flood (down %d up %d) "
+          "- this is the r37 stuck-drag / dead-click field bug",
+          saw_down, saw_up);
+    CHECK(tot == 600, "9c: flood deltas summed to %d want 600 (pixel-"
+          "exact trajectory through coalescing)", tot);
+    printf("  9 move coalescing: 2 moves -> 1 event (15,4); button "
+           "order kept; 200-move flood + release fully survived\n");
+}
+
+/* ===== TEST 10: r38 ACPI _S5_ package walk ============================== */
+static void test_acpi_s5(void)
+{
+    /* real-world shape of Name(\_S5_, Package(4){5,0,0,0}):
+     *   08 5C 5F 53 35 5F 12 PkgLen NumEl 0A 05 ...
+     * The NameOp 0x08 sits BEFORE the nameseg; right after "_S5_" comes
+     * the PackageOp 0x12.  The pre-r38 walk demanded 0x08 at i+4 - a
+     * byte pattern no real DSDT produces - so shutdown on hardware
+     * always wrote SLP_TYP 0, which firmware ignores. */
+    static const u8 d1[] = {
+        0x08, 0x5C, 0x5F, 0x53, 0x35, 0x5F,      /* Name(\_S5_ */
+        0x12, 0x0A, 0x04,                        /* Package, len 10, 4 el */
+        0x0A, 0x05, 0x00, 0x00, 0x00, 0x00,      /* {5, 0, 0, 0} */
+    };
+    slp_typa = 0;
+    CHECK(parse_s5(d1, (u32)sizeof d1) == 1,
+          "10a: root-prefixed Name(_S5_) package not found (the r37 "
+          "field shutdown bug)");
+    CHECK(slp_typa == 5,
+          "10a: SLP_TYPa %u want 5 (SLP_TYP 0 = firmware ignores the S5 "
+          "write = 'safe to turn off' screen)", slp_typa);
+
+    /* scoped, no root char, WordConst first element */
+    static const u8 d2[] = {
+        0x5B, 0x80,                              /* Scope( */
+        0x08, 0x5F, 0x53, 0x35, 0x5F,            /* Name(_S5_ */
+        0x12, 0x0B, 0x04,                        /* Package len 11 */
+        0x0B, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00 /* {7, ...} word */
+    };
+    slp_typa = 0;
+    CHECK(parse_s5(d2, (u32)sizeof d2) == 1, "10b: scoped _S5_ not found");
+    CHECK(slp_typa == 7, "10b: SLP_TYPa %u want 7 (WordConst decode)",
+          slp_typa);
+
+    /* a different sleep state must NOT match */
+    static const u8 d3[] = {
+        0x08, 0x5F, 0x53, 0x30, 0x5F,            /* Name(_S0_ */
+        0x12, 0x04, 0x02, 0x0A, 0x01
+    };
+    slp_typa = 0;
+    CHECK(parse_s5(d3, (u32)sizeof d3) == 0,
+          "10c: _S0_ package falsely matched as _S5_");
+
+    /* the OLD (broken) pattern - "_S5_" followed by a NameOp byte, which
+     * only appears in hand-written test vectors, not real AML - is no
+     * longer required; a lone nameseg with no NameOp prefix must not
+     * match (guards against random data) */
+    static const u8 d4[] = { 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x03, 0x01, 0x05 };
+    slp_typa = 0;
+    CHECK(parse_s5(d4, (u32)sizeof d4) == 0,
+          "10d: nameseg without a NameOp prefix falsely matched");
+    printf("  10 ACPI _S5_: root-prefixed + scoped packages decode "
+           "SLP_TYPa 5/7; _S0_ and bare namesegs rejected\n");
 }
 
 /* ===== TEST 7: axis + key semantics through the REAL drivers (r35) ====== */
@@ -1430,6 +1647,10 @@ int main(int argc, char **argv)
     test_runtime_fallbacks();
     printf("usb_sim: r37 report-descriptor layout parser + extraction...\n");
     test_layout_parser();
+    printf("usb_sim: r38 move coalescing (button events survive floods)...\n");
+    test_move_coalescing();
+    printf("usb_sim: r38 ACPI _S5_ package walk...\n");
+    test_acpi_s5();
     printf("usb_sim: r35 direction matrix through real mouse.c/kbd.c...\n");
     test_direction_matrix();
     if (failures) {

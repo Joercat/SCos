@@ -32,7 +32,20 @@
  * endpoint looks armed and healthy yet delivers NOTHING.  64 bytes is
  * the USB2 interrupt maximum, so no legal report can ever overflow. */
 #define IN_BUF_BYTES 64
-#define IN_TRBS 8
+/* r38: gain applied to 16-bit/high-res mouse paths (layout + wide16) -
+ * the r37 field mouse felt "way too low" at 1:1 with its fine counts;
+ * boot-protocol mice keep 1:1 and the prefs slider scales on top */
+#define USB_LAYOUT_GAIN 2
+/* r38: 64 ring slots, not 8.  The r37 field mouse turned out to poll at
+ * 1000 Hz (its EP ctx interval 3 = 1 ms): with only 7 outstanding TRBs
+ * the ring ran dry between the WM's 100 Hz drain passes and the xHC had
+ * no buffer for ~30% of reports - INCLUDING button transitions.  That is
+ * the r37 field cluster: "have to spam click for it to pick up", "double
+ * click doesn't pick up", "highlight stuck - can't interact until I click
+ * somewhere with no button" (a lost button-RELEASE = a stuck drag).
+ * 63 queued reports = 63 ms of 1 kHz buffering: 6x the drain interval,
+ * and IN_TRBS * IN_BUF_BYTES is exactly one 4 KiB page. */
+#define IN_TRBS 64
 
 #define TRB_NORMAL      1
 #define TRB_SETUP       2
@@ -71,6 +84,11 @@ struct hid_layout {
     u8  ok;
     u8  kind;              /* 1 keyboard, 2 mouse */
     u8  rid;               /* Report ID of the selected report (0 = none) */
+    u8  saw_rid;           /* r38: the descriptor defines Report IDs
+                            * SOMEWHERE (e.g. on its LED output report)
+                            * even though the input report has none -
+                            * such devices often still prefix every
+                            * report with the ID byte on the wire */
     u16 btn_off, btn_cnt;  /* buttons: bit offset + total bits */
     u16 x_off, x_sz;       /* X: bit offset + size */
     u16 y_off, y_sz;
@@ -99,6 +117,7 @@ struct hid_ep {
     u8 use_layout;            /* r37: extract via lay, not boot format */
     u8 wide16;                /* r37: probe verdict: 16-bit axes behind ID */
     u8 rid_skip_logged;       /* rate limit: foreign report-ID drop logs */
+    u8 hid_prefix_logged;     /* rate limit: hidden-prefix strip log (r38) */
     u8 rep_logged;            /* rate limit for first-report hex dumps */
     u8 probe_n, probe_done;   /* r34 runtime offset probe state (mouse) */
     u8 nz[5];                 /* nonzero counts for report bytes 1..5 */
@@ -238,7 +257,7 @@ int hid_parse_layout(const u8 *d, int len, int want_kind,
     u16 bitpos[8];
     memset(rs, 0, sizeof rs);
     memset(bitpos, 0, sizeof bitpos);
-    u8 cur_id = 0;
+    u8 cur_id = 0, saw_rid = 0;
     u32 gsize = 0, gcount = 0, page = 0;
     u32 usages[24];
     int nusage = 0;
@@ -268,6 +287,7 @@ int hid_parse_layout(const u8 *d, int len, int want_kind,
         case 0x94: gcount = data; break;                  /* Report Count */
         case 0x84:                                        /* Report ID */
             cur_id = (u8)data;
+            saw_rid = 1;
             bitpos[data & 7] = 0;
             rs[data & 7].rid = cur_id;
             nusage = 0;
@@ -317,6 +337,7 @@ int hid_parse_layout(const u8 *d, int len, int want_kind,
         L->kind = (u8)want_kind;
         L->ok = 1;
         L->rpt_bits = bitpos[i];
+        L->saw_rid = saw_rid;
         *out = *L;
         return 1;
     }
@@ -332,6 +353,27 @@ static int hid_inject_layout(struct hid_ep *h, const u8 *r, u32 len,
 {
     const u8 *rp = r;
     u32 rl = len;
+    if (!h->lay.rid && h->lay.saw_rid && rl >= 1 &&
+        rl * 8 == (u32)h->lay.rpt_bits + 8) {
+        /* r38 KEYBOARD ROOT FIX: the descriptor defines Report IDs only
+         * on its OUTPUT (LED) report, so the parsed input report has
+         * rid 0 - but per HID 1.11 8.3 a device that uses IDs anywhere
+         * prefixes EVERY report with one, and both field keyboards do
+         * (r35 proved it empirically: the boot path with off=1 typed).
+         * r37 then parsed the ID byte as the modifier bitmap: a
+         * PERMANENT STUCK CTRL - every letter became an invisible
+         * control character = "keyboard absolutely no response, just
+         * power".  Decided per report from the length evidence: the
+         * report is exactly one byte longer than its parsed size. */
+        if (!h->hid_prefix_logged) {
+            h->hid_prefix_logged = 1;
+            klog("usb: slot %d dci %u: input report is %u bytes but the "
+                 "parsed layout is %u bits - stripping hidden Report ID "
+                 "prefix %02x", slot, ep, rl, h->lay.rpt_bits, r[0]);
+        }
+        rp++;
+        rl--;
+    }
     if (h->lay.rid) {
         if (rl < 1 || r[0] != h->lay.rid) {
             if (h->rid_skip_logged < 3) {
@@ -354,6 +396,14 @@ static int hid_inject_layout(struct hid_ep *h, const u8 *r, u32 len,
                             h->lay.x_sz);
         i32 dy = hid_signed(hid_bits(rp, rl, h->lay.y_off, h->lay.y_sz),
                             h->lay.y_sz);
+        /* r38: resolution normalization for high-res report-protocol
+         * mice.  The field mouse (16-bit axes, 1 kHz polling) emits fine
+         * per-report counts that made the cursor feel "way too low" at
+         * the WM's 1:1 default; boot-protocol mice keep their historical
+         * 1:1 feel (their path is untouched), and the user's sensitivity
+         * slider still scales everything on top. */
+        dx *= USB_LAYOUT_GAIN;
+        dy *= USB_LAYOUT_GAIN;
         i32 wh = 0;
         if (h->lay.w_sz && rl * 8 >= (u32)h->lay.w_off + h->lay.w_sz)
             wh = hid_signed(hid_bits(rp, rl, h->lay.w_off, h->lay.w_sz),
@@ -476,7 +526,11 @@ static void mouse_probe(struct hid_ep *he, const u8 *data, u32 len)
 static int proc_events(void)
 {
     int work = 0;
-    for (int guard = 0; guard < 128; guard++) {
+    /* r38: a 63-deep ring can complete 63 transfers per 10 ms tick at
+     * 1 kHz polling - the guard must not truncate that burst (events are
+     * never lost, only delayed a tick, but delayed button events are
+     * exactly the "slow click" field complaint) */
+    for (int guard = 0; guard < 256; guard++) {
         volatile u32 *t = evt_ring + (u32)evt_idx * 4;
         if ((t[3] & 1) != evt_cycle) break;
         u32 type = (t[3] >> 10) & 0x3F;
@@ -608,6 +662,8 @@ static int proc_events(void)
                                             ((u16)r[off + 2] << 8));
                                 i32 dy = (i32)(i16)(u16)(r[off + 3] |
                                             ((u16)r[off + 4] << 8));
+                                dx *= USB_LAYOUT_GAIN;   /* r38: high-res */
+                                dy *= USB_LAYOUT_GAIN;
                                 i32 wh = len >= (u32)off + 6
                                          ? (i32)(i8)r[off + 5] : 0;
                                 mouse_inject(r[off], dx, dy, wh);
@@ -1911,8 +1967,14 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
         h->inr = (volatile u32 *)palloc(4096);
         if (!h->inr) { h->iface = -1; continue; }
         memset((void *)h->inr, 0, 4096);
-        for (int b = 0; b < IN_TRBS; b++) h->in_buf[b] = palloc(IN_BUF_BYTES);
-        if (!h->in_buf[0]) { h->iface = -1; continue; }
+        /* r38: IN_TRBS * IN_BUF_BYTES = exactly one 4 KiB page - slice
+         * one allocation instead of 64 page-rounded ones */
+        u8 *pool = palloc(IN_TRBS * IN_BUF_BYTES);
+        if (!pool) { h->iface = -1; continue; }
+        for (int b = 0; b < IN_TRBS; b++) {
+            h->in_buf[b] = pool + b * IN_BUF_BYTES;
+            memset(h->in_buf[b], 0, IN_BUF_BYTES);
+        }
         h->inr_idx = 0;
         h->inr_cycle = 1;
         h->link_pend = 0;

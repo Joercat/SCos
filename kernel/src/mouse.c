@@ -62,8 +62,33 @@ static void mouse_apply(u8 btns, i32 dx, i32 dy, i32 wheel)
 
     if (pdx || pdy) {
         e.type = MEV_MOVE;
-        e.dx = (i16)pdx; e.dy = (i16)pdy; e.wheel = 0;
-        mouse_enqueue(&e);
+        /* r38: coalesce into the last QUEUED move when one is pending.
+         * A 1000 Hz mouse produces up to 10 moves per WM tick while the
+         * queue holds 128 events and mouse_enqueue DROPS whatever
+         * arrives at a full queue - move floods were evicting button
+         * transitions (the r37 field cluster: clicks needing spam,
+         * double-clicks missed, stuck highlights from lost releases).
+         * Summing pending deltas keeps the trajectory pixel-exact (the
+         * WM applies moves additively) and guarantees a move flood can
+         * never displace a button or wheel event. */
+        int merged = 0;
+        if (q_head != q_tail) {
+            struct mouse_event *L = &queue[(q_head - 1 + QUEUE) % QUEUE];
+            if (L->type == MEV_MOVE) {
+                i32 sx = (i32)L->dx + dx, sy = (i32)L->dy + dy;
+                if (sx > 32767) sx = 32767;
+                if (sx < -32768) sx = -32768;
+                if (sy > 32767) sy = 32767;
+                if (sy < -32768) sy = -32768;
+                L->dx = (i16)sx;
+                L->dy = (i16)sy;
+                merged = 1;
+            }
+        }
+        if (!merged) {
+            e.dx = (i16)pdx; e.dy = (i16)pdy; e.wheel = 0;
+            mouse_enqueue(&e);
+        }
     }
     for (int b = 0; b < 3; b++) {
         u8 bit = 1 << b;
