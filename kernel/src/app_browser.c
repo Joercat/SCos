@@ -8,7 +8,24 @@
  */
 #include "scos.h"
 
-static void br_open(struct window *w, void *arg) { (void)arg; (void)w; }
+/* r36: the explanation page is ~300 px tall - in a short window the tail
+ * used to be clipped and unreachable (no wheel handler at all). */
+struct br_data { int scroll; };
+
+#define BR_CONTENT_H 310
+
+static void br_open(struct window *w, void *arg)
+{
+    (void)arg;
+    struct br_data *b = palloc(sizeof(*b));
+    if (b) b->scroll = 0;
+    w->data = b;
+}
+
+static void br_close(struct window *w)
+{
+    if (w->data) { pfree(w->data, sizeof(struct br_data)); w->data = NULL; }
+}
 
 static void br_paint(struct window *w)
 {
@@ -32,18 +49,46 @@ static void br_paint(struct window *w)
         "",
         "All other desktop apps run directly on this kernel.",
     };
-    int y = 50;
+    struct br_data *b = w->data;
+    int maxs = BR_CONTENT_H - s->h;
+    if (maxs < 0) maxs = 0;
+    int scroll = b ? b->scroll : 0;
+    if (scroll > maxs) scroll = maxs;
+    int y = 50 - scroll;
     for (unsigned i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {
-        s_text(s, 16, y, lines[i], i == 0 ? t->main : t->text);
+        if (y >= -16 && y < s->h)
+            s_text(s, 16, y, lines[i], i == 0 ? t->main : t->text);
         y += 20;
     }
 }
 
-static void br_key(struct window *w, struct key_event *e) { (void)w; (void)e; }
-static void br_mouse(struct window *w, struct mouse_event *e, int x, int y) { (void)w; (void)e; (void)x; (void)y; }
+static void br_scroll_by(struct window *w, int lines_delta)
+{
+    struct br_data *b = w->data;
+    if (!b) return;
+    int maxs = BR_CONTENT_H - w->surf.h;
+    if (maxs < 0) maxs = 0;
+    int ns = b->scroll + lines_delta * 20;
+    if (ns < 0) ns = 0;
+    if (ns > maxs) ns = maxs;
+    if (ns != b->scroll) { b->scroll = ns; wm_redraw(w); }
+}
+
+static void br_key(struct window *w, struct key_event *e)
+{
+    if (!e->pressed) return;
+    if (e->keycode == KEY_PGUP) br_scroll_by(w, -3);
+    else if (e->keycode == KEY_PGDN) br_scroll_by(w, 3);
+}
+static void br_mouse(struct window *w, struct mouse_event *e, int x, int y)
+{
+    (void)x; (void)y;
+    if (e->type == MEV_WHEEL) br_scroll_by(w, -(int)e->wheel);
+}
 
 struct app app_browser = {
     .id = "browser", .title = "Web Browser", .icon = ICON_BROWSER, .single = 0,
     .def_w = 640, .def_h = 420,
     .open = br_open, .paint = br_paint, .key = br_key, .mouse = br_mouse,
+    .close = br_close,
 };

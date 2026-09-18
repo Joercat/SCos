@@ -375,7 +375,16 @@ u32 proc_wm_mem_kb(void);
 u32 proc_kernel_mem_kb(void);
 
 void wm_init(void);
-void wm_run(void);                              /* main loop: never returns */
+void wm_run(void);                              /* main loop: returns only
+                                                 * if the WM dies (r36:
+                                                 * kmain then falls into
+                                                 * the maintenance tty) */
+/* r36: kernel maintenance console (tty.c) - a rescue shell owned by the
+ * kernel itself, independent of the WM.  `tty` in a terminal raises
+ * tty_request and the WM loop hands over; if wm_run() ever returns,
+ * kmain enters tty_run(0) rescue mode directly. */
+extern int tty_request;
+void tty_run(int return_to_wm);
 struct window *wm_open_app(const char *app_id, void *arg);
 void wm_close_window(struct window *w);
 void wm_set_title(struct window *w, const char *title);

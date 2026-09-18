@@ -185,6 +185,8 @@ static const char *help_text =
     "diag [sub]- Full hardware scan; sub = pci|usb|input for a quick\n"
             "            subsystem scan printed right here in the terminal\n"
     "sysrq <a> - System request: a = panic|reboot|error|dump|time\n"
+    "tty       - Kernel maintenance console (rescue shell, Linux-tty "
+            "style)\n"
     "theme     - List or switch themes\n"
     "calc      - Perform basic arithmetic\n"
     "ping      - Honest answer: this kernel has no TCP/IP stack\n"
@@ -741,6 +743,13 @@ static void run_command(struct term *t, const char *command)
         else if (fs_image_save()) strcpy(response, "Filesystem image written to disk.");
         else strcpy(response, "Error: disk write failed.");
     }
+    else if (!strcmp(cmd, "tty")) {
+        /* r36: hand screen + keyboard to the kernel maintenance console;
+         * the WM main loop picks tty_request up, and 'wm' returns here */
+        tty_request = 1;
+        strcpy(response, "Entering the SCos maintenance console - "
+                         "type 'wm' there to return to the desktop");
+    }
     else if (!strcmp(cmd, "shutdown")) {
         term_print(t, "Shutting down SCos... Goodbye!");
         t->shutting_down = 1;
@@ -1014,7 +1023,7 @@ static void run_command(struct term *t, const char *command)
         int ni = 0;
         strcpy(info[ni++], "user@scos");
         strcpy(info[ni++], "---------------------");
-        strcpy(info[ni++], "OS:      SCos 2.0.0 (build r35)");
+        strcpy(info[ni++], "OS:      SCos 2.0.0 (build r36)");
         strcpy(info[ni],   "CPU:     "); strncpy(info[ni] + 9, cpu, 40); ni++;
         strcpy(info[ni],   "Speed:   ");
         fmt_u32(n, cpu_mhz()); strcat(info[ni], n); strcat(info[ni], " MHz (TSC-measured)"); ni++;
@@ -1559,12 +1568,25 @@ static void term_key(struct window *w, struct key_event *e)
                                 * still change what must be on screen */
         return;
     }
+    /* r36: keyboard scrollback - matches every terminal the user knows
+     * and hedges mice whose reports never carry a wheel byte */
+    if (e->keycode == KEY_PGUP || e->keycode == KEY_PGDN) {
+        int rows = term_visible_rows(w);
+        int total = t->nlines + (t->pending_active ? 1 : 0) + 1;
+        t->scroll += (e->keycode == KEY_PGUP) ? -(rows - 1) : (rows - 1);
+        if (t->scroll > total - rows) t->scroll = total - rows;
+        if (t->scroll < 0) t->scroll = 0;
+        t->follow = (t->scroll >= total - rows);
+        wm_redraw(w);
+        return;
+    }
     if (e->keycode == KEY_UP) {
         if (t->hcount && t->hindex > 0) {
             t->hindex--;
             strcpy(t->input, t->hist[t->hindex]);
             t->ipos = (int)strlen(t->input);
         }
+        wm_redraw(w);        /* r36: recalled history must SHOW */
         return;
     }
     if (e->keycode == KEY_DOWN) {
@@ -1573,9 +1595,15 @@ static void term_key(struct window *w, struct key_event *e)
             strcpy(t->input, t->hist[t->hindex]);
         } else { t->hindex = t->hcount; t->input[0] = 0; }
         t->ipos = (int)strlen(t->input);
+        wm_redraw(w);        /* r36: recalled history must SHOW */
         return;
     }
     edit_line(t->input, &t->ipos, sizeof(t->input), e);
+    /* r36 ECHO ROOT FIX: typed characters landed in the line buffer but
+     * NOTHING repainted the window - the field saw "text I type is
+     * invisible until I press Enter" because Enter was the only path
+     * that called wm_redraw.  Every line-editing key now redraws. */
+    wm_redraw(w);
 }
 
 static void term_mouse(struct window *w, struct mouse_event *e, int x, int y)

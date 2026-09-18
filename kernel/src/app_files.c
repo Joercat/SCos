@@ -11,6 +11,7 @@ struct files {
     int notice;             /* 1 = show "hidden system dir" notice */
     u64 last_down_tick;     /* double-click detection */
     int last_down_row;
+    int scroll;             /* r36: first visible row (wheel scrolling) */
 };
 
 #define TB_Y 8
@@ -41,6 +42,7 @@ static void files_load(struct files *f)
 {
     for (int i = 0; i < 64; i++) f->synth[i] = 0;
     f->notice = 0;
+    f->scroll = 0;              /* r36: new directory starts at the top */
     /* /system is a real directory now: true copies of the boot chain,
      * readable and editable from here and from the terminal */
     struct vfs_node *dir = vfs_lookup(f->path);
@@ -245,10 +247,15 @@ static void files_paint(struct window *w)
     s_frame_rect(s, px, TB_Y, s->w - px - 8, TB_H, t->main);
     s_clip_text(s, px + 6, TB_Y + 5, f->path, t->main, s->w - px - 20);
 
-    /* entries */
+    /* entries (r36: scrollable - rows past the clip used to be
+     * unreachable: no wheel handler, no offset, silently invisible) */
     int rows = (s->h - LIST_Y - 6) / ROW_H;
-    for (int i = 0; i < f->n && i < rows; i++) {
-        int y = LIST_Y + 4 + i * ROW_H;
+    int maxs = f->n - rows;
+    if (maxs < 0) maxs = 0;
+    if (f->scroll > maxs) f->scroll = maxs;
+    if (f->scroll < 0) f->scroll = 0;
+    for (int i = f->scroll; i < f->n && i < f->scroll + rows; i++) {
+        int y = LIST_Y + 4 + (i - f->scroll) * ROW_H;
         if (i == f->hover_row)
             s_fill(s, 4, y, s->w - 8, ROW_H, fr_mix(t->win_bg, t->main, 18));
         if (files_is_dir_row(f, i)) {
@@ -271,6 +278,17 @@ static void files_paint(struct window *w)
 static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
 {
     struct files *f = w->data;
+    /* r36: wheel scrolls the entry list (3 rows per notch) */
+    if (e->type == MEV_WHEEL) {
+        int rows = (w->surf.h - LIST_Y - 6) / ROW_H;
+        int maxs = f->n - rows;
+        if (maxs < 0) maxs = 0;
+        int ns = f->scroll - (int)e->wheel * 3;
+        if (ns < 0) ns = 0;
+        if (ns > maxs) ns = maxs;
+        if (ns != f->scroll) { f->scroll = ns; wm_redraw(w); }
+        return;
+    }
     int old_btn = f->hover_btn, old_row = f->hover_row;
     f->hover_btn = -1;
     f->hover_row = -1;
@@ -278,8 +296,12 @@ static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
         for (int b = 0; b < 4; b++)
             if (fr_in(x, y, 8 + b * 34, TB_Y, 30, TB_H)) f->hover_btn = b;
     } else {
-        int row = (y - LIST_Y - 4) / ROW_H;
-        if (row >= 0 && row < f->n) f->hover_row = row;
+        int rows = (w->surf.h - LIST_Y - 6) / ROW_H;
+        int row = f->scroll + (y - LIST_Y - 4) / ROW_H;
+        /* r36: hover must ignore rows below the visible clip (the old
+         * hit test selected INVISIBLE rows whenever n > rows) */
+        if (row >= f->scroll && row < f->n && row < f->scroll + rows)
+            f->hover_row = row;
     }
     if (f->hover_btn != old_btn || f->hover_row != old_row) wm_redraw(w);
 

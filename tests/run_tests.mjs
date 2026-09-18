@@ -660,6 +660,72 @@ test(26, "terminal r27: tabs, appstrt console, procs, kill, easter egg", async (
     await state.click(w.x + 700 - 13, w.y + 13); await sleep(400);
 });
 
+test(27, "terminal r36: typed text is visible BEFORE Enter (echo)", async (state) => {
+    const { execSync } = await import("node:child_process");
+    const REPO = new URL("./../", import.meta.url).pathname;
+    const p = ICON_POS(ICON.terminal);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
+    const w = win_pos(1, 700, 450);
+    /* 23 rows reaches the input line at the bottom of the content area */
+    const dump = (name) => execSync(
+        `python3 tools/term_dump.py ${OUT}${name}.ppm ${w.x + 7} ${w.y + TITLEBAR + 26} 86 23`,
+        { cwd: REPO }).toString();
+
+    /* the r36 field bug: keystrokes updated the line buffer but NOTHING
+     * repainted, so typed text appeared only when Enter ran a command */
+    await state.type("echo qqq77");            /* NO newline yet */
+    await sleep(500);
+    shot(state, "67_echo_before_enter");
+    const before = dump("67_echo_before_enter");
+    if (!before.includes("qqq77"))
+        throw new Error("typed text invisible before Enter (echo broken):\n" + before.slice(-400));
+    await state.type("\n"); await sleep(600);
+    shot(state, "68_echo_after_enter");
+    if (!dump("68_echo_after_enter").includes("qqq77"))
+        throw new Error("echo command output missing after Enter");
+    if (!(await live(state))) throw new Error("frozen during echo scenario");
+});
+
+test(28, "tty r36: kernel maintenance console round-trip", async (state) => {
+    const { execSync } = await import("node:child_process");
+    const REPO = new URL("./../", import.meta.url).pathname;
+    const p = ICON_POS(ICON.terminal);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
+    const w = win_pos(1, 700, 450);
+    const dumpWin = (name) => execSync(
+        `python3 tools/term_dump.py ${OUT}${name}.ppm ${w.x + 7} ${w.y + TITLEBAR + 26} 86 23`,
+        { cwd: REPO }).toString();
+    /* the tty console owns the whole screen: decode from its own origin */
+    const dumpTty = (name) => execSync(
+        `python3 tools/term_dump.py ${OUT}${name}.ppm 6 4 96 42`,
+        { cwd: REPO }).toString();
+
+    await state.type("tty\n"); await sleep(1200);
+    shot(state, "69_tty_enter");
+    const t1 = dumpTty("69_tty_enter");
+    if (!t1.includes("maintenance console"))
+        throw new Error("tty console did not take the screen:\n" + t1.slice(0, 400));
+    await state.type("help\n"); await sleep(600);
+    shot(state, "70_tty_help");
+    if (!dumpTty("70_tty_help").includes("appstrt"))
+        throw new Error("tty help missing appstrt");
+    await state.type("procs\n"); await sleep(600);
+    shot(state, "71_tty_procs");
+    if (!dumpTty("71_tty_procs").includes("PID"))
+        throw new Error("tty procs missing PID table");
+    await state.type("free\n"); await sleep(600);
+    shot(state, "72_tty_free");
+    if (!dumpTty("72_tty_free").includes("memory:"))
+        throw new Error("tty free missing memory line");
+    /* 'wm' hands screen + keyboard back to the window manager */
+    await state.type("wm\n"); await sleep(1500);
+    shot(state, "73_tty_exit");
+    const back = dumpWin("73_tty_exit");
+    if (!back.includes("maintenance console"))
+        throw new Error("WM did not resume with the terminal intact:\n" + back.slice(-400));
+    if (!(await live(state))) throw new Error("frozen after tty round-trip");
+});
+
 /* ------------------------------------------------------------- runner ---- */
 const list = only ? scenarios.filter((s) => only.includes(s.id)) : scenarios;
 for (const s of list) {

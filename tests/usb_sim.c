@@ -906,6 +906,24 @@ static void test_direction_matrix(void)
     CHECK(got && me.dx == -7,
           "T7: physical left -> queue dx %d, want -7", me.dx);
 
+    /* wheel signs: HID wheel +1 (scroll up) and -1 (scroll down) must
+     * arrive as MEV_WHEEL with the SAME signs (Linux maps both PS/2 and
+     * USB wheels to REL_WHEEL unflipped) - r36 field report: "downward
+     * scrolling doesn't work on anything" */
+    memset(&me, 0, sizeof me);
+    mouse_inject(0, 0, 0, 1);
+    got = mouse_poll(&me);
+    CHECK(got && me.type == MEV_WHEEL && me.wheel == 1,
+          "T7: wheel up arrived as type %u wheel %d (want MEV_WHEEL +1)",
+          (u32)me.type, me.wheel);
+    memset(&me, 0, sizeof me);
+    mouse_inject(0, 0, 0, -1);
+    got = mouse_poll(&me);
+    CHECK(got && me.type == MEV_WHEEL && me.wheel == -1,
+          "T7: wheel DOWN arrived as type %u wheel %d (want MEV_WHEEL -1: "
+          "a lost sign here kills downward scrolling everywhere)",
+          (u32)me.type, me.wheel);
+
     /* modifier + key through the REAL kbd.c: Left Shift + 'a' = 'A' */
     u8 pk[6] = { 0, 0, 0, 0, 0, 0 };
     u8 pm = 0;

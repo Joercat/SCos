@@ -1085,6 +1085,37 @@ static void interact_repaint(int x, int y, int w, int h)
     dirty = 1;
 }
 
+/* r36 RESIZE PERF ROOT FIX: every mouse report during a resize used to
+ * run palloc + pfree + a full-surface memset + a full app repaint.  At
+ * a USB mouse's 125-1000 Hz report rate that is megabytes of memset and
+ * repaint per SECOND of dragging - the field report's "resizing windows
+ * immediately makes CPU go to 100% and lags the system really bad".
+ * Now handle_mouse only records the target geometry; resize_flush()
+ * applies it at most once per ~20 ms (50 Hz) from the main loop, and
+ * unconditionally (force) when the button releases. */
+static int rs_nw, rs_nh, rs_pending;
+static u32 rs_last;
+static void resize_flush(int force)
+{
+    if (!resize_win || !rs_pending) return;
+    if (!force && rs_last && (u32)tick_count - rs_last < 2) return;
+    struct window *w = resize_win;
+    int nw = rs_nw, nh = rs_nh;
+    rs_pending = 0;
+    rs_last = (u32)tick_count;
+    if (nw == w->w && nh == w->h) return;
+    int cw = nw - 2, ch = nh - WIN_TITLEBAR - 1;
+    u32 *np = palloc((u32)cw * ch * 4);
+    if (!np) return;                       /* OOM: keep the old geometry */
+    pfree(w->surf.px, (u32)w->surf.w * w->surf.h * 4);
+    w->w = nw; w->h = nh;
+    w->surf.px = np; w->surf.w = cw; w->surf.h = ch;
+    memset(np, 0, (u32)cw * ch * 4);
+    if (w->app && w->app->paint) w->app->paint(w);
+    w->dirty = 0;
+    damage_add(w->x, w->y, w->w + 4, w->h + 4);
+}
+
 /* -------------------------------------------------------------- input ---- */
 static void handle_mouse(struct mouse_event *e)
 {
@@ -1136,16 +1167,9 @@ static void handle_mouse(struct mouse_event *e)
             if (nw > screen_w) nw = screen_w;
             if (nh > screen_h - TASKBAR_H) nh = screen_h - TASKBAR_H;
             if (nw != w->w || nh != w->h) {
-                int cw = nw - 2, ch = nh - WIN_TITLEBAR - 1;
-                u32 *np = palloc((u32)cw * ch * 4);
-                if (np) {
-                    pfree(w->surf.px, (u32)w->surf.w * w->surf.h * 4);
-                    w->w = nw; w->h = nh;
-                    w->surf.px = np; w->surf.w = cw; w->surf.h = ch;
-                    memset(np, 0, (u32)cw * ch * 4);
-                    if (w->app && w->app->paint) w->app->paint(w);
-                    w->dirty = 0;
-                }
+                /* r36: record the target only - resize_flush() applies
+                 * it once per frame, throttled to ~50 Hz (see above) */
+                rs_nw = nw; rs_nh = nh; rs_pending = 1;
             }
         }
         if (drag_win || band_active || resize_win || desk_drag >= 0) {
@@ -1314,6 +1338,7 @@ static void handle_mouse(struct mouse_event *e)
             }
         }
         drag_win = NULL;
+        resize_flush(1);          /* r36: apply the final resize target */
         resize_win = NULL;
         wm_full();
         return;
@@ -1635,6 +1660,12 @@ void wm_run(void)
         }
         struct mouse_event me;
         while (mouse_poll(&me)) handle_mouse(&me);
+        resize_flush(0);           /* r36: once-per-frame resize apply */
+        if (tty_request) {         /* r36: kernel maintenance console */
+            tty_request = 0;
+            tty_run(1);            /* returns when the user types 'wm' */
+            wm_full();             /* tty repainted both buffers */
+        }
         struct key_event ke;
         while (kbd_poll(&ke)) handle_key(&ke);
 
@@ -1724,6 +1755,8 @@ static void dlg_key(struct window *w, struct key_event *e)
         if (e->pressed && e->keycode == '\n') { dlg_resolve(w, 1); return; }
         if (e->pressed && e->keycode == 27)   { dlg_resolve(w, 0); return; }
         edit_line(d->input, &d->pos, sizeof(d->input), e);
+        wm_redraw(w);      /* r36: same echo bug class as the terminal -
+                            * typed dialog input was invisible until OK */
         return;
     }
     if (e->pressed && (e->keycode == '\n' || e->keycode == 27))

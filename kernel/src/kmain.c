@@ -10,7 +10,7 @@ void kmain(struct boot_info *bi)
 {
     boot_info = *bi;
 
-    klog("SCos kernel starting - build r35");
+    klog("SCos kernel starting - build r36");
     klog("  lfb %x %dx%d pitch %u, mem %u KB", bi->lfb_base, bi->width,
          bi->height, bi->pitch, bi->mem_kb);
 
@@ -87,6 +87,14 @@ void kmain(struct boot_info *bi)
 
     klog("boot complete, handing over to window manager");
     wm_run();
+
+    /* r36: wm_run is a for(;;) loop - landing here means the window
+     * manager EXITED (crash recovery).  Instead of hanging on a frozen
+     * desktop, fall into the kernel-owned maintenance console so the
+     * system keeps behaving like a Linux tty: real shell, real commands,
+     * and 'wm' can restart the desktop (up to 5 attempts). */
+    klog("kmain: wm_run RETURNED - falling back to the maintenance tty");
+    tty_run(0);
 
     for (;;) cpu_hlt();
 }
