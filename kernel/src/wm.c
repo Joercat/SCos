@@ -21,6 +21,34 @@ static struct window *focused_w;
 static struct window *modal_w;
 static int dirty = 1;
 
+/* r39: per-app CPU accounting. Every app callback (paint/tick/mouse/
+ * key) is timed with the TSC; once per second the accumulated cycles
+ * become a percent of the machine's measured TSC rate (the same
+ * calibration SysMon already shows as MHz). Real numbers only: on a
+ * box without TSC nothing is instrumented and the column reads 0. */
+static u64 app_cyc[MAX_WINDOWS];
+static u32 app_pct[MAX_WINDOWS];
+static int cyc_ok;                     /* TSC usable (set in wm_run) */
+#define APP_T0(w) u64 cyc_t0 = cyc_ok ? rdtsc() : 0; int cyc_id = (w)->id
+#define APP_T1(w) do { if (cyc_ok) { \
+    u64 elapsed = rdtsc() - cyc_t0; \
+    for (int ci = 0; ci < win_count; ci++) \
+        if (wins[ci].id == cyc_id) { app_cyc[ci] += elapsed; break; } \
+    } } while (0)
+
+static void cyc_reset_all(void)
+{
+    for (int i = 0; i < MAX_WINDOWS; i++) { app_cyc[i] = 0; app_pct[i] = 0; }
+}
+
+u32 wm_win_cpu_pct(struct window *w)
+{
+    if (!w) return 0;
+    int i = (int)(w - wins);
+    if (i < 0 || i >= MAX_WINDOWS) return 0;
+    return app_pct[i];
+}
+
 /* ---- damage-rect compositing: repaint and flip only what changed ---- */
 struct drect { int x, y, w, h; };
 static struct drect dmg[8];
@@ -247,6 +275,8 @@ void wm_close_window(struct window *w)
     if (idx >= 0) {
         for (int i = idx; i < win_count - 1; i++) wins[i] = wins[i + 1];
         win_count--;
+        cyc_reset_all();   /* r39: window indices shifted; CPU% rebuilds
+                            * from zero within the next second */
     }
     if (focused_w == w) focused_w = NULL;
     if (modal_w == w) modal_w = NULL;
@@ -279,6 +309,7 @@ struct window *wm_open_app(const char *app_id, void *arg)
             }
     if (win_count >= MAX_WINDOWS) return NULL;
     struct window *w = &wins[win_count++];
+    cyc_reset_all();
     memset(w, 0, sizeof(*w));
     w->console = cons;
     w->id = next_id++;
@@ -762,7 +793,7 @@ static void paint_partial(void)
         if (!lowest) break;
         drawn[lowest - wins] = 1;
         if (lowest->dirty && lowest->app && lowest->app->paint) {
-            lowest->app->paint(lowest);
+            { APP_T0(lowest); lowest->app->paint(lowest); APP_T1(lowest); }
             lowest->dirty = 0;
             paint_win_content(lowest);
             damage_add(lowest->x + 1, lowest->y + WIN_TITLEBAR, lowest->w - 2,
@@ -979,7 +1010,7 @@ static void paint_all(void)
         if (!lowest) break;
         drawn[lowest - wins] = 1;
         if (lowest->dirty && lowest->app && lowest->app->paint) {
-            lowest->app->paint(lowest);
+            { APP_T0(lowest); lowest->app->paint(lowest); APP_T1(lowest); }
             lowest->dirty = 0;
         }
         paint_window(lowest);
@@ -1111,7 +1142,7 @@ static void resize_flush(int force)
     w->w = nw; w->h = nh;
     w->surf.px = np; w->surf.w = cw; w->surf.h = ch;
     memset(np, 0, (u32)cw * ch * 4);
-    if (w->app && w->app->paint) w->app->paint(w);
+    if (w->app && w->app->paint) { APP_T0(w); w->app->paint(w); APP_T1(w); }
     w->dirty = 0;
     damage_add(w->x, w->y, w->w + 4, w->h + 4);
 }
@@ -1245,7 +1276,7 @@ static void handle_mouse(struct mouse_event *e)
             dirty = 1;
         }
         if (hw && hw->app && hw->app->mouse)
-            hw->app->mouse(hw, e, mx - (hw->x + 1), my - (hw->y + WIN_TITLEBAR));
+            { APP_T0(hw); hw->app->mouse(hw, e, mx - (hw->x + 1), my - (hw->y + WIN_TITLEBAR)); APP_T1(hw); }
         cur_move();                  /* cheap overlay-only cursor move */
         (void)zone;
         return;
@@ -1265,7 +1296,7 @@ static void handle_mouse(struct mouse_event *e)
     if (e->type == MEV_WHEEL) {
         struct window *w = win_at_point(mx, my);
         if (w && w->app && w->app->mouse) {
-            w->app->mouse(w, e, mx - (w->x + 1), my - (w->y + WIN_TITLEBAR));
+            { APP_T0(w); w->app->mouse(w, e, mx - (w->x + 1), my - (w->y + WIN_TITLEBAR)); APP_T1(w); }
             w->dirty = 1;            /* app scrolled: repaint its content */
         }
         dirty = 1;
@@ -1420,7 +1451,7 @@ static void handle_mouse(struct mouse_event *e)
             return;
         }
         if (w->app && w->app->mouse)
-            w->app->mouse(w, e, mx - (w->x + 1), my - (w->y + WIN_TITLEBAR));
+            { APP_T0(w); w->app->mouse(w, e, mx - (w->x + 1), my - (w->y + WIN_TITLEBAR)); APP_T1(w); }
         dirty = 1;
         return;
     }
@@ -1552,7 +1583,7 @@ static void handle_key(struct key_event *e)
         return;
     }
     struct window *w = modal_w ? modal_w : focused_w;
-    if (w && w->app && w->app->key) w->app->key(w, e);
+    if (w && w->app && w->app->key) { APP_T0(w); w->app->key(w, e); APP_T1(w); }
     dirty = 1;
 }
 
@@ -1561,7 +1592,24 @@ static void wm_tick(void)
 {
     for (int i = 0; i < win_count; i++)
         if (wins[i].app && wins[i].app->tick && wins[i].state != WIN_STATE_MIN)
-            wins[i].app->tick(&wins[i]);
+            { APP_T0((&wins[i])); wins[i].app->tick(&wins[i]); APP_T1((&wins[i])); }
+
+    /* r39: fold each window's accumulated TSC cycles into a percent
+     * once per second (budget = cpu_mhz() * 1e6 ticks, the same PIT-
+     * calibrated TSC rate SysMon reports). */
+    if (cyc_ok) {
+        static u32 cyc_sec;
+        u32 sec = (u32)(tick_count / 100);
+        if (sec != cyc_sec) {
+            cyc_sec = sec;
+            u64 budget = (u64)cpu_mhz() * 1000000ull;
+            for (int i = 0; i < MAX_WINDOWS; i++) {
+                app_pct[i] = budget ? (u32)(app_cyc[i] * 100 / budget) : 0;
+                if (app_pct[i] > 100) app_pct[i] = 100;
+                app_cyc[i] = 0;
+            }
+        }
+    }
 
     /* clock / blink phase: repaint only the rects that actually show them */
     u64 phase = tick_count / 50;
@@ -1619,9 +1667,6 @@ static void irq_watchdog(void)
     last_tick = (u32)tick_count;
 }
 
-static u32 wm_t0;
-static int diag_tried;
-static u64 diag_last;        /* tick when diagnostics were last shown */
 static u32 last_paint_tick;
 volatile int wm_in_idle;
 
@@ -1639,35 +1684,20 @@ int is_v86_box(void)
 
 void wm_run(void)
 {
-    wm_t0 = tick_count;
     input_guard_armed = 1;
-    if (usb_diag_flag()) {      /* enumeration already reported trouble */
-        diag_tried = 1;
-        diag_last = tick_count;
-        diag_run();
-    }
+    cyc_ok = cpu_mhz() != 0;   /* r39: per-app CPU metering needs TSC */
+
+    /* r39: the automatic diagnostics screens are GONE (field request:
+     * "remove the auto-diagnostic screen if it exists and anything that
+     * looks like debugging"). Diagnostics remain fully available on
+     * demand: Settings -> "System diagnostics (full scan)", the terminal
+     * 'diag' command, and the tty console. Nothing pops up by itself. */
 
     klog("wm: entering main loop");
     for (;;) {
         irq_watchdog();
         if (err_pending()) err_show_pending();
         usb_poll();
-        if (!input_last_tick && !is_v86_box()) {
-            /* r26: no input ever - the live diagnostics screen is the
-             * user's window into the background hub-recovery attempts
-             * (usb_poll revives silent hubs every few seconds). Show it
-             * first after 6 s of silence, then re-show every 40 s, so
-             * the LATEST attempt results are always photographable
-             * without reflashing or rebooting. */
-            if (!diag_tried && tick_count - wm_t0 > 600) {
-                diag_tried = 1;
-                diag_last = tick_count;
-                diag_run();
-            } else if (diag_tried && tick_count - diag_last > 4000) {
-                diag_last = tick_count;
-                diag_run();
-            }
-        }
         struct mouse_event me;
         while (mouse_poll(&me)) handle_mouse(&me);
         resize_flush(0);           /* r36: once-per-frame resize apply */

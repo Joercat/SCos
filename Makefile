@@ -57,7 +57,7 @@ $(BUILD)/scos.img: $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $
 font:
 	$(PYTHON) tools/fontgen.py kernel/src/font_data.c
 
-test: all usbtest
+test: all usbtest cputest
 	node tests/run_tests.mjs
 
 # native USB-logic simulator: runs the REAL usb.c against a mini xHC and
@@ -83,3 +83,12 @@ preview: all vendor
 
 clean:
 	rm -rf $(BUILD)
+
+.PHONY: cputest
+cputest: build/cpu_brand_test
+	./build/cpu_brand_test
+
+build/cpu_brand_test: tests/cpu_brand_test.c kernel/src/lib.c kernel/include/scos.h
+	@mkdir -p build
+	gcc -fno-builtin -Wno-pointer-to-int-cast -ffunction-sections -fdata-sections \
+	    -Wl,--gc-sections -Ikernel/include tests/cpu_brand_test.c kernel/src/lib.c -o $@

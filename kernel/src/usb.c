@@ -34,8 +34,9 @@
 #define IN_BUF_BYTES 64
 /* r38: gain applied to 16-bit/high-res mouse paths (layout + wide16) -
  * the r37 field mouse felt "way too low" at 1:1 with its fine counts;
- * boot-protocol mice keep 1:1 and the prefs slider scales on top */
-#define USB_LAYOUT_GAIN 2
+ * boot-protocol mice keep 1:1 and the prefs slider scales on top.
+ * r39: 2 -> 3, field feedback asked for "a bit more sensitivity". */
+#define USB_LAYOUT_GAIN 3
 /* r38: 64 ring slots, not 8.  The r37 field mouse turned out to poll at
  * 1000 Hz (its EP ctx interval 3 = 1 ms): with only 7 outstanding TRBs
  * the ring ran dry between the WM's 100 Hz drain passes and the xHC had
@@ -559,8 +560,12 @@ static int proc_events(void)
             u32 rem = t[2] & 0xFFFFFF;       /* bytes NOT transferred */
             u32 len = rem <= IN_BUF_BYTES ? IN_BUF_BYTES - rem : 0u;
             u32 ptr = t[0];
-            cc_code = code;
-            cc_slot = slot | (ep << 8) | 0x10000u;
+            /* Interrupt reports must not satisfy or overwrite an EP0
+             * control completion while this batch of events is drained. */
+            if (ep == 1) {
+                cc_code = code;
+                cc_slot = slot | (ep << 8) | 0x10000u;
+            }
             /* per-HID-interface rings: an event's EP field (DCI) selects
              * which boot interface completed.  The pre-r29 code keyed off
              * a single per-device ep_addr and scribbled low memory when
@@ -925,7 +930,7 @@ static int ctrl_xfer_to(int slot, u8 rt_, u8 rq, u16 val, u16 idx,
     u64 t0 = now_ms();
     while (now_ms() - t0 < to_ms) {
         proc_events();
-        if ((cc_slot & 0x10000u) && (cc_slot & 0xFF) == (u32)slot)
+        if (cc_slot == (0x10100u | (u32)slot))
             return (int)cc_code;
         cpu_hlt();
     }
@@ -938,7 +943,6 @@ static int ctrl_xfer(int slot, u8 rt_, u8 rq, u16 val, u16 idx,
 {
     return ctrl_xfer_to(slot, rt_, rq, val, idx, buf, len, in, 800, 1);
 }
-
 
 /* ------------------------------------------------- 32-bit BAR relocation --
  * Some firmware parks the xHCI registers above 4 GB ("Above 4G decoding"),
@@ -2078,21 +2082,17 @@ void usb_poll(void)
                 pending_portc &= ~(1u << p);
             }
     }
-    /* r35 FREEZE ROOT FIX: the hub-port poll below runs BLOCKING control
-     * transfers (800 ms timeout each, and a timeout kicks xhci_restart)
-     * right here in the WM main loop.  On the field machine a single
-     * hiccup from the hub froze mouse, keyboard and clock for seconds
-     * ("random lag spikes... mouse stops moving until unfrozen"), and 4
-     * rounds of one port-1 timeout triggered hub_recover - a root-port
-     * reset + full branch re-enumeration = the 10 s lockup that also
-     * tore down and re-armed the live input endpoints.  Health-polling a
-     * hub is only needed while input is SILENT (the r26 recovery /
-     * diagnostics case); while reports are flowing, the bus is provably
-     * alive, so skip the blocking probes entirely.  Root-port hotplug
-     * (pending_portc above) is event-driven and stays live. */
-    int input_fresh = input_guard_armed && input_last_tick &&
-                      tick_count - (u64)input_last_tick < 300;
-    if (!input_fresh)
+    /* Never run blocking hub health probes while HID endpoints are armed.
+     * Idle keyboards legitimately stop reporting. A timeout here blocks
+     * dispatch and can reset a healthy input branch just because it is quiet.
+     * Root-port events above still handle root hotplug. Hub-child hotplug
+     * while HID is active needs an asynchronous hub-status implementation. */
+    int hid_armed = 0;
+    for (int s = 1; s <= MAX_SLOTS; s++)
+        if (devs[s].used)
+            for (int j = 0; j < devs[s].nhid; j++)
+                if (devs[s].hid[j].active) hid_armed = 1;
+    if (!hid_armed)
     for (int sl = 1; sl <= MAX_SLOTS; sl++) {   /* hub-port hotplug, 1 Hz */
         struct xdev *h = &devs[sl];
         if (!h->used || !h->is_hub) continue;
@@ -2426,11 +2426,6 @@ void usb_init(void)
     strcat(nl, " rs "); fmt_u32(tmp, restart_count); strcat(nl, tmp);
     strcpy(status_line, nl);
     klog("%s", status_line);
-}
-
-int usb_diag_flag(void)
-{
-    return have_xhci && (n_devs == 0 || fail_flag);
 }
 
 void usb_status(char *out, int max)

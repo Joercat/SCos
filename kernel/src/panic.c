@@ -22,13 +22,13 @@ void kernel_panic_info(const char *reason, const char *detail, struct regs *r)
     if (!screen.px) { for (;;) cpu_hlt(); }
 
     fb_clear(0x100000);
-    /* the user's neofetch logo (art.txt), rendered in panic red */
+    /* r39: the user's dedicated panic art (panic-art.txt), in panic red */
     int y = 40;
-    for (int i = 0; i < neofetch_art_lines; i++) {
-        s_text(&screen, 60, y, neofetch_art[i], 0xFF4444);
+    for (int i = 0; i < panic_art_lines; i++) {
+        s_text(&screen, 60, y, panic_art[i], 0xFF4444);
         y += 18;
     }
-    int tx = 60 + (neofetch_art_width + 3) * 8;
+    int tx = 60 + (panic_art_width + 3) * 8;
     s_text_scaled(&screen, tx, 60, "KERNEL", 0xFF4444, 3);
     s_text_scaled(&screen, tx, 110, "PANIC", 0xFF4444, 3);
 

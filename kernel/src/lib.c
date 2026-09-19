@@ -198,6 +198,7 @@ char *str_chr(const char *s, char c)
 
 void cpu_brand(char *out, int max)
 {
+    if (!out || max <= 0) return;
     u32 ax, bx, cx, dx;
     out[0] = 0;
     __asm__ volatile("movl $0x80000000, %%eax; cpuid"
@@ -215,8 +216,9 @@ void cpu_brand(char *out, int max)
         fam = ((f1 >> 8) & 0xF);
         if (fam == 0xF) fam += (f1 >> 20) & 0xFF;
         mod = ((f1 >> 4) & 0xF);
-        if (fam == 0x6 || fam == 0xF) mod += (f1 >> 16) & 0xF;
+        if (fam == 0x6 || fam == 0xF) mod += ((f1 >> 16) & 0xF) << 4;
         strncpy(out, vend, max - 1);
+        out[max - 1] = 0;
         char tail[40];
         strcpy(tail, " family ");
         char n[8];
@@ -225,21 +227,30 @@ void cpu_brand(char *out, int max)
         strncat(out, tail, max - strlen(out) - 1);
         return;
     }
-    u32 *o = (u32 *)out;
+    /* r39: collect into a local 48-byte block first, then copy out
+     * bounded by max - the old code wrote out[48] and u32-aliased the
+     * caller buffer regardless of max, and unaligned u32 stores through
+     * a char * invited aliasing trouble. Also trims BOTH ends: brand
+     * strings are space-padded inside the 48 bytes. */
+    u32 words[12];
     for (u32 leaf = 0x80000002; leaf <= 0x80000004; leaf++) {
         __asm__ volatile("cpuid"
                          : "=a"(ax), "=b"(bx), "=c"(cx), "=d"(dx)
                          : "a"(leaf));
         int idx = (int)(leaf - 0x80000002) * 4;
-        if (idx + 4 <= max / 4 + 3 && idx + 4 <= 48) {
-            o[idx / 4] = ax; o[idx / 4 + 1] = bx; o[idx / 4 + 2] = cx; o[idx / 4 + 3] = dx;
-        }
+        words[idx] = ax; words[idx + 1] = bx;
+        words[idx + 2] = cx; words[idx + 3] = dx;
     }
-    out[48] = 0;
-    /* trim leading spaces */
-    int i = 0;
-    while (out[i] == ' ') i++;
-    if (i) { int j = 0; while (out[i]) { out[j++] = out[i++]; } out[j] = 0; }
+    char tmp[49];
+    memcpy(tmp, words, 48);
+    tmp[48] = 0;
+    const char *b = tmp;
+    while (*b == ' ') b++;
+    int len = (int)strlen(b);
+    while (len > 0 && b[len - 1] == ' ') len--;
+    if (len > max - 1) len = max - 1;
+    memcpy(out, b, (u32)len);
+    out[len] = 0;
 }
 
 u32 str_to_u32(const char *s)

@@ -11,7 +11,6 @@
 #include "scos.h"
 
 static u32 tsc_per_ms = 0;
-static u64 idle_mark = 0;
 static u64 idle_acc = 0;
 static u32 tick_acc = 0;
 static u32 usage_pct = 0;

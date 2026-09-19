@@ -212,3 +212,25 @@ build/           build output (git-ignored): scos.img, intermediates, tests/
 * Python 3 (+ Pillow only for `make font`)
 * Node.js ≥ 18 for the test suite and preview
 * Network access once, for `tools/setup_preview.sh` (npm + GitHub tarball)
+
+### Round 39 input and desktop fixes
+
+* Active HID endpoints no longer trigger synchronous hub-health probes merely
+  because the user stops moving/typing. Root-port hotplug remains enabled;
+  external-hub child hotplug during active HID use is deferred pending an
+  asynchronous hub-status implementation.
+* HID Home/Page Up/Delete/End and F11 mappings corrected; NumLock/keypad modes
+  supported. Lock LEDs are not yet descriptor-aware; Pause/Print Screen actions
+  and automatic held-key repeat are not implemented.
+* USB layout/wide-axis mouse gain increased from 2 to 3 (preferences still scale
+  it). Automatic diagnostic overlays removed; manual diagnostics and internal
+  logs remain available.
+* CPUID brand-chunk indexing, bounded output, extended model number and neofetch
+  string construction corrected. `make cputest` validates against raw CPUID.
+* SysMon CPU column measures time spent in each app's paint/input/tick callbacks
+  on the single executing CPU; not an SMP scheduler utilization figure. System
+  rows show `-` rather than fabricated attribution. Whole-percent rounding can
+  display 0% for light workloads.
+* Terminal/TTY underline insertion cursors, wider Settings controls, and the
+  dedicated user-provided panic art. `make usbtest` includes idle-input and
+  keyboard-mapping regression tests in addition to the existing ring/parser tests.

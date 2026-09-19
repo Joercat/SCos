@@ -47,8 +47,13 @@ static struct rsdp *find_rsdp(void)
         if (mem_eq(r->sig, "RSD PTR ", 8) && sum_bytes((const u8 *)r, 20) == 0)
             return r;
     }
-    /* EBDA first KB */
-    u16 ebda = (*(u16 *)0x40E) << 4;
+    /* EBDA first KB - the BIOS data-area word at 0x40E. GCC's
+     * -Warray-bounds treats a dereference of that small constant
+     * address as a zero-size object access, so the address is passed
+     * through an opaque asm barrier before the read (r39 sweep). */
+    u32 bda = 0x40E;
+    __asm__("" : "+r"(bda));
+    u32 ebda = (u32)(*(const volatile u16 *)bda) << 4;
     for (u32 addr = ebda; addr < (u32)ebda + 1024; addr += 16) {
         struct rsdp *r = (struct rsdp *)addr;
         if (mem_eq(r->sig, "RSD PTR ", 8) && sum_bytes((const u8 *)r, 20) == 0)

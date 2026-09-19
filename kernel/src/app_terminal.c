@@ -102,6 +102,21 @@ static void term_type(struct term *t, const char *s)    /* typewriter */
     t->pending_active = 1;
 }
 
+/* r39: bounded, ALWAYS-terminated copy into neofetch's info[] lines.
+ * strncpy(dst, src, 40) leaves dst unterminated when src >= 40 chars -
+ * the 45-char i5 brand string made the renderer read on into the next
+ * line's bytes ("a bunch of random names after the CPU id" in the
+ * field). */
+static void info_set(char *line, int linesz, const char *prefix, const char *val)
+{
+    strcpy(line, prefix);
+    int pl = (int)strlen(prefix);
+    int vl = (int)strlen(val);
+    if (pl + vl > linesz - 1) vl = linesz - 1 - pl;
+    memcpy(line + pl, val, (u32)vl);
+    line[pl + vl] = 0;
+}
+
 static void prompt_str(struct term *t, char *out)
 {
     /* mirror the web simulation: home shows as "~" */
@@ -1025,9 +1040,10 @@ static void run_command(struct term *t, const char *command)
         strcpy(info[ni++], "user@scos");
         strcpy(info[ni++], "---------------------");
         strcpy(info[ni++], "OS:      SCos 2.0.0 (build " SCOS_BUILD_TAG ")");
-        strcpy(info[ni],   "CPU:     "); strncpy(info[ni] + 9, cpu, 40); ni++;
+        info_set(info[ni++], (int)sizeof(info[0]), "CPU:     ", cpu);
         strcpy(info[ni],   "Speed:   ");
         fmt_u32(n, cpu_mhz()); strcat(info[ni], n); strcat(info[ni], " MHz (TSC-measured)"); ni++;
+        strcpy(info[ni], "         ");
         fmt_u32(n, cpu_core_count()); strcat(info[ni], n); strcat(info[ni], " core(s), ");
         fmt_u32(n, cpu_thread_count()); strcat(info[ni], n); strcat(info[ni], " thread(s) (CPUID)"); ni++;
         strcpy(info[ni],   "Load:    ");
@@ -1036,18 +1052,17 @@ static void run_command(struct term *t, const char *command)
         fmt_u32(n, (tot - fre) / 1024); strcat(info[ni], n);
         strcat(info[ni], " / "); fmt_u32(n, tot / 1024); strcat(info[ni], n);
         strcat(info[ni], " MB"); ni++;
-        strcpy(info[ni],   "Disk:    ");
         { const char *m = ata_model();
-          strncpy(info[ni] + 9, m && m[0] ? m : "none", 40); }
-        ni++;
+          info_set(info[ni++], (int)sizeof(info[0]), "Disk:    ",
+                   m && m[0] ? m : "none"); }
         strcpy(info[ni],   "Video:   ");
         fmt_u32(n, (u32)screen_w); strcat(info[ni], n); strcat(info[ni], "x");
         fmt_u32(n, (u32)screen_h); strcat(info[ni], n); strcat(info[ni], "x");
         fmt_u32(n, fb_bpp()); strcat(info[ni], n); ni++;
         strcpy(info[ni],   "Uptime:  ");
         fmt_u32(n, uptime_ms() / 1000); strcat(info[ni], n); strcat(info[ni], " s"); ni++;
-        strcpy(info[ni],   "Theme:   ");
-        strncpy(info[ni] + 9, theme_current()->name, 40); ni++;
+        info_set(info[ni++], (int)sizeof(info[0]), "Theme:   ",
+                 theme_current()->name);
         strcpy(info[ni++], "Shell:   scos-sh");
         strcpy(info[ni++], "WM:      scwm (VBE framebuffer compositor)");
         response[0] = 0;
@@ -1525,9 +1540,13 @@ static void term_paint(struct window *w)
             prompt_str(t, prompt);
             s_text(s, 6, y, prompt, th->main);
             int px = 6 + s_text_width(prompt);
-            s_clip_text(s, px, y, t->input, th->main, s->w - px - 8);
-            if ((tick_count / 50) % 2 == 0)
-                s_fill(s, px + t->ipos * FONT_W, y, 2, FONT_H, th->main);
+            int cols = (s->w - px - 8) / FONT_W;
+            int start = cols > 0 && t->ipos >= cols ? t->ipos - cols + 1 : 0;
+            s_clip_text(s, px, y, t->input + start, th->main, s->w - px - 8);
+            /* Keep the insertion cell visible when a command exceeds the row. */
+            int cx = px + (t->ipos - start) * FONT_W;
+            if (cx >= 0 && cx + FONT_W <= s->w - 6)
+                s_fill(s, cx, y + FONT_H - 2, FONT_W, 2, th->main);
         }
     }
 }

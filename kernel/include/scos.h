@@ -12,7 +12,7 @@
  * "SCos 2.0 r27" on the boot screen - boot_screen.c had never been in the
  * per-round tag sweep, so nobody could tell which build was flashed.
  * Every visible version string now concatenates this macro. */
-#define SCOS_BUILD_TAG "r38"
+#define SCOS_BUILD_TAG "r39"
 
 typedef unsigned char      u8;
 typedef unsigned short     u16;
@@ -84,7 +84,6 @@ int  pci_find_class(u8 class, u8 subclass, u8 progif,
 void usb_init(void);
 void usb_poll(void);
 void usb_status(char *out, int max);
-int  usb_diag_flag(void);
 void diag_run(void);
 int  is_v86_box(void);              /* running inside the v86 emulator box? */
 void usb_kbd_leds_off(void);        /* drive keyboard LEDs off (shutdown) */
@@ -272,6 +271,8 @@ u32   vfs_usage_bytes(void);
 u32   str_to_u32(const char *s);
 extern const char *const neofetch_art[];
 extern const int neofetch_art_lines, neofetch_art_width;
+extern const char *const panic_art[];
+extern const int panic_art_lines, panic_art_width;
 char *vfs_parent_path(const char *path, char *out);   /* "a/b/c" -> "a/b/" */
 
 /* ----------------------------------------------------------------- ata ---- */
@@ -359,6 +360,7 @@ struct window {
 
 int  wm_win_count(void);
 struct window *wm_win_at(int i);
+u32  wm_win_cpu_pct(struct window *w);   /* r39: TSC-measured, 0-100 */
 int  wm_app_running(const char *app_id);       /* windows open for an id */
 
 /* per-window real memory attribution (shown by sysmon + terminal `procs`) */

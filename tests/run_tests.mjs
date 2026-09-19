@@ -726,6 +726,27 @@ test(28, "tty r36: kernel maintenance console round-trip", async (state) => {
     if (!(await live(state))) throw new Error("frozen after tty round-trip");
 });
 
+test(29, "r39: idle input and terminal underline cursor", async (state) => {
+    const { execSync } = await import("node:child_process");
+    const p = ICON_POS(ICON.terminal);
+    await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y);
+    await sleep(7000); // beyond the old auto-diagnostic/idle-probe threshold
+    await state.type("aaaa55"); await sleep(700);
+    shot(state, "74_idle_cursor");
+    const w = win_pos(1, 700, 450);
+    const text = execSync(`python3 tools/term_dump.py ${OUT}74_idle_cursor.ppm ${w.x+7} ${w.y+TITLEBAR+26} 86 23`).toString();
+    const lines = text.split("\n");
+    const row = lines.findIndex(l => l.includes("user@scos:/$ aaaa55"));
+    if (row < 0) throw new Error("idle/repeated input missing: " + text);
+    const col = lines[row].indexOf("aaaa55") + 6;
+    const x = w.x + 7 + col * 8, y = w.y + TITLEBAR + 26 + row * 18 + 14;
+    const color = px(state, x, y);
+    if (color[0]+color[1]+color[2] < 50) throw new Error("underline cursor missing");
+    for (let i=0; i<8; i++)
+        if (px(state, x+i, y).join() !== color.join())
+            throw new Error("cursor is not a full-width underline cell");
+});
+
 /* ------------------------------------------------------------- runner ---- */
 const list = only ? scenarios.filter((s) => only.includes(s.id)) : scenarios;
 for (const s of list) {

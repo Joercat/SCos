@@ -98,7 +98,7 @@ static void sm_paint(struct window *w)
     u32 fam = (sig >> 8) & 0xF;
     if (fam == 0xF) fam += (sig >> 20) & 0xFF;
     u32 mod = (sig >> 4) & 0xF;
-    if (fam == 6 || fam == 0xF) mod += (sig >> 16) & 0xF;
+    if (fam == 6 || fam == 0xF) mod += ((sig >> 16) & 0xF) << 4;
     strcpy(line, "  cpuid:  family ");
     fmt_u32(n, fam); strcat(line, n);
     strcat(line, " model "); fmt_u32(n, mod); strcat(line, n);
@@ -155,6 +155,7 @@ static void sm_paint(struct window *w)
     s_text(s, 260, y, "TYPE", t->text);
     s_text(s, 360, y, "STATE", t->text);
     s_text(s, 470, y, "MEM", t->text);
+    if (s->w >= 600) s_text(s, 560, y, "CPU", t->text);   /* r39 */
     y += 6;
     s_fill(s, 12, y, s->w - 24, 1, t->main);
     y += 6;
@@ -186,6 +187,10 @@ static void sm_paint(struct window *w)
             if (show) { fmt_u32(mb, kb); strcat(mb, " KB"); }
             else strcpy(mb, "-");
             s_text(s, 470, y, mb, t->text);
+            /* r39: per-task CPU is honestly attributable to app windows
+             * only (their callbacks are the instrumented code paths);
+             * system rows show "-" rather than inventing a split. */
+            if (s->w >= 600) s_text(s, 560, y, "-", t->text);
         } else {
             struct window *aw = wm_win_at(i - SYS_TASKS);
             fmt_u32(n, (u32)(10 + i - SYS_TASKS));
@@ -197,6 +202,12 @@ static void sm_paint(struct window *w)
             fmt_u32(mb, proc_win_mem_kb(aw));
             strcat(mb, " KB");
             s_text(s, 470, y, mb, t->text);
+            if (s->w >= 600) {          /* r39: TSC-measured app CPU% */
+                char cb[8];
+                fmt_u32(cb, wm_win_cpu_pct(aw));
+                strcat(cb, "%");
+                s_text(s, 560, y, cb, t->text);
+            }
         }
         y += rh;
     }

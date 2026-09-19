@@ -12,13 +12,21 @@ static struct key_event queue[QUEUE];
 static volatile int q_head, q_tail;
 
 static u8 shift_on, ctrl_on, alt_on, caps_on;
+/* r39: lock-key state. NumLock defaults ON so the keypad types digits
+ * out of the box; LED output reports require a separate descriptor-aware implementation. */
+static u8 num_on = 1, scroll_on;
 
+/* table extended to 0x4F in r39 so keypad '-' (0x4A) and keypad '+'
+ * (0x4E) reach the character path; the zero slots between are keys the
+ * special_key()/toggle paths consume before a character lookup. */
 static const char sc_ascii[] = {
     /* 0x00 */ 0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
     /* 0x0f */ '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
     /* 0x1d */ 0 /*ctrl*/, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
     /* 0x2a */ 0 /*shift*/, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/',
     /* 0x36 */ 0 /*shift*/, '*', 0 /*alt*/, ' ', 0 /*caps*/,
+    /* 0x3b */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,               /* F1-F10: special */
+    /* 0x45 */ 0, 0, 0, 0, 0, '-', 0, 0, 0, '+', 0,        /* keypad - and + */
 };
 static const char sc_shift[] = {
     /* 0x00 */ 0, 27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b',
@@ -26,6 +34,8 @@ static const char sc_shift[] = {
     /* 0x1d */ 0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~',
     /* 0x2a */ 0, '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?',
     /* 0x36 */ 0, '*', 0, ' ', 0,
+    /* 0x3b */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0x45 */ 0, 0, 0, 0, 0, '-', 0, 0, 0, '+', 0,
 };
 
 static void kbd_enqueue(struct key_event *e)
@@ -80,7 +90,16 @@ static void kbd_sc(u8 sc)
     case 0x38: alt_on = e.pressed; e.keycode = KEY_LALT; kbd_enqueue(&e); return;
     case 0x3a:
         if (e.pressed) caps_on = !caps_on;
-        e.keycode = KEY_CAPS; kbd_enqueue(&e); return;
+        e.keycode = KEY_CAPS; kbd_enqueue(&e);
+        return;
+    case 0x45:                         /* r39: NumLock - was a dead key */
+        if (e.pressed) num_on = !num_on;
+        e.keycode = KEY_NUM; kbd_enqueue(&e);
+        return;
+    case 0x46:                         /* r39: ScrollLock */
+        if (e.pressed) scroll_on = !scroll_on;
+        e.keycode = KEY_SCROLL; kbd_enqueue(&e);
+        return;
     default: break;
     }
     if (!e.pressed) {
@@ -147,6 +166,7 @@ static u8 hid_make(u8 u)
     case 0x2F: return 0x1A;
     case 0x30: return 0x1B;
     case 0x31: return 0x2B;
+    case 0x32: return 0x2B;   /* non-US backslash (r39) */
     case 0x33: return 0x27;
     case 0x34: return 0x28;
     case 0x35: return 0x29;
@@ -154,19 +174,44 @@ static u8 hid_make(u8 u)
     case 0x37: return 0x34;
     case 0x38: return 0x35;
     case 0x39: return 0x3A;   /* caps lock */
+    case 0x46: return 0x54;   /* print screen (r39) */
+    case 0x47: return 0x46;   /* scroll lock (r39) */
+    case 0x48: return 0;      /* Pause needs a distinct event, not NumLock */
     case 0x49: return 0x52;   /* insert */
-    case 0x4A: return 0x53;   /* delete */
-    case 0x4B: return 0x47;   /* home */
-    case 0x4C: return 0x4F;   /* end */
-    case 0x4D: return 0x49;   /* pgup */
+    /* r39: the nav block 0x4A-0x4D was off by one against the HID usage
+     * table (0x49 Ins, 0x4A Home, 0x4B PgUp, 0x4C Del, 0x4D End, 0x4E
+     * PgDn). The old mapping made physical Delete emit End - which is
+     * why Ctrl+Alt+Del never fired - and physical Home emit Delete,
+     * silently eating text. Corrected: */
+    case 0x4A: return 0x47;   /* home */
+    case 0x4B: return 0x49;   /* pgup */
+    case 0x4C: return 0x53;   /* delete forward */
+    case 0x4D: return 0x4F;   /* end */
     case 0x4E: return 0x51;   /* pgdn */
     case 0x4F: return 0x4D;   /* right */
     case 0x50: return 0x4B;   /* left */
     case 0x51: return 0x50;   /* down */
     case 0x52: return 0x48;   /* up */
+    case 0x53: return 0x45;   /* num lock (r39: was unmapped -> dead) */
+    case 0x54: return 0x35;   /* keypad / (r39) */
+    case 0x55: return 0x37;   /* keypad * (r39) */
+    case 0x56: return 0x4A;   /* keypad - (r39) */
+    case 0x57: return 0x4E;   /* keypad + (r39) */
+    case 0x58: return 0x1C;   /* keypad enter (r39) */
+    case 0x63: return num_on ? 0x34 : 0x53;   /* keypad . / delete */
     default:
-        if (u >= 0x3A && u <= 0x45)
-            return (u <= 0x44) ? (u8)(u - 0x3A + 0x3B) : 0x58;
+        if (u >= 0x3A && u <= 0x43)
+            return (u8)(u - 0x3A + 0x3B);      /* F1-F10 */
+        if (u == 0x44) return 0x57;   /* F11 (r39 fix: old range math
+                                       * sent F11 to 0x45 = NumLock) */
+        if (u == 0x45) return 0x58;   /* F12 */
+        if (u >= 0x59 && u <= 0x62) { /* keypad 1-9 then 0 (r39) */
+            if (num_on) return (u8)(u - 0x59 + 0x02);  /* digit row */
+            static const u8 kpnav[10] = {
+                0x4F, 0x50, 0x51, 0x4B, 0x00, 0x4D, 0x47, 0x48, 0x49, 0x52 };
+            return kpnav[u - 0x59];   /* end/dn/pgdn/left/-/right/home/
+                                       * up/pgup/ins - classic NumLock-off */
+        }
         return 0;
     }
 }

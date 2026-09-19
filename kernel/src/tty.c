@@ -109,8 +109,8 @@ static void tty_draw(void)
     s_text(&screen, 6, y, pl, TTY_PROMPT_FG);
     /* block cursor after the input position */
     int plen = (int)strlen(pl) - (int)strlen(tty_input);
-    s_char_bg(&screen, 6 + (plen + tty_ipos) * FONT_W, y, ' ',
-              TTY_BG, TTY_FG);
+    s_fill(&screen, 6 + (plen + tty_ipos) * FONT_W, y + FONT_H - 2,
+           FONT_W, 2, TTY_FG);
     fb_flip();
 }
 

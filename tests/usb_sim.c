@@ -932,9 +932,9 @@ static void test_runtime_fallbacks(void)
                   "6e: probe never detected 16-bit axes (xh00ff %u len6 %u "
                   "nz4 %u nz5 %u of n %u)", (u32)h->xh00ff, (u32)h->len6,
                   (u32)h->nz[3], (u32)h->nz[4], (u32)h->probe_n);
-            CHECK(sim_m_dx == -10 && sim_m_dy == -12,
-                  "6e: wide16 content wrong: dx %d dy %d (want -10, -12 "
-                  "with the r38 high-res gain; dy +2 would be the r36 "
+            CHECK(sim_m_dx == -15 && sim_m_dy == -18,
+                  "6e: wide16 content wrong: dx %d dy %d (want -15, -18 "
+                  "with the r39 high-res gain x3; dy +2 would be the r36 "
                   "X-high-byte up-drift)", sim_m_dx, sim_m_dy);
             printf("  6e 16-bit probe fallback: verdict at 60, dx %d dy %d "
                    "delivered (no descriptor needed)\n",
@@ -1166,9 +1166,9 @@ static void test_layout_parser(void)
             sim_mouse_reports = 0;
             sim_m_btn = 0; sim_m_dx = 12345; sim_m_dy = 12345; sim_m_wh = 0;
             t8_pump(c, 1);
-            CHECK(sim_m_dx == -10 && sim_m_dy == 0,
-                  "8f: physical left dx -5 gave dx %d dy %d (want -10 with "
-                  "the r38 high-res gain, 0 - dy nonzero is the r36 "
+            CHECK(sim_m_dx == -15 && sim_m_dy == 0,
+                  "8f: physical left dx -5 gave dx %d dy %d (want -15 with "
+                  "the r39 high-res gain x3, 0 - dy nonzero is the r36 "
                   "up-drift bug)", sim_m_dx, sim_m_dy);
 
             /* physical DOWN, dy=+6 -> queue dy = -6 (r35 convention:
@@ -1178,9 +1178,9 @@ static void test_layout_parser(void)
             t8_refill(dm, 0, c, 7, pay_down);
             sim_m_dx = 12345; sim_m_dy = 12345;
             t8_pump(c, 1);
-            CHECK(sim_m_dx == 0 && sim_m_dy == -12,
-                  "8f: physical down gave dx %d dy %d (want 0, -12 with "
-                  "the r38 gain - the r36 dead-vertical bug)",
+            CHECK(sim_m_dx == 0 && sim_m_dy == -18,
+                  "8f: physical down gave dx %d dy %d (want 0, -18 with "
+                  "the r39 gain x3 - the r36 dead-vertical bug)",
                   sim_m_dx, sim_m_dy);
 
             /* diagonal: dx=+300 (0x012C), dy=-120 (0xFF88) -> queue
@@ -1189,9 +1189,9 @@ static void test_layout_parser(void)
             t8_refill(dm, 0, c, 7, pay_diag);
             sim_m_dx = 0; sim_m_dy = 0;
             t8_pump(c, 1);
-            CHECK(sim_m_dx == 600 && sim_m_dy == 240,
-                  "8f: diagonal 16-bit move gave dx %d dy %d (want 600, "
-                  "240 with the r38 gain - beyond the 8-bit range "
+            CHECK(sim_m_dx == 900 && sim_m_dy == 360,
+                  "8f: diagonal 16-bit move gave dx %d dy %d (want 900, "
+                  "360 with the r39 gain x3 - beyond the 8-bit range "
                   "entirely)", sim_m_dx, sim_m_dy);
 
             /* wheel -2 */
@@ -1223,8 +1223,8 @@ static void test_layout_parser(void)
             t8_pump(c, 1);
             CHECK(sim_m_btn == 2, "8f: layout buttons got %u want 2",
                   (u32)sim_m_btn);
-            printf("  8f 16-bit mouse end-to-end (r38 gain x2): left(-10,"
-                   "0) down(0,-12) diag(600,240) wheel -2 foreign-ID "
+            printf("  8f 16-bit mouse end-to-end (r39 gain x3): left(-15,"
+                   "0) down(0,-18) diag(900,360) wheel -2 foreign-ID "
                    "dropped btn 2\n");
         }
     }
@@ -1627,6 +1627,163 @@ static void test_direction_matrix(void)
            "shrinks; shift+a -> 'A'; release -> breaks only\n");
 }
 
+/* ------------- T11 (r39): HID usage -> scancode translation table ------
+ * Field findings this pins down: the physical Delete key emitted End
+ * (the nav block 0x4A-0x4D sat one usage off from the HID table: 0x49
+ * Ins, 0x4A Home, 0x4B PgUp, 0x4C Del, 0x4D End, 0x4E PgDn), so
+ * Ctrl+Alt+Del never fired and Home silently ate text; F11 mapped to
+ * the NumLock byte through a wrong range formula; and NumLock,
+ * ScrollLock, Pause, PrintScreen plus the whole keypad were unmapped
+ * dead keys. */
+static void test_hid_table(void)
+{
+    static const struct { u8 usage, sc; const char *name; } v[] = {
+        { 0x04, 0x1E, "a" }, { 0x1D, 0x2C, "z" },
+        { 0x1E, 0x02, "digit 1" }, { 0x27, 0x0B, "digit 0" },
+        { 0x28, 0x1C, "enter" }, { 0x29, 0x01, "esc" },
+        { 0x2A, 0x0E, "backspace" }, { 0x2B, 0x0F, "tab" },
+        { 0x2C, 0x39, "space" }, { 0x39, 0x3A, "caps lock" },
+        { 0x3A, 0x3B, "F1" }, { 0x43, 0x44, "F10" },
+        { 0x44, 0x57, "F11 (r39: old math returned 0x45=NumLock)" },
+        { 0x45, 0x58, "F12" },
+        { 0x46, 0x54, "print screen (r39: was dead)" },
+        { 0x47, 0x46, "scroll lock (r39: was dead)" },
+        { 0x48, 0, "pause (not NumLock)" },
+        { 0x49, 0x52, "insert" },
+        { 0x4A, 0x47, "home (r39: was DELETE scancode - ate text)" },
+        { 0x4B, 0x49, "page up (r39: was home)" },
+        { 0x4C, 0x53, "delete (r39: was END - Ctrl+Alt+Del was dead)" },
+        { 0x4D, 0x4F, "end (r39: was page up)" },
+        { 0x4E, 0x51, "page down" },
+        { 0x4F, 0x4D, "right arrow" }, { 0x50, 0x4B, "left arrow" },
+        { 0x51, 0x50, "down arrow" }, { 0x52, 0x48, "up arrow" },
+        { 0x53, 0x45, "num lock (r39: was dead)" },
+        { 0x54, 0x35, "keypad / (r39: was dead)" },
+        { 0x55, 0x37, "keypad * (r39: was dead)" },
+        { 0x56, 0x4A, "keypad - (r39: was dead)" },
+        { 0x57, 0x4E, "keypad + (r39: was dead)" },
+        { 0x58, 0x1C, "keypad enter (r39: was dead)" },
+    };
+    for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); i++) {
+        u8 got = hid_make(v[i].usage);
+        CHECK(got == v[i].sc, "T11: %s: usage %02X -> %02X, want %02X",
+              v[i].name, (u32)v[i].usage, (u32)got, (u32)v[i].sc);
+    }
+
+    /* keypad with NumLock ON (driver default): digit-row scancodes */
+    CHECK(hid_make(0x59) == 0x02, "T11: KP1 -> '1' 0x02, got %02X",
+          (u32)hid_make(0x59));
+    CHECK(hid_make(0x61) == 0x0A, "T11: KP9 -> '9' 0x0A, got %02X",
+          (u32)hid_make(0x61));
+    CHECK(hid_make(0x62) == 0x0B, "T11: KP0 -> '0' 0x0B, got %02X",
+          (u32)hid_make(0x62));
+    CHECK(hid_make(0x63) == 0x34, "T11: KP. -> '.' 0x34, got %02X",
+          (u32)hid_make(0x63));
+
+    /* end-to-end through the real diff/inject path: a report carrying
+     * NumLock (usage 0x53) must produce a KEY_NUM press and flip the
+     * keypad translation to nav mode; release must NOT toggle again */
+    u8 pk[6] = {0}, pm = 0;
+    u8 keys[6] = { 0x53, 0, 0, 0, 0, 0 };
+    sim_kbd_reports = 0; sim_k_code = 0; sim_k_pressed = 9;
+    kbd_inject_hid(0, keys, pk, &pm);
+    drain_input();
+    CHECK(sim_kbd_reports == 1 && sim_k_code == KEY_NUM &&
+          sim_k_pressed == 1,
+          "T11: NumLock press emitted %ld event(s) code %u pressed %u "
+          "(want 1, KEY_NUM, 1)", sim_kbd_reports, (u32)sim_k_code,
+          (u32)sim_k_pressed);
+    CHECK(num_on == 0, "T11: NumLock press did not flip num_on");
+    CHECK(hid_make(0x59) == 0x4F, "T11: NumLock off: KP1 -> End, got %02X",
+          (u32)hid_make(0x59));
+    CHECK(hid_make(0x60) == 0x48, "T11: NumLock off: KP8 -> Up, got %02X",
+          (u32)hid_make(0x60));
+    CHECK(hid_make(0x5D) == 0x00, "T11: NumLock off: KP5 -> none, got %02X",
+          (u32)hid_make(0x5D));
+    keys[0] = 0;
+    kbd_inject_hid(0, keys, pk, &pm);   /* release edge */
+    drain_input();
+    CHECK(num_on == 0,
+          "T11: NumLock RELEASE toggled again (must be press-edge only)");
+    num_on = 1;                          /* restore driver default */
+
+    /* Delete end-to-end: usage 0x4C must reach the WM as KEY_DELETE -
+     * the exact event the Ctrl+Alt+Del handler waits for */
+    keys[0] = 0x4C;
+    sim_kbd_reports = 0; sim_k_code = 0;
+    kbd_inject_hid(0, keys, pk, &pm);
+    drain_input();
+    CHECK(sim_kbd_reports == 1 && sim_k_code == KEY_DELETE,
+          "T11: Delete press emitted code %u (want KEY_DELETE - the "
+          "Ctrl+Alt+Del path)", (u32)sim_k_code);
+    keys[0] = 0;
+    kbd_inject_hid(0, keys, pk, &pm);
+    drain_input();
+
+    printf("  T11 hid_make: %u table vectors + NumLock toggle/keypad "
+           "modes + Delete -> KEY_DELETE all correct\n",
+           (u32)(sizeof(v) / sizeof(v[0])));
+}
+
+/* Idle HID must never trigger synchronous hub probing/reset. */
+static void test_idle_dispatch(void)
+{
+    memset(devs, 0, sizeof(devs));
+    ncons = 0;
+    pending_portc = 0;
+    have_xhci = 1;
+    devs[1].used = 1; devs[1].slot = 1;
+    devs[1].is_hub = 1; devs[1].hub_ports = 1;
+    devs[1].ep0 = palloc(4096); devs[1].ep0_cycle = 1;
+    devs[2].used = 1; devs[2].nhid = 1;
+    devs[2].hid[0].active = 1;
+    input_guard_armed = 1; input_last_tick = 1;
+    for (int i = 0; i < 10; i++) {
+        tick_count += 1000;
+        u64 before = tick_count;
+        usb_poll();
+        CHECK(tick_count == before && devs[1].ep0_idx == 0,
+              "T12: idle HID entered blocking hub control path");
+        if (tick_count != before) return;
+    }
+    /* Repeated character with releases and long idle gaps. */
+    u8 prev[6] = {0}, mod = 0, keys[6] = {4,0,0,0,0,0};
+    struct key_event ke;
+    drain_input();
+    for (int i = 0; i < 20; i++) {
+        kbd_inject_hid(0, keys, prev, &mod);
+        CHECK(kbd_poll(&ke) && ke.pressed && ke.keycode == 'a',
+              "T12: repeated a missing at %d", i);
+        u8 up[6] = {0}; kbd_inject_hid(0, up, prev, &mod);
+        tick_count += 1000; usb_poll();
+    }
+    /* Stationary presses/releases need no movement event. */
+    struct mouse_event me;
+    mouse_apply(0,0,0,0); drain_input();
+    for (int i = 0; i < 20; i++) {
+        mouse_apply(1,0,0,0);
+        CHECK(mouse_poll(&me) && me.type == MEV_BUTTON && me.down,
+              "T12: stationary press missing");
+        mouse_apply(0,0,0,0);
+        CHECK(mouse_poll(&me) && me.type == MEV_BUTTON && !me.down,
+              "T12: stationary release missing");
+    }
+    printf("  T12 idle HID: no hub controls; repeated a and stationary clicks pass\n");
+}
+
+static void test_control_event_isolation(void)
+{
+    cc_code = 0xFF; cc_slot = 0;
+    sim_post_event(2, 3, 1, 0, 0); proc_events();
+    CHECK(cc_slot == 0 && cc_code == 0xFF,
+          "T13: interrupt report falsely completed control transfer");
+    sim_post_event(2, 1, 1, 0, 0);
+    sim_post_event(2, 3, 13, 0, 0); proc_events();
+    CHECK(cc_slot == 0x10102 && cc_code == 1,
+          "T13: interrupt report overwrote EP0 completion in same batch");
+    printf("  T13 EP0 completion isolated from interrupt reports\n");
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -1653,6 +1810,11 @@ int main(int argc, char **argv)
     test_acpi_s5();
     printf("usb_sim: r35 direction matrix through real mouse.c/kbd.c...\n");
     test_direction_matrix();
+    printf("usb_sim: r39 HID usage -> scancode table (Delete/F11/NumLock/"
+           "keypad fixes)...\n");
+    test_hid_table();
+    test_idle_dispatch();
+    test_control_event_isolation();
     if (failures) {
         printf("USB SIM: %d FAILURE(S)\n", failures);
         return 1;

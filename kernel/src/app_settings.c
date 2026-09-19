@@ -20,8 +20,10 @@ static void st_pref_rect(int id, int sy, int *x, int *y, int *w, int *h)
     int row = (id < 2) ? 0 : (id < 4 ? 1 : 2);
     *y = sy + 22 + row * 30;
     if (id == 0 || id == 2) { *x = 210; *w = 24; *h = 20; }
-    else if (id == 1 || id == 3) { *x = 290; *w = 24; *h = 20; }
-    else { *x = 16; *w = 170; *h = 24; *y = sy + 84; }
+    else if (id == 1 || id == 3) { *x = 326; *w = 24; *h = 20; }
+    /* r39: 190 px - "Restore desktop icons" is 21 chars * 8 px + 20 px
+     * padding; the old 170 let the label overflow the button edge */
+    else { *x = 16; *w = 190; *h = 24; *y = sy + 84; }
 }
 
 
@@ -32,6 +34,7 @@ static void st_open(struct window *w, void *arg)
     if (!ui) return;             /* OOM: wm_open_app reports it centrally */
     ui->hover_tile = -1;
     ui->hover_reset = -1;
+    ui->hover_pref = -1;
     w->data = ui;
     wm_track_mem(w, (int)sizeof(*ui));
 }
@@ -75,7 +78,7 @@ static void st_paint(struct window *w)
 
     int sy, ry_ignored;
     st_layout(s, &sy, &ry_ignored);
-    s_text(s, 16, sy, "Mouse && Desktop", t->main);
+    s_text(s, 16, sy, "Mouse & Desktop", t->main);
     const struct prefs *pf = prefs_get();
     char val[24];
     s_text(s, 16, sy + 26, "Mouse speed:", t->text);
@@ -125,8 +128,10 @@ static void st_paint(struct window *w)
     s_text(s, 26, ry + 5, "Factory Reset", ui->hover_reset == 1 ? t->title_text : t->main);
     {
         u32 bg2 = ui->hover_reset == 2 ? t->main : 0x333333;
-        s_fill(s, 160, ry, 200, 26, bg2);
-        s_frame_rect(s, 160, ry, 200, 26, t->main);
+        /* r39: 268 px - the 30-char label at 8 px/char + 24 px padding;
+         * the old 200 px button let text run 52 px past its border */
+        s_fill(s, 160, ry, 268, 26, bg2);
+        s_frame_rect(s, 160, ry, 268, 26, t->main);
         s_text(s, 172, ry + 5, "System diagnostics (full scan)",
                ui->hover_reset == 2 ? t->title_text : t->main);
     }
@@ -178,7 +183,7 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
         if (x >= hx && y >= hy && x < hx + hw && y < hy + hh) ui->hover_pref = id;
     }
     if (x >= 16 && y >= ry && x < 146 && y < ry + 26) ui->hover_reset = 1;
-    if (x >= 160 && y >= ry && x < 360 && y < ry + 26) ui->hover_reset = 2;
+    if (x >= 160 && y >= ry && x < 428 && y < ry + 26) ui->hover_reset = 2;
     if (oldt != ui->hover_tile || oldr != ui->hover_reset ||
         oldp != ui->hover_pref) wm_redraw(w);
 
@@ -223,7 +228,7 @@ static void st_key(struct window *w, struct key_event *e) { (void)w; (void)e; }
 
 struct app app_settings = {
     .uses_data = 1, .id = "settings", .title = "Settings", .icon = ICON_SETTINGS, .single = 0,
-    .def_w = 620, .def_h = 600, .min_w = 430, .min_h = 580,
+    .def_w = 620, .def_h = 600, .min_w = 560, .min_h = 580,
     .open = st_open, .paint = st_paint, .key = st_key,
     .mouse = st_mouse, .close = st_close,
 };
