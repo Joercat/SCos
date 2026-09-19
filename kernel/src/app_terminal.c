@@ -19,6 +19,7 @@
 #define TAB_BTN_W 74
 
 struct term {
+    struct shell_confirm confirmation;
     char lines[TERM_LINES][TERM_LINE];
     int nlines;
     int scroll;              /* first visible line */
@@ -101,6 +102,8 @@ static void term_type(struct term *t, const char *s)    /* typewriter */
     t->pend_shown = 0;
     t->pending_active = 1;
 }
+
+static void trace_term_emit(const char *line, void *ctx) { term_print(ctx, line); }
 
 /* r39: bounded, ALWAYS-terminated copy into neofetch's info[] lines.
  * strncpy(dst, src, 40) leaves dst unterminated when src >= 40 chars -
@@ -209,7 +212,9 @@ static const char *help_text =
     "alias     - Create command aliases\n"
     "history   - Show command history\n"
     "save      - Write the filesystem image to disk\n"
-    "shutdown  - Power the machine off\n"
+    "inputtrace start|stop|show|save - bounded USB report recorder\n"
+    "kill --system <pid> - confirmed stop (scwm only)\n"
+    "shutdown [--confirm] - Power the machine off\n"
     "reboot    - Restart the machine\n"
     "panic     - Trigger a kernel panic screen (for inspection)\n";
 
@@ -248,6 +253,13 @@ static void run_command(struct term *t, const char *command)
     strncpy(cmdbuf, command, sizeof(cmdbuf) - 1);
     cmdbuf[sizeof(cmdbuf) - 1] = 0;
 
+    int confirmed = t->confirmation.command[0] != 0;
+    char confirmation_message[192];
+    if (confirmed && confirm_command(&t->confirmation, cmdbuf, sizeof(cmdbuf), confirmation_message)) {
+        term_print(t, confirmation_message);
+        return;
+    }
+
     char prompt[160];
     prompt_str(t, prompt);
     char echo[TERM_LINE + 160];
@@ -272,7 +284,7 @@ static void run_command(struct term *t, const char *command)
     int i = 0;
     while (sp[i] && sp[i] != ' ' && i < 63) { first[i] = sp[i]; i++; }
     first[i] = 0;
-    for (int a = 0; a < t->nalias; a++)
+    for (int a = 0; !confirmed && a < t->nalias; a++)
         if (!strcmp(t->aliases[a][0], first)) {
             char rest[TERM_LINE];
             strcpy(rest, sp + i);
@@ -281,6 +293,9 @@ static void run_command(struct term *t, const char *command)
             break;
         }
 
+    if (!confirmed && confirm_command(&t->confirmation,effective,sizeof(effective),confirmation_message)) {
+        term_print(t,confirmation_message); return;
+    }
     /* tokenize (naive, space separated like the web version) */
     char *args[24];
     int nargs = 0;
@@ -605,13 +620,16 @@ static void run_command(struct term *t, const char *command)
         }
     }
     else if (!strcmp(cmd, "rm")) {
-        int force = 0;
+        int force = 0, invalid = 0;
         const char *target = NULL;
         for (int j = 1; j < nargs; j++) {
             if (!strcmp(args[j], "-s") || !strcmp(args[j], "-f")) force = 1;
+            else if (!strcmp(args[j], "-i")) { }
+            else if (args[j][0]=='-' || target) invalid=1;
             else target = args[j];
         }
-        if (!target) strcpy(response, "Error: No file or directory specified. (rm [-s] <path>)");
+        if (invalid) strcpy(response,"Usage: rm [-i] [-s|-f] <path>; -s/-f allow system files and always confirm.");
+        else if (!target) strcpy(response, "Error: No file or directory specified. (rm [-s] <path>)");
         else {
             char path[256];
             resolve_path(t, target, path);
@@ -767,11 +785,17 @@ static void run_command(struct term *t, const char *command)
                          "to the desktop");
     }
     else if (!strcmp(cmd, "shutdown")) {
+        if (nargs > 1 && (nargs != 2 || strcmp(args[1],"--confirm"))) {
+            term_print(t,"Usage: shutdown [--confirm]"); return;
+        }
         term_print(t, "Shutting down SCos... Goodbye!");
         t->shutting_down = 1;
         return;
     }
     else if (!strcmp(cmd, "reboot")) {
+        if (nargs > 1 && (nargs != 2 || strcmp(args[1],"--confirm"))) {
+            term_print(t,"Usage: reboot [--confirm]"); return;
+        }
         term_print(t, "Rebooting SCos... Please wait.");
         t->shutting_down = 2;
         return;
@@ -1179,10 +1203,22 @@ static void run_command(struct term *t, const char *command)
             strcat(response, "(more windows - see sysmon)\n");
         response[strlen(response) - 1] = 0;
     }
+    else if (!strcmp(cmd, "inputtrace")) {
+        usb_inputtrace(nargs == 1 ? "show" : nargs == 2 ? args[1] : "--help", trace_term_emit, t);
+        return;
+    }
     else if (!strcmp(cmd, "kill")) {
-        if (nargs < 2) strcpy(response, "Usage: kill <pid>  (see 'procs')");
+        int pid = -1;
+        int system = nargs == 3 && !strcmp(args[1], "--system");
+        if (nargs == 2 && !strcmp(args[1], "--help"))
+            strcpy(response,"kill <pid> | kill --system <pid> (always asks y/n). Only scwm (2) supports a real system stop.");
+        else if ((!system && nargs != 2) || !parse_pid(args[system ? 2 : 1], &pid))
+            strcpy(response,"Usage: kill <pid> | kill --system <pid>; PID must be decimal.");
+        else if (system) {
+            if (pid == 2) { wm_stop_requested = 1; strcpy(response,"Stopping scwm; returning to the base console. 'wm' restarts it."); }
+            else strcpy(response,"This subsystem has no independent stop operation; nothing was terminated.");
+        }
         else {
-            int pid = (int)str_to_u32(args[1]);
             if (pid >= 0 && pid < proc_sys_count()) {
                 strcpy(response, "cannot kill system task ");
                 strcat(response, proc_sys_name(pid));
@@ -1556,6 +1592,10 @@ static void term_key(struct window *w, struct key_event *e)
     if (WT(w)->edit_mode) { ed_key(w, e); return; }
     struct term *t = WT(w);
     if (!e->pressed) return;
+    if (t->confirmation.command[0] && (e->keycode == 3 || e->keycode == 27)) {
+        t->confirmation.command[0]=0; t->input[0]=0; t->ipos=0;
+        term_print(t,"Cancelled."); wm_redraw(w); return;
+    }
     /* tab shortcuts (before line editing swallows the keys) */
     if (e->ctrl) {
         struct termwin *tw = TW(w);

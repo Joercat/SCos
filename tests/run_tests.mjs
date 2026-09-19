@@ -244,7 +244,7 @@ test(10, "shutdown falls back to power-off screen (no ACPI in v86)", async (stat
     const p = ICON_POS(ICON.terminal);
     await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 700, 450);
-    await state.type("shutdown\n"); await sleep(3000);
+    await state.type("shutdown\ny\n"); await sleep(3000);
     shot(state, "31_poweroff");
     const c = px(state, 512, 100);
     if (c[0] > 40 || c[1] > 40 || c[2] > 40) throw new Error("power-off screen not black at top");
@@ -255,7 +255,7 @@ test(11, "reboot returns to bootloader", async (state) => {
     const p = ICON_POS(ICON.terminal);
     await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     const w = win_pos(1, 700, 450);
-    await state.type("reboot\n"); await sleep(4000);
+    await state.type("reboot\ny\n"); await sleep(4000);
     const n = state.serial.split("[s2] stage2 alive").length - 1;
     if (n < 2) throw new Error("no second boot after reboot (s2 count=" + n + ")");
 });
@@ -269,7 +269,7 @@ test(12, "ATA persistence: save survives reboot", async (state) => {
     await state.type("touch documents/persist.txt\n"); await sleep(400);
     await state.type("save\n"); await sleep(1500);
     shot(state, "32_saved_to_disk");
-    await state.type("reboot\n"); await sleep(6000);          /* second boot */
+    await state.type("reboot\ny\n"); await sleep(6000);          /* second boot */
     state.cursor.x = 512; state.cursor.y = 384;               /* guest cursor resets on boot */
     await state.click(p.x, p.y); await sleep(120); await state.click(p.x, p.y); await sleep(700);
     w = win_pos(1, 700, 450);
@@ -745,6 +745,37 @@ test(29, "r39: idle input and terminal underline cursor", async (state) => {
     for (let i=0; i<8; i++)
         if (px(state, x+i, y).join() !== color.join())
             throw new Error("cursor is not a full-width underline cell");
+});
+
+test(30, "r40: shared confirmations, alias safety, capture and real WM stop", async (state) => {
+    const { execSync } = await import("node:child_process");
+    const p = ICON_POS(ICON.terminal);
+    await state.click(p.x,p.y); await sleep(120); await state.click(p.x,p.y); await sleep(700);
+    const w=win_pos(1,700,450);
+    function dump(name, tty=false) {
+        shot(state,name);
+        return execSync(`python3 tools/term_dump.py ${OUT}${name}.ppm ${tty?6:w.x+7} ${tty?4:w.y+TITLEBAR+26} ${tty?96:86} ${tty?42:23}`).toString();
+    }
+    await state.type("alias stopwm kill\nstopwm --system 2\n"); await sleep(700);
+    if (!dump("75_confirm").includes("[y/N]")) throw new Error("system kill alias bypassed confirmation");
+    await state.type("maybe\n"); await sleep(400);
+    if (!dump("76_invalid_answer").includes("Please answer y or n")) throw new Error("invalid answer accepted");
+    await state.type("n\n"); await sleep(400);
+    if (!dump("77_cancel").includes("Cancelled.")) throw new Error("N did not cancel");
+    await state.type("inputtrace start\ninputtrace stop\ninputtrace save\n"); await sleep(1000);
+    if (!dump("78_trace_saved").includes("Saved /home/inputtrace.txt")) throw new Error("capture not persisted");
+    await state.type("kill bogus\n"); await sleep(400);
+    if (!dump("79_bad_pid").includes("PID must be decimal")) throw new Error("bad PID accepted");
+    await state.type("kill --system 2\ny\n"); await sleep(1200);
+    if (!dump("80_system_stopped",true).includes("WINDOW MANAGER HAS EXITED")) throw new Error("WM service did not actually stop");
+    await state.type("wm\n"); await sleep(1200);
+    if (!(await live(state))) throw new Error("WM could not be restarted");
+    if (!dump("82_wm_restart").includes("Stopping scwm"))
+        throw new Error("WM restarted but did not restore its terminal scene");
+    await state.type("tty\n"); await sleep(900);
+    await state.type("kill --system 2\nn\nshutdown\nn\n"); await sleep(800);
+    if (!dump("81_tty_confirm",true).includes("Cancelled.")) throw new Error("TTY confirmation failed");
+    await state.type("wm\n"); await sleep(600);
 });
 
 /* ------------------------------------------------------------- runner ---- */

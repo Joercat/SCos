@@ -207,6 +207,10 @@ void fmt_u32(char *o, u32 v) { sprintf(o, "%u", v); }
 void sleep_ms(u32 ms) { tick_count += (ms + 9) / 10; }
 const char *ata_model(void) { return NULL; }
 
+int vfs_write(const char *path, const char *data, u32 len) { (void)path;(void)data;(void)len;return 0; }
+int fs_image_save(void) { return 0; }
+void pfree(void *p, u32 n) { (void)p; (void)n; }
+
 /* ------------------------------------------------- mini xHC simulator -- */
 static u32 fake_op[512], fake_db[256], fake_rt[64], fake_cap[256];
 static u64 fake_dcbaa[16];
@@ -590,12 +594,16 @@ static void test_interrupt_rings(void)
      * cycle bit at the link and input died permanently after ~14
      * reports.  Events flow through the REAL proc_events re-arm path,
      * and (r35) through the REAL mouse.c/kbd.c queues. */
+    trace_active = 1; trace_count = 0;
     for (int i = 0; i < 500; i++) {
         sim_consume_td(ck);
         sim_consume_td(cm);
         proc_events();
         drain_input();
     }
+    trace_active = 0;
+    CHECK(trace_count == 1000 && input_trace[(trace_count-1)%TRACE_N].sequence == 1000,
+          "flight recorder did not wrap/preserve the latest report");
     /* the kbd sends the SAME report 500 times: kbd_inject_hid diffs
      * against prev, so exactly one 'a' make event is correct - the ring
      * proof is the TD/event counts below, the content proof is the 'a' */
@@ -1784,6 +1792,77 @@ static void test_control_event_isolation(void)
     printf("  T13 EP0 completion isolated from interrupt reports\n");
 }
 
+/* Split controls may use independent IDs that also collide modulo 8. */
+static void test_split_reports(void)
+{
+    static const u8 mouse_desc[] = {
+        0x05,1, 0x85,1, 0x09,0x30, 0x09,0x31, 0x75,8, 0x95,2, 0x81,6,
+        0x85,9, 0x05,9, 0x19,1, 0x29,3, 0x75,1, 0x95,3, 0x81,2,
+        0x75,5, 0x95,1, 0x81,1,
+        0xA4, /* save globals incl ID9 */
+        0x85,17, 0x05,1, 0x09,0x38, 0x75,8, 0x95,1, 0x81,6,
+        0xB4, /* restore ID9, size5/count1 */
+        0x85,1, 0x91,1 /* same ID, output: MUST NOT erase 16 input bits */
+    };
+    struct hid_ep h; memset(&h,0,sizeof(h)); h.kind=2;
+    h.nlayouts=hid_parse_layouts(mouse_desc,sizeof(mouse_desc),2,h.layouts,8);
+    CHECK(h.nlayouts==3,"T14: split mouse parsed %u layouts, need 3",h.nlayouts);
+    CHECK(h.layouts[0].rid==1 && h.layouts[0].rpt_bits==16 && h.layouts[1].rid==9 && h.layouts[2].rid==17,
+          "T14: report ID alias/revisit corrupted layouts");
+    h.lay=h.layouts[0];
+    mouse_apply(0,0,0,0); drain_input();
+    u8 down[]={9,1}, up[]={9,0}, wheel[]={17,1}, move[]={1,5,6};
+    struct mouse_event e;
+    CHECK(hid_inject_layout(&h,down,sizeof(down),1,3) && mouse_poll(&e) && e.type==MEV_BUTTON && e.down,
+          "T14: stationary button-only report lost");
+    for(int i=0;i<20;i++) {
+        CHECK(hid_inject_layout(&h,wheel,sizeof(wheel),1,3) && mouse_poll(&e) && e.type==MEV_WHEEL && e.wheel==1,
+              "T14: isolated wheel tick %d lost",i);
+        CHECK(!mouse_poll(&e),"T14: wheel-only report synthesized a release");
+    }
+    CHECK(hid_inject_layout(&h,move,sizeof(move),1,3) && mouse_poll(&e) && e.type==MEV_MOVE && e.buttons==1,
+          "T14: movement lost held-button state");
+    CHECK(hid_inject_layout(&h,up,sizeof(up),1,3) && mouse_poll(&e) && e.type==MEV_BUTTON && !e.down,
+          "T14: independent release lost");
+    static const u8 kdesc[]={
+        0x05,7, 0x85,1, 0x19,0xE0, 0x29,0xE7, 0x75,1, 0x95,8, 0x81,2,
+        0x85,9, 0x19,0, 0x29,0x65, 0x75,8, 0x95,6, 0x81,0
+    };
+    memset(&h,0,sizeof(h)); h.kind=1;
+    h.nlayouts=hid_parse_layouts(kdesc,sizeof(kdesc),1,h.layouts,8); h.lay=h.layouts[0];
+    CHECK(h.nlayouts==2,"T14: split keyboard layouts missing");
+    u8 shift[]={1,2}, keys[]={9,4,0,0,0,0,0}, release[]={9,0,0,0,0,0,0};
+    hid_inject_layout(&h,shift,2,1,3); drain_input();
+    struct key_event ke;
+    for(int i=0;i<20;i++) {
+        CHECK(hid_inject_layout(&h,keys,7,1,3) && kbd_poll(&ke) && ke.pressed && ke.keycode=='A',
+              "T14: split modifiers/repeated key missing %d",i);
+        hid_inject_layout(&h,release,7,1,3); drain_input();
+    }
+    shift[1]=0; hid_inject_layout(&h,shift,2,1,3); drain_input();
+    keys[1]=0x53;
+    CHECK(hid_inject_layout(&h,keys,7,1,3) && kbd_poll(&ke) && ke.keycode==KEY_NUM && ke.pressed,
+          "T14: NumLock on alternate report ID lost");
+    hid_inject_layout(&h,release,7,1,3); drain_input(); num_on=1;
+    static const u8 pushed[]={
+        0x05,1,0x85,1,0x75,8,0x95,1,0x09,0x30,0x81,6,
+        0xA4,0x85,9,0x05,9,0x75,1,0x95,3,0x19,1,0x81,2,
+        0xB4,0x09,0x31,0x81,6
+    };
+    struct hid_layout maps[8];
+    CHECK(hid_parse_layouts(pushed,sizeof(pushed),2,maps,8)==2 &&
+          maps[0].rid==1 && maps[0].y_off==8 && maps[0].y_sz==8 && maps[0].rpt_bits==16,
+          "T14: Push/Pop did not restore page, count, size and ID");
+    static const u8 bitmap[]={0x05,7,0x85,3,0x19,4,0x29,11,0x75,1,0x95,8,0x81,2};
+    memset(&h,0,sizeof(h)); h.kind=1;
+    h.nlayouts=hid_parse_layouts(bitmap,sizeof(bitmap),1,h.layouts,8);h.lay=h.layouts[0];
+    u8 bitmap_key[]={3,1};
+    CHECK(hid_inject_layout(&h,bitmap_key,2,1,3) && kbd_poll(&ke) && ke.keycode=='a',
+          "T14: nonzero Usage Minimum bitmap interpreted as modifiers");
+    bitmap_key[1]=0;hid_inject_layout(&h,bitmap_key,2,1,3);drain_input();
+    printf("  T14 split report IDs: stationary clicks, all 20 wheel ticks, repeated keys and NumLock PASS\n");
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -1815,6 +1894,7 @@ int main(int argc, char **argv)
     test_hid_table();
     test_idle_dispatch();
     test_control_event_isolation();
+    test_split_reports();
     if (failures) {
         printf("USB SIM: %d FAILURE(S)\n", failures);
         return 1;

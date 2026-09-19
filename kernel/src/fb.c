@@ -1,5 +1,6 @@
 /* SCos native - framebuffer: back buffer + 2D primitives + bitmap font text */
 #include "scos.h"
+#include "mtrr_plan.h"
 
 struct surface screen;
 int screen_w, screen_h;
@@ -20,52 +21,66 @@ static void wrmsr_l(u32 msr, u64 v)
     __asm__ volatile("wrmsr" : : "c"(msr), "a"((u32)v), "d"((u32)(v >> 32)));
 }
 
-/* r34 PERF ROOT FIX: on real hardware the VBE linear framebuffer is
- * UNCACHED memory - every composite flip becomes millions of separate
- * bus transactions (a 1080p flip can take half a second or worse), so a
- * window drag queues seconds of flip backlog: "small move locks the
- * screen 5-10 s".  v86 can never show this because its LFB is plain RAM.
- * Mapping the LFB range as write-combining via a variable MTRR (the
- * classic framebuffer fix, exactly what BIOSes do for GPU BARs they know
- * about) turns the same stores into burst writes: ms instead of s. */
+/* MTRR updates run during boot on the sole executing CPU, before paging
+ * or application processors are enabled. Preserve firmware ranges/settings;
+ * only unused variable pairs can cover exact framebuffer pages. */
 static void fb_set_wc(u32 base, u32 bytes)
 {
-    /* CPUID.01H:EDX[12] = MTRR support.  Touching the MSRs without it
-     * (or on an emulator that fakes the bit but traps rdmsr) would #GP,
-     * so probe the feature first and degrade to "LFB stays uncached". */
-    u32 ax, bx, cx, dx;
-    __asm__ volatile("movl $1, %%eax; cpuid"
-                     : "=a"(ax), "=b"(bx), "=c"(cx), "=d"(dx));
-    if (!(dx & (1u << 12))) {
-        klog("fb: no MTRR support - LFB stays uncached (flips slow)");
-        return;
+    u32 ax,bx,cx,dx;
+    __asm__ volatile("cpuid" : "=a"(ax),"=b"(bx),"=c"(cx),"=d"(dx) : "a"(1),"c"(0));
+    if (!(dx & (1u<<12))) return;
+    u64 cap=rdmsr_l(0xFE), def=rdmsr_l(0x2FF);
+    if (!(cap & (1ull<<10)) || !(def & (1ull<<11))) {
+        klog("fb: WC unavailable or firmware disabled MTRRs; leaving cache policy unchanged"); return;
     }
-    u64 sz = 1u << 12;
-    while (sz < bytes) sz <<= 1;          /* variable MTRRs want pow2 */
-    u64 b = (u64)base & ~(sz - 1);
-    /* the pow2-aligned region must still COVER base..base+bytes */
-    while (b + sz < (u64)base + bytes && sz < (1ull << 40)) {
-        sz <<= 1;
-        b = (u64)base & ~(sz - 1);
+    unsigned bits=36;
+    __asm__ volatile("cpuid" : "=a"(ax),"=b"(bx),"=c"(cx),"=d"(dx) : "a"(0x80000000u),"c"(0));
+    if (ax>=0x80000008u) {
+        __asm__ volatile("cpuid" : "=a"(ax),"=b"(bx),"=c"(cx),"=d"(dx) : "a"(0x80000008u),"c"(0));
+        bits=ax&255;
     }
-    if (sz >= (1ull << 40)) {
-        klog("fb: LFB too large for one variable MTRR - stays uncached");
-        return;
+    if (bits<32 || bits>52 || (u64)base+bytes>0x100000000ull) return;
+    unsigned count=cap&255;
+    u32 pairs[16], planned=0, remaining=bytes, cursor=base;
+    u64 bases[16], masks[16];
+    u64 physmask=(1ull<<bits)-1, address_mask=physmask&~4095ull;
+    for (unsigned i=0;i<count && planned<16 && remaining>=4096;i++) {
+        if (rdmsr_l(0x201+2*i)&(1ull<<11)) continue;
+        u64 nb,nm; u32 covered;
+        if (!mtrr_wc_plan(cursor,remaining,bits,&nb,&nm,&covered)) break;
+        /* Avoid undefined combinations (e.g. WC overlapping firmware WB).
+         * Existing UC ranges are preserved rather than overridden. */
+        int conflict=0;
+        for (unsigned j=0;j<count;j++) {
+            u64 m=rdmsr_l(0x201+2*j);
+            if (!(m&(1ull<<11))) continue;
+            u64 b=rdmsr_l(0x200+2*j);
+            u64 lo=b&address_mask, size=(~(m&address_mask)&physmask)+1;
+            if ((u64)cursor<lo+size && lo<(u64)cursor+covered && (b&255)!=1) {
+                conflict=1; break;
+            }
+        }
+        if (conflict) { klog("fb: existing MTRR overlaps LFB; keeping firmware policy"); return; }
+        pairs[planned]=i; bases[planned]=nb; masks[planned++]=nm;
+        cursor+=covered; remaining-=covered;
     }
-    for (u32 i = 0; i < 8; i++) {
-        u64 m = rdmsr_l(0x201 + 2 * i);   /* MTRRphysMask(i) */
-        if (m & (1ull << 11)) continue;   /* valid bit: pair in use */
-        wrmsr_l(0x200 + 2 * i, b | 6ull); /* type 6 = write-combining */
-        wrmsr_l(0x201 + 2 * i,
-                (~(sz - 1) & 0x0000000FFFFFFFFFull) | (1ull << 11));
-        u64 d = rdmsr_l(0x2FF);           /* MTRRdefType */
-        if (!(d & (1ull << 10)))          /* MTRRenable */
-            wrmsr_l(0x2FF, d | (1ull << 10));
-        klog("fb: LFB %x +%u KB -> write-combining (MTRR%u) - flips are "
-             "now burst writes", (u32)b, (u32)(sz / 1024), i);
-        return;
+    if (!planned) { klog("fb: no spare MTRR pair; keeping firmware policy"); return; }
+    u32 flags,cr0;
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+    __asm__ volatile("mov %%cr0,%0" : "=r"(cr0));
+    u32 nofill=(cr0|(1u<<30))&~(1u<<29);
+    __asm__ volatile("mov %0,%%cr0; wbinvd" : : "r"(nofill) : "memory");
+    wrmsr_l(0x2FF,def&~(1ull<<11)); /* E is bit 11, not fixed-range bit 10 */
+    for (unsigned i=0;i<planned;i++) {
+        wrmsr_l(0x200+2*pairs[i],bases[i]);
+        wrmsr_l(0x201+2*pairs[i],masks[i]);
     }
-    klog("fb: no free variable MTRR - LFB stays uncached (flips slow)");
+    __asm__ volatile("wbinvd" : : : "memory");
+    wrmsr_l(0x2FF,def);
+    __asm__ volatile("mov %0,%%cr0" : : "r"(cr0) : "memory");
+    if (flags&(1u<<9)) irq_enable();
+    klog("fb: requested WC type 1 for %u KB of LFB (%u variable ranges)",
+         (bytes-remaining)/1024,planned);
 }
 
 void fb_init(void)

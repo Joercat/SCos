@@ -1682,8 +1682,12 @@ int is_v86_box(void)
     return m && strstr(m, "v86");
 }
 
+int wm_stop_requested;
+
 void wm_run(void)
 {
+    wm_stop_requested = 0;
+    wm_full(); /* Restart from the base console must replace its entire scene. */
     input_guard_armed = 1;
     cyc_ok = cpu_mhz() != 0;   /* r39: per-app CPU metering needs TSC */
 
@@ -1695,6 +1699,7 @@ void wm_run(void)
 
     klog("wm: entering main loop");
     for (;;) {
+        if (wm_stop_requested) return;
         irq_watchdog();
         if (err_pending()) err_show_pending();
         usb_poll();
@@ -1708,6 +1713,7 @@ void wm_run(void)
         }
         struct key_event ke;
         while (kbd_poll(&ke)) handle_key(&ke);
+        if (wm_stop_requested) return;
 
         static u64 last_tick;
         if (tick_count != last_tick) {

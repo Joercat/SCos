@@ -39,10 +39,13 @@ static u8 mouse_read(void)
     return inb(MOUSE_DATA);
 }
 
+u32 input_mouse_enqueued, input_mouse_dropped;
+
 static void mouse_enqueue(struct mouse_event *e)
 {
     int next = (q_head + 1) % QUEUE;
-    if (next == q_tail) return;
+    if (next == q_tail) { input_mouse_dropped++; return; }
+    input_mouse_enqueued++;
     queue[q_head] = *e;
     q_head = next;
 }

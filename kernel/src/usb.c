@@ -95,6 +95,7 @@ struct hid_layout {
     u16 y_off, y_sz;
     u16 w_off, w_sz;       /* wheel */
     u16 mod_off, mod_sz;   /* keyboard modifier bitmap */
+    u16 key_min;
     u16 key_off, key_sz, key_cnt;  /* key array (sz 8) or NKRO bitmap (sz 1) */
     u16 rpt_bits;          /* total input bits for this report ID */
 };
@@ -105,6 +106,11 @@ struct hid_layout {
  * the Razer presents boot-keyboard iface 0 + consumer-control ifaces).
  * Every boot interface gets its own interrupt ring and state. */
 struct hid_ep {
+    struct hid_layout layouts[8];
+    u8 nlayouts, selected_layout;
+    u8 report_buttons[8], report_modifiers[8], report_keys[8][6];
+    u8 report_descriptor[256];
+    u16 report_descriptor_len;
     int active;
     int iface;                /* bInterfaceNumber */
     int kind;                 /* 1 = boot keyboard, 2 = boot mouse */
@@ -198,6 +204,17 @@ static u32 ring_full_hits;  /* code-21 (Event Ring Full) sightings - 21 is
 static u32 restart_count;   /* xHC restarts after a halt */
 static u8 desc_buf[512];
 
+/* Manual, bounded flight recorder. Never performs I/O in the event path. */
+#define TRACE_N 128
+struct input_trace_record {
+    u32 tick, sequence;
+    u8 slot, ep, code, len, accepted, keys, mouse;
+    u8 bytes[64];
+};
+static struct input_trace_record input_trace[TRACE_N];
+static u32 trace_count, trace_key_drop_base, trace_mouse_drop_base;
+static int trace_active;
+
 static u64 now_ms(void) { return tick_count * 10; }
 #define PA(p) ((u32)(p))
 
@@ -226,6 +243,7 @@ static u32 hid_bits(const u8 *r, u32 rlen, u16 boff, u16 n)
 {
     u32 v = 0;
     if (!n) return 0;
+    if (n > 32) n = 32;
     for (u16 i = 0; i < n; i++) {
         u32 bit = (u32)boff + i;
         if ((bit >> 3) >= rlen) break;
@@ -251,15 +269,19 @@ static i32 hid_signed(u32 v, u16 n)
  * on one interface - the Holtek and Razer both do this) accumulate
  * correctly because the bit position keeps running; fields of other
  * usage pages simply map nothing. */
-int hid_parse_layout(const u8 *d, int len, int want_kind,
-                     struct hid_layout *out)
+static int hid_parse_layouts(const u8 *d, int len, int want_kind,
+                     struct hid_layout *out, int capacity)
 {
     struct hid_layout rs[8];
     u16 bitpos[8];
     memset(rs, 0, sizeof rs);
     memset(bitpos, 0, sizeof bitpos);
     u8 cur_id = 0, saw_rid = 0;
+    u8 ids[8] = {0}; int nids = 1, id7 = 0;
     u32 gsize = 0, gcount = 0, page = 0;
+    struct { u32 size, count, page; u8 id; int index; } stack[8];
+    int depth = 0;
+    u32 usage_min = 0;
     u32 usages[24];
     int nusage = 0;
     int p = 0;
@@ -277,26 +299,45 @@ int hid_parse_layout(const u8 *d, int len, int want_kind,
         for (u8 i = 0; i < bsz; i++)
             data |= (u32)d[p + 1 + i] << (8 * i);
         p += 1 + bsz;
-        int id7 = cur_id & 7;
         switch (pre & 0xFC) {
         case 0x04: page = data; break;                    /* Usage Page */
         case 0x08:                                        /* Usage */
             if (nusage < 24) usages[nusage++] = (page << 16) | data;
             break;
-        case 0x18: case 0x28: break;      /* Usage Min/Max: count-driven */
+        case 0x18: usage_min = data; break;
+        case 0x28: break;
+        case 0xA4: /* Global Push; report bit positions are not global state. */
+            if (depth == 8) return 0;
+            stack[depth].size=gsize; stack[depth].count=gcount;
+            stack[depth].page=page; stack[depth].id=cur_id; stack[depth].index=id7;
+            depth++; break;
+        case 0xB4:
+            if (!depth) return 0;
+            depth--; gsize=stack[depth].size; gcount=stack[depth].count;
+            page=stack[depth].page; cur_id=stack[depth].id; id7=stack[depth].index;
+            break;
+        case 0x90: case 0xB0: nusage=0; usage_min=0; break; /* Output/Feature */
         case 0x74: gsize = data; break;                   /* Report Size */
         case 0x94: gcount = data; break;                  /* Report Count */
         case 0x84:                                        /* Report ID */
+            if (!data || data > 255) return 0;
             cur_id = (u8)data;
             saw_rid = 1;
-            bitpos[data & 7] = 0;
-            rs[data & 7].rid = cur_id;
+            for (id7 = 0; id7 < nids; id7++) if (ids[id7] == cur_id) break;
+            if (id7 == nids) {
+                if (nids == 8 || !cur_id || data > 255) return 0;
+                ids[nids++] = cur_id;
+            }
+            /* Revisiting an ID continues its input offset; Output items
+             * and another ID never reset already parsed Input fields. */
+            rs[id7].rid = cur_id;
             nusage = 0;
             break;
-        case 0xA0: case 0xC0: nusage = 0; break;  /* Collection / End */
+        case 0xA0: case 0xC0: nusage = 0; usage_min = 0; break;  /* Collection / End */
         case 0x80: {                                      /* Input */
             struct hid_layout *L = &rs[id7];
             u16 bp = bitpos[id7];
+            if (gsize > 32 || (gsize && gcount > (512u-bp)/gsize)) return 0;
             int constant = (int)(data & 1);
             if (!constant && gsize && gcount) {
                 if (page == 0x01) {           /* Generic Desktop */
@@ -314,42 +355,47 @@ int hid_parse_layout(const u8 *d, int len, int want_kind,
                         L->btn_cnt = (u16)(gsize * gcount);
                     }
                 } else if (page == 0x07) {    /* Keyboard */
-                    if (gsize == 1 && gcount >= 8 && !L->mod_sz) {
+                    if (gsize == 1 && gcount == 8 && usage_min == 0xE0 && !L->mod_sz) {
                         L->mod_off = bp; L->mod_sz = (u16)gcount;
                     } else if (gsize == 8 && !L->key_cnt) {
                         L->key_off = bp; L->key_sz = 8; L->key_cnt = (u16)gcount;
                     } else if (gsize == 1 && !L->key_cnt) {
                         /* NKRO bitmap: bit index == usage id */
-                        L->key_off = bp; L->key_sz = 1; L->key_cnt = (u16)gcount;
+                        L->key_off = bp; L->key_sz = 1; L->key_cnt = (u16)gcount; L->key_min = usage_min;
                     }
                 }
             }
             bitpos[id7] = (u16)(bp + gsize * gcount);
-            nusage = 0;
+            nusage = 0; usage_min = 0;
             break; }
         default: break;      /* Output/Feature/Push/Pop/strings: ignored */
         }
     }
-    for (int i = 0; i < 8; i++) {
+    int found = 0;
+    for (int i = 0; i < nids; i++) {
         struct hid_layout *L = &rs[i];
-        int hit = (want_kind == 2) ? (L->x_sz && L->y_sz)
+        int hit = (want_kind == 2) ? ((L->x_sz && L->y_sz) || L->btn_cnt || L->w_sz)
                                    : (L->key_cnt || L->mod_sz);
         if (!hit) continue;
         L->kind = (u8)want_kind;
         L->ok = 1;
         L->rpt_bits = bitpos[i];
         L->saw_rid = saw_rid;
-        *out = *L;
-        return 1;
+        if (found < capacity) out[found++] = *L;
     }
-    return 0;
+    return found;
+}
+
+int hid_parse_layout(const u8 *d, int len, int kind, struct hid_layout *out)
+{
+    return hid_parse_layouts(d,len,kind,out,1);
 }
 
 /* Inject one report through the parsed field map (report protocol).
  * Returns 0 when a DIFFERENT Report ID arrived on a shared interrupt EP
  * (consumer-control traffic on the mouse/keyboard interface) - dropped,
  * never misparsed as axes or keys. */
-static int hid_inject_layout(struct hid_ep *h, const u8 *r, u32 len,
+static int hid_inject_one(struct hid_ep *h, const u8 *r, u32 len,
                              int slot, u32 ep)
 {
     const u8 *rp = r;
@@ -409,18 +455,24 @@ static int hid_inject_layout(struct hid_ep *h, const u8 *r, u32 len,
         if (h->lay.w_sz && rl * 8 >= (u32)h->lay.w_off + h->lay.w_sz)
             wh = hid_signed(hid_bits(rp, rl, h->lay.w_off, h->lay.w_sz),
                             h->lay.w_sz);
-        u32 btn = hid_bits(rp, rl, h->lay.btn_off, h->lay.btn_cnt) & 0x1F;
-        mouse_inject((u8)btn, dx, dy, wh);
+        if (h->lay.btn_cnt) {
+            if (rl * 8 < (u32)h->lay.btn_off + h->lay.btn_cnt) return 0;
+            h->report_buttons[h->selected_layout] =
+                hid_bits(rp, rl, h->lay.btn_off, h->lay.btn_cnt > 5 ? 5 : h->lay.btn_cnt) & 0x1F;
+        }
+        u8 btn = 0;
+        for (int j=0; j<8; j++) btn |= h->report_buttons[j];
+        mouse_inject(btn, dx, dy, wh);
         return 1;
     }
     /* keyboard */
     {
-        u32 need = (u32)h->lay.mod_off + (h->lay.mod_sz ? h->lay.mod_sz : 8);
+        u32 need = (u32)h->lay.mod_off + h->lay.mod_sz;
         u32 nk = (u32)h->lay.key_off + h->lay.key_sz * h->lay.key_cnt;
         if (nk > need) need = nk;
         if (rl * 8 < need) return 0;
         u8 mod = (u8)hid_bits(rp, rl, h->lay.mod_off,
-                              h->lay.mod_sz ? h->lay.mod_sz : 8);
+                              h->lay.mod_sz);
         u8 keys[6];
         memset(keys, 0, sizeof keys);
         if (h->lay.key_sz == 8) {
@@ -433,14 +485,44 @@ static int hid_inject_layout(struct hid_ep *h, const u8 *r, u32 len,
             for (u32 b = 0; b < h->lay.key_cnt && n < 6; b++) {
                 if (!hid_bits(rp, rl, (u16)(h->lay.key_off + b), 1))
                     continue;
-                u8 u = (u8)b;
+                u8 u = (u8)(b + h->lay.key_min);
                 if (u >= 4) keys[n++] = u;   /* bit index == usage id */
+            }
+        }
+        /* A report releases only its own keys, not another report ID's
+         * modifiers/keys. Rollover is an error, not an all-up report. */
+        for (int i=0;i<6;i++) if (keys[i] >= 1 && keys[i] <= 3) return 0;
+        memcpy(h->report_keys[h->selected_layout],keys,6);
+        h->report_modifiers[h->selected_layout] = mod;
+        memset(keys,0,6); mod=0;
+        int n=0;
+        for (int j=0;j<8;j++) {
+            mod |= h->report_modifiers[j];
+            for (int k=0;k<6;k++) {
+                u8 key=h->report_keys[j][k]; int duplicate=0;
+                for(int z=0;z<n;z++) if(keys[z]==key) duplicate=1;
+                if(key && !duplicate && n<6) keys[n++]=key;
             }
         }
         kbd_inject_hid(mod, keys, h->prev_keys, &h->prev_mod);
         return 1;
     }
 }
+
+static int hid_inject_layout(struct hid_ep *h, const u8 *r, u32 len, int slot, u32 ep)
+{
+    if (!h->nlayouts) return hid_inject_one(h,r,len,slot,ep);
+    for (int i=0;i<h->nlayouts;i++) {
+        if (h->layouts[i].rid && (!len || r[0] != h->layouts[i].rid)) continue;
+        struct hid_layout primary = h->lay;
+        h->lay = h->layouts[i]; h->selected_layout = i;
+        int ok=hid_inject_one(h,r,len,slot,ep);
+        h->lay = primary;
+        return ok;
+    }
+    return 0;
+}
+
 
 /* r34: runtime report-offset probe for boot mice.
  * The Report ID descriptor walk (r33) is the primary evidence, but the
@@ -581,6 +663,15 @@ static int proc_events(void)
                         klog("usb: ev slot %d dci %u code %u rem %u ptr %x",
                              slot, ep, code, rem, ptr);
                     }
+                    struct input_trace_record *rec = NULL;
+                    u32 keys_before = input_key_enqueued, mouse_before = input_mouse_enqueued;
+                    if (trace_active) {
+                        rec = &input_trace[trace_count % TRACE_N];
+                        memset(rec, 0, sizeof(*rec));
+                        rec->sequence = ++trace_count;
+                        rec->tick = (u32)tick_count; rec->slot = slot; rec->ep = ep;
+                        rec->code = code; rec->len = 0;
+                    }
                     if (code == 1 || code == 12 || code == 13) {
                         /* r31 field round 2 ROOT FIX: a real xHC posts the
                          * COMPLETED TRB'S OWN ADDRESS in a transfer event
@@ -601,6 +692,7 @@ static int proc_events(void)
                                  (u32)PA(h->inr) + IN_TRBS * 16u);
                         if (i >= 0) {
                             u8 *r = h->in_buf[i];
+                            if (rec) { rec->len = len; memcpy(rec->bytes,r,len); }
                             h->last_rep_tick = tick_count;
                             if (!h->reported) {
                                 h->reported = 1;
@@ -657,7 +749,8 @@ static int proc_events(void)
                             if (h->use_layout) {
                                 /* r37 PRIMARY: bit-accurate extraction via
                                  * the parsed report-descriptor field map */
-                                hid_inject_layout(h, r, len, slot, ep);
+                                int accepted = hid_inject_layout(h, r, len, slot, ep);
+                                if (rec) rec->accepted = accepted ? 1 : 0;
                             } else if (h->wide16 && h->kind == 2 &&
                                        len >= (u32)off + 5) {
                                 /* r37 LAST RESORT: statistical 16-bit
@@ -680,6 +773,11 @@ static int proc_events(void)
                             else if (h->kind == 1 && len >= (u32)off + 8)
                                 kbd_inject_hid(r[off], r + off + 2,
                                                h->prev_keys, &h->prev_mod);
+                            if (rec) {
+                                if (!h->use_layout) rec->accepted = hold ? 0 : 2;
+                                rec->keys = input_key_enqueued - keys_before;
+                                rec->mouse = input_mouse_enqueued - mouse_before;
+                            }
                         }
                     }
                     /* Deferred link-TRB maintenance (r28): this event is
@@ -1916,8 +2014,12 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
             int rrc = ctrl_xfer(slot, 0x81, 6, 0x2200, (u16)cand[j].iface,
                                 rdesc, (u16)rl, 1);
             if (rrc == 1) {
+                memcpy(h->report_descriptor, rdesc, rl);
+                h->report_descriptor_len = rl;
                 struct hid_layout lay;
-                if (hid_parse_layout(rdesc, rl, h->kind, &lay)) {
+                h->nlayouts = hid_parse_layouts(rdesc, rl, h->kind, h->layouts, 8);
+                if (h->nlayouts) {
+                    lay = h->layouts[0];
                     h->lay = lay;
                     h->use_layout = 1;
                     klog("usb: slot %d iface %d rdesc %dB -> %s LAYOUT "
@@ -2432,4 +2534,92 @@ void usb_status(char *out, int max)
 {
     strncpy(out, status_line[0] ? status_line : "usb: not probed", max - 1);
     out[max - 1] = 0;
+}
+
+static void trace_number(char *line, const char *label, u32 n)
+{
+    char digits[16]; strcat(line,label); fmt_u32(digits,n); strcat(line,digits);
+}
+static void trace_hex(char *line, const u8 *bytes, unsigned n)
+{
+    static const char hex[] = "0123456789abcdef";
+    unsigned p = strlen(line);
+    for (unsigned i = 0; i < n; i++) {
+        line[p++] = ' '; line[p++] = hex[bytes[i] >> 4]; line[p++] = hex[bytes[i] & 15];
+    }
+    line[p] = 0;
+}
+struct trace_writer { char *buf; unsigned size, used; };
+static void trace_append(const char *line, void *ctx)
+{
+    struct trace_writer *w = ctx;
+    unsigned n = strlen(line);
+    if (w->used + n + 2 >= w->size) return;
+    memcpy(w->buf+w->used,line,n); w->used += n;
+    w->buf[w->used++] = '\n'; w->buf[w->used] = 0;
+}
+void usb_inputtrace(const char *action, void (*emit)(const char *, void *), void *ctx)
+{
+    if (!strcmp(action,"start")) {
+        trace_count = 0; trace_active = 1;
+        trace_key_drop_base = input_key_dropped; trace_mouse_drop_base = input_mouse_dropped;
+        emit("Recording last 128 USB reports. Test isolated inputs; inputtrace stop freezes them.",ctx);
+        return;
+    }
+    if (!strcmp(action,"stop")) { trace_active = 0; emit("Input recorder frozen.",ctx); return; }
+    int save = !strcmp(action,"save");
+    int desc = !strcmp(action,"desc");
+    if (!save && !desc && strcmp(action,"show")) {
+        emit("inputtrace start|stop|show|desc|save. save writes /home/inputtrace.txt and persists it.",ctx); return;
+    }
+    /* Freeze BEFORE formatting or writing; filesystem output cannot mutate the capture. */
+    trace_active = 0;
+    void (*sink)(const char *, void *) = emit; void *opaque = ctx;
+    struct trace_writer writer = {0};
+    if (save) {
+        writer.size = 65536; writer.buf = palloc(writer.size);
+        if (!writer.buf) { emit("inputtrace: out of memory",ctx); return; }
+        writer.buf[0] = 0; sink = trace_append; opaque = &writer;
+    }
+    char line[256];
+    strcpy(line,"Input capture " SCOS_BUILD_TAG);
+    trace_number(line," reports=",trace_count);
+    trace_number(line," key-drops=",input_key_dropped-trace_key_drop_base);
+    trace_number(line," mouse-drops=",input_mouse_dropped-trace_mouse_drop_base);
+    sink(line,opaque);
+    if (save || desc) {
+        for (int sl=1; sl<=MAX_SLOTS; sl++) if (devs[sl].used)
+            for (int j=0; j<devs[sl].nhid; j++) {
+                struct hid_ep *h=&devs[sl].hid[j];
+                strcpy(line,"slot"); trace_number(line,"=",sl); trace_number(line," ep=",h->dci);
+                trace_number(line," kind=",h->kind); trace_number(line," layout=",h->use_layout);
+                trace_number(line," rid=",h->lay.rid); trace_number(line," layouts=",h->nlayouts); trace_number(line," bits=",h->lay.rpt_bits);
+                sink(line,opaque);
+                for (unsigned off=0; off<h->report_descriptor_len; off+=16) {
+                    strcpy(line,"desc"); trace_number(line,"+",off);
+                    unsigned n=h->report_descriptor_len-off; if(n>16)n=16;
+                    trace_hex(line,h->report_descriptor+off,n); sink(line,opaque);
+                }
+            }
+    }
+    if (!desc) {
+        u32 count=trace_count>TRACE_N?TRACE_N:trace_count;
+        if (!save && count>16) count=16;
+        sink("seq tick slot ep len cc accepted key-events mouse-events : raw bytes",opaque);
+        for (u32 i=trace_count-count; i<trace_count; i++) {
+            struct input_trace_record *r=&input_trace[i%TRACE_N];
+            line[0]=0; trace_number(line,"",r->sequence); trace_number(line," ",r->tick);
+            trace_number(line," ",r->slot); trace_number(line," ",r->ep);
+            trace_number(line," ",r->len); trace_number(line," ",r->code);
+            trace_number(line," ",r->accepted); trace_number(line," ",r->keys);
+            trace_number(line," ",r->mouse); strcat(line," :");
+            trace_hex(line,r->bytes,save?r->len:(r->len>12?12:r->len)); sink(line,opaque);
+        }
+    }
+    if (save) {
+        int ok=vfs_write("/home/inputtrace.txt",writer.buf,writer.used);
+        pfree(writer.buf,writer.size);
+        if (ok && fs_image_save()) emit("Saved /home/inputtrace.txt to disk.",ctx);
+        else emit("inputtrace: save failed or disk persistence unavailable.",ctx);
+    }
 }

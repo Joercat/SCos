@@ -38,11 +38,14 @@ static const char sc_shift[] = {
     /* 0x45 */ 0, 0, 0, 0, 0, '-', 0, 0, 0, '+', 0,
 };
 
+u32 input_key_enqueued, input_key_dropped;
+
 static void kbd_enqueue(struct key_event *e)
 {
     if (input_guard_armed) input_last_tick = tick_count;
     int next = (q_head + 1) % QUEUE;
-    if (next == q_tail) return;      /* full: drop */
+    if (next == q_tail) { input_key_dropped++; return; }      /* full: drop */
+    input_key_enqueued++;
     queue[q_head] = *e;
     q_head = next;
 }

@@ -12,7 +12,7 @@
  * "SCos 2.0 r27" on the boot screen - boot_screen.c had never been in the
  * per-round tag sweep, so nobody could tell which build was flashed.
  * Every visible version string now concatenates this macro. */
-#define SCOS_BUILD_TAG "r39"
+#define SCOS_BUILD_TAG "r40"
 
 typedef unsigned char      u8;
 typedef unsigned short     u16;
@@ -446,5 +446,15 @@ int wm_desk_vis_count(void);
 int wm_desk_vis_get(int idx, char *app, char *path, char *label, int *kind);
 void wm_wallpaper_invalidate(void);
 void system_reset(void);
+
+
+/* Shared shell confirmation and real compositor stop. */
+struct shell_confirm { char command[256]; };
+int confirm_answer(const char *s);
+int confirm_command(struct shell_confirm *c, char *line, unsigned cap, char *message);
+int parse_pid(const char *s, int *pid);
+extern int wm_stop_requested;
+void usb_inputtrace(const char *action, void (*emit)(const char *, void *), void *ctx);
+extern u32 input_key_enqueued, input_mouse_enqueued, input_key_dropped, input_mouse_dropped;
 
 #endif /* SCOS_H */

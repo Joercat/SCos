@@ -234,3 +234,57 @@ build/           build output (git-ignored): scos.img, intermediates, tests/
 * Terminal/TTY underline insertion cursors, wider Settings controls, and the
   dedicated user-provided panic art. `make usbtest` includes idle-input and
   keyboard-mapping regression tests in addition to the existing ring/parser tests.
+
+### Round 40: split HID reports, capture, and confirmed service stops
+
+The r39 hardware report was **not** resolved by its idle-hub change. r40 fixes
+additional, independently reproduced report-parser defects: multiple input IDs
+per interface (up to eight report-state slots including unnumbered state), IDs
+that collide modulo eight, repeated-ID input-offset resets, global Push/Pop,
+and bitmap Usage Minimum. Mouse button/wheel-only reports are accepted without
+movement. Keyboard modifier/key reports are merged per ID, with per-ID releases.
+These tests are not a substitute for capturing the affected physical devices.
+Lock LEDs and held-key autorepeat remain separate unimplemented features.
+
+Manual capture, with no boot overlay or automatic recording:
+
+1. `inputtrace start`
+2. Keep the mouse still; click/release a few times, turn the wheel a few notches,
+   and press/release `a` twice and NumLock once.
+3. `inputtrace stop` (or `show`/`save`, which also freeze the capture).
+4. `inputtrace show` displays the last 16 records; `inputtrace desc` prints the
+   actual fetched report descriptors and endpoint identities.
+5. `inputtrace save` writes the retained 128 reports plus descriptors to
+   `/home/inputtrace.txt` and attempts disk persistence. The file contains raw
+   keyboard reports: do not type secrets while recording. No network upload occurs.
+
+Records include tick, slot/DCI, byte count, completion code, decoder acceptance
+(0 rejected/error, 1 layout accepted, 2 boot/fallback path), actual queued key
+and mouse event counts, and raw bytes. Queue-drop counters are included. Save
+reports success only if both the VFS write and disk save succeed. Existing
+`/home/inputtrace.txt` is replaced only by an explicit `inputtrace save`.
+
+`kill --system 2` always asks `[y/N]`, then **actually stops scwm's event loop**
+and enters the base console. `wm` restarts it with existing app state retained.
+Other system rows describe in-kernel subsystems, not independently scheduled
+processes; attempts to stop them are rejected, not faked. `kill <app-pid>` still
+closes the actual app. `kill --help` explains syntax; malformed PIDs and unknown
+kill options are rejected.
+
+The same per-shell/per-tab confirmation handler serves `reboot`, `shutdown`
+(and their `--confirm` spelling), privileged `rm -s`/`rm -f`, and interactive
+`rm -i`. Enter, `n`, `no`, Escape, or Ctrl+C cancels; `y`/`yes` confirms; other
+answers re-prompt. Aliases are resolved before requesting consent and the
+confirmed command is frozen. Unknown rm flags and multiple paths are rejected.
+Existing graphical confirmation dialogs and explicit emergency `sysrq` actions
+retain their existing behavior. `make confirmtest` tests the shared handler.
+
+r40 also corrects the framebuffer MTRR setup: the previous code accidentally
+requested write-back type 6 while labeling it write-combining. It now requests
+architectural WC type 1, uses the CPU's physical-address width and variable-pair
+count, preserves existing ranges, checks WC support, and updates cache settings
+with caching disabled/flushed. Only exact framebuffer page ranges are covered;
+conflicting firmware mappings are left alone. This boot-only implementation
+assumes SCos's existing single executing CPU and disabled paging. `make mtrrtest`
+checks the pure register/range planner; it does not execute privileged MSRs on
+hardware. v86 also does not validate the physical GPU/cache behavior.

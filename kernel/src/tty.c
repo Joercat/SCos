@@ -185,8 +185,13 @@ static void tty_no_wm(const char *cmd)
               "everything else here works without it)");
 }
 
+static struct shell_confirm tty_confirmation;
+static void trace_tty_emit(const char *line, void *ctx) { (void)ctx; tty_print(line); }
+
 static void tty_exec(char *cmd)
 {
+    char message[192];
+    if (confirm_command(&tty_confirmation, cmd, TTY_COLS + 1, message)) { tty_print(message); return; }
     char *args[6];
     int nargs = 0;
     char *p = cmd;
@@ -231,7 +236,9 @@ static void tty_exec(char *cmd)
             "  whoami/version  identity\n"
             "  clear           clear this console\n"
             "  reboot          reboot the machine now\n"
-            "  shutdown        ACPI power-off");
+            "  inputtrace start|stop|show|save - USB recorder\n"
+            "  kill --system <pid> - confirmed stop (scwm only)\n"
+            "  shutdown [--confirm] - ACPI power-off");
     }
     else if (!strcmp(args[0], "ls")) {
         char path[160];
@@ -299,12 +306,15 @@ static void tty_exec(char *cmd)
         else tty_print("touch: failed to create file");
     }
     else if (!strcmp(args[0], "rm")) {
-        int force = 0;
+        int force = 0, invalid = 0;
         const char *target = NULL;
         for (int j = 1; j < nargs; j++) {
             if (!strcmp(args[j], "-s") || !strcmp(args[j], "-f")) force = 1;
+            else if (!strcmp(args[j], "-i")) { }
+            else if (args[j][0]=='-' || target) invalid=1;
             else target = args[j];
         }
+        if (invalid) { tty_print("Usage: rm [-i] [-s|-f] <path>; unknown flags/multiple paths rejected"); return; }
         if (!target) { tty_print("rm: need a path (rm [-s] <path>)"); return; }
         char path[160];
         tty_resolve(target, path, sizeof path);
@@ -545,9 +555,23 @@ static void tty_exec(char *cmd)
         tty_print(m);
     }
     else if (!strcmp(args[0], "procs")) tty_procs();
+    else if (!strcmp(args[0], "inputtrace")) {
+        usb_inputtrace(nargs == 1 ? "show" : nargs == 2 ? args[1] : "--help", trace_tty_emit, NULL);
+    }
     else if (!strcmp(args[0], "kill")) {
-        if (nargs < 2) { tty_print("kill: need a pid (see 'procs')"); return; }
-        int pid = (int)str_to_u32(args[1]);
+        int pid = -1;
+        int system = nargs == 3 && !strcmp(args[1], "--system");
+        if (nargs == 2 && !strcmp(args[1], "--help")) {
+            tty_print("kill <pid> | kill --system <pid>; only scwm (2) is independently stoppable"); return;
+        }
+        if ((!system && nargs != 2) || !parse_pid(args[system ? 2 : 1], &pid)) {
+            tty_print("Usage: kill <pid> | kill --system <pid>; decimal PID required"); return;
+        }
+        if (system) {
+            if (pid == 2 && tty_wm_alive) { wm_stop_requested = 1; tty_exit = 1; }
+            else tty_print("No independent stop operation available; nothing terminated.");
+            return;
+        }
         if (pid >= 0 && pid < proc_sys_count()) {
             tty_print("kill: cannot kill a system task from the console");
             return;
@@ -752,11 +776,13 @@ static void tty_exec(char *cmd)
     }
     else if (!strcmp(args[0], "clear")) tty_nlines = 0;
     else if (!strcmp(args[0], "reboot")) {
+        if (nargs > 1 && (nargs != 2 || strcmp(args[1],"--confirm"))) { tty_print("Usage: reboot [--confirm]"); return; }
         tty_print("rebooting...");
         tty_draw();
         cpu_reboot_8042();
     }
     else if (!strcmp(args[0], "shutdown") || !strcmp(args[0], "poweroff")) {
+        if (nargs > 1 && (nargs != 2 || strcmp(args[1],"--confirm"))) { tty_print("Usage: shutdown [--confirm]"); return; }
         tty_print("powering off...");
         tty_draw();
         if (acpi_shutdown()) { wm_poweroff_screen(); for (;;) cpu_hlt(); }
@@ -792,6 +818,10 @@ static void tty_console_loop(void)
         while (kbd_poll(&ke)) {
             got = 1;
             if (!ke.pressed) continue;
+            if (tty_confirmation.command[0] && (ke.keycode==3 || ke.keycode==27)) {
+                tty_confirmation.command[0]=0; tty_input[0]=0; tty_ipos=0;
+                tty_print("Cancelled."); tty_draw(); continue;
+            }
             /* r37: Ctrl+Alt+F7 - Linux's "back to the GUI VT" switch;
              * the WM side is Ctrl+Alt+F1 (see wm.c handle_key) */
             if (ke.ctrl && ke.alt && ke.keycode == KEY_F7) {

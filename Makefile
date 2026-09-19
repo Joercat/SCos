@@ -57,7 +57,7 @@ $(BUILD)/scos.img: $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $
 font:
 	$(PYTHON) tools/fontgen.py kernel/src/font_data.c
 
-test: all usbtest cputest
+test: all usbtest cputest confirmtest mtrrtest
 	node tests/run_tests.mjs
 
 # native USB-logic simulator: runs the REAL usb.c against a mini xHC and
@@ -92,3 +92,20 @@ build/cpu_brand_test: tests/cpu_brand_test.c kernel/src/lib.c kernel/include/sco
 	@mkdir -p build
 	gcc -fno-builtin -Wno-pointer-to-int-cast -ffunction-sections -fdata-sections \
 	    -Wl,--gc-sections -Ikernel/include tests/cpu_brand_test.c kernel/src/lib.c -o $@
+
+.PHONY: confirmtest
+confirmtest: build/confirm_test
+	./build/confirm_test
+
+build/confirm_test: tests/confirm_test.c kernel/src/confirm.c kernel/src/lib.c kernel/include/scos.h
+	@mkdir -p build
+	gcc -fno-builtin -Wno-pointer-to-int-cast -ffunction-sections -fdata-sections \
+	    -Wl,--gc-sections -Ikernel/include tests/confirm_test.c kernel/src/confirm.c kernel/src/lib.c -o $@
+
+$(BUILD)/kobj/fb.o: kernel/include/mtrr_plan.h
+.PHONY: mtrrtest
+mtrrtest: build/mtrr_test
+	./build/mtrr_test
+build/mtrr_test: tests/mtrr_test.c kernel/include/mtrr_plan.h kernel/include/scos.h
+	@mkdir -p build
+	gcc -fno-builtin -Ikernel/include tests/mtrr_test.c -o $@
