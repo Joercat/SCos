@@ -1553,9 +1553,8 @@ static void handle_key(struct key_event *e)
      * there Ctrl+Alt+F7 or the 'wm' command returns to the desktop.
      * Gives the user a rescue console even when no terminal app is
      * open or the WM's app layer is wedged. */
-    if (e->pressed && e->ctrl && e->alt && e->keycode == KEY_F1) {
-        klog("wm: ctrl+alt+f1 - switching to the kernel console (tty)");
-        tty_request = 1;
+    if (e->pressed && e->ctrl && e->alt && e->keycode >= KEY_F1 && e->keycode <= KEY_F6) {
+        tty_request = e->keycode - KEY_F1 + 1;
         return;
     }
     if (menu.active && e->pressed && e->keycode == 27) {
@@ -1682,6 +1681,30 @@ int is_v86_box(void)
     return m && strstr(m, "v86");
 }
 
+/* Called only after dispatch has unwound, never from inside an app
+ * callback. Terminating the compositor also destroys its dependent apps. */
+static void wm_destroy_session(void)
+{
+    u32 total, before, after; mm_stats(&total,&before);
+    pending_console = NULL;
+    for (int i=0;i<win_count;i++) wins[i].console=NULL;
+    while (win_count) wm_close_window(&wins[win_count-1]);
+    focused_w=modal_w=drag_win=resize_win=NULL;
+    rs_pending=0; band_active=0; desk_drag=-1; desk_sel=0;
+    menu.active=0; launch.active=0; ndmg=0; mbuttons=0;
+    if (wp_cache.px) {
+        pfree(wp_cache.px,(u32)wp_cache.w*wp_cache.h*4);
+        memset(&wp_cache,0,sizeof(wp_cache));
+    }
+    wp_valid=0;
+    if (cur_buf) pfree(cur_buf,CUR_W*CUR_H*4);
+    cur_buf=NULL; cur_have=0;
+    cyc_reset_all();
+    mm_stats(&total,&after);
+    klog("wm: terminated; application windows and compositor caches released (%u KB reclaimed)",
+         after >= before ? after-before : 0);
+}
+
 int wm_stop_requested;
 
 void wm_run(void)
@@ -1699,7 +1722,7 @@ void wm_run(void)
 
     klog("wm: entering main loop");
     for (;;) {
-        if (wm_stop_requested) return;
+        if (wm_stop_requested) goto stopped;
         irq_watchdog();
         if (err_pending()) err_show_pending();
         usb_poll();
@@ -1707,13 +1730,14 @@ void wm_run(void)
         while (mouse_poll(&me)) handle_mouse(&me);
         resize_flush(0);           /* r36: once-per-frame resize apply */
         if (tty_request) {         /* r36: kernel maintenance console */
+            tty_select(tty_request);
             tty_request = 0;
             tty_run(1);            /* returns when the user types 'wm' */
             wm_full();             /* tty repainted both buffers */
         }
         struct key_event ke;
         while (kbd_poll(&ke)) handle_key(&ke);
-        if (wm_stop_requested) return;
+        if (wm_stop_requested) goto stopped;
 
         static u64 last_tick;
         if (tick_count != last_tick) {
@@ -1730,6 +1754,8 @@ void wm_run(void)
         cpu_hlt();
         wm_in_idle = 0;
     }
+stopped:
+    wm_destroy_session();
 }
 
 /* ------------------------------------------------------------- dialogs --- */

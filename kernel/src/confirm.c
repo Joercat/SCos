@@ -50,7 +50,7 @@ int confirm_command(struct shell_confirm *c, char *line, unsigned cap,
     }
     normalized[ni] = 0;
     const char *action = NULL;
-    if (!strncmp(normalized,"kill --system ",14)) action = "Stop this system service? The desktop may exit.";
+    if (!strncmp(normalized,"kill --system ",14)) action = "Stopping scwm closes all GUI apps. Unsaved edits will be lost.";
     else if ((!strcmp(normalized,"reboot --confirm") || !strcmp(normalized,"reboot"))) action = "Reboot now? Unsaved changes may be lost.";
     else if ((!strcmp(normalized,"shutdown --confirm") || !strcmp(normalized,"poweroff --confirm") || !strcmp(normalized,"shutdown") || !strcmp(normalized,"poweroff"))) action = "Power off now? Unsaved changes may be lost.";
     else if (!strncmp(normalized,"rm ",3) &&
@@ -61,7 +61,7 @@ int confirm_command(struct shell_confirm *c, char *line, unsigned cap,
         strcpy(message,"Command too long to confirm."); return 1;
     }
     strcpy(c->command,line);
-    strcpy(message,action); strcat(message," [y/N]");
+    strcpy(message,action); strcat(message,"\nContinue? [y/N]");
     return 1;
 }
 

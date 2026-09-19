@@ -32,11 +32,9 @@
  * endpoint looks armed and healthy yet delivers NOTHING.  64 bytes is
  * the USB2 interrupt maximum, so no legal report can ever overflow. */
 #define IN_BUF_BYTES 64
-/* r38: gain applied to 16-bit/high-res mouse paths (layout + wide16) -
- * the r37 field mouse felt "way too low" at 1:1 with its fine counts;
- * boot-protocol mice keep 1:1 and the prefs slider scales on top.
- * r39: 2 -> 3, field feedback asked for "a bit more sensitivity". */
-#define USB_LAYOUT_GAIN 3
+/* r41: no artificial gain to compensate for lost reports. The WM's
+ * saved sensitivity setting applies equally to USB and PS/2 counts. */
+#define USB_LAYOUT_GAIN 1
 /* r38: 64 ring slots, not 8.  The r37 field mouse turned out to poll at
  * 1000 Hz (its EP ctx interval 3 = 1 ms): with only 7 outstanding TRBs
  * the ring ran dry between the WM's 100 Hz drain passes and the xHC had
@@ -108,6 +106,9 @@ struct hid_layout {
 struct hid_ep {
     struct hid_layout layouts[8];
     u8 nlayouts, selected_layout;
+    u8 frame_ids[8], nframes;
+    u16 frame_sizes[8], fragment_used, fragment_goal;
+    u8 fragment[IN_BUF_BYTES];
     u8 report_buttons[8], report_modifiers[8], report_keys[8][6];
     u8 report_descriptor[256];
     u16 report_descriptor_len;
@@ -115,7 +116,7 @@ struct hid_ep {
     int iface;                /* bInterfaceNumber */
     int kind;                 /* 1 = boot keyboard, 2 = boot mouse */
     u8 ep_addr;               /* IN endpoint number (0x81 -> 1) */
-    u8 ep_mps;
+    u16 ep_mps;
     u8 binterval;             /* descriptor bInterval (r31: EP ctx interval) */
     u8 ctx_dumped;            /* watchdog one-shot ctx dump done (r31) */
     u8 ev_logged;             /* rate limit for the r32 event log lines */
@@ -214,6 +215,16 @@ struct input_trace_record {
 static struct input_trace_record input_trace[TRACE_N];
 static u32 trace_count, trace_key_drop_base, trace_mouse_drop_base;
 static int trace_active;
+
+/* Buffer CAPACITY is not the receive request length. An 8-byte packet
+ * on an 8-byte endpoint is full-size and cannot terminate a 64-byte TD.
+ * Request one endpoint packet so sparse reports complete immediately. */
+static u32 hid_rx_bytes(const struct hid_ep *h)
+{
+    u32 mps = h->ep_mps & 0x7FFu;
+    if (!mps) mps = 8;
+    return mps < IN_BUF_BYTES ? mps : IN_BUF_BYTES;
+}
 
 static u64 now_ms(void) { return tick_count * 10; }
 #define PA(p) ((u32)(p))
@@ -374,7 +385,7 @@ static int hid_parse_layouts(const u8 *d, int len, int want_kind,
     int found = 0;
     for (int i = 0; i < nids; i++) {
         struct hid_layout *L = &rs[i];
-        int hit = (want_kind == 2) ? ((L->x_sz && L->y_sz) || L->btn_cnt || L->w_sz)
+        int hit = !want_kind ? (bitpos[i] != 0) : (want_kind == 2) ? ((L->x_sz && L->y_sz) || L->btn_cnt || L->w_sz)
                                    : (L->key_cnt || L->mod_sz);
         if (!hit) continue;
         L->kind = (u8)want_kind;
@@ -389,6 +400,61 @@ static int hid_parse_layouts(const u8 *d, int len, int want_kind,
 int hid_parse_layout(const u8 *d, int len, int kind, struct hid_layout *out)
 {
     return hid_parse_layouts(d,len,kind,out,1);
+}
+
+/* Framing includes non-keyboard/mouse IDs too: their continuation bytes
+ * must never be mistaken for the start of an input report. */
+static void hid_set_frames(struct hid_ep *h, const u8 *d, int len)
+{
+    struct hid_layout frames[8];
+    h->nframes = hid_parse_layouts(d,len,0,frames,8);
+    for (int i=0;i<h->nframes;i++) {
+        h->frame_ids[i]=frames[i].rid;
+        h->frame_sizes[i]=(frames[i].rpt_bits+7)/8 + !!frames[i].saw_rid;
+    }
+}
+
+/* One USB packet per TD prevents sparse full-packet reports batching.
+ * Longer HID reports still need assembly, using descriptor lengths rather
+ * than waiting for arbitrary future activity. The recorder keeps raw packets. */
+static int hid_frame_packet(struct hid_ep *h, u8 **data, u32 *len)
+{
+    u32 n=*len, packet=hid_rx_bytes(h);
+    if (!n) { h->fragment_used=h->fragment_goal=0; return 0; }
+    if (!h->fragment_used) {
+        u32 goal=0;
+        for (int i=0;i<h->nframes;i++)
+            if (!h->frame_ids[i]) goal=h->frame_sizes[i];
+            else if (h->frame_ids[i]==(*data)[0]) {
+                goal=h->frame_sizes[i]; break;
+            }
+        if (!goal && h->use_layout) {
+            int count=h->nlayouts ? h->nlayouts : 1;
+            for (int i=0;i<count;i++) {
+                const struct hid_layout *l=h->nlayouts ? &h->layouts[i] : &h->lay;
+                if (l->rid && l->rid!=(*data)[0]) continue;
+                goal=(l->rpt_bits+7)/8 + !!(l->rid || l->saw_rid); break;
+            }
+        }
+        if (!goal || n>=goal) return 1;
+        /* Keep the existing short, unprefixed output-ID firmware quirk.
+         * A full packet with IDs follows descriptor framing; there is no
+         * unambiguous way to distinguish an omitted prefix in that case. */
+        if (n<packet) return h->use_layout && !h->lay.rid &&
+            h->lay.saw_rid && n==(u32)(h->lay.rpt_bits+7)/8;
+        h->fragment_goal=goal;
+    }
+    u32 used=h->fragment_used+n, goal=h->fragment_goal;
+    if (used>goal || (n<packet && used<goal)) {
+        h->fragment_used=h->fragment_goal=0; return 0;
+    }
+    /* Over-capacity reports are consumed but never decoded or copied. */
+    if (goal<=IN_BUF_BYTES) memcpy(h->fragment+h->fragment_used,*data,n);
+    h->fragment_used=used;
+    if (used<goal) return 0;
+    h->fragment_used=h->fragment_goal=0;
+    if (goal>IN_BUF_BYTES) return 0;
+    *data=h->fragment; *len=goal; return 1;
 }
 
 /* Inject one report through the parsed field map (report protocol).
@@ -512,10 +578,18 @@ static int hid_inject_one(struct hid_ep *h, const u8 *r, u32 len,
 static int hid_inject_layout(struct hid_ep *h, const u8 *r, u32 len, int slot, u32 ep)
 {
     if (!h->nlayouts) return hid_inject_one(h,r,len,slot,ep);
-    for (int i=0;i<h->nlayouts;i++) {
-        if (h->layouts[i].rid && (!len || r[0] != h->layouts[i].rid)) continue;
+    int selected=-1;
+    for (int i=0;i<h->nlayouts;i++)
+        if (h->layouts[i].rid && len && r[0]==h->layouts[i].rid) { selected=i; break; }
+    if (selected<0) {
+        for (int i=0;i<h->nframes;i++)
+            if (h->frame_ids[i] && len && r[0]==h->frame_ids[i]) return 0;
+        for (int i=0;i<h->nlayouts;i++)
+            if (!h->layouts[i].rid) { selected=i; break; }
+    }
+    if (selected>=0) {
         struct hid_layout primary = h->lay;
-        h->lay = h->layouts[i]; h->selected_layout = i;
+        h->lay = h->layouts[selected]; h->selected_layout = selected;
         int ok=hid_inject_one(h,r,len,slot,ep);
         h->lay = primary;
         return ok;
@@ -640,7 +714,7 @@ static int proc_events(void)
             u32 ep = (t[3] >> 16) & 0x1F;
             u32 code = (t[2] >> 24) & 0xFF;
             u32 rem = t[2] & 0xFFFFFF;       /* bytes NOT transferred */
-            u32 len = rem <= IN_BUF_BYTES ? IN_BUF_BYTES - rem : 0u;
+            u32 len = 0; /* calculated from the completed TRB, not buffer capacity */
             u32 ptr = t[0];
             /* Interrupt reports must not satisfy or overwrite an EP0
              * control completion while this batch of events is drained. */
@@ -672,7 +746,8 @@ static int proc_events(void)
                         rec->tick = (u32)tick_count; rec->slot = slot; rec->ep = ep;
                         rec->code = code; rec->len = 0;
                     }
-                    if (code == 1 || code == 12 || code == 13) {
+                    if (code != 1 && code != 13) h->fragment_used=h->fragment_goal=0;
+                    if (code == 1 || code == 13) {
                         /* r31 field round 2 ROOT FIX: a real xHC posts the
                          * COMPLETED TRB'S OWN ADDRESS in a transfer event
                          * (Linux converts it with xhci_dma_to_trb); the
@@ -691,8 +766,14 @@ static int proc_events(void)
                                  ptr, (u32)PA(h->inr),
                                  (u32)PA(h->inr) + IN_TRBS * 16u);
                         if (i >= 0) {
+                            u32 requested = h->inr[(u32)i*4+2] & 0x1FFFFu;
+                            len = requested <= IN_BUF_BYTES && rem <= requested ? requested-rem : 0;
                             u8 *r = h->in_buf[i];
                             if (rec) { rec->len = len; memcpy(rec->bytes,r,len); }
+                            if (!hid_frame_packet(h,&r,&len)) {
+                                if (rec && h->fragment_used) rec->accepted=3;
+                                goto hid_packet_done;
+                            }
                             h->last_rep_tick = tick_count;
                             if (!h->reported) {
                                 h->reported = 1;
@@ -780,6 +861,7 @@ static int proc_events(void)
                             }
                         }
                     }
+hid_packet_done:
                     /* Deferred link-TRB maintenance (r28): this event is
                      * from the new lap, so the consumer has provably
                      * passed the previous link - only now is rewriting
@@ -792,7 +874,7 @@ static int proc_events(void)
                     volatile u32 *tr = h->inr + (u32)h->inr_idx * 4;
                     tr[0] = PA(h->in_buf[h->inr_idx]);
                     tr[1] = 0;
-                    tr[2] = IN_BUF_BYTES;
+                    tr[2] = hid_rx_bytes(h);
                     /* IOC + ISP exactly like the pre-queued TRBs: without
                      * IOC no event fires, without ISP the always-short
                      * HID report never completes - input would die after
@@ -1765,7 +1847,7 @@ static void hid_arm_ring(struct xdev *d, int j)
         volatile u32 *tr = h->inr + (u32)b * 4;
         tr[0] = PA(h->in_buf[b]);
         tr[1] = 0;
-        tr[2] = IN_BUF_BYTES;
+        tr[2] = hid_rx_bytes(h);
         /* IOC: a completion event per report; ISP: complete on the
          * always-short HID report - without ISP no event ever fires and
          * input is silently dead */
@@ -1776,9 +1858,9 @@ static void hid_arm_ring(struct xdev *d, int j)
     h->arm_tick = tick_count;
     h->kick1 = 0;
     ring_db((u32)d->slot, h->dci);
-    klog("usb: slot %d %s iface %d ep %02x ring armed (doorbell %u)",
+    klog("usb: slot %d %s iface %d ep %02x armed: packet %u request %u buffer %u",
          d->slot, h->kind == 2 ? "mouse" : "keyboard", h->iface,
-         (u32)(0x80 | h->ep_addr), h->dci);
+         (u32)(0x80 | h->ep_addr), h->ep_mps & 0x7FF, hid_rx_bytes(h), IN_BUF_BYTES);
 }
 
 /* Build one interrupt-IN endpoint context exactly the way Linux's
@@ -1993,7 +2075,7 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
         h->iface = cand[j].iface;
         h->kind = (cand[j].proto == 2) ? 2 : 1;
         h->ep_addr = (u8)cand[j].ep_addr;
-        h->ep_mps = (u8)(cand[j].ep_mps & 0xFFFF);
+        h->ep_mps = (u16)(cand[j].ep_mps & 0xFFFF);
         h->binterval = (u8)(cand[j].ep_interval & 0xFF);
         if (!h->binterval) h->binterval = 1;
         h->ctx_dumped = 0;
@@ -2016,6 +2098,7 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
             if (rrc == 1) {
                 memcpy(h->report_descriptor, rdesc, rl);
                 h->report_descriptor_len = rl;
+                hid_set_frames(h,rdesc,rl);
                 struct hid_layout lay;
                 h->nlayouts = hid_parse_layouts(rdesc, rl, h->kind, h->layouts, 8);
                 if (h->nlayouts) {
@@ -2062,6 +2145,7 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
                              0, 0, 0);
             klog("usb: slot %d iface %d SET_PROTOCOL(boot) rc %d",
                  slot, cand[j].iface, srcc);
+            if (srcc == 1) { h->nframes=0; h->has_id=0; }
         }
         ctrl_xfer(slot, 0x21, 0x0A, 0, (u16)cand[j].iface, 0, 0, 0);
         if (cand[j].proto == 1) {
@@ -2592,7 +2676,7 @@ void usb_inputtrace(const char *action, void (*emit)(const char *, void *), void
             for (int j=0; j<devs[sl].nhid; j++) {
                 struct hid_ep *h=&devs[sl].hid[j];
                 strcpy(line,"slot"); trace_number(line,"=",sl); trace_number(line," ep=",h->dci);
-                trace_number(line," kind=",h->kind); trace_number(line," layout=",h->use_layout);
+                trace_number(line," kind=",h->kind); trace_number(line," mps=",h->ep_mps & 0x7FF); trace_number(line," rx=",hid_rx_bytes(h)); trace_number(line," layout=",h->use_layout);
                 trace_number(line," rid=",h->lay.rid); trace_number(line," layouts=",h->nlayouts); trace_number(line," bits=",h->lay.rpt_bits);
                 sink(line,opaque);
                 for (unsigned off=0; off<h->report_descriptor_len; off+=16) {

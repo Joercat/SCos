@@ -703,7 +703,7 @@ test(28, "tty r36: kernel maintenance console round-trip", async (state) => {
     await state.type("tty\n"); await sleep(1200);
     shot(state, "69_tty_enter");
     const t1 = dumpTty("69_tty_enter");
-    if (!t1.includes("maintenance console"))
+    if (!t1.includes("SCos tty1"))
         throw new Error("tty console did not take the screen:\n" + t1.slice(0, 400));
     await state.type("help\n"); await sleep(600);
     shot(state, "70_tty_help");
@@ -721,7 +721,7 @@ test(28, "tty r36: kernel maintenance console round-trip", async (state) => {
     await state.type("wm\n"); await sleep(1500);
     shot(state, "73_tty_exit");
     const back = dumpWin("73_tty_exit");
-    if (!back.includes("maintenance console"))
+    if (!back.includes("Switched to text console"))
         throw new Error("WM did not resume with the terminal intact:\n" + back.slice(-400));
     if (!(await live(state))) throw new Error("frozen after tty round-trip");
 });
@@ -767,15 +767,83 @@ test(30, "r40: shared confirmations, alias safety, capture and real WM stop", as
     await state.type("kill bogus\n"); await sleep(400);
     if (!dump("79_bad_pid").includes("PID must be decimal")) throw new Error("bad PID accepted");
     await state.type("kill --system 2\ny\n"); await sleep(1200);
-    if (!dump("80_system_stopped",true).includes("WINDOW MANAGER HAS EXITED")) throw new Error("WM service did not actually stop");
+    if (!dump("80_system_stopped",true).includes("Desktop stopped.")) throw new Error("WM service did not actually stop");
+    await state.type("procs\n"); await sleep(400);
+    const stopped=dump("82_stopped_procs",true);
+    if (stopped.match(/^2\s+scwm/m) || stopped.match(/terminal\s+app/))
+        throw new Error("terminated compositor/app still present in process table");
+    if (!state.serial.includes("application windows and compositor caches released"))
+        throw new Error("WM did not execute teardown");
+    const reclaimed=state.serial.match(/released \((\d+) KB reclaimed\)/);
+    if (!reclaimed || Number(reclaimed[1]) < 1024) throw new Error("WM teardown did not return allocations to the heap");
     await state.type("wm\n"); await sleep(1200);
     if (!(await live(state))) throw new Error("WM could not be restarted");
-    if (!dump("82_wm_restart").includes("Stopping scwm"))
-        throw new Error("WM restarted but did not restore its terminal scene");
+    state.cursor={x:512,y:384};
+    await state.click(p.x,p.y); await sleep(120); await state.click(p.x,p.y); await sleep(700);
+    const fresh=dump("83_fresh_terminal");
+    if (!fresh.includes("user@scos") || fresh.includes("alias stopwm"))
+        throw new Error("old terminal survived WM kill, or fresh terminal cannot open");
     await state.type("tty\n"); await sleep(900);
     await state.type("kill --system 2\nn\nshutdown\nn\n"); await sleep(800);
     if (!dump("81_tty_confirm",true).includes("Cancelled.")) throw new Error("TTY confirmation failed");
     await state.type("wm\n"); await sleep(600);
+});
+
+test(31,"r41: six persistent text consoles and F7 desktop",async(state)=>{
+    const {execSync}=await import("node:child_process");
+    async function select(n) {
+        const sc=0x3a+n;
+        await state.scancodes([0x1d,0x38,sc,sc|0x80,0xb8,0x9d]); await sleep(350);
+    }
+    function text(name) {
+        shot(state,name);
+        return execSync(`python3 tools/term_dump.py ${OUT}${name}.ppm 6 4 96 42`).toString();
+    }
+    for(let n=1;n<=6;n++) {
+        await select(n);
+        await state.type(`echo console${n}marker\ncd ${n%2?"/home":"/"}\n`);
+        await state.type(`echo pending${n}`);
+        const t=text(`84_vt${n}`);
+        if(!t.includes(`SCos tty${n}`)||!t.includes(`console${n}marker`)) throw new Error(`tty${n} unavailable`);
+        if(n>1 && t.includes(`console${n-1}marker`)) throw new Error("console histories shared");
+    }
+    for(let n=1;n<=6;n++) {
+        await select(n);
+        if(!text(`85_resume${n}`).includes(`scos:${n%2?"/home/":"/"}# echo pending${n}`)) throw new Error(`tty${n} lost input buffer or working directory`);
+        await state.type("\n");
+    }
+    await select(2); await state.type("shutdown\n");
+    await select(3); await state.type("echo independent\n");
+    if(text("86_confirmation_isolation").includes("Please answer y or n")) throw new Error("confirmation leaked across VTs");
+    await select(2); await state.type("n\n");
+    if(!text("87_cancel_vt2").includes("Cancelled.")) throw new Error("VT2 lost confirmation");
+    await select(7);
+    if(!(await live(state))) throw new Error("F7 failed to return to desktop");
+    await select(6);
+    const t=text("88_vt6_again");
+    if(!t.includes("pending6")) throw new Error("history lost across desktop switch");
+    if(t.includes("Linux model") || t.includes("runs the whole OS")) throw new Error("obsolete console wording");
+    await select(7);
+});
+
+test(32,"r41: seven WM terminations/restarts and stopped F7",async(state)=>{
+    const {execSync}=await import("node:child_process");
+    const select=async(n)=>{
+        const sc=0x3a+n;
+        await state.scancodes([0x1d,0x38,sc,sc|0x80,0xb8,0x9d]); await sleep(250);
+    };
+    for(let n=0;n<7;n++) {
+        await select(1);
+        await state.type("kill --system 2\ny\n");await sleep(650);
+        const stops=(state.serial.match(/application windows and compositor caches released/g)||[]).length;
+        if(stops!==n+1) throw new Error(`stop ${n+1} did not unwind/clean WM`);
+        await select(7);
+        const name=`89_stopped_f7_${n}`;shot(state,name);
+        const t=execSync(`python3 tools/term_dump.py ${OUT}${name}.ppm 6 4 96 42`).toString();
+        if(!t.includes("SCos tty1")||!t.includes("Desktop stopped.")) throw new Error("F7 revived a stopped desktop");
+        await state.type("wm\n");await sleep(650);
+    }
+    if(!(await live(state))) throw new Error("WM failed after seven restarts");
 });
 
 /* ------------------------------------------------------------- runner ---- */

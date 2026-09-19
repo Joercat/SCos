@@ -1,32 +1,4 @@
-/* SCos native - kernel console ("tty").
- *
- * r36 introduced this as a rescue shell.  r37 makes it what the field
- * feedback asked for: the LINUX MODEL - a kernel-owned text console that
- * runs the WHOLE OS, with the window manager merely layered on top.
- * Every command the terminal app offers works here too (filesystem,
- * calc, sysinfo, themes, calendar, sysrq, diagnostics, process control);
- * the ONLY commands that need the WM are the ones that launch or kill
- * GUI apps, and those fail with an explicit
- *     "app failed startup: cannot bind to wm"
- * style error instead of silently doing nothing.
- *
- * Entry points:
- *   - the terminal command `tty` (raises tty_request; the WM main loop
- *     hands screen + keyboard over and reclaims them when tty returns),
- *   - Ctrl+Alt+F1 anywhere in the WM (r37 hotkey, like Linux's console
- *     switch),
- *   - wm_run() ever RETURNING (the WM died - kmain falls through here),
- * and while this console runs it ALSO presents pending non-fatal error
- * screens (err_show_pending) - error display no longer depends on the
- * WM being alive.  Kernel panics never did (panic.c draws straight to
- * the framebuffer).
- *
- * Like everything else in SCos this is polled: each loop pumps
- * usb_poll() (the keyboard is a USB device - without this the console
- * itself would be deaf), drains kbd_poll(), edits the line with the
- * shared edit_line() helper and repaints the 8x16 text grid at the
- * FONT_H+2 pitch term_dump.py decodes.
- */
+/* SCos virtual text consoles, independent of the desktop compositor. */
 #include "scos.h"
 
 int tty_request;                     /* raised by the terminal `tty` cmd
@@ -39,15 +11,32 @@ int tty_request;                     /* raised by the terminal `tty` cmd
 #define TTY_PROMPT_FG 0x00E8E8A0u
 #define TTY_WARN_FG   0x00E8A060u
 
-static char tty_lines[TTY_ROWS_MAX][TTY_COLS + 1];
-static int  tty_nlines;
-static char tty_input[TTY_COLS + 1];
-static int  tty_ipos;
-static int  tty_rows;
-static int  tty_wm_alive;
-static int  tty_exit;
-static int  wm_restarts;             /* 'wm' restart budget after a death */
-static char tty_cwd[128] = "/";      /* r37: the console has its own cwd */
+struct tty_session {
+    char lines[TTY_ROWS_MAX][TTY_COLS + 1];
+    int nlines;
+    char input[TTY_COLS + 1];
+    int ipos;
+    char cwd[128];
+    struct shell_confirm confirmation;
+    int initialized;
+};
+static struct tty_session consoles[6];
+static int active_console;
+#define tty_lines (consoles[active_console].lines)
+#define tty_nlines (consoles[active_console].nlines)
+#define tty_input (consoles[active_console].input)
+#define tty_ipos (consoles[active_console].ipos)
+#define tty_cwd (consoles[active_console].cwd)
+#define tty_confirmation (consoles[active_console].confirmation)
+static int tty_rows, tty_wm_alive, tty_exit;
+
+void tty_select(int number)
+{
+    if (number < 1 || number > 6) return;
+    active_console = number - 1;
+    struct tty_session *v = &consoles[active_console];
+    if (!v->initialized) { strcpy(v->cwd,"/"); v->initialized=1; }
+}
 
 static void tty_line_out(const char *s, int len)
 {
@@ -80,7 +69,7 @@ static void tty_print(const char *s)
     }
 }
 
-/* Linux-style prompt: scos:<cwd># */
+/* Console prompt. */
 static void tty_prompt(char *out, int max)
 {
     strcpy(out, "scos:");
@@ -98,8 +87,11 @@ static void tty_draw(void)
     u32 *p = screen.px;
     u32 n = (u32)screen.w * (u32)screen.h;
     for (u32 i = 0; i < n; i++) p[i] = TTY_BG;
-    int y = 4;
-    int first = tty_nlines - (tty_rows - 1);
+    char heading[32] = "SCos tty";
+    char number[8]; fmt_u32(number,active_console+1); strcat(heading,number);
+    s_text(&screen,6,4,heading,TTY_FG);
+    int y = 4 + FONT_H + 2;
+    int first = tty_nlines - (tty_rows - 2);
     if (first < 0) first = 0;
     for (int i = first; i < tty_nlines; i++, y += FONT_H + 2)
         s_text(&screen, 6, y, tty_lines[i], TTY_FG);
@@ -133,6 +125,7 @@ static void tty_procs(void)
     char row[112], n[16];
     tty_print("PID  NAME        TYPE    STATE      MEM");
     for (int i = 0; i < proc_sys_count(); i++) {
+        if (i == 2 && !tty_wm_alive) continue;
         strcpy(row, "     ");
         fmt_u32(n, (u32)i);
         strcpy(row, n);
@@ -185,7 +178,6 @@ static void tty_no_wm(const char *cmd)
               "everything else here works without it)");
 }
 
-static struct shell_confirm tty_confirmation;
 static void trace_tty_emit(const char *line, void *ctx) { (void)ctx; tty_print(line); }
 
 static void tty_exec(char *cmd)
@@ -206,9 +198,9 @@ static void tty_exec(char *cmd)
 
     if (!strcmp(args[0], "help")) {
         tty_print(
-            "commands (the full OS runs from this console; only GUI apps "
-            "need the WM):\n"
+            "Commands:\n"
             "  help            this list\n"
+            "  Ctrl+Alt+F1-F6  text consoles; F7 returns to a running desktop\n"
             "  ls [path]       list a directory (default: cwd)\n"
             "  cd <path>       change directory (cd .. / cd / go up, cd / = root)\n"
             "  pwd             print the working directory\n"
@@ -599,22 +591,12 @@ static void tty_exec(char *cmd)
         /* r37: GUI apps are the ONE thing this console cannot do without
          * the WM - fail loudly and correctly instead of half-launching */
         if (!tty_wm_alive) { tty_no_wm("appstrt"); return; }
-        if (wm_restarts >= 5) {
-            tty_print("appstrt: the WM keeps exiting - GUI apps cannot "
-                      "run; use 'reboot' for a clean start");
-            return;
-        }
         struct window *nw = wm_open_app(args[1], NULL);
         if (!nw) { tty_print("appstrt: unknown app (see 'help')"); return; }
         tty_print("appstrt: launched - returning you to the desktop");
         tty_exit = 1;
     }
     else if (!strcmp(args[0], "wm") || !strcmp(args[0], "exit")) {
-        if (!tty_wm_alive && wm_restarts >= 5) {
-            tty_print("wm: restart budget exhausted (the WM keeps dying) "
-                      "- staying in the console; 'reboot' for a clean start");
-            return;
-        }
         tty_exit = 1;
     }
     else if (!strcmp(args[0], "dmesg") || !strcmp(args[0], "klog")) {
@@ -801,8 +783,6 @@ static void tty_exec(char *cmd)
 static void tty_console_loop(void)
 {
     tty_exit = 0;
-    tty_input[0] = 0;
-    tty_ipos = 0;
     tty_draw();
     while (!tty_exit) {
         usb_poll();                    /* the keyboard is USB - pump it */
@@ -824,9 +804,12 @@ static void tty_console_loop(void)
             }
             /* r37: Ctrl+Alt+F7 - Linux's "back to the GUI VT" switch;
              * the WM side is Ctrl+Alt+F1 (see wm.c handle_key) */
+            if (ke.ctrl && ke.alt && ke.keycode >= KEY_F1 && ke.keycode <= KEY_F6) {
+                tty_select(ke.keycode - KEY_F1 + 1); tty_draw(); continue;
+            }
             if (ke.ctrl && ke.alt && ke.keycode == KEY_F7) {
-                tty_exit = 1;
-                break;
+                if (tty_wm_alive) { tty_exit=1; break; }
+                tty_print("Desktop stopped. Type 'wm' to start it."); tty_draw(); continue;
             }
             if (ke.keycode == '\n') {
                 char echo[TTY_COLS + 16];
@@ -851,41 +834,17 @@ static void tty_console_loop(void)
 
 void tty_run(int return_to_wm)
 {
-    tty_wm_alive = return_to_wm;
+    tty_select(active_console+1);
     tty_rows = (screen_h - 8) / (FONT_H + 2);
     if (tty_rows > TTY_ROWS_MAX) tty_rows = TTY_ROWS_MAX;
     if (tty_rows < 4) tty_rows = 4;
-    klog("tty: maintenance console entered (wm %s)",
-         return_to_wm ? "alive - manual entry" : "EXITED - rescue mode");
-
     for (;;) {
-        tty_nlines = 0;
-        tty_print("SCos maintenance console (build " SCOS_BUILD_TAG
-                  ") - kernel-owned rescue tty");
-        if (return_to_wm)
-            tty_print("the window manager is alive; 'wm' returns to the "
-                      "desktop");
-        else {
-            tty_print("THE WINDOW MANAGER HAS EXITED - the desktop is "
-                      "gone.");
-            tty_print("'wm' restarts it; everything else here works "
-                      "without it.");
-        }
-        tty_print("this console runs the whole OS (Linux model): every "
-                  "command works except GUI apps, which need the wm");
-        tty_print("'wm' or ctrl+alt+f7 returns to the desktop (ctrl+"
-                  "alt+f1 brings you back here)");
-        tty_print("type 'help' for commands");
+        tty_wm_alive = return_to_wm;
+        if (!return_to_wm) tty_print("Desktop stopped. Type 'wm' to start it.");
         tty_console_loop();
-        if (return_to_wm) return;      /* the WM loop reclaims its state */
-        /* rescue mode: 'wm'/'appstrt' asked for the desktop back */
-        if (wm_restarts >= 5) {        /* loop should have refused; belt */
-            tty_console_loop();
-            continue;
-        }
-        wm_restarts++;
-        klog("tty: restarting the WM (attempt %d of 5)", wm_restarts);
-        wm_run();                      /* nested; may return again */
-        klog("tty: wm_run RETURNED again (crash loop?) - back to console");
+        if (return_to_wm) return;
+        /* Explicit 'wm' starts a new desktop session after termination. */
+        wm_init();
+        wm_run();
     }
 }

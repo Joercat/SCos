@@ -14,6 +14,7 @@ static u8 packet[4];
 static int mouse_ok;
 static int packet_idx;
 static int packet_len = 3;
+static u8 mouse_id;
 static u8 button_state;
 
 static void mouse_wait_write(void)
@@ -115,12 +116,18 @@ static void mouse_apply(u8 btns, i32 dx, i32 dy, i32 wheel)
 static void handle_packet(void)
 {
     if (packet[0] & 0xC0) return;                     /* overflow: drop */
-    i32 dx = (i32)(i8)packet[1];
-    i32 dy = (i32)(i8)packet[2];
+    i32 dx = (i32)packet[1];
+    i32 dy = (i32)packet[2];
     if (packet[0] & 0x10) dx |= ~0xFF;                /* sign extend safety */
     if (packet[0] & 0x20) dy |= ~0xFF;
-    mouse_apply(packet[0] & 7, dx, dy,
-                packet_len == 4 ? (i32)(i8)packet[3] : 0);
+    i32 wheel = 0;
+    if (packet_len == 4) {
+        if (mouse_id == 4) { /* Explorer: signed 4-bit wheel; upper bits are buttons. */
+            wheel = packet[3] & 15;
+            if (wheel & 8) wheel -= 16;
+        } else wheel = (i8)packet[3];
+    }
+    mouse_apply(packet[0] & 7, dx, dy, wheel);
 }
 
 /* USB HID boot mouse reports arrive here */
@@ -216,7 +223,8 @@ void mouse_init(void)
         mouse_write(0xF2); mouse_read();
         id = mouse_read();
     }
-    if (id >= 3) packet_len = 4;
+    mouse_id = id;
+    if (id == 3 || id == 4) packet_len = 4;
     klog("mouse: device id %d, packet len %d", id, packet_len);
 
     while (inb(MOUSE_STAT) & 1) inb(MOUSE_DATA);   /* flush probe leftovers */

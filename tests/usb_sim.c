@@ -221,6 +221,7 @@ struct sim_consumer {
     u32 deq;                    /* consumer dequeue index */
     u32 cycle;                  /* expected consumer cycle bit */
     u32 slot, dci;
+    u32 max_packet, pending_bytes;
     u32 report_len;             /* simulated payload length for events */
     int active;
     long tds;                   /* completed TDs (events posted) */
@@ -243,6 +244,39 @@ static void sim_post_event(u32 slot, u32 dci, u32 code, u32 trb_ptr, u32 rem)
     if (sim_evt_idx == EVT_TRBS) { sim_evt_idx = 0; sim_evt_cycle ^= 1; }
 }
 
+/* A USB PACKET is not a TD. Full-size packets accumulate until the
+ * request is satisfied; only short packets end a TD early. Device NAKs
+ * (no report to send) are modeled by not calling this function at all. */
+static volatile u32 *sim_current_trb(struct sim_consumer *c)
+{
+    for (int i=0;i<2;i++) {
+        volatile u32 *t=c->ring+c->deq*4;
+        if ((t[3]&1u)!=c->cycle) return NULL;
+        if (((t[3]>>10)&63)!=TRB_LINK) return t;
+        if(t[3]&2)c->cycle^=1;
+        c->deq=0;
+    }
+    return NULL;
+}
+static int sim_deliver_packet(struct sim_consumer *c, const u8 *packet, u32 len)
+{
+    volatile u32 *t=sim_current_trb(c);
+    if(!c->active || !t) return 0;
+    if(len>c->max_packet) { fprintf(stderr,"SIM: packet exceeds endpoint MPS\n"); exit(1); }
+    u32 requested=t[2]&0x1FFFFu;
+    u32 left=requested-c->pending_bytes;
+    u32 copied=len<left?len:left;
+    memcpy((u8 *)(unsigned long)t[0]+c->pending_bytes,packet,copied);
+    c->pending_bytes+=copied;
+    int short_packet=len<c->max_packet;
+    if(!short_packet && c->pending_bytes<requested) return 0;
+    u32 code=len>left?3:(c->pending_bytes<requested?13:1);
+    if ((t[3]&(1u<<5)) || (short_packet && (t[3]&(1u<<2))))
+        sim_post_event(c->slot,c->dci,code,(u32)(unsigned long)t,requested-c->pending_bytes);
+    c->pending_bytes=0; c->deq++; c->tds++;
+    return 1;
+}
+
 /* Consume ready TRBs until an IOC fires (one TD per call, like a
  * scheduling xHC) or a not-ready TRB idles the endpoint.  This is where a
  * wrong-cycle producer TRB becomes visible: the consumer stops, the
@@ -250,6 +284,12 @@ static void sim_post_event(u32 slot, u32 dci, u32 code, u32 trb_ptr, u32 rem)
 static int sim_consume_td(struct sim_consumer *c)
 {
     if (!c->active) return 0;
+    if (c->dci != 1) {
+        volatile u32 *t=sim_current_trb(c);
+        if (!t) return 0;
+        u8 packet[64]; memcpy(packet,(const void *)(unsigned long)t[0],c->report_len);
+        return sim_deliver_packet(c,packet,c->report_len);
+    }
     for (int guard = 0; guard < 8 * c->ring_trbs + 8; guard++) {
         volatile u32 *t = c->ring + c->deq * 4;
         if ((t[3] & 1u) != c->cycle) return 0;       /* EP idles here */
@@ -341,6 +381,7 @@ static struct sim_consumer *sim_cfg_ep(const u32 *epw, u32 slot, u32 dci,
     struct sim_consumer *c = sim_add_consumer(
         (volatile u32 *)(unsigned long)(deq & ~0xFu), IN_TRBS, slot, dci,
         replen);
+    c->max_packet = mps;
     c->deq = 0;                          /* dequeue = ring start here */
     c->cycle = deq & 1u;                 /* xHC takes the cycle from ctx */
     return c;
@@ -539,13 +580,11 @@ static void test_interrupt_rings(void)
         h->kind = j == 0 ? 1 : 2;
         h->ep_addr = (u8)(j + 1);
         h->dci = (u32)(h->ep_addr * 2 + 1);
-        h->ep_mps = 8;
+        h->ep_mps = j == 0 ? 16 : 8;
         h->binterval = (u8)(j == 0 ? 2 : 1);  /* field: kbd 2, mouse 1 */
         h->inr = (volatile u32 *)palloc(4096);
-        /* r33: model the field devices - reports carry a Report ID
-         * prefix byte, so the payload sits one byte up.  The inject
-         * stubs record what arrived, so a wrong report offset fails
-         * T3 on CONTENT, not just on counts. */
+        /* Synthetic prefix coverage: the 9-byte keyboard report needs
+         * MPS >= 9. Actual field MPS8/report8 behavior is tested in T15. */
         h->has_id = 1;
         for (int b = 0; b < IN_TRBS; b++) {
             h->in_buf[b] = palloc(IN_BUF_BYTES);
@@ -755,7 +794,7 @@ static struct sim_consumer *t6_arm(struct xdev *d, u32 slot, int j,
     h->kind = kind;
     h->ep_addr = (u8)(j + 1);
     h->dci = (u32)(h->ep_addr * 2 + 1);
-    h->ep_mps = 8;
+    h->ep_mps = replen > 8 ? 16 : 8;
     h->binterval = 2;                   /* FS, like the field devices */
     h->has_id = 0;                      /* descriptor evidence "failed" */
     h->inr = (volatile u32 *)palloc(4096);
@@ -940,9 +979,9 @@ static void test_runtime_fallbacks(void)
                   "6e: probe never detected 16-bit axes (xh00ff %u len6 %u "
                   "nz4 %u nz5 %u of n %u)", (u32)h->xh00ff, (u32)h->len6,
                   (u32)h->nz[3], (u32)h->nz[4], (u32)h->probe_n);
-            CHECK(sim_m_dx == -15 && sim_m_dy == -18,
-                  "6e: wide16 content wrong: dx %d dy %d (want -15, -18 "
-                  "with the r39 high-res gain x3; dy +2 would be the r36 "
+            CHECK(sim_m_dx == -5 && sim_m_dy == -6,
+                  "6e: wide16 content wrong: dx %d dy %d (want -5, -6 "
+                  "with the r41 unity gain; dy +2 would be the r36 "
                   "X-high-byte up-drift)", sim_m_dx, sim_m_dy);
             printf("  6e 16-bit probe fallback: verdict at 60, dx %d dy %d "
                    "delivered (no descriptor needed)\n",
@@ -1044,7 +1083,7 @@ static struct sim_consumer *t8_arm(struct xdev *d, u32 slot, int j,
     h->kind = kind;
     h->ep_addr = (u8)(j + 1);
     h->dci = (u32)(h->ep_addr * 2 + 1);
-    h->ep_mps = 8;
+    h->ep_mps = replen > 8 ? 16 : 8;
     h->binterval = 1;
     h->use_layout = 1;
     h->lay = *lay;
@@ -1174,9 +1213,9 @@ static void test_layout_parser(void)
             sim_mouse_reports = 0;
             sim_m_btn = 0; sim_m_dx = 12345; sim_m_dy = 12345; sim_m_wh = 0;
             t8_pump(c, 1);
-            CHECK(sim_m_dx == -15 && sim_m_dy == 0,
-                  "8f: physical left dx -5 gave dx %d dy %d (want -15 with "
-                  "the r39 high-res gain x3, 0 - dy nonzero is the r36 "
+            CHECK(sim_m_dx == -5 && sim_m_dy == 0,
+                  "8f: physical left dx -5 gave dx %d dy %d (want -5 with "
+                  "the r41 unity gain, 0 - dy nonzero is the r36 "
                   "up-drift bug)", sim_m_dx, sim_m_dy);
 
             /* physical DOWN, dy=+6 -> queue dy = -6 (r35 convention:
@@ -1186,9 +1225,9 @@ static void test_layout_parser(void)
             t8_refill(dm, 0, c, 7, pay_down);
             sim_m_dx = 12345; sim_m_dy = 12345;
             t8_pump(c, 1);
-            CHECK(sim_m_dx == 0 && sim_m_dy == -18,
-                  "8f: physical down gave dx %d dy %d (want 0, -18 with "
-                  "the r39 gain x3 - the r36 dead-vertical bug)",
+            CHECK(sim_m_dx == 0 && sim_m_dy == -6,
+                  "8f: physical down gave dx %d dy %d (want 0, -6 with "
+                  "the r41 unity gain - the r36 dead-vertical bug)",
                   sim_m_dx, sim_m_dy);
 
             /* diagonal: dx=+300 (0x012C), dy=-120 (0xFF88) -> queue
@@ -1197,9 +1236,9 @@ static void test_layout_parser(void)
             t8_refill(dm, 0, c, 7, pay_diag);
             sim_m_dx = 0; sim_m_dy = 0;
             t8_pump(c, 1);
-            CHECK(sim_m_dx == 900 && sim_m_dy == 360,
-                  "8f: diagonal 16-bit move gave dx %d dy %d (want 900, "
-                  "360 with the r39 gain x3 - beyond the 8-bit range "
+            CHECK(sim_m_dx == 300 && sim_m_dy == 120,
+                  "8f: diagonal 16-bit move gave dx %d dy %d (want 300, "
+                  "120 with r41 unity gain - beyond the 8-bit range "
                   "entirely)", sim_m_dx, sim_m_dy);
 
             /* wheel -2 */
@@ -1231,8 +1270,8 @@ static void test_layout_parser(void)
             t8_pump(c, 1);
             CHECK(sim_m_btn == 2, "8f: layout buttons got %u want 2",
                   (u32)sim_m_btn);
-            printf("  8f 16-bit mouse end-to-end (r39 gain x3): left(-15,"
-                   "0) down(0,-18) diag(900,360) wheel -2 foreign-ID "
+            printf("  8f 16-bit mouse end-to-end (r41 unity gain): left(-5,"
+                   "0) down(0,-6) diag(300,120) wheel -2 foreign-ID "
                    "dropped btn 2\n");
         }
     }
@@ -1863,6 +1902,150 @@ static void test_split_reports(void)
     printf("  T14 split report IDs: stationary clicks, all 20 wheel ticks, repeated keys and NumLock PASS\n");
 }
 
+/* T15: full-size interrupt PACKETS on the field devices' 8-byte EPs.
+ * No refresh callback or unrelated input is involved in delivery. */
+static void test_packet_boundaries(void)
+{
+    struct hid_layout kl;
+    CHECK(hid_parse_layout(rdesc_bootkbd,sizeof(rdesc_bootkbd),1,&kl),"T15 keyboard descriptor");
+    u8 minus[8]={0,0,0x2D,0,0,0,0,0}, release[8]={0};
+    struct key_event ke;
+    drain_input();
+    struct xdev *old=slot_alloc(3); old->nhid=1; old->kind=1;
+    struct sim_consumer *broken=t8_arm(old,3,0,1,&kl,8,minus);
+    /* Demonstrate the old transfer behavior, not a mocked event drop. */
+    old->hid[0].inr[2]=64;
+    for(int i=0;i<8;i++) {
+        int completed=sim_deliver_packet(broken,i%2?release:minus,8);
+        CHECK(completed==(i==7),"T15 old 64-byte TD completed on packet %d",i+1);
+        proc_events();
+        if(i<7) CHECK(!kbd_poll(&ke),"T15 old oversized TD unexpectedly emitted a key early");
+    }
+    CHECK(kbd_poll(&ke) && ke.pressed && ke.keycode=='-',"T15 oversized TD first report not decoded");
+    CHECK(!kbd_poll(&ke),"T15 old TD should have swallowed its seven trailing reports");
+    sim_deliver_packet(broken,minus,8);proc_events();
+    CHECK(!kbd_poll(&ke),"T15 old batch did not reproduce stuck repeated '-'");
+    broken->active=0; old->hid[0].active=0;
+
+    struct xdev *d=slot_alloc(4); d->nhid=1; d->kind=1;
+    struct sim_consumer *c=t8_arm(d,4,0,1,&kl,8,minus);
+    CHECK(c && c->max_packet==8,"T15 not testing field MPS8");
+    static const u8 usages[]={0x2D,0x2D,0x2A,0x2A,0x53,0x53};
+    static const u16 codes[]={'-','-',8,8,KEY_NUM,KEY_NUM};
+    for(int i=0;i<200;i++) {
+        u8 packet[8]={0,0,usages[i%6],0,0,0,0,0};
+        tick_count+=50; // a deliberate pause; no GUI refresh or extra reports
+        CHECK(sim_deliver_packet(c,packet,8)==1,"T15 key %d needs more USB packets to complete",i);
+        proc_events();
+        CHECK(kbd_poll(&ke) && ke.pressed && ke.keycode==codes[i%6],"T15 key %d missing/repeated wrong",i);
+        CHECK(sim_deliver_packet(c,release,8)==1,"T15 release %d failed to complete",i);
+        proc_events();drain_input();
+    }
+    c->active=0; d->hid[0].active=0; num_on=1;
+
+    struct hid_layout ml={.kind=2,.ok=1,.btn_off=0,.btn_cnt=3,
+        .x_off=8,.x_sz=16,.y_off=24,.y_sz=16,.w_off=40,.w_sz=8,.rpt_bits=64};
+    struct xdev *m=slot_alloc(5);m->nhid=1;m->kind=2;
+    struct sim_consumer *mc=t8_arm(m,5,0,2,&ml,8,release);
+    mouse_apply(0,0,0,0);drain_input();
+    struct mouse_event me;
+    for(int i=0;i<200;i++) {
+        u8 down[8]={1,0,0,0,0,0,0,0};
+        tick_count+=50;
+        CHECK(sim_deliver_packet(mc,down,8)==1,"T15 stationary down delayed"); proc_events();
+        CHECK(mouse_poll(&me) && me.type==MEV_BUTTON && me.down,"T15 stationary down lost");
+        sim_deliver_packet(mc,release,8);proc_events();
+        CHECK(mouse_poll(&me) && me.type==MEV_BUTTON && !me.down,"T15 stationary up lost");
+        u8 wheel[8]={0,0,0,0,0, i%2?0xFF:1,0,0};
+        CHECK(sim_deliver_packet(mc,wheel,8)==1,"T15 wheel delayed"); proc_events();
+        CHECK(mouse_poll(&me) && me.type==MEV_WHEEL && me.wheel==(i%2?-1:1),"T15 wheel lost");
+    }
+    mc->active=0;
+    printf("  T15 reproduced 8-report batching/stuck '-' with old length; 400 key packets + 600 stationary mouse packets pass individually\n");
+}
+
+static void test_ps2_packet_fields(void)
+{
+    mouse_apply(0,0,0,0); drain_input();
+    packet_len=4; mouse_id=4;
+    packet[0]=8; packet[1]=200; packet[2]=180; packet[3]=0;
+    handle_packet(); struct mouse_event e;
+    CHECK(mouse_poll(&e) && e.type==MEV_MOVE && e.dx==200 && e.dy==180,
+          "T16 PS/2 positive 9-bit deltas were sign-flipped at 128");
+    packet[0]=8|0x30; packet[1]=56; packet[2]=76; handle_packet();
+    CHECK(mouse_poll(&e) && e.dx==-200 && e.dy==-180,"T16 PS/2 negative 9-bit deltas wrong");
+    packet[0]=8;packet[1]=packet[2]=0;packet[3]=0x1F;handle_packet();
+    CHECK(mouse_poll(&e) && e.type==MEV_WHEEL && e.wheel==-1,
+          "T16 Explorer wheel nibble/extra-button bits misdecoded");
+    packet[3]=1;handle_packet();
+    CHECK(mouse_poll(&e) && e.wheel==1,"T16 Explorer up wrong");
+    mouse_id=3;packet[3]=0xFF;handle_packet();
+    CHECK(mouse_poll(&e) && e.wheel==-1,"T16 IntelliMouse signed-byte wheel wrong");
+    packet_len=3; mouse_id=0;
+    printf("  T16 PS/2 9-bit axes and both wheel formats PASS\n");
+}
+
+static void test_report_assembly(void)
+{
+    caps_on=0;
+    u8 desc[128]={0x85,1};
+    memcpy(desc+2,rdesc_bootkbd,sizeof(rdesc_bootkbd));
+    const u8 consumer[]={0x85,2,0x05,0x0C,0x75,8,0x95,16,0x81,2};
+    memcpy(desc+2+sizeof(rdesc_bootkbd),consumer,sizeof(consumer));
+    int dl=2+sizeof(rdesc_bootkbd)+sizeof(consumer);
+    struct hid_layout lay;
+    CHECK(hid_parse_layout(desc,dl,1,&lay),"T17 parse keyboard");
+    u8 down[9]={1,0,0,4},up[9]={1}; struct key_event e={0};
+    struct xdev *d=slot_alloc(3); d->nhid=1;d->kind=1;
+    struct sim_consumer *c=t8_arm(d,3,0,1,&lay,8,down);
+    struct hid_ep *h=&d->hid[0]; hid_set_frames(h,desc,dl);
+    CHECK(h->nframes==2 && h->frame_sizes[1]==17,"T17 consumer framing lost");
+    drain_input();
+    for(int i=0;i<100;i++) {
+        sim_deliver_packet(c,down,8);proc_events();
+        CHECK(!kbd_poll(&e),"T17 injected partial report");
+        sim_deliver_packet(c,down+8,1);proc_events();
+        CHECK(kbd_poll(&e) && e.keycode=='a',"T17 8+1 report failed/repeated key latched: key=%u ctrl=%u used=%u goal=%u",e.keycode,e.ctrl,h->fragment_used,h->fragment_goal);
+        sim_deliver_packet(c,up,8);proc_events();
+        sim_deliver_packet(c,up+8,1);proc_events();
+        CHECK(!kbd_poll(&e),"T17 release generated phantom input");
+    }
+    /* Consumer continuation deliberately resembles a keyboard report. */
+    u8 foreign[17]={2};memcpy(foreign+8,down,9);
+    sim_deliver_packet(c,foreign,8);proc_events();
+    sim_deliver_packet(c,foreign+8,8);proc_events();
+    sim_deliver_packet(c,foreign+16,1);proc_events();
+    CHECK(!kbd_poll(&e) && !h->fragment_used,"T17 foreign continuation injected keys");
+    /* Consume an over-capacity report without copying beyond the 64B buffer. */
+    u8 oversized[65]={2};memcpy(oversized+8,down,9);h->frame_sizes[1]=65;
+    for (int i=0;i<64;i+=8) { sim_deliver_packet(c,oversized+i,8);proc_events(); }
+    sim_deliver_packet(c,oversized+64,1);proc_events();
+    CHECK(!kbd_poll(&e) && !h->fragment_used,"T17 over-capacity report injected or wedged assembly");
+    h->frame_sizes[1]=17;
+    /* ZLP aborts a truncated report; subsequent valid input must recover. */
+    sim_deliver_packet(c,down,8);proc_events();
+    sim_deliver_packet(c,down,0);proc_events();
+    CHECK(!kbd_poll(&e) && !h->fragment_used,"T17 zero-length termination kept stale fragment");
+    sim_deliver_packet(c,down,8);proc_events();
+    sim_deliver_packet(c,down+8,1);proc_events();
+    CHECK(kbd_poll(&e) && e.keycode=='a',"T17 recovery after truncated report failed");
+    sim_deliver_packet(c,up,8);proc_events();sim_deliver_packet(c,up+8,1);proc_events();drain_input();
+    /* Exact multiple of MPS must complete at its declared size, no ZLP needed. */
+    struct hid_layout nk;hid_parse_layout(rdesc_nkro,sizeof(rdesc_nkro),1,&nk);
+    u8 report[16]={2,0,0,0x10};
+    struct xdev *nd=slot_alloc(4);nd->nhid=1;nd->kind=1;
+    struct sim_consumer *nc=t8_arm(nd,4,0,1,&nk,8,report);
+    sim_deliver_packet(nc,report,8);proc_events();CHECK(!kbd_poll(&e),"T17 partial NKRO emitted");
+    sim_deliver_packet(nc,report+8,8);proc_events();
+    CHECK(kbd_poll(&e) && e.keycode=='a',"T17 exact 8+8 NKRO waited for unrelated activity");
+    /* Hidden output-only Report ID, also split 8+1. */
+    h->nframes=0;h->lay.rid=0;h->lay.saw_rid=1;
+    sim_deliver_packet(c,down,8);proc_events();CHECK(!kbd_poll(&e),"T17 hidden prefix partial emitted");
+    sim_deliver_packet(c,down+8,1);proc_events();
+    CHECK(kbd_poll(&e) && e.keycode=='a' && !e.ctrl,"T17 hidden-prefix assembly failed");
+    printf("  T17 400 split packets, foreign-ID framing, ZLP recovery, NKRO and hidden-prefix assembly PASS\n");
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -1895,6 +2078,9 @@ int main(int argc, char **argv)
     test_idle_dispatch();
     test_control_event_isolation();
     test_split_reports();
+    test_packet_boundaries();
+    test_ps2_packet_fields();
+    test_report_assembly();
     if (failures) {
         printf("USB SIM: %d FAILURE(S)\n", failures);
         return 1;

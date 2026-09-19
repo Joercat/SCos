@@ -13,7 +13,7 @@ used by the test suite and the live preview.
 
 ```
 make            # build build/scos.img (bootable disk image)
-make test       # 14 end-to-end scenarios in headless v86 (screenshots in build/tests/)
+make test       # host regressions + 32 headless v86 scenarios (build/tests/)
 make preview    # browser preview on http://localhost:8080
 ```
 
@@ -265,7 +265,8 @@ reports success only if both the VFS write and disk save succeed. Existing
 `/home/inputtrace.txt` is replaced only by an explicit `inputtrace save`.
 
 `kill --system 2` always asks `[y/N]`, then **actually stops scwm's event loop**
-and enters the base console. `wm` restarts it with existing app state retained.
+and enters the base console. In r40, `wm` retained app state; **r41 replaces this
+with actual app/compositor teardown and a fresh desktop on restart.**
 Other system rows describe in-kernel subsystems, not independently scheduled
 processes; attempts to stop them are rejected, not faked. `kill <app-pid>` still
 closes the actual app. `kill --help` explains syntax; malformed PIDs and unknown
@@ -288,3 +289,54 @@ conflicting firmware mappings are left alone. This boot-only implementation
 assumes SCos's existing single executing CPU and disabled paging. `make mtrrtest`
 checks the pure register/range planner; it does not execute privileged MSRs on
 hardware. v86 also does not validate the physical GPU/cache behavior.
+
+
+### Round 41: packet completion, six consoles, and WM teardown
+
+**r40 did not fix the reported physical input failures.** A concrete transport
+bug was reproduced for r41: every interrupt TD requested the entire 64-byte
+buffer, even on an 8-byte endpoint. Eight full-size packets therefore completed
+one TD, and the decoder interpreted only its first report. Releases and wheel
+steps in the remaining packets were lost. This produces repeated-key suppression
+and movement-dependent clicks without any display-refresh dependency. The old
+simulator incorrectly completed a TD for every packet and hid this bug.
+
+* Initial and rearmed receive requests now use one endpoint packet (bounded by
+  the 64-byte allocation). Completion lengths use the submitted request minus
+  its residual, not allocation capacity. Only success/short completions decode.
+* Descriptor-framed assembly preserves longer reports across packet completions,
+  including 8+1-byte prefixed keyboards and 8+8-byte NKRO reports. Known unrelated
+  report IDs are framed and discarded as whole reports; their continuation bytes
+  cannot become phantom input. Truncated and zero-length reports clear assembly.
+* The compensating USB 3× motion multiplier is removed. Saved sensitivity settings
+  remain unchanged. Native PS/2 has separate fixes for 9-bit axis sign extension
+  and Explorer's signed 4-bit wheel (which was previously interpreted as 8 bits).
+  This is not an arbitrary PS/2 sensitivity reduction.
+* Ctrl+Alt+F1–F6 select six persistent text consoles, each with its own history,
+  unfinished input, working directory and confirmation. Ctrl+Alt+F7 returns to
+  a **running** desktop. The GUI terminal also accepts `tty [1-6]`.
+* Confirmed `kill --system 2` unwinds the WM loop, closes GUI applications and
+  frees their resources plus compositor caches. Unsaved GUI edits are lost.
+  `wm` starts a fresh desktop; F7 cannot resurrect a killed one. Switching VTs
+  without killing the WM preserves its applications. The five-restart cap is gone.
+* Console headings are simply `SCos ttyN`; the old maintenance/Linux-model prose
+  is removed. Manual `diag`/`inputtrace` diagnostics remain available. Endpoint
+  traces now include packet/request sizes; trace acceptance code 3 means a packet
+  is awaiting its report continuation (0 dropped/error, 1 parsed, 2 fallback).
+
+Verification: packet-level USB tests explicitly reproduce the old eight-report
+batching/stuck-minus failure, then deliver 400 key packets and 600 stationary
+click/release/wheel packets independently without GUI refresh. Another 400 split
+packets exercise assembly and ring wrap, with foreign-ID, ZLP recovery, hidden-ID,
+NKRO and PS/2 format checks. Restoring the oversized request makes regressions
+fail. Emulator coverage checks six-console state isolation, actual heap reclamation,
+fresh app state after WM termination, and seven stop/restart cycles.
+
+These are local driver and emulator results, **not physical acceptance on the
+user's PC**. HID support remains bounded to eight descriptor ID slots (including
+unnumbered state), a 256-byte descriptor, 64-byte assembled reports and six merged
+keyboard usages. Reports over 64 bytes are unsupported; unknown/vendor formats are not
+universally supported. A full-size unprefixed
+report from firmware whose descriptor requires an ID is ambiguous; short
+unprefixed quirk reports remain supported. LED synchronization and held-key
+repeat are still not implemented. No hardware resolution is claimed until tested.

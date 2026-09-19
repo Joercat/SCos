@@ -203,11 +203,10 @@ static const char *help_text =
     "diag [sub]- Full hardware scan; sub = pci|usb|input for a quick\n"
             "            subsystem scan printed right here in the terminal\n"
     "sysrq <a> - System request: a = panic|reboot|error|dump|time\n"
-    "tty       - Kernel maintenance console (Linux-tty style; the whole "
-            "OS runs there, ctrl+alt+f1 also opens it)\n"
+    "tty [1-6] - Switch to a text console; Ctrl+Alt+F7 returns to desktop\n"
     "theme     - List or switch themes\n"
     "calc      - Perform basic arithmetic\n"
-    "ping      - Honest answer: this kernel has no TCP/IP stack\n"
+    "ping      - Network status (TCP/IP unavailable)\n"
     "scinfo    - Display system information\n"
     "alias     - Create command aliases\n"
     "history   - Show command history\n"
@@ -777,12 +776,10 @@ static void run_command(struct term *t, const char *command)
         else strcpy(response, "Error: disk write failed.");
     }
     else if (!strcmp(cmd, "tty")) {
-        /* r36: hand screen + keyboard to the kernel maintenance console;
-         * the WM main loop picks tty_request up, and 'wm' returns here */
-        tty_request = 1;
-        strcpy(response, "Entering the SCos maintenance console - "
-                         "type 'wm' or press ctrl+alt+f7 there to return "
-                         "to the desktop");
+        int number=1;
+        if (nargs>2 || (nargs==2 && (!parse_pid(args[1],&number) || number<1 || number>6)))
+            strcpy(response,"Usage: tty [1-6]");
+        else { tty_request=number; strcpy(response,"Switched to text console. Ctrl+Alt+F7 returns to desktop."); }
     }
     else if (!strcmp(cmd, "shutdown")) {
         if (nargs > 1 && (nargs != 2 || strcmp(args[1],"--confirm"))) {
@@ -1215,7 +1212,7 @@ static void run_command(struct term *t, const char *command)
         else if ((!system && nargs != 2) || !parse_pid(args[system ? 2 : 1], &pid))
             strcpy(response,"Usage: kill <pid> | kill --system <pid>; PID must be decimal.");
         else if (system) {
-            if (pid == 2) { wm_stop_requested = 1; strcpy(response,"Stopping scwm; returning to the base console. 'wm' restarts it."); }
+            if (pid == 2) { wm_stop_requested = 1; strcpy(response,"Terminating scwm and its applications. Type 'wm' in the console to start a new desktop."); }
             else strcpy(response,"This subsystem has no independent stop operation; nothing was terminated.");
         }
         else {
