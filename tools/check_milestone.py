@@ -23,6 +23,21 @@ def main():
         if meta.get(key) != value:
             raise ValueError(f"Milestone provenance mismatch: {key}")
     print(f"PASS: permanent scos 32bit / r42 — {SHA256}")
+    name = "dist/scos-32bit-r43.img"
+    sha = "43c2bce097389179aff9965779148c82a4907017c392f996a6602f727efb0c97"
+    image43 = (ROOT / name).read_bytes()
+    if len(image43) != 8388608 or hashlib.sha256(image43).hexdigest() != sha:
+        raise ValueError("Permanent scos 32bit r43 image changed or truncated")
+    if (ROOT / (name + ".sha256")).read_text() != f"{sha}  {name}\n":
+        raise ValueError("r43 milestone checksum mismatch")
+    meta43 = json.loads((ROOT / "docs/milestones/scos-32bit-r43.json").read_text())
+    expected43 = dict(artifact=name, architecture="i386", build_tag="r43",
+                      source_commit="edb89550fff5f32363be53d6f47a2ceb1973fa2f",
+                      sha256=sha, bytes=8388608)
+    for key, value in expected43.items():
+        if meta43.get(key) != value:
+            raise ValueError(f"r43 provenance mismatch: {key}")
+    print(f"PASS: permanent scos 32bit / r43 — {sha}")
 
 
 if __name__ == "__main__":
