@@ -1,82 +1,58 @@
-# Write an SCos app in Lua
+# App Studio, CAT packages and Lua API 2
 
-SCos embeds the **Lua 5.4.9 lexer, parser, bytecode compiler and VM**. A `.lua`
-file is compiled in memory when it launches; no kernel rebuild or reboot is
-needed. This is real native execution, not the old web simulation.
+All **13 shipped desktop applications are native C**, including App Studio,
+Counter and Sketch. Themes can change their appearance; editable Lua does not
+replace system applications. Lua 5.4.9's real compiler and VM remain available
+for your own apps, loaded exclusively from **`.cat` packages**. Raw `.lua`
+files and `.project` files cannot be launched as applications.
 
-## Try the included apps
+## Build an app inside SCos
 
-In the SCos Terminal:
+1. Open **App Studio** in the launcher or run `appstrt studio` in Terminal.
+2. Edit the starter source. The left pane edits ID, title, initial window size
+   and the optional system-theme permission. Use a unique lowercase ID.
+3. **Check** performs real syntax compilation without running the code.
+4. **Ctrl+S / Save** writes `/home/projects/<id>.project`, including metadata
+   and unfinished source. **Ctrl+B / Build** syntax-compiles and writes a
+   checksummed `/home/apps/<id>.cat`. A failed build leaves an old package intact.
+5. **F5 / Run** builds first, then launches the resulting package in a separate
+   window. Runtime errors appear there and in Studio's diagnostics; syntax
+   checking alone cannot guarantee runtime success. Close old app instances
+   before testing new code; existing instances retain their compiled state.
+6. Later use `appstrt /home/apps/<id>.cat`, `appstrt <id>`, the launcher, or
+   double-click the package in Files. No OS rebuild or reboot is required.
 
-```text
-appstrt counter
-appstrt sketch
-```
+Studio has line numbers, scrolling, lexical syntax colors, metadata caret
+editing, one-level source undo/redo (Ctrl+Z/Y), select-all (Ctrl+A), an API
+reference (F1), diagnostics, and New/Open/Save/Check/Build/Run/API/Recover
+controls. Ctrl+N/O create/open projects. Open accepts `.project` or `.cat`;
+opening another document in an already-running dirty Studio asks before
+replacing it. Closing dirty Studio writes a **best-effort RAM recovery copy**
+at `/home/projects/studio-recovery.project`; Recover loads it. Valid metadata
+is preserved; invalid metadata falls back to recovery defaults. This is not
+continuous autosave, multi-level undo, a filesystem tree, autocomplete, or a
+full Android Studio port. Coloring is a lightweight lexical aid, not a parser.
 
-- **Counter:** click its button or press Space. Press S to write its count into
-  `/home/appdata/counter/count.txt` in the RAM filesystem.
-- **Sketch:** click to draw, resize the window, press R to clear.
-
-Their editable sources are `/home/apps/counter.lua` and `/home/apps/sketch.lua`.
-The repository originals are in `apps/examples/`. The examples are initial VFS
-resources, not special cases in the compositor or interpreter.
-
-## Create your own app
-
-```text
-touch /home/apps/hello.lua
-appstrt notepad /home/apps/hello.lua
-```
-
-Enter this source and save it with Ctrl+S:
-
-```lua
-local clicks = 0
-return {
-    open = function()
-        scos.title("Hello from my app")
-    end,
-    paint = function(width, height)
-        scos.clear(0x101820)
-        scos.text(16, 16, "Clicks: " .. clicks, 0x39ff14)
-        scos.rect(16, 48, math.max(0, width - 32), 32, 0x17402a)
-    end,
-    mouse = function(kind, x, y, button, down, wheel, buttons)
-        if kind == 2 and button == 1 and down then
-            clicks = clicks + 1
-            scos.redraw()
-        end
-    end
-}
-```
-
-Then run:
-
-```text
-appstrt /home/apps/hello.lua
-```
-
-After discovery, `appstrt hello` also works. Relative file paths use the
-terminal's current directory. After editing, **close and relaunch** to compile
-the new source. Existing windows retain their own compiled code and state.
-Syntax/runtime failures leave an error window that can be closed normally; a
-launching terminal receives the error log too. Launching a file never executes
-it at discovery time.
+Open `/home/projects/sample-counter.project` or `sample-sketch.project` for
+editable **user-app templates**, separate from the built-in C Counter/Sketch.
+Files associates `.project` with Studio and ordinary text with Notepad.
 
 ### Discovery and names
 
-- `/home/apps/*.lua` is scanned at startup, on `apps`/`appstrt`, when opening
-  the launcher, and when restoring desktop icons.
-- Other VFS paths can be launched explicitly with `appstrt path/to/name.lua`.
-- The filename without `.lua` is the app ID: 1–30 characters, lowercase ASCII
-  letters, digits or `-`. IDs must be unique and cannot replace native apps.
-- Source limit: **64 KiB**. Up to **32 Lua app IDs per boot session**, with a
-  64-entry shared registry. The existing 16-window limit still applies.
-- Registry entries live for the session; deleting a source makes subsequent
-  launches report a missing-source error. Restart clears transient entries.
-- Search includes Lua apps. Scroll the launcher to reach results beyond its
-  ten visible rows. “Restore removed icons” adds discovered apps while desktop
-  grid capacity permits. Internal dialog/error clients are not listed.
+- `/home/apps/*.cat` is scanned at startup and during app/launcher discovery.
+- Explicit paths elsewhere can be launched with `appstrt path/to/name.cat`.
+- Package metadata supplies the ID (1–30 lowercase ASCII letters/digits/dashes),
+  not its filename. Native IDs and same-ID packages at different paths conflict.
+- Source limit is **64 KiB**; up to **32 external registrations per boot**,
+  within the 64-entry shared registry and 16-window limit. Deleting a package
+  does not reclaim its registration until restart; launching it then fails.
+- Header, checksum, source and capability metadata are revalidated on launch.
+  Capability changes require closing and reopening the app.
+- Search and desktop-icon restoration include discovered packages.
+
+See [the exact package format](CAT-FORMAT.md). CAT carries source plus a manifest;
+Build really invokes the compiler, but the stored payload is **not native machine
+code** or Lua bytecode. CRC detects corruption, **not authenticity**.
 
 ## Callback contract
 
@@ -97,49 +73,101 @@ not the framebuffer address. There is no user close/finalizer callback: closing
 or killing the window releases the entire runtime arena without executing
 additional app code.
 
-## `scos` API, version 1
+## `scos` API — 48 functions, `scos.version == 2`
 
-`scos.version` is the integer `1`.
+Drawing functions are **paint-only**. RGB colors are integers `0xRRGGBB`;
+coordinates are -4096..4096, drawing dimensions 0..4096, text ≤1024 bytes.
+Invalid arguments stop the app with a diagnostic. Widgets draw only: handle
+clicks in `mouse` and call `hit` yourself. There is no hidden widget state.
 
-| Function | Meaning |
+| Functions / signatures | Result or behavior |
 | --- | --- |
-| `scos.clear(rgb)` | Fill this window's content. |
-| `scos.rect(x,y,w,h,rgb)` | Filled rectangle, clipped to this window. |
-| `scos.text(x,y,text,rgb)` | Native bitmap text (UTF-8 string operations exist, but the native font renderer is not a Unicode font engine). |
-| `scos.size()` | Return current content width, height. |
-| `scos.redraw()` | Request a paint; does not recursively invoke the app. |
-| `scos.title(text)` | Change this window's title, maximum 63 bytes. |
-| `scos.log(text)` | Send a message to the app's launching terminal, maximum 512 bytes. |
-| `scos.time()` | Real uptime in seconds from the existing PIT clock. |
-| `scos.read(name)` | Read a file under `/home/appdata/<app-id>/`; nil if absent. |
-| `scos.write(name, contents)` | Write there in RAM; returns success boolean. |
+| `clear(rgb)`, `rect(x,y,w,h,rgb)` | Fill content or clipped rectangle. |
+| `text(x,y,text,rgb)` | Native bitmap text, not a Unicode font engine. |
+| `pixel(x,y,rgb)`, `frame(x,y,w,h,rgb)` | Pixel or outlined rectangle. |
+| `line(x,y,x2,y2,rgb)` | Clipped line. |
+| `circle(x,y,r,rgb)`, `disc(x,y,r,rgb)` | Outline/filled circle; radius 0..1024. |
+| `gradient(x,y,w,h,top,bottom)` | Vertical RGB gradient. |
+| `icon(id,x,y,rgb)` | Native icon by valid `ICON_*` numeric index. |
+| `text_width(text)`, `text_scaled(x,y,text,rgb,scale)` | Width in pixels; scaled text with scale 1..4. |
+| `rgb(r,g,b)`, `blend(a,b,percent)` | RGB channels 0..255; 0..100 percent of color b. |
+| `clamp(value,min,max)`, `hit(x,y,rx,ry,w,h)` | Numeric clamp; half-open rectangular hit test. |
+| `button(x,y,w,h,label,active)` | Themed button drawing. |
+| `checkbox(x,y,label,checked)`, `progress(x,y,w,h,percent)` | Themed checkbox/progress drawing, percent 0..100. |
+| `size()`, `screen()` | Content width,height; screen width,height. |
+| `window()` | Table: x,y,width,height (outer geometry), state,focused. |
+| `resize(width,height)`, `move(x,y)` | Success boolean; not during paint. Resize 320..2048 × 200..2048; screen/app-min clamped. Refused during drag/resize or non-normal window state. Allocation failure leaves geometry intact. |
+| `mouse()` | Last content-relative x,y,held-button bitmask (buttons zero when unfocused). |
+| `redraw()`, `title(text)` | Request deferred repaint; set title (≤63 bytes). |
+| `interval(ms)` | Tick interval 100..60000 ms, rounded to timer granularity. |
+| `time()`, `uptime()` | Real PIT uptime in seconds; aliases. |
+| `date()` | RTC table: year,month,day,hour,minute,second,weekday. |
+| `app_id()`, `memory()` | Metadata ID; owner bytes and Lua arena limit (not remaining free bytes). |
+| `log(text)` | Launching terminal log, ≤512 bytes. |
+| `read(name)`, `write(name,contents)` | String/nil; success boolean. |
+| `exists(name)`, `file_size(name)` | Boolean; byte count/nil. |
+| `remove(name)`, `rename(old,new)`, `files()` | Success booleans; array of private filenames. |
+| `theme()`, `themes()` | Current palette table; array of available IDs. |
+| `theme_apply(id)`, `theme_custom(id,fields)` | Request native confirmation, return whether prompt opened; permission required. |
+| `theme_status()` | Global latest request: idle/pending/applied/denied/failed, not per-app ownership. |
+| `message(text)` | Native message dialog, ≤192 bytes; boolean indicating whether shown. Not in paint. |
+| `api_info()` | Table: version,source_limit,arena_limit,data_limit,data_files,theme_permission. |
 
-Drawing is allowed **only inside `paint`**. Colors are integer `0xRRGGBB`.
-Coordinates range from -4096 to 4096; dimensions from 0 to 4096; individual text
-calls accept up to 1024 bytes. Out-of-range arguments stop the app instead of
-being passed unchecked to native drawing code.
+Private files live in `/home/appdata/<id>/`. Names allow ASCII letters/digits,
+`.`, `_`, `-`, but not `.`/`..` or slashes. Up to 16 files/64 KiB per ID through
+this API. Instances share that directory but have separate Lua states. There
+is no general filesystem, shell, network or device access.
 
-Data filenames allow ASCII letters, digits, `.`, `_`, `-`, but not `.`/`..`,
-slashes or path traversal. Each app ID has at most 16 files / 64 KiB total through
-this API. Instances have **separate Lua states**, but deliberately share the
-same app-ID data directory. There is no general filesystem, device, network or
-shell-command API in Lua.
+## Create and select system themes
+
+Settings selects four presets plus **eight custom slots**; use its mouse wheel
+in shorter windows to reach lower controls. Themes affect desktop backgrounds,
+window chrome, text, taskbar, menus, dialogs and native app palettes. Semantic
+alert colors and playing-card colors remain purposeful exceptions. User apps
+should use `scos.theme()` rather than hardcoded colors to follow appearance.
+
+In Studio enable **theme permission**, replace the source with this, and Run:
+
+```lua
+assert(scos.theme_custom("user-midnight", {
+    main = 0x64b5f6, text = 0xe6edf3, win_bg = 0x18202c,
+    title_text = 0xffffff, taskbar_bg = 0x101722,
+    bg_top = 0x101722, bg_bot = 0x243c58,
+    mode = 2, spacing = 32, grid = 0x294059
+}))
+return {
+    paint = function(w, h)
+        local t = scos.theme()
+        scos.clear(t.win_bg)
+        scos.text(16, 20, "Theme request: " .. scos.theme_status(), t.text)
+    end,
+    tick = function() scos.redraw() end
+}
+```
+
+Approve the **native system confirmation** to apply it. The ID must start with
+`user-`, contain lowercase letters/digits/dashes, and total at most 30 bytes.
+Unspecified fields inherit the current theme. Modes: 0 solid, 1 gradient,
+2 grid, 3 stripes; spacing 8..256 pixels. Other fields are RGB values.
+Existing custom IDs can be overwritten; a ninth new ID fails without replacing
+another slot. Selection can also be requested with `theme_apply(id)`.
+Requests cannot originate in paint, are throttled to once per five seconds per
+instance, and fail to open while another modal is active. A returned `true`
+means **prompt opened**, not user approval or successful persistence.
+Message dialogs have a separate five-second throttle.
 
 ## Saving and persistence
 
-Notepad save and `scos.write` update the existing **RAM VFS**. They do not promise
-durable disk writes. On the existing supported/verified ATA target, use the
-terminal's confirmed `save` command to persist the tree. The saved partition
-remains only 128 KiB for the whole filesystem, including other files and license
-notices: app-local quotas are ceilings, not a promise that every combination
-will fit a disk save. The OS must report a failed/oversized save rather than
-pretend success.
+Studio, custom themes and app-data writes save to the **RAM VFS**. Recovery is
+also RAM-only until persisted. On an existing supported/verified ATA target,
+the Terminal's confirmed `save` command persists the tree. The saved region is
+128 KiB for the whole filesystem, including licenses and other files. Per-app
+quotas are ceilings, not guarantees that a combined disk save will fit.
 
-USB-storage boot still lacks native USB disk persistence. On that configuration,
-custom sources and data are lost on shutdown/reboot. No storage driver was added
-for this feature. Do not reset the filesystem merely to obtain examples: an
-older saved tree without `/home/apps` gets the examples on upgrade; existing
-app directories and edited sources are not replaced.
+USB boot/AHCI/NVMe still lack supported native persistence: your changes are
+lost on reboot there. No new storage drivers were added. Missing sample
+projects are installed on upgrade without overwriting existing project edits;
+old `.lua` files remain ordinary data, never executable apps.
 
 ## Lua compatibility and limits
 
@@ -183,7 +211,7 @@ SCOS_APP(app_my_app, 100);
 
 The linker retains and orders these registrations. `apps.c` validates IDs and
 provides shared lookup/registration. Optional `desktop_label` is short icon
-metadata; `file_editor` identifies the document editor without naming it in the
-compositor. The WM handles generic registered clients; its internal dialogs
+metadata; `file_editor` identifies the fallback document editor; `file_suffix` and
+`document` support native document associations and single-instance opening. The WM handles generic registered clients; its internal dialogs
 remain native WM UI. Adding a C app requires a build; adding a Lua app does not.
 There is no native ELF executable loader in this change.

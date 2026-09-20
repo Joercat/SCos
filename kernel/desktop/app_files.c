@@ -162,7 +162,7 @@ static void file_menu_cb(int item, void *ud)
         } else {
             char full[300];
             if(!files_full_path(f,ctx->row,full)){pfree(ctx,sizeof(*ctx));wm_error_popup("Path too long.");return;}
-            wm_open_app("notepad", full);
+            app_open_document(full);
         }
         pfree(ctx, sizeof(*ctx));
     } else if (item == 2) {
@@ -206,7 +206,7 @@ static void files_paint(struct window *w)
     /* toolbar buttons: back, up, refresh, new folder */
     for (int b = 0; b < 4; b++) {
         int bx = 8 + b * 34;
-        u32 bg = f->hover_btn == b ? t->main : 0x333333;
+        u32 bg = f->hover_btn == b ? t->main : color_blend(t->win_bg,t->main,15);
         u32 fg = f->hover_btn == b ? t->title_text : t->main;
         s_fill(s, bx, TB_Y, 30, TB_H, bg);
         s_frame_rect(s, bx, TB_Y, 30, TB_H, t->main);
@@ -229,7 +229,7 @@ static void files_paint(struct window *w)
     }
     /* path box */
     int px = 8 + 4 * 34 + 6;
-    s_fill(s, px, TB_Y, s->w - px - 8, TB_H, 0x333333);
+    s_fill(s, px, TB_Y, s->w - px - 8, TB_H, color_blend(t->win_bg,t->main,15));
     s_frame_rect(s, px, TB_Y, s->w - px - 8, TB_H, t->main);
     s_clip_text(s, px + 6, TB_Y + 5, f->path, t->main, s->w - px - 20);
 
@@ -353,7 +353,7 @@ static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
                 strcat(nm, k2 == 0 ? " .app" : " .lnk");
                 if (strcmp(f->names[row], nm)) continue;
                 if (k2 == 0) wm_open_app(a2, NULL);
-                else wm_open_app("notepad", p2);
+                else app_open_document(p2);
                 break;
             }
             wm_redraw(w);
@@ -368,7 +368,7 @@ static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
         } else {
             char full[300];
             if(!files_full_path(f,f->hover_row,full)){wm_error_popup("Path too long.");return;}
-            wm_open_app("notepad", full);
+            app_open_document(full);
         }
         wm_redraw(w);
     }

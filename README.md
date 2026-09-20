@@ -28,16 +28,19 @@ For the first physical boot, use the [PC test guide and final USB-boot checks](d
 
 ## Write your own apps
 
-The compositor now uses self-registering native apps and runtime-discovered Lua
-apps instead of hardcoded app/icon lists. **Lua 5.4.9's real compiler and VM** run
-inside SCos. Edit a `.lua` file in `/home/apps`, then launch it with `appstrt` —
-no rebuild or reboot. Try `appstrt counter` and `appstrt sketch`.
+All shipped desktop apps are **native C**, including Counter, Sketch and the
+new **App Studio**. Run `appstrt studio` to edit a project, syntax-check it with
+the real Lua 5.4.9 compiler, build a `.cat` package and launch it with F5.
+Raw `.lua` launching is removed. API 2 offers 48 functions for drawing, widgets,
+window control, private data, system queries and confirmed global themes.
+Settings selects four presets or up to eight custom palettes/backgrounds.
 
-See the [Lua app guide and API](docs/LUA-APPS.md),
-[verification record](docs/migration/LUA-VERIFICATION.md), and
-[open-source provenance/licenses](third_party/README.md). Runtime limits stop
-tested script failures; this remains a cooperative kernel, not a ring-3 security
-sandbox. Existing RAM-versus-ATA persistence limitations still apply.
+See the [Studio and API guide](docs/LUA-APPS.md), [CAT format](docs/CAT-FORMAT.md),
+[current verification record](docs/migration/CAT-VERIFICATION.md), and
+[open-source provenance/licenses](third_party/README.md). This remains a
+cooperative kernel, not a ring-3 security sandbox. RAM-versus-ATA persistence
+limitations still apply. The [earlier Lua verification](docs/migration/LUA-VERIFICATION.md)
+is historical, not the current package contract.
 
 ## Build and emulator
 

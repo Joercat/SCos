@@ -178,6 +178,36 @@ static void win_free_buf(struct window *w)
     }
 }
 
+/* App-requested geometry changes are transactional and never call back into
+ * paint synchronously. Lua disallows these operations from its paint callback. */
+int wm_resize_window(struct window *w,int width,int height)
+{
+    if(!w||!w->app||w->state!=WIN_STATE_NORMAL||w==resize_win||w==drag_win)return 0;
+    int minw=w->app->min_w>320?w->app->min_w:320;
+    int minh=w->app->min_h>200?w->app->min_h:200;
+    if(width<minw)width=minw;
+    if(height<minh)height=minh;
+    if(width>screen_w-8)width=screen_w-8;
+    if(height>screen_h-TASKBAR_H-8)height=screen_h-TASKBAR_H-8;
+    if(width==w->w&&height==w->h)return 1;
+    int cw=width-2,ch=height-WIN_TITLEBAR-1;
+    u32 *p=palloc_owned((size_t)cw*ch*4,(uintptr_t)w);if(!p)return 0;
+    memset(p,0,(size_t)cw*ch*4);win_free_buf(w);
+    w->w=width;w->h=height;w->surf=(struct surface){p,cw,ch};
+    if(w->x+width>screen_w)w->x=screen_w-width;
+    if(w->y+height>screen_h-TASKBAR_H)w->y=screen_h-TASKBAR_H-height;
+    w->dirty=1;wm_full();return 1;
+}
+int wm_move_window(struct window *w,int x,int y)
+{
+    if(!w||!w->app||w->state!=WIN_STATE_NORMAL||w==drag_win||w==resize_win)return 0;
+    if(x<0)x=0;
+    if(y<0)y=0;
+    if(x>screen_w-w->w)x=screen_w-w->w;
+    if(y>screen_h-TASKBAR_H-w->h)y=screen_h-TASKBAR_H-w->h;
+    w->x=x;w->y=y;wm_full();return 1;
+}
+
 void wm_set_title(struct window *w, const char *title)
 {
     strncpy(w->title, title, sizeof(w->title) - 1);
@@ -299,6 +329,7 @@ struct window *wm_open_app(const char *app_id, void *arg)
                 if (wins[i]->state == WIN_STATE_MIN) wins[i]->state = WIN_STATE_NORMAL;
                 if (cons) wins[i]->console = cons;
                 wm_focus(wins[i]);
+                if(arg&&app->document){APP_T0(wins[i]);app->document(wins[i],arg);APP_T1(wins[i]);}
                 return wins[i];
             }
     if (win_count >= MAX_WINDOWS) return NULL;
@@ -340,7 +371,7 @@ struct window *wm_open_app(const char *app_id, void *arg)
                    "windows or apps and try again.", NULL, 0);
         return NULL;
     }
-    focused_w = w;
+    focused_w = modal_w ? modal_w : w;
     wm_full();
     return w;
 }
@@ -401,15 +432,13 @@ static void paint_wallpaper(void)
         }
         if (wp_cache.px) {
             struct surface *c = &wp_cache;
-            s_vgrad(c, 0, 0, screen_w, screen_h, t->bg_top, t->bg_bot);
-            u32 grid = blend(t->bg_top, t->main, 14);
-            for (int x = 0; x < screen_w; x += 64)
-                s_fill(c, x, 0, 1, screen_h, grid);
-            for (int y = 0; y < screen_h; y += 64)
-                s_fill(c, 0, y, screen_w, 1, grid);
-            /* r27: the decorative "corner glow" discs are gone - the user
-             * saw them as a weird circle floating in the top-right of the
-             * desktop. The wallpaper is now just gradient + grid. */
+            u32 v[10];theme_values(t,v);
+            if(v[7]==0)s_fill(c,0,0,screen_w,screen_h,t->bg_top);
+            else s_vgrad(c,0,0,screen_w,screen_h,t->bg_top,t->bg_bot);
+            if(v[7]>=2)for(int x=0;x<screen_w;x+=(int)v[8])
+                s_fill(c,x,0,v[7]==3?(int)v[8]/2:1,screen_h,v[9]);
+            if(v[7]==2)for(int y=0;y<screen_h;y+=(int)v[8])
+                s_fill(c,0,y,screen_w,1,v[9]);
             wp_valid = 1;
         }
     }
@@ -1744,6 +1773,7 @@ volatile int wm_in_idle;
 void wm_theme_changed(void)
 {
     wp_valid = 0;
+    for(int i=0;i<win_count;i++)wins[i]->dirty=1;
     wm_full();
 }
 

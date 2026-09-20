@@ -1,4 +1,4 @@
--- Edit this file in SCos, then close and relaunch: appstrt counter
+-- Studio template: build sample-counter.cat. The built-in Counter is C.
 -- Mouse/keyboard state belongs to this window, not to the compositor.
 local count = 0
 local function increment()

@@ -204,8 +204,8 @@ static void sl_paint(struct window *w)
     struct sol *g = w->data;
     struct surface *s = &w->surf;
     const struct theme *t = theme_current();
-    s_fill(s, 0, 0, s->w, s->h, 0x0B3D0B);
-    for (int yy = 8; yy < s->h; yy += 16) s_fill(s, 0, yy, s->w, 1, 0x0E4A0E);
+    s_fill(s, 0, 0, s->w, s->h, color_blend(t->win_bg,t->main,12));
+    for (int yy = 8; yy < s->h; yy += 16) s_fill(s, 0, yy, s->w, 1, color_blend(t->win_bg,t->main,18));
 
     /* stock + waste */
     if (g->stockn) card_draw(s, COLX(0), TOP_Y, g->stock[g->stockn - 1], 1, t->main);
@@ -213,7 +213,7 @@ static void sl_paint(struct window *w)
     if (g->wasten) {
         u8 c = g->waste[g->wasten - 1];
         card_draw(s, COLX(1), TOP_Y, c, 0, t->main);
-        if (g->sel_src == 7) s_frame_rect(s, COLX(1) - 2, TOP_Y - 2, CW + 4, CH + 4, 0xFFFF66);
+        if (g->sel_src == 7) s_frame_rect(s, COLX(1) - 2, TOP_Y - 2, CW + 4, CH + 4, t->main);
     } else empty_pile(s, COLX(1), TOP_Y, ((t->main >> 1) & 0x7F7F7F), NULL);
 
     /* foundations */
@@ -222,7 +222,7 @@ static void sl_paint(struct window *w)
         int x = COLX(3 + f);
         if (g->foundn[f]) {
             card_draw(s, x, TOP_Y, g->found[f][g->foundn[f] - 1], 0, t->main);
-            if (g->sel_src == 8 + f) s_frame_rect(s, x - 2, TOP_Y - 2, CW + 4, CH + 4, 0xFFFF66);
+            if (g->sel_src == 8 + f) s_frame_rect(s, x - 2, TOP_Y - 2, CW + 4, CH + 4, t->main);
         } else empty_pile(s, x, TOP_Y, ((t->main >> 1) & 0x7F7F7F), fh[f]);
     }
 
@@ -231,18 +231,18 @@ static void sl_paint(struct window *w)
         int x = COLX(c);
         if (!g->tabn[c]) {
             empty_pile(s, x, TAB_Y, ((t->main >> 1) & 0x7F7F7F), NULL);
-            if (g->hover == c && g->sel_src >= 0) s_frame_rect(s, x - 2, TAB_Y - 2, CW + 4, CH + 4, 0xFFFF66);
+            if (g->hover == c && g->sel_src >= 0) s_frame_rect(s, x - 2, TAB_Y - 2, CW + 4, CH + 4, t->main);
             continue;
         }
         int y = TAB_Y;
         for (int i = 0; i < g->tabn[c]; i++) {
             int sel = (g->sel_src == c && i >= g->sel_idx);
             card_draw(s, x, y, g->tab[c][i], !g->tabup[c][i], t->main);
-            if (sel) s_frame_rect(s, x - 2, y - 2, CW + 4, CH + 4, 0xFFFF66);
+            if (sel) s_frame_rect(s, x - 2, y - 2, CW + 4, CH + 4, t->main);
             y += g->tabup[c][i] ? UP_OFF : DOWN_OFF;
         }
         if (g->hover == c && g->sel_src >= 0 && g->sel_src != c)
-            s_frame_rect(s, x - 2, y - UP_OFF - 2, CW + 4, CH + 4, 0xFFFF66);
+            s_frame_rect(s, x - 2, y - UP_OFF - 2, CW + 4, CH + 4, t->main);
     }
 
     /* status + button */
@@ -256,7 +256,7 @@ static void sl_paint(struct window *w)
     s_text(s, s->w - s_text_width(line) - 12, s->h - 30, line, t->text);
 
     int bx = 12, by = s->h - 38;
-    u32 bg = g->hover_btn ? t->main : 0x222222;
+    u32 bg = g->hover_btn ? t->main : color_blend(t->win_bg,t->main,15);
     u32 fg = g->hover_btn ? t->title_text : t->main;
     s_fill(s, bx, by, 96, 28, bg);
     s_frame_rect(s, bx, by, 96, 28, fg);
@@ -267,9 +267,9 @@ static void sl_paint(struct window *w)
     if (g->won) {
         const char *m = "You win! All foundations complete.";
         int tw = s_text_width(m);
-        s_fill(s, (s->w - tw) / 2 - 12, 210, tw + 24, 30, 0x000000);
-        s_frame_rect(s, (s->w - tw) / 2 - 12, 210, tw + 24, 30, 0xFFFF66);
-        s_text(s, (s->w - tw) / 2, 217, m, 0xFFFF66);
+        s_fill(s, (s->w - tw) / 2 - 12, 210, tw + 24, 30, t->win_bg);
+        s_frame_rect(s, (s->w - tw) / 2 - 12, 210, tw + 24, 30, t->main);
+        s_text(s, (s->w - tw) / 2, 217, m, t->main);
     }
 }
 

@@ -1,6 +1,7 @@
 /* Lua apps are file-backed clients of the ordinary window/app interface.
  * This is a bounded language runtime, NOT a ring-3 security boundary. */
 #include "scos.h"
+#include "cat.h"
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
@@ -8,7 +9,7 @@
 #define SCRIPT_MAX 65536u
 #define ARENA_SIZE (2u*1024u*1024u)
 #define LUA_APPS 32
-struct lua_app { struct app app; char id[32], path[192]; };
+struct lua_app { struct app app; char id[32], title[40], path[192]; };
 static struct lua_app scripts[LUA_APPS];
 static int script_count;
 struct block { size_t size; struct block *next; int free; u32 pad; };
@@ -19,6 +20,10 @@ struct lua_window {
     int ref, failed, painting, budget;
     u32 deadline, next_tick, pixels;
     char error[224];
+    u32 permissions;
+    int mouse_x,mouse_y,mouse_buttons;
+    int interval;
+    int theme_used,message_used;u32 theme_at,message_at;
 };
 static struct lua_window *context(lua_State *L) {
     return *(struct lua_window **)lua_getextraspace(L);
@@ -125,10 +130,20 @@ static int api_write(lua_State *L){
         return luaL_error(L,"app data quota exceeded (16 files / 64 KiB)");
     lua_pushboolean(L,vfs_write(path,s,(u32)n));return 1;
 }
+#include "lua_api.inc"
 static const luaL_Reg api[]={
     {"clear",api_clear},{"rect",api_rect},{"text",api_text},{"size",api_size},
     {"redraw",api_redraw},{"title",api_title},{"log",api_log},{"time",api_clock},
-    {"read",api_read},{"write",api_write},{NULL,NULL}
+    {"read",api_read},{"write",api_write},
+    {"pixel",api_pixel},{"frame",api_frame},{"line",api_line},{"circle",api_circle},{"disc",api_disc},
+    {"gradient",api_gradient},{"icon",api_icon},{"text_width",api_text_width},{"text_scaled",api_text_scaled},
+    {"rgb",api_rgb},{"blend",api_blend},{"clamp",api_clamp},{"hit",api_hit},
+    {"button",api_button},{"checkbox",api_checkbox},{"progress",api_progress},
+    {"resize",api_resize},{"move",api_move},{"window",api_window},{"screen",api_screen},{"mouse",api_mouse_state},{"interval",api_interval},
+    {"app_id",api_app_id},{"memory",api_memory},{"date",api_date},{"uptime",api_clock},
+    {"exists",api_exists},{"file_size",api_file_size},{"remove",api_remove},{"rename",api_rename},{"files",api_files},
+    {"theme",api_theme},{"themes",api_themes},{"theme_apply",api_theme_apply},{"theme_custom",api_theme_custom},
+    {"theme_status",api_theme_status},{"message",api_message},{"api_info",api_info},{NULL,NULL}
 };
 static int initialize(lua_State *L) {
     luaL_requiref(L,"_G",luaopen_base,1);lua_pop(L,1);
@@ -138,7 +153,7 @@ static int initialize(lua_State *L) {
     lua_getglobal(L,"string");lua_pushnil(L);lua_setfield(L,-2,"dump");lua_pop(L,1);
     luaL_requiref(L,"math",luaopen_math,1);lua_pop(L,1);
     luaL_requiref(L,"utf8",luaopen_utf8,1);lua_pop(L,1);
-    luaL_newlib(L,api);lua_pushinteger(L,1);lua_setfield(L,-2,"version");lua_setglobal(L,"scos");return 0;
+    luaL_newlib(L,api);lua_pushinteger(L,2);lua_setfield(L,-2,"version");lua_setglobal(L,"scos");return 0;
 }
 /* Lookup and argument construction occur INSIDE the protected call too:
  * even a table lookup/metamethod or allocating an event can raise an error. */
@@ -166,16 +181,18 @@ static void invoke(struct lua_window *d,struct invocation *i) {
 }
 static int load_app(lua_State *L) {
     struct lua_window *d=context(L);struct lua_app *a=(struct lua_app *)d->w->app;
-    u32 n;char *s=vfs_read(a->path,&n);
-    if(!s||!n||n>SCRIPT_MAX)return luaL_error(L,"app source missing, empty, or larger than 64 KiB");
-    if(luaL_loadbufferx(L,s,n,a->path,"t")!=LUA_OK)return lua_error(L);
+    u32 n=0;char *s=vfs_read(a->path,&n);struct cat_info m;char err[160];
+    if(!cat_validate(s,n,&m,err,sizeof(err)))return luaL_error(L,"%s",err);
+    if(strcmp(m.id,a->id))return luaL_error(L,"Package identity changed; use a new path and restart");
+    d->permissions=m.permissions;
+    if(luaL_loadbufferx(L,m.source,m.length,a->path,"t")!=LUA_OK)return lua_error(L);
     lua_call(L,0,1);
     if(!lua_istable(L,-1))return luaL_error(L,"app source must return a callback table");
     d->ref=luaL_ref(L,LUA_REGISTRYINDEX);return 0;
 }
 static void script_open(struct window *w,void *arg) {
     (void)arg;struct lua_window *d=palloc(sizeof(*d));if(!d)return;
-    memset(d,0,sizeof(*d));w->data=d;d->w=w;d->ref=LUA_NOREF;
+    memset(d,0,sizeof(*d));w->data=d;d->w=w;d->ref=LUA_NOREF;d->interval=10;
     d->arena=palloc(ARENA_SIZE);if(!d->arena){fail(d,"Not enough memory for Lua arena");return;}
     *(struct block *)d->arena=(struct block){ARENA_SIZE-sizeof(struct block),NULL,1,0};
     d->L=lua_newstate(allocate,d);if(!d->L){fail(d,"Unable to create Lua state");return;}
@@ -193,8 +210,8 @@ static void script_paint(struct window *w){
     if(d->failed){s_text(&w->surf,12,12,"Lua app stopped",0xff7777);s_clip_text(&w->surf,12,36,d->error,0xffffff,w->surf.w-24);s_text(&w->surf,12,60,"Close, fix the source, then launch again.",0xcccccc);}
 }
 static void script_key(struct window *w,struct key_event *e){struct invocation i={.name="key",.key=e};invoke(w->data,&i);}
-static void script_mouse(struct window *w,struct mouse_event *e,int x,int y){struct invocation i={.name="mouse",.mouse=e,.x=x,.y=y};invoke(w->data,&i);}
-static void script_tick(struct window *w){struct lua_window *d=w->data;if((i32)((u32)tick_count-d->next_tick)<0)return;d->next_tick=(u32)tick_count+10;struct invocation i={.name="tick"};invoke(d,&i);}
+static void script_mouse(struct window *w,struct mouse_event *e,int x,int y){struct lua_window *d=w->data;d->mouse_x=x;d->mouse_y=y;d->mouse_buttons=e->buttons;struct invocation i={.name="mouse",.mouse=e,.x=x,.y=y};invoke(w->data,&i);}
+static void script_tick(struct window *w){struct lua_window *d=w->data;if((i32)((u32)tick_count-d->next_tick)<0)return;d->next_tick=(u32)tick_count+(u32)d->interval;struct invocation i={.name="tick"};invoke(d,&i);}
 static void script_close(struct window *w){
     struct lua_window *d=w->data;if(!d)return;
     /* The arena owns everything, and the API creates no external handles.
@@ -205,19 +222,32 @@ static void script_close(struct window *w){
 static const char *script_failure(struct window *w) {
     struct lua_window *d=w->data;return d&&d->failed?d->error:NULL;
 }
+int lua_source_check(const char *source,u32 length,char *err,size_t cap) {
+    if(!source||!length||length>CAT_SOURCE_MAX){if(cap){strncpy(err,"Source must be 1..65536 bytes",cap-1);err[cap-1]=0;}return 0;}
+    struct lua_window d;memset(&d,0,sizeof(d));d.arena=palloc(ARENA_SIZE);
+    if(!d.arena){if(cap){strncpy(err,"Not enough memory to compile",cap-1);err[cap-1]=0;}return 0;}
+    *(struct block *)d.arena=(struct block){ARENA_SIZE-sizeof(struct block),NULL,1,0};
+    d.L=lua_newstate(allocate,&d);int ok=0;
+    if(d.L)ok=luaL_loadbufferx(d.L,source,length,"project","t")==LUA_OK;
+    if(cap){const char *message=ok?"Syntax check passed":d.L?lua_tostring(d.L,-1):"Cannot create compiler state";strncpy(err,message?message:"Compile failed",cap-1);err[cap-1]=0;}
+    pfree(d.arena,ARENA_SIZE);return ok;
+}
 struct app *lua_app_install(const char *path) {
     if(!path||strlen(path)>=sizeof(scripts[0].path))return NULL;
     if(*path=='/')path++;
-    for(int i=0;i<script_count;i++)if(!strcmp(path,scripts[i].path))return &scripts[i].app;
-    const char *base=path;for(const char *p=path;*p;p++)if(*p=='/')base=p+1;
-    size_t n=strlen(base);if(n<5||n>34||strcmp(base+n-4,".lua"))return NULL;
-    u32 len;if(!vfs_read(path,&len)||!len||len>SCRIPT_MAX||script_count>=LUA_APPS)return NULL;
-    char id[32];memcpy(id,base,n-4);id[n-4]=0;
-    for(size_t i=0;i<n-4;i++)if(!((id[i]>='a'&&id[i]<='z')||(id[i]>='0'&&id[i]<='9')||id[i]=='-'))return NULL;
-    for(int i=0;i<app_count();i++)if(!strcmp(app_at(i)->id,id))return NULL;
-    struct lua_app *a=&scripts[script_count];strcpy(a->id,id);strcpy(a->path,path);
-    a->app=(struct app){.id=a->id,.title=a->id,.icon=ICON_NOTEPAD,.def_w=560,.def_h=360,.uses_data=1,
-        .open=script_open,.paint=script_paint,.key=script_key,.mouse=script_mouse,.tick=script_tick,.close=script_close,.failure=script_failure};
+    size_t n=strlen(path);if(n<5||strcmp(path+n-4,".cat"))return NULL;
+    u32 length=0;char *bytes=vfs_read(path,&length);struct cat_info m;char err[128];
+    if(!cat_validate(bytes,length,&m,err,sizeof(err)))return NULL;
+    for(int i=0;i<script_count;i++)if(!strcmp(path,scripts[i].path)) {
+        if(strcmp(m.id,scripts[i].id))return NULL;
+        strcpy(scripts[i].title,m.title);scripts[i].app.def_w=m.width;scripts[i].app.def_h=m.height;
+        return &scripts[i].app;
+    }
+    if(script_count>=LUA_APPS)return NULL;
+    for(int i=0;i<app_count();i++)if(!strcmp(app_at(i)->id,m.id))return NULL;
+    struct lua_app *a=&scripts[script_count];strcpy(a->id,m.id);strcpy(a->title,m.title);strcpy(a->path,path);
+    a->app=(struct app){.id=a->id,.title=a->title,.icon=ICON_NOTEPAD,.def_w=m.width,.def_h=m.height,.uses_data=1,
+        .open=script_open,.paint=script_paint,.key=script_key,.mouse=script_mouse,.tick=script_tick,.close=script_close,.failure=script_failure,.external=1};
     if(!app_register(&a->app))return NULL;
     script_count++;return &a->app;
 }

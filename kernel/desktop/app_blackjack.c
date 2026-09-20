@@ -137,10 +137,10 @@ static void bj_paint(struct window *w)
     struct bj *b = w->data;
     struct surface *s = &w->surf;
     const struct theme *t = theme_current();
-    s_fill(s, 0, 0, s->w, s->h, 0x0B3D0B);
+    s_fill(s, 0, 0, s->w, s->h, color_blend(t->win_bg,t->main,12));
     /* felt texture */
     for (int yy = 8; yy < s->h; yy += 16)
-        s_fill(s, 0, yy, s->w, 1, 0x0E4A0E);
+        s_fill(s, 0, yy, s->w, 1, color_blend(t->win_bg,t->main,18));
 
     char line[96];
     strcpy(line, "Blackjack - dealer stands on 17");
@@ -182,7 +182,7 @@ static void bj_paint(struct window *w)
                              "BLACKJACK! You win!";
         u32 mc = b->result == 2 ? 0xFF6666 : t->main;
         int tw = s_text_width(msg);
-        s_fill(s, (s->w - tw) / 2 - 10, 240, tw + 20, 28, 0x000000);
+        s_fill(s, (s->w - tw) / 2 - 10, 240, tw + 20, 28, t->win_bg);
         s_frame_rect(s, (s->w - tw) / 2 - 10, 240, tw + 20, 28, mc);
         s_text(s, (s->w - tw) / 2, 246, msg, mc);
     }
@@ -190,8 +190,8 @@ static void bj_paint(struct window *w)
     for (int i = 0; i < 3; i++) {
         int bx = 12 + i * 104, by = s->h - 40;
         int enabled = (i == 0) || (b->state == 0 && i > 0);
-        u32 bg = b->hover == i && enabled ? t->main : 0x222222;
-        u32 fg = b->hover == i && enabled ? t->title_text : (enabled ? t->main : 0x666666);
+        u32 bg = b->hover == i && enabled ? t->main : color_blend(t->win_bg,t->main,15);
+        u32 fg = b->hover == i && enabled ? t->title_text : (enabled ? t->main : color_blend(t->text,t->win_bg,55));
         s_fill(s, bx, by, 96, 28, bg);
         s_frame_rect(s, bx, by, 96, 28, fg);
         s_text(s, bx + (96 - s_text_width(BTN_LABELS[i])) / 2, by + 6, BTN_LABELS[i], fg);

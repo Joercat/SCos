@@ -672,7 +672,7 @@ static void run_command(struct term *t, const char *command)
          * program from a Linux shell: the window opens, this tab becomes
          * its console, and the app's real events stream in here. */
         if (nargs < 2) {
-            strcpy(response, "Usage: appstrt <app|file.lua> [file]\nInstalled:");
+            strcpy(response, "Usage: appstrt <app|file.cat> [file]\nInstalled:");
             for (int i2 = 0; i2 < app_count(); i2++) {
                 struct app *a = app_at(i2);
                 if (!a || a->id[0] == '_') continue;
@@ -1413,8 +1413,8 @@ static void term_paint_editor(struct window *w)
     struct term *t = WT(w);
     struct surface *s = &w->surf;
     const struct theme *th = theme_current();
-    s_fill(s, 0, 0, s->w, s->h, 0x000000);
-    s_fill(s, 0, 0, s->w, 20, 0x1a1a1a);
+    s_fill(s, 0, 0, s->w, s->h, th->win_bg);
+    s_fill(s, 0, 0, s->w, 20, th->taskbar_bg);
     char hdr[160];
     strcpy(hdr, "  edit: ");
     strcat(hdr, t->ed_path);
@@ -1425,9 +1425,9 @@ static void term_paint_editor(struct window *w)
         int r = t->ed_scroll + i;
         int y = 24 + i * (FONT_H + 2);
         if (r < t->ed_lines)
-            s_clip_text(s, 6, y, t->ed_buf[r], 0xCCCCCC, s->w - 12);
+            s_clip_text(s, 6, y, t->ed_buf[r], th->text, s->w - 12);
         else
-            s_text(s, 6, y, "~", 0x555555);
+            s_text(s, 6, y, "~", color_blend(th->text,th->win_bg,55));
     }
     int cy = 24 + (t->ed_row - t->ed_scroll) * (FONT_H + 2);
     int cx = 6 + t->ed_col * FONT_W;
@@ -1436,9 +1436,9 @@ static void term_paint_editor(struct window *w)
     s_fill(s, cx, cy, FONT_W, FONT_H, th->main);
     char one[2] = { under, 0 };
     s_text(s, cx, cy, one, th->title_text);
-    s_fill(s, 0, s->h - 18, s->w, 18, 0x1a1a1a);
+    s_fill(s, 0, s->h - 18, s->w, 18, th->taskbar_bg);
     s_text(s, 6, s->h - 15, "^O save   ^X exit   arrows move   type to insert",
-           0x888888);
+           th->text);
 }
 
 static void term_paint_tabstrip(struct window *w)
@@ -1446,23 +1446,23 @@ static void term_paint_tabstrip(struct window *w)
     struct termwin *tw = TW(w);
     struct surface *s = &w->surf;
     const struct theme *th = theme_current();
-    s_fill(s, 0, 0, s->w, TERM_TAB_H, 0x141414);
+    s_fill(s, 0, 0, s->w, TERM_TAB_H, th->taskbar_bg);
     int x = 4;
     for (int i = 0; i < tw->ntabs && x + TAB_BTN_W <= s->w - 8; i++) {
         int act = (i == tw->active);
-        s_fill(s, x, 2, TAB_BTN_W - 3, TERM_TAB_H - 4, act ? 0x000000 : 0x202020);
+        s_fill(s, x, 2, TAB_BTN_W - 3, TERM_TAB_H - 4, act ? th->win_bg : color_blend(th->win_bg,th->main,12));
         s_frame_rect(s, x, 2, TAB_BTN_W - 3, TERM_TAB_H - 4,
-                     act ? th->main : 0x3a3a3a);
+                     act ? th->main : th->main);
         char lbl[12];
         fmt_u32(lbl, (u32)(i + 1));
         strcat(lbl, ":term");
-        s_text(s, x + 5, 5, lbl, act ? th->main : 0x8a8a8a);
-        s_text(s, x + TAB_BTN_W - 16, 5, "x", 0xb06060);
+        s_text(s, x + 5, 5, lbl, act ? th->main : th->text);
+        s_text(s, x + TAB_BTN_W - 16, 5, "x", th->text);
         x += TAB_BTN_W;
     }
     if (x + 26 <= s->w - 4) {
-        s_fill(s, x, 2, 24, TERM_TAB_H - 4, 0x202020);
-        s_frame_rect(s, x, 2, 24, TERM_TAB_H - 4, 0x3a3a3a);
+        s_fill(s, x, 2, 24, TERM_TAB_H - 4, color_blend(th->win_bg,th->main,12));
+        s_frame_rect(s, x, 2, 24, TERM_TAB_H - 4, th->main);
         s_text(s, x + 7, 4, "+", th->main);
     }
 }
@@ -1473,7 +1473,7 @@ static void term_paint(struct window *w)
     struct term *t = WT(w);
     struct surface *s = &w->surf;
     const struct theme *th = theme_current();
-    s_fill(s, 0, 0, s->w, s->h, 0x000000);
+    s_fill(s, 0, 0, s->w, s->h, th->win_bg);
     term_paint_tabstrip(w);      /* after the background clear */
 
     int rows = term_visible_rows(w);
@@ -1497,7 +1497,7 @@ static void term_paint(struct window *w)
     int y = TERM_TAB_H + 4;
     for (int r = t->scroll; r < total && r < t->scroll + rows; r++, y += FONT_H + 2) {
         if (r < t->nlines) {
-            s_clip_text(s, 6, y, t->lines[r], th->main, s->w - 12);
+            s_clip_text(s, 6, y, t->lines[r], th->text, s->w - 12);
         } else if (t->pending_active && r < t->nlines + plines) {
             const char *l = pbuf;
             for (int k = 0; k < r - t->nlines; k++) {

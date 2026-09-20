@@ -29,6 +29,16 @@ struct app *app_at(int i){return i>=0&&i<reg_count?registry[i]:NULL;}
 
 struct window *app_open_document(const char *path)
 {
+    size_t n=strlen(path);
+    if(n>=4&&!strcmp(path+n-4,".cat")){
+        struct app *a=lua_app_install(path);
+        if(a)return wm_open_app(a->id,NULL);
+        wm_error_popup("Cannot open CAT package.\nInvalid format, conflicting ID,\nor application registry full.");return NULL;
+    }
+    for(int i=0;i<reg_count;i++)if(registry[i]->file_suffix){
+        size_t len=strlen(registry[i]->file_suffix);
+        if(n>=len&&!strcmp(path+n-len,registry[i]->file_suffix))return wm_open_app(registry[i]->id,(void *)path);
+    }
     for(int i=0;i<reg_count;i++)if(registry[i]->file_editor)
         return wm_open_app(registry[i]->id,(void *)path);
     return NULL;

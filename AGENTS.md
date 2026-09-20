@@ -55,3 +55,8 @@ See `docs/migration/BOOT64.md` for contracts, verification and limitations.
   its necessary freestanding numeric/format support subset are now approved.
   This does not authorize new hardware drivers, networking, or a browser engine.
   Keep upstream provenance/license notices and document port restrictions.
+
+* The user now authorizes an expanded Lua API, custom themes/backgrounds, native
+  C App Studio and validated .cat packages replacing directly launchable .lua
+  files. All built-in apps must be C. Preserve reusable test tools from now on;
+  this supersedes the earlier requirement to delete temporary verification tools.

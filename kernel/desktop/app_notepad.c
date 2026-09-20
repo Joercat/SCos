@@ -204,7 +204,7 @@ static void np_paint(struct window *w)
     const char *labels[2] = { "Save", "Save As" };
     for (int b = 0; b < 2; b++) {
         int bx = 8 + b * 90;
-        u32 bg = np->hover_btn == b ? t->main : 0x333333;
+        u32 bg = np->hover_btn == b ? t->main : color_blend(t->win_bg,t->main,15);
         s_fill(s, bx, 5, 80, 24, bg);
         s_frame_rect(s, bx, 5, 80, 24, t->main);
         s_text(s, bx + (80 - s_text_width(labels[b])) / 2, 9, labels[b],

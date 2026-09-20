@@ -191,8 +191,8 @@ static void sm_paint(struct window *w)
     /* End Task button */
     int by = s->h - 36;
     int enabled = m->sel >= SYS_TASKS;
-    u32 bg = (m->hover_btn && enabled) ? t->main : 0x222222;
-    u32 fg = (m->hover_btn && enabled) ? t->title_text : (enabled ? t->main : 0x666666);
+    u32 bg = (m->hover_btn && enabled) ? t->main : color_blend(t->win_bg,t->main,15);
+    u32 fg = (m->hover_btn && enabled) ? t->title_text : (enabled ? t->main : color_blend(t->text,t->win_bg,55));
     s_fill(s, 12, by, 110, 26, bg);
     s_frame_rect(s, 12, by, 110, 26, fg);
     s_text(s, 26, by + 5, "End Task", fg);

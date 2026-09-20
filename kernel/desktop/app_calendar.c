@@ -71,7 +71,7 @@ static void cal_paint(struct window *w)
     for (int b = 0; b < 3; b++) {
         int bx = 8 + b * 34;
         int bw = b == 2 ? 60 : 30;
-        u32 bg = c->hover_btn == b ? t->main : 0x333333;
+        u32 bg = c->hover_btn == b ? t->main : color_blend(t->win_bg,t->main,15);
         u32 fg = c->hover_btn == b ? t->title_text : t->main;
         s_fill(s, bx, 7, bw, 26, bg);
         s_frame_rect(s, bx, 7, bw, 26, t->main);

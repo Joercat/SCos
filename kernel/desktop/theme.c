@@ -30,9 +30,9 @@ static const struct theme themes[] = {
 
 static int current = 0;
 
-int theme_count(void) { return (int)(sizeof(themes) / sizeof(themes[0])); }
-const struct theme *theme_get(int i) { return &themes[i]; }
-const struct theme *theme_current(void) { return &themes[current]; }
+int theme_count(void) { return 4+theme_custom_count(); }
+const struct theme *theme_get(int i) { return i>=4?theme_custom_get(i-4):(i>=0?&themes[i]:NULL); }
+const struct theme *theme_current(void) { return theme_get(current); }
 void theme_set_index(int i)
 {
     if (i >= 0 && i < theme_count()) current = i;
@@ -41,7 +41,7 @@ void theme_set_index(int i)
 int theme_index_of_id(const char *id)
 {
     for (int i = 0; i < theme_count(); i++)
-        if (!strcmp(themes[i].id, id)) return i;
+        if (!strcmp(theme_get(i)->id, id)) return i;
     return -1;
 }
 
@@ -81,6 +81,8 @@ static int json_int(const char *json, const char *key)
 
 void theme_load_from_settings(void)
 {
+    current=0;
+    theme_custom_load();
     u32 len = 0;
     char *json = vfs_read("system/settings.json", &len);
     if (!json) return;

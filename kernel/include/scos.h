@@ -291,6 +291,12 @@ struct theme {
     u32 taskbar_bg;
 };
 
+int theme_custom_count(void);
+const struct theme *theme_custom_get(int);
+int theme_id_valid(const char *);
+int theme_custom_store(const char *,const u32[10],int);
+void theme_custom_load(void);
+void theme_values(const struct theme *,u32[10]);
 int  theme_count(void);
 const struct theme *theme_get(int i);
 const struct theme *theme_current(void);
@@ -317,7 +323,10 @@ struct app {
     void (*tick)(struct window *w);
     void (*close)(struct window *w);
     const char *desktop_label;    /* optional short icon label */
+    int external;                /* runtime-loaded package, not a built-in */
     int file_editor;             /* default editable-document handler */
+    const char *file_suffix;
+    void (*document)(struct window *,const char *);
     const char *(*failure)(struct window *w); /* optional startup/runtime status */
 };
 
@@ -383,6 +392,8 @@ void tty_run(int return_to_wm);
 struct window *wm_open_app(const char *app_id, void *arg);
 void wm_close_window(struct window *w);
 void wm_set_title(struct window *w, const char *title);
+int wm_resize_window(struct window *,int,int);
+int wm_move_window(struct window *,int,int);
 void wm_redraw(struct window *w);
 void wm_request_full(void);     /* full repaint after a held overlay exits */
 void wm_theme_changed(void);
