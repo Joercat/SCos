@@ -145,7 +145,10 @@ void mouse_inject(u8 buttons, i32 dx, i32 dy, i32 wheel)
      * edge; the one time it moved "up" was a physical DOWN move).  The
      * wheel sign already matches between HID and PS/2 (Linux maps both
      * to REL_WHEEL unflipped), so only dy flips. */
+    u64 flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
     mouse_apply(buttons, dx, -dy, wheel);
+    if (flags & (1u << 9)) irq_enable();
 }
 
 int mouse_present(void) { return mouse_ok; }
@@ -242,8 +245,15 @@ void mouse_init(void)
 
 int mouse_poll(struct mouse_event *out)
 {
-    if (q_tail == q_head) return 0;
-    *out = queue[q_tail];
-    q_tail = (q_tail + 1) % QUEUE;
-    return 1;
+    /* The PS/2 producer can coalesce into this very slot. Keep copying
+     * and consuming atomic with respect to its interrupt handler. */
+    u64 flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    int have = q_tail != q_head;
+    if (have) {
+        *out = queue[q_tail];
+        q_tail = (q_tail + 1) % QUEUE;
+    }
+    if (flags & (1u << 9)) irq_enable();
+    return have;
 }

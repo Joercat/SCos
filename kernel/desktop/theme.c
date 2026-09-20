@@ -10,13 +10,15 @@ static char *strstr_safe(const char *hay, const char *needle)
     return NULL;
 }
 
-static char *strchr_q(char *p, char c, int skip)
+static const char *json_value(const char *json, const char *key)
 {
-    while (*p && skip > 0) {
-        if (*p == c) skip--;
-        p++;
-    }
-    return *p == c ? p : NULL;
+    const char *p = strstr_safe(json, key);
+    if (!p) return NULL;
+    p += strlen(key);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p++ != ':') return NULL;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    return p;
 }
 
 static const struct theme themes[] = {
@@ -43,7 +45,7 @@ int theme_index_of_id(const char *id)
     return -1;
 }
 
-static struct prefs prefs = { 3, 500 };
+static struct prefs prefs = { PREFS_MOUSE_DEFAULT, PREFS_DBL_DEFAULT };
 const struct prefs *prefs_get(void) { return &prefs; }
 
 void prefs_set_mouse(int sens)
@@ -64,14 +66,16 @@ void prefs_set_dbl(int ms)
 
 static int json_int(const char *json, const char *key)
 {
-    const char *p = strstr_safe(json, key);
-    if (!p) return -1;
-    while (*p && *p != ':') p++;
-    if (!*p) return -1;
-    p++;
-    while (*p == ' ') p++;
+    const char *p = json_value(json, key);
+    if (!p || *p < '0' || *p > '9') return -1;
     int v = 0;
-    while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+    while (*p >= '0' && *p <= '9') {
+        int digit = *p++ - '0';
+        if (v > (2147483647 - digit) / 10) return -1;
+        v = v * 10 + digit;
+    }
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p != ',' && *p != '}' && *p) return -1;
     return v;
 }
 
@@ -81,16 +85,15 @@ void theme_load_from_settings(void)
     char *json = vfs_read("system/settings.json", &len);
     if (!json) return;
     int ms = json_int(json, "\"mouse_sens\"");
-    if (ms > 0) prefs.mouse_sens = ms > 6 ? 6 : ms;
+    if (ms >= 0) prefs.mouse_sens = ms < 1 ? 1 : (ms > 6 ? 6 : ms);
     int db = json_int(json, "\"dbl_ms\"");
-    if (db > 0) prefs.dbl_ms = db;
-    char *p = strstr_safe(json, "\"theme\"");
-    if (!p) return;
-    p = strchr_q(p, '"', 2);
-    if (!p) return;
+    if (db >= 0) prefs.dbl_ms = db < 200 ? 200 : (db > 900 ? 900 : db);
+    const char *p = json_value(json, "\"theme\"");
+    if (!p || *p++ != '"') return;
     char id[32];
     int i = 0;
     while (p[i] && p[i] != '"' && i < 31) { id[i] = p[i]; i++; }
+    if (p[i] != '"') return;
     id[i] = 0;
     int idx = theme_index_of_id(id);
     if (idx >= 0) theme_set_index(idx);
@@ -115,6 +118,8 @@ void settings_save(void)
 
 void system_reset(void)
 {
+    prefs.mouse_sens = PREFS_MOUSE_DEFAULT;
+    prefs.dbl_ms = PREFS_DBL_DEFAULT;
     theme_set_index(0);
     vfs_init_defaults();          /* rebuilds the tree from scratch */
     settings_save();

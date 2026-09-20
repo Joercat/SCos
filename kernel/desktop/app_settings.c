@@ -140,8 +140,8 @@ static void reset_confirm_cb(int ok, const char *text, void *ud)
     }
     theme_set_index(0);
     wm_theme_changed();
-    prefs_set_mouse(3);
-    prefs_set_dbl(500);
+    prefs_set_mouse(PREFS_MOUSE_DEFAULT);
+    prefs_set_dbl(PREFS_DBL_DEFAULT);
     settings_save();
     int persistent=fs_image_available();
     if (persistent && !fs_image_save()) {

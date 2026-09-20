@@ -421,6 +421,8 @@ void boot_screen_init(void);
 
 /* persistence hooks */
 void settings_save(void);
+#define PREFS_MOUSE_DEFAULT 2
+#define PREFS_DBL_DEFAULT 500
 struct prefs { int mouse_sens; int dbl_ms; };
 const struct prefs *prefs_get(void);
 void prefs_set_mouse(int sens);

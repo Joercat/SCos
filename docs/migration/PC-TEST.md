@@ -136,3 +136,9 @@ appears. Include motherboard model, BIOS version, GPU model, and which USB ports
 were used. Do not repeatedly change settings or reflash identical bytes without
 new evidence. A firmware boot-menu failure, GOP failure and native-input failure
 are different problems and should be diagnosed separately.
+
+## Subsequent input/compositor corrections
+
+See [the unnumbered input/compositor verification record](INPUT-COMPOSITOR.md)
+for the lower default sensitivity, fractional-motion and drag-trail fixes,
+additional UI/settings corrections, and the focused PC retest checklist.

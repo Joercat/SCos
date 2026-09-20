@@ -68,9 +68,10 @@ static void wm_full(void) { dirty = 1; full_dirty = 1; }
 void wm_request_full(void) { wm_full(); }
 
 static int mx = 300, my = 300;
+static int mouse_rx, mouse_ry, mouse_sens;
 static u8 mbuttons;
 static struct window *drag_win, *resize_win;
-static int drag_ox, drag_oy;
+static int drag_ox, drag_oy, resize_ox, resize_oy;
 
 static struct {
     int active, x, y, w, h;
@@ -672,7 +673,9 @@ static void paint_icons(void)
     if (!in_full) wp_restore_rect(0, 0, screen_w, band);
     /* no hover feedback while dragging/resizing/modally busy: the pointer is
      * occupied and highlighting launch buttons underneath is misleading */
-    int interactive = !drag_win && !resize_win && !menu.active && !modal_w;
+    int interactive = !drag_win && !resize_win && desk_drag < 0 &&
+                      !band_active && !menu.active && !launch.active && !modal_w &&
+                      !win_at_point(mx, my);
     for (int i = 0; i < nitems; i++) {
         if (items[i].hidden) continue;
         int x, y, w, h;
@@ -839,8 +842,12 @@ static void paint_partial(void)
         }
         if (!lowest) break;
         for(int di=0;di<win_count;di++)if(wins[di]==lowest){drawn[di]=1;break;}
-        if (dmg_intersects(lowest->x, lowest->y, lowest->w + 4, lowest->h + 4))
+        if (dmg_intersects(lowest->x, lowest->y, lowest->w + 4, lowest->h + 4)) {
             paint_window(lowest);
+            /* Whole-frame blits can touch higher windows outside the
+             * original damage. Propagate those bounds up the z stack. */
+            damage_add(lowest->x, lowest->y, lowest->w + 4, lowest->h + 4);
+        }
     }
     for (int i = 0; i < win_count; i++) drawn[i] = 0;
     if (tb_dirty || dmg_intersects(0, screen_h - TASKBAR_H, screen_w, TASKBAR_H)) {
@@ -925,7 +932,8 @@ static void paint_taskbar(void)
     /* power button */
     int px, py, pw, ph;
     tb_power_rect(&px, &py, &pw, &ph);
-    power_hover = in_rect(mx, my, px, py, pw, ph) && !drag_win && !resize_win && !menu.active && !modal_w;
+    power_hover = in_rect(mx, my, px, py, pw, ph) && !drag_win && !resize_win &&
+                  desk_drag < 0 && !band_active && !menu.active && !modal_w;
     s_fill(&screen, px, py, pw, ph, power_hover ? blend(t->taskbar_bg, t->main, 45) : blend(t->taskbar_bg, t->main, 12));
     s_frame_rect(&screen, px, py, pw, ph, blend(t->taskbar_bg, t->main, 60));
     u32 pc = power_hover ? t->title_text : t->main;
@@ -981,6 +989,18 @@ static int launch_match(int idx)
     if (!a) return 0;
     if (!launch.q[0]) return 1;
     return strstr(a->id, launch.q) || strstr(a->title, launch.q);
+}
+
+/* Hit testing must not depend on the previous rendered hover frame. */
+static int launcher_at_point(void)
+{
+    int row = 0;
+    for (int i = 0; i < app_count() && row < 10; i++) {
+        if (!launch_match(i)) continue;
+        if (in_rect(mx, my, 14, screen_h - TASKBAR_H - 255 + row * 24, 288, 22)) return i;
+        row++;
+    }
+    return -1;
 }
 
 static void paint_launcher(void)
@@ -1101,14 +1121,14 @@ static int move_needs_composite(struct window **wout)
     if (launch.active &&
         in_rect(mx, my, 8, screen_h - TASKBAR_H - 308, 300, 308)) return 1;
     if (my >= screen_h - TASKBAR_H) return 1;
+    struct window *w = win_at_point(mx, my);
+    if (w) { *wout = w; return 1; }
     for (int i = 0; i < nitems; i++) {
         if (items[i].hidden) continue;
         int x, y, ww, hh;
         icon_rect(i, &x, &y, &ww, &hh);
         if (in_rect(mx, my, x, y, ww, hh)) return 1;
     }
-    struct window *w = win_at_point(mx, my);
-    if (w) { *wout = w; return 1; }
     return 0;
 }
 
@@ -1123,6 +1143,12 @@ static void interact_repaint(int x, int y, int w, int h)
     if (x + w > screen_w) w = screen_w - x;
     if (y + h > screen_h) h = screen_h - y;
     if (w <= 0 || h <= 0) return;
+    /* Remove the saved cursor BEFORE changing its underlying scene.
+     * Restoring it later would paste old window pixels onto wallpaper. */
+    if (cur_have) {
+        damage_add(cur_bx, cur_by, cur_bw, cur_bh);
+        cur_restore();
+    }
     wp_restore_rect(x, y, w, h);
     if (y < icon_band + 8) icons_dirty = 1;
     for (int i = 0; i < win_count; i++) {
@@ -1187,11 +1213,22 @@ static void handle_mouse(struct mouse_event *e)
         }
         int obx1 = band_x1, oby1 = band_y1;
         int sens = prefs_get()->mouse_sens;
-        mx += e->dx * sens / 3; my -= e->dy * sens / 3;  /* PS/2: +dy is up */
+        if (sens != mouse_sens) {
+            mouse_rx = mouse_ry = 0;
+            mouse_sens = sens;
+        }
+        /* Carry subpixel movement across reports, including negative
+         * deltas. Low sensitivity must not discard slow mouse motion. */
+        int dx = e->dx * sens + mouse_rx;
+        int dy = -e->dy * sens + mouse_ry; /* PS/2: +dy is up */
+        mx += dx / 3; my += dy / 3;
+        mouse_rx = dx % 3; mouse_ry = dy % 3;
         if (mx < 0) mx = 0;
         if (my < 0) my = 0;
         if (mx > screen_w - 1) mx = screen_w - 1;
         if (my > screen_h - 1) my = screen_h - 1;
+        if ((mx == 0 && mouse_rx < 0) || (mx == screen_w - 1 && mouse_rx > 0)) mouse_rx = 0;
+        if ((my == 0 && mouse_ry < 0) || (my == screen_h - 1 && mouse_ry > 0)) mouse_ry = 0;
         if (drag_win) {
             drag_win->x = mx - drag_ox;
             drag_win->y = my - drag_oy;
@@ -1207,7 +1244,7 @@ static void handle_mouse(struct mouse_event *e)
             desk_drag_moved = 1;
         if (resize_win) {
             struct window *w = resize_win;
-            int nw = mx - w->x, nh = my - w->y;
+            int nw = mx - w->x + resize_ox, nh = my - w->y + resize_oy;
             int minw = 320, minh = 200;
             if (w->app) {
                 if (w->app->min_w > minw) minw = w->app->min_w;
@@ -1273,20 +1310,26 @@ static void handle_mouse(struct mouse_event *e)
         static int last_zone, last_icon = -2, last_tb = -2;
         static int last_mrow = -2, last_lrow = -2;
         int icon = -1, tbz = -1, mrow = -1, lrow = -1;
-        if (menu.active && in_rect(mx, my, menu.x, menu.y, menu.w, menu.h))
-            mrow = (my - menu.y - 3) / 24;
-        if (launch.active)
-            lrow = my / 22;
-        if (!zone && !hw) {
+        if (menu.active) {
+            for (int i = 0; i < menu.n; i++)
+                if (in_rect(mx, my, menu.x, menu.y + 3 + i * 24, menu.w, 24)) mrow = i;
+        } else if (launch.active &&
+                   in_rect(mx, my, 8, screen_h - TASKBAR_H - 308, 300, 308)) {
+            lrow = launcher_at_point();
+        } else if (my >= screen_h - TASKBAR_H) {
+            int x, y, w, h;
+            tb_power_rect(&x, &y, &w, &h);
+            tbz = in_rect(mx, my, x, y, w, h);
+        } else if (!hw) {
             for (int i = 0; i < nitems; i++) {
+                if (items[i].hidden) continue;
                 int x, y, ww, hh;
                 icon_rect(i, &x, &y, &ww, &hh);
                 if (in_rect(mx, my, x, y, ww, hh)) { icon = i; break; }
             }
-            if (my >= screen_h - TASKBAR_H) tbz = my / 8;
         }
         if (hw != last_hw || zone != last_zone || icon != last_icon ||
-            tbz != last_tb) {
+            tbz != last_tb || mrow != last_mrow || lrow != last_lrow) {
             if (icon != last_icon) icons_dirty = 1;
             if (tbz != last_tb) tb_dirty = 1;
             if (mrow != last_mrow) menu_dirty = 1;
@@ -1397,7 +1440,7 @@ static void handle_mouse(struct mouse_event *e)
 
     if (menu.active) {
         if (in_rect(mx, my, menu.x, menu.y, menu.w, menu.h)) {
-            int item = (my - menu.y - 3) / 24;
+            int item = my < menu.y + 3 ? -1 : (my - menu.y - 3) / 24;
             menu_cb cb = menu.cb;
             void *ud = menu.ud;
             menu.active = 0;
@@ -1412,8 +1455,9 @@ static void handle_mouse(struct mouse_event *e)
     if (launch.active) {
         int px = 8, py = screen_h - TASKBAR_H - 308, pw = 300, ph = 300;
         if (in_rect(mx, my, px, py, pw, ph)) {
-            if (launch.hover >= 0) {
-                wm_open_app(app_at(launch.hover)->id, NULL);
+            int hit = launcher_at_point();
+            if (hit >= 0) {
+                wm_open_app(app_at(hit)->id, NULL);
                 launch.active = 0;
             }
             wm_full();
@@ -1467,6 +1511,7 @@ static void handle_mouse(struct mouse_event *e)
         /* resize handle */
         if (in_rect(rx, ry, w->w - 16, w->h - 16, 16, 16) && w->state != WIN_STATE_MAX) {
             resize_win = w;
+            resize_ox = w->w - rx; resize_oy = w->h - ry;
             wm_full();
             return;
         }
@@ -1704,6 +1749,7 @@ static void wm_destroy_session(void)
     for (int i=0;i<win_count;i++) wins[i]->console=NULL;
     while (win_count) wm_close_window(wins[win_count-1]);
     focused_w=modal_w=drag_win=resize_win=NULL;
+    mouse_rx=mouse_ry=mouse_sens=0;
     rs_pending=0; band_active=0; desk_drag=-1; desk_sel=0;
     menu.active=0; launch.active=0; ndmg=0; mbuttons=0;
     if (wp_cache.px) {
