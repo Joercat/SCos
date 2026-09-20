@@ -11,6 +11,12 @@ void console_init(void) {
 static void emit(char c) {
     /* Missing UART must not hang a boot or panic. */
     for(unsigned i=0;i<65536;i++) if(in8(0x3fd)&0x20) {out8(0x3f8,(uint8_t)c);break;}
+    /* A fatal NMI can interrupt a normal print between row++ and scrolling.
+     * It never returns, so normalize the cursor BEFORE indexing VGA memory.
+     * Do not use a lock here: the interrupted context may own it already.
+     * This bounds emergency output; it is not an SMP console implementation. */
+    if(col>=80) col=0;
+    if(row>=25) row=24;
     if(c=='\n') {col=0;row++;}
     else if(c!='\r') {video[row*80+col]=(uint16_t)(0x0700|(uint8_t)c);if(++col==80){col=0;row++;}}
     if(row==25) {

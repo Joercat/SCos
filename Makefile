@@ -8,7 +8,7 @@ CFLAGS := -m64 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
           -mcmodel=small -O2 -Wall -Wextra -Werror -std=c11 -Ikernel/include
 SOURCES := $(wildcard kernel/src/*.c)
 OBJECTS := $(patsubst kernel/src/%.c,$(BUILD)/%.o,$(SOURCES))
-.PHONY: all clean legacy milestone-check
+.PHONY: all clean milestone-check
 all: milestone-check $(BUILD)/scos.img
 milestone-check:
 	python3 tools/check_milestone.py
@@ -35,7 +35,5 @@ $(BUILD)/stage2.bin: $(BUILD)/stage2.elf
 	$(OBJCOPY) -O binary -j .text $< $@
 $(BUILD)/scos.img: $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(BUILD)/stage2.elf $(BUILD)/kernel.bin $(BUILD)/kernel.elf tools/makedisk.py
 	python3 tools/makedisk.py $(BUILD)
-legacy:
-	$(MAKE) -C legacy/i386
 clean:
 	rm -rf $(BUILD)

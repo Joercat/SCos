@@ -25,7 +25,10 @@ void interrupts_init(void) {
     gdt[4]=base>>32;
     struct table_pointer gdtr={sizeof(gdt)-1,(uintptr_t)gdt};
     load_gdt(&gdtr);
-    __asm__ volatile("ltr %0"::"r"((uint16_t)24));
+    /* No LDT is supported. Discard any inherited hidden descriptor state,
+     * rather than allowing TI selectors to refer to firmware-era tables. */
+    __asm__ volatile("lldt %0"::"r"((uint16_t)0):"memory");
+    __asm__ volatile("ltr %0"::"r"((uint16_t)24):"memory");
     for(size_t i=0;i<256;i++) {
         uintptr_t a=isr_stubs[i];
         idt[i]=(struct gate){a&65535,8,i==8?1:i==2?2:i==18?3:0,0x8e,(a>>16)&65535,a>>32,0};
@@ -50,10 +53,13 @@ void interrupt_dispatch(struct interrupt_frame *f) {
     if(f->vector==32) {timer_ticks++;out8(0x20,0x20);return;}
     if(f->vector==39) {out8(0x20,0x0b);if(!(in8(0x20)&128))return;}
     if(f->vector==47) {out8(0xa0,0x0b);if(!(in8(0xa0)&128)){out8(0x20,0x20);return;}}
+    /* Snapshot fault addresses before console I/O. Never dereference the
+     * interrupted RIP/RSP: they may themselves be unmapped/noncanonical. */
+    uint64_t fault_address=read_cr2(), page_root=read_cr3();
     putstr("\nEXCEPTION/UNEXPECTED INTERRUPT vector=");puthex(f->vector);
     putstr(" error=");puthex(f->error);putstr("\nRIP=");puthex(f->rip);
     putstr(" RSP=");puthex(f->rsp);putstr(" RFLAGS=");puthex(f->rflags);
-    putstr("\nCR2=");puthex(read_cr2());putstr(" CR3=");puthex(read_cr3());
+    putstr("\nCR2=");puthex(fault_address);putstr(" CR3=");puthex(page_root);
     putstr("\nRAX=");puthex(f->rax);putstr(" RBX=");puthex(f->rbx);
     putstr(" RCX=");puthex(f->rcx);putstr(" RDX=");puthex(f->rdx);
     panic("unhandled exception/interrupt");

@@ -8,12 +8,17 @@ x86-64 startup foundation; see `docs/migration/BOOT64.md`.
 * `dist/scos-32bit.img` is now permanently frozen at the verified r43 bytes.
   Preserve its checksum, provenance and integrity guard. Do not overwrite it
   with future builds. Historical revisions remain in Git history.
-* `legacy/i386/` contains the old build, bootloader, kernel, desktop and drivers.
-  Preserve it as the behavior/porting reference; it is not linked into AMD64.
+* The user requested removal of duplicate i386 source/build files on 2026-09-20.
+  `legacy/i386/` and its font generator are removed. Retrieve individual files
+  from commit `6717943f977a7e0f95f0ace5fa48cfe6a564f873` when a port is requested;
+  do not restore the entire obsolete source tree. Preserve the frozen image.
 * Publish x86-64 development images as `dist/scos.img`, with checksum and truthful
   verification notes. No release/round number until conversion starts on the
   user's PC, per the latest instruction. Do not prematurely call this r1.
-* Conversion approval is OPEN. Port and validate the existing core first.
+* Work only on the already-started startup components for now. The user will
+  specify the next subsystem to convert; do NOT start additional ports on your
+  own. A bootable test image is NOT a complete OS or physical-PC acceptance.
+* Conversion approval is OPEN, but follow the user's component-by-component scope.
   New GPU/NIC/Wi-Fi/browser driver/library integration requires a SEPARATE
   instruction after conversion. Research is not approved integration.
 * Preserve r41's physically validated packet-sized HID reception and report

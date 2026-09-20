@@ -3,6 +3,11 @@
 SCos is a custom operating system, not a Linux distribution. `os.html` remains
 its desktop design reference.
 
+**The 64-bit OS is NOT fully working. Only its startup foundation is implemented.**
+A bootable image is an internal integration checkpoint, not a usable desktop
+release or a request to flash/test the PC now. The user will choose the next
+subsystem to convert.
+
 **Active development: unnumbered x86-64 startup foundation.** The user authorized
 conversion; the final working 32-bit r43 image is now permanently frozen.
 There is no new release number until conversion starts on the user's PC.
@@ -18,22 +23,23 @@ There is no new release number until conversion starts on the user's PC.
 ## Build and boot
 
 Use an x86 Linux host with GCC supporting freestanding `-m64` and `-m32`, GNU
-binutils, Make and Python 3. No host C library is linked into either kernel.
+binutils, Make and Python 3. No host C library is linked into the kernel.
 
 ```sh
 make                           # active AMD64 build/scos.img
 sha256sum -c dist/scos.img.sha256
 python3 tools/check_milestone.py
-make legacy                    # legacy/i386/build/scos.img; identical r43 bytes
 make clean                     # remove active disposable build output
 python3 tools/setup_qemu.py     # optional pinned host emulator, no root required
 python3 tools/run_qemu.py       # snapshot boot; serial log and private QMP socket
 ```
 
-Old 32-bit sources/build rules are relocated to `legacy/i386/`, not compiled
-into the new kernel. Necessary 16/32-bit BIOS transition instructions remain in
-`boot/`; they are not the old 32-bit OS. `make -C legacy/i386 font` regenerates
-the legacy bitmap font if needed.
+Duplicate 32-bit sources/build rules and the old font generator have been removed.
+They are recoverable from [Git history](https://github.com/Joercat/SCos/tree/6717943f977a7e0f95f0ace5fa48cfe6a564f873/legacy/i386)
+when individual ports are requested. Necessary 16/32-bit BIOS transition
+instructions remain in `boot/`; deleting those would break BIOS-to-64-bit startup.
+See the [detailed startup review](docs/migration/STARTUP-REVIEW.md) for changes,
+component contracts, test evidence and remaining limitations.
 
 The images are raw bootable disks. Writing one to an entire USB drive destroys
 that drive's contents: back up and verify the target first. The new image needs

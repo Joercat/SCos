@@ -5,8 +5,8 @@
  * Real-hardware notes:
  *  - the BIOS drive number (DL) is trusted first but every read is retried
  *    with LBA extensions (AH=42h) and then classic CHS (AH=02h), on the SAME BIOS boot drive. Never fall back to an unrelated disk.
- *  - interrupts stay masked for the whole stage: we run for milliseconds
- *    and cannot afford a BIOS timer tick pushing over our scratch area.
+ *  - our code leaves interrupts disabled; firmware calls manage their own
+ *    interrupt requirements. The loader makes no timing guarantee.
  *  - scratch: 0x7b00 = BIOS drive, 0x7b10 = disk address packet.
  */
     .code16
@@ -35,10 +35,17 @@ fail:
     movw $0x0007, %bx
     leaw fail_str, %si
 fl:
+    cld
     lodsb
     testb %al, %al
     jz   fh
+    pushal
+    pushw %ds
+    pushw %es
     int  $0x10
+    popw %es
+    popw %ds
+    popal
     jmp  fl
 fh:
     cli
@@ -61,6 +68,7 @@ rd_lba:
     movw $0x4200, %ax
     pushw %ds
     pushw %es
+    stc                        /* failure unless firmware reports success */
     int  $0x13
     popw %es
     popw %ds
@@ -77,6 +85,7 @@ rd_chs:
     movb 0x7b00, %dl
     pushw %ds
     pushw %es
+    stc                        /* failure unless firmware reports success */
     int  $0x13
     popw %es
     popw %ds

@@ -1,6 +1,10 @@
 .section .text.entry,"ax"
 .code64
 .globl _start
+/* RDI is the fixed low-memory boot handoff. No inherited stack is trusted.
+ * Keep that pointer in a register while clearing BSS, including our new stacks.
+ * A 16-byte aligned RSP BEFORE call gives SysV's (RSP + 8) alignment in C.
+ * No FPU/SIMD or TLS state is consumed by this ring-0-only build. */
 _start:
     cli
     cld
@@ -19,6 +23,8 @@ _start:
     hlt
     jmp 1b
 .globl load_gdt
+/* Reload CS through a far return; LGDT alone does not replace cached segment
+ * descriptors. Data selectors are then refreshed before TSS/IDT installation. */
 load_gdt:
     lgdt (%rdi)
     pushq $8

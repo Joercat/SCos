@@ -18,7 +18,18 @@ struct boot_handoff {
 };
 _Static_assert(sizeof(struct boot_map_entry)==24, "E820 ABI");
 _Static_assert(sizeof(struct boot_handoff)==80, "handoff ABI");
+/* These offsets are consumed by assembly and cannot follow C refactors silently. */
+_Static_assert(offsetof(struct boot_handoff, version)==8, "handoff version offset");
+_Static_assert(offsetof(struct boot_handoff, size)==12, "handoff size offset");
+_Static_assert(offsetof(struct boot_handoff, map_address)==16, "handoff map offset");
+_Static_assert(offsetof(struct boot_handoff, map_count)==24, "handoff count offset");
+_Static_assert(offsetof(struct boot_handoff, map_stride)==28, "handoff stride offset");
 _Static_assert(offsetof(struct boot_handoff, kernel_start)==32, "handoff offset");
+_Static_assert(offsetof(struct boot_handoff, kernel_end)==40, "handoff end offset");
+_Static_assert(offsetof(struct boot_handoff, kernel_file_end)==48, "handoff file offset");
+_Static_assert(offsetof(struct boot_handoff, bootstrap_cr3)==56, "handoff CR3 offset");
+_Static_assert(offsetof(struct boot_handoff, flags)==68, "handoff flags offset");
+_Static_assert(offsetof(struct boot_handoff, reserved)==72, "handoff reserved offset");
 _Static_assert(offsetof(struct boot_handoff, bios_drive)==64, "handoff offset");
 int boot_map_valid(const struct boot_map_entry *, size_t);
 int boot_range_usable(const struct boot_map_entry *, size_t, uint64_t, uint64_t);

@@ -1,4 +1,10 @@
 #include "kernel.h"
+/* Boot-only, single-CPU identity-mapped page pool. This is deliberately NOT a
+ * general heap, DMA allocator, high-memory allocator or per-process VM manager.
+ * memory_init runs once with maskable interrupts off, after handoff validation.
+ * BSS owns all page tables; the entire linked kernel span stays reserved.
+ * Allocation/release serialize against ordinary IRQs, not NMI or other CPUs.
+ * NMI/machine-check/panic handlers must never allocate or free pages here. */
 #define PAGE UINT64_C(4096)
 #define NX (UINT64_C(1)<<63)
 #define COUNT (BOOT_IDENTITY_LIMIT/PAGE)
@@ -6,6 +12,7 @@ static uint64_t pml4[512] __attribute__((aligned(4096)));
 static uint64_t pdpt[512] __attribute__((aligned(4096)));
 static uint64_t directory[512] __attribute__((aligned(4096)));
 static uint64_t tables[8][512] __attribute__((aligned(4096)));
+_Static_assert(COUNT == sizeof(tables)/sizeof(uint64_t), "page-table coverage mismatch");
 static uint8_t state[COUNT]; /* 0 reserved, 1 free, 2 allocated; not a fake heap */
 static uint64_t free_pages;
 static uint64_t irq_save(void) {uint64_t f;__asm__ volatile("pushfq;popq %0;cli":"=r"(f)::"memory");return f;}
@@ -49,6 +56,8 @@ uintptr_t page_allocate(void) {
 void page_release(uintptr_t p) {
     uint64_t f=irq_save();
     if(p%PAGE || p>=BOOT_IDENTITY_LIMIT || state[p/PAGE]!=2) panic("invalid page release");
+    /* No dereference on release; data is erased on the next allocation.
+     * Callers must relinquish every reference before releasing the page. */
     state[p/PAGE]=1;free_pages++;
     irq_restore(f);
 }

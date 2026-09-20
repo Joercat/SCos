@@ -3,11 +3,14 @@
 Implemented and emulator-verified on 2026-09-19 after explicit user permission.
 This is a staged conversion of SCos, not Linux, and not the completed desktop.
 No release number is assigned until conversion starts on the user's PC.
+**This is not a usable 64-bit desktop OS.** See the detailed
+[2026-09-20 startup review and source cleanup](STARTUP-REVIEW.md) for the latest
+hardening and checks. The user will choose the next subsystem to convert.
 
 ## Artifact and source layout
 
 * `dist/scos.img`: 8,388,608-byte raw BIOS development disk.
-* SHA256: `838c55b1dbe98c25cb3ab3dc76760253d56feadd184491858a4a6ff75fde4615`.
+* SHA256: `6dbb612976497c5e373570e5923731aafb2c645bcc59260a28c7eec88b25e27b`.
 * Root `make` builds the same bytes into `build/scos.img`. GCC 12.2.0,
   binutils 2.40; freestanding AMD64, no host libraries, PIE, red zone, implicit
   SIMD/FPU use or stack protector runtime. Linker uses ELF64 AMD64 with separate
@@ -18,8 +21,9 @@ No release number is assigned until conversion starts on the user's PC.
   `kernel/src/`: validated handoff, console, memory and interrupt/platform setup.
 * `tools/gen_vectors.py` generates production interrupt entry assembly;
   `tools/makedisk.py` validates and packages the ELF64-derived payload.
-* `legacy/i386/`: relocated previous bootloader, kernel, desktop, drivers and
-  build rules. `make legacy` reproduces the frozen r43 image byte-for-byte.
+* The duplicate `legacy/i386/` sources/build were removed on 2026-09-20 at the
+  user's request. Commit `6717943` retains them for individual future ports.
+  Before removal their rebuild was verified byte-identical to frozen r43.
 * `dist/scos-32bit.img` and its checksum stay permanently unchanged. `os.html`
   stays as the original design reference. No new third-party guest library or
   driver has been imported.
@@ -94,8 +98,10 @@ error, RIP/CS/RFLAGS/RSP/SS. Vector offset 120, total 176 bytes. Stubs save all
 15 GPRs, clear DF for C, align the call stack and use IRETQ. Hardware-error-code
 vectors are handled separately; the interrupted flags are restored on return.
 
-## Verification performed
+## Baseline verification performed (before the 2026-09-20 review)
 
+The table below records the initial foundation checks. The separate
+[review](STARTUP-REVIEW.md) lists checks rerun on the hardened revision.
 Tests used QEMU 11.0.2 TCG, one CPU, snapshot disks and private QMP/GDB sockets;
 no physical disks, USB passthrough or guest network. Faults and boot mutations
 were injected externally into disposable guests, not via production test hooks.
@@ -143,5 +149,6 @@ Next conversion work is native allocation/mapping and device/DMA interfaces,
 then careful ports of existing console/input/display/storage and SCos behavior.
 Preserve physically validated HID report assembly and packet boundaries; do not
 mechanically widen hardware register fields or cast virtual pointers into DMA
-addresses. Existing desktop behavior is retained in `legacy/i386/` for that work.
+addresses. Existing desktop behavior is retained in Git history (commit `6717943`) for
+that work. Do not start another subsystem until the user requests it.
 New GPU/network/browser resources still need separate permission after conversion.

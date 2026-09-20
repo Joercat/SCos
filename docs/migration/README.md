@@ -2,7 +2,8 @@
 
 Status, 2026-09-19: **conversion authorized; first startup foundation implemented**.
 See [BOOT64.md](BOOT64.md) for the implemented boot ABI, test results and explicit
-limitations. Root `make` is AMD64; prior sources live under `legacy/i386/`.
+limitations. Root `make` is AMD64. Duplicate i386 sources were removed on 2026-09-20;
+retrieve individual porting references from commit `6717943` when needed.
 `dist/scos-32bit.img` is permanently frozen at r43. `dist/scos.img` is the
 unnumbered foundation, not a replacement desktop release. The user deferred
 numbering until conversion starts on their PC. New driver/library integration
@@ -26,7 +27,8 @@ We prefer narrow upstream adapters over maintaining large rewritten forks.
 
 ## Original i386 audit and remaining conversion work
 
-The paths below now refer to `legacy/i386/`. Boot/interrupt/basic page-pool work
+The paths below refer to historical `legacy/i386/` at commit `6717943`,
+not present-tree files. Boot/interrupt/basic page-pool work
 is implemented as documented in BOOT64; the remaining entries are a roadmap.
 
 | Current location/assumption | Future requirement |
@@ -75,12 +77,13 @@ The tested build uses host GCC 12.2.0 and GNU binutils 2.40 with explicit AMD64
 freestanding/no-host-library flags, no red zone, general-register-only C and
 SysV stack alignment. BIOS stages deliberately use `-m32` assembly. A dedicated
 version-pinned cross toolchain remains desirable; it is not falsely claimed to
-have been provisioned. Root and legacy build output directories are separate.
+have been provisioned. Only the AMD64 build remains active.
 
 **Gates A/B are open:** the user reported no major remaining 32-bit blockers
 and explicitly requested conversion. The final r43 image is frozen. The first
 boot/ABI foundation is implemented, not the entire architecture/desktop port.
-No round number until conversion starts on the user's PC.
+No round number until conversion starts on the user's PC. **Wait for the user to
+choose the next subsystem; this roadmap is not permission to begin it now.**
 
 **Gate C stays closed:** separate permission after conversion is required for
 new drivers/resources. The sequence below remains a roadmap, not a list of
