@@ -1,9 +1,9 @@
 # SCos release and transition rules
 
-Current final-test gate is CLOSED: `docs/AUDIT-32BIT.md` documents a reproduced
-wrong-disk write in r42 plus reset/serialization issues and missing TTY `save`.
-Address these as 32-bit safety fixes and retest before requesting final hardware
-acceptance. Do not use the retained image's save/reset against real disks.
+r43 fixes and verifies the r42 storage findings; see `docs/RELEASE-r43.md`.
+Final physical acceptance is still pending. Never use the archived r42 image's
+save/reset against real disks. Use `dist/scos-32bit-r43.img` for the next test;
+retain this new image/checksum/provenance permanently as well.
 
 * Keep the custom SCos kernel and identity; do not replace it with Linux.
 * `dist/scos-32bit.img` is a permanent, immutable 32-bit milestone. Never delete,
@@ -16,7 +16,7 @@ acceptance. Do not use the retained image's save/reset against real disks.
 * Await the user's final 32-bit hardware test. Address any reported defects and
   await their retest. Do NOT begin conversion until the user explicitly says so.
 * Reset the round counter to r1 only when the authorized conversion begins.
-  Do not reset the current i386 r42 tag during planning. Label future artifacts
+  Do not reset the current i386 r43 tag during planning. Label future artifacts
   with architecture as well as round, so historical 32-bit r1 is not confused
   with x86-64 r1.
 * Convert and validate the existing core/desktop first. New GPU/NIC/Wi-Fi/browser

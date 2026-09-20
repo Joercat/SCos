@@ -4,13 +4,14 @@ SCos is a custom, bootable x86 operating system with its own kernel, desktop,
 applications, terminal and six text consoles. It is not a Linux distribution.
 `os.html` remains the original desktop design reference.
 
-**Current release: r42, still 32-bit.** Boot uses legacy BIOS/CSM, an MBR loader
+**Current release: r43, still 32-bit.** Boot uses legacy BIOS/CSM, an MBR loader
 and a VBE framebuffer. There is no UEFI-only or x86-64 kernel build yet.
 
-**Final-test hold:** the new audit reproduced an unsafe disk-selection bug in
-`save` and found related Factory Reset error handling problems. Do not use those
-operations on real hardware with other attached ATA-accessible disks. This is
-not a bug-free/finally accepted image; see [the audit and required fixes](docs/AUDIT-32BIT.md).
+**Storage corrections verified:** r43 fixes the wrong-disk write, reset double-
+free and failure reporting, incomplete serialization, and malformed-load handling.
+Use the new **`dist/scos-32bit-r43.img`** for the next physical test, not the
+unchanged r42 archive. See [r43 changes, checks and limitations](docs/RELEASE-r43.md).
+Final hardware acceptance and permission to convert are still pending.
 
 ## Build and boot
 
@@ -19,7 +20,7 @@ compilation, GNU binutils, Make and Python 3:
 
 ```sh
 make                         # build/scos.img
-sha256sum -c dist/scos-32bit.img.sha256  # verify a published image, from repo root
+sha256sum -c dist/scos-32bit-r43.img.sha256  # verify current release
 make font                    # optional: regenerate the bitmap font
 make clean                   # remove generated build files
 ```
@@ -27,10 +28,14 @@ make clean                   # remove generated build files
 The image is a raw bootable disk image, not a file to copy into an existing USB
 filesystem. Writing it to a whole USB device overwrites that device's contents;
 back up the correct device first. Boot in the working BIOS/CSM configuration.
-Disk persistence currently depends on supported legacy ATA access: booting from
-USB does not by itself provide a USB mass-storage driver.
+Disk persistence requires one uniquely verified SCos-owned legacy ATA disk.
+`save` confirms the target; unknown or multiple targets are refused. Booting from
+USB does not by itself provide a USB mass-storage driver. See the release notes
+for the FS2 format and single-slot power-loss limitation. Back up older data: old
+unmarked images/FS1 saves are not automatically adopted or migrated.
 
-The permanently retained **scos 32bit** image is `dist/scos-32bit.img`, with its
+The current image/checksum are `dist/scos-32bit-r43.img` and
+`dist/scos-32bit-r43.img.sha256`. The permanently retained original **scos 32bit** image is `dist/scos-32bit.img`, with its
 SHA-256 in `dist/scos-32bit.img.sha256` and provenance in
 [the milestone manifest](docs/milestones/scos-32bit.json). It is the unchanged
 r42 image, not a newly fixed release. Never overwrite or delete it; further
@@ -52,8 +57,8 @@ have workflow-write permission. Build products are not source dependencies.
   processes; unsupported system kills are rejected rather than simulated.
 * Power controls are in the taskbar menu; `shutdown` is also available in the
   terminal and TTY. If firmware cannot power off, SCos displays the fallback
-  screen and halts. Restart remains available; Factory Reset is currently subject
-  to the storage safety hold above.
+  screen and halts. Factory Reset reports RAM-only operation when persistence is
+  unavailable; a failed disk reset reports failure without automatically rebooting.
 * `help` lists current commands. Kernel service/error logs, panic handling and
   WM-independent error reporting remain; temporary input capture and hardware
   diagnostic screens have been retired.
@@ -96,7 +101,7 @@ full-system testing. It is not imported into the guest or required by the build.
 
 ## Preparing x86-64 — implementation has NOT begun
 
-The custom kernel and SCos identity will remain. After the current 32-bit safety fixes, final physical test and explicit user
+The custom kernel and SCos identity will remain. After the verified 32-bit safety fixes, final physical test and explicit user
 permission, the next architectural step is a staged port, with lightweight
 upstream libraries and selected driver source adapted
 where practical, not automatic Linux binary/module compatibility.
@@ -113,6 +118,6 @@ are future work. The current browser remains a stub; network metrics are not
 fabricated. The planning documents explicitly separate researched candidates
 from tested, working SCos support.
 
-The round remains **r42** during planning. Reset to **r1** only when the user
+The current 32-bit bug-fix round is **r43**. Reset to **r1** only when the user
 explicitly authorizes conversion. Completing conversion is not permission to
 start drivers/resources: that requires a separate instruction afterward.

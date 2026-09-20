@@ -53,7 +53,7 @@ $(BUILD)/stage2.elf: boot/stage2.S
 $(BUILD)/stage2.bin: $(BUILD)/stage2.elf
 	$(OBJCOPY) -O binary -j .text -j .rodata -j .data $< $@
 
-$(BUILD)/scos.img: $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $(BUILD)/stage2.elf
+$(BUILD)/scos.img: $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin tools/makedisk.py $(BUILD)/stage2.elf
 	$(PYTHON) tools/makedisk.py $(BUILD)
 
 font:

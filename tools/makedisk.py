@@ -40,14 +40,30 @@ def main(build_dir):
     stage2 = open(os.path.join(build_dir, "stage2.bin"), "rb").read()
     kernel = open(os.path.join(build_dir, "kernel.bin"), "rb").read()
 
-    assert len(stage1) == SECTOR, f"stage1 must be 512 bytes, got {len(stage1)}"
-    assert len(stage2) <= STAGE2_SECTORS * SECTOR, "stage2 too big"
+    if len(stage1)!=SECTOR or stage1[510:]!=b"\x55\xaa":
+        raise ValueError("invalid MBR")
+    if any(stage1[400:510]):
+        raise ValueError("MBR code overlaps reserved ownership descriptor")
+    if len(stage2)>STAGE2_SECTORS*SECTOR:
+        raise ValueError("stage2 too big")
+    # Conservative legacy low-memory staging cap: 0x20000..0x80000.
+    if not kernel or (len(kernel)+511)//512*512 > 0x60000:
+        raise ValueError("kernel exceeds legacy BIOS staging policy")
+    if KERNEL_START*512+len(kernel)>2048*512:
+        raise ValueError("kernel overlaps persistence")
+    import struct
+    stage1=bytearray(stage1)
+    stage1[400:412]=b"SCOSDISK32v1"
+    struct.pack_into("<IIII",stage1,412,2048,256,IMG_SECTORS,len(kernel))
 
     offs = symbol_offsets(os.path.join(build_dir, "stage2.elf"),
                           ["kernel_start_lba", "kernel_sector_count"])
     kernel_lba = KERNEL_START
     kernel_sectors = (len(kernel) + SECTOR - 1) // SECTOR
 
+    for name in ("kernel_start_lba","kernel_sector_count"):
+        if name not in offs or not 0 <= offs[name]-0x8000 <= len(stage2)-4:
+            raise ValueError("invalid stage2 patch symbol: "+name)
     stage2 = bytearray(stage2 + b"\0" * (STAGE2_SECTORS * SECTOR - len(stage2)))
     import struct
     o = offs["kernel_start_lba"] - 0x8000
@@ -61,6 +77,8 @@ def main(build_dir):
     kstart = KERNEL_START * SECTOR
     img[kstart:kstart + len(kernel)] = kernel
 
+    if len(img)!=IMG_SECTORS*SECTOR or img[510:512]!=b"\x55\xaa":
+        raise ValueError("assembled image size/signature mismatch")
     out = os.path.join(build_dir, "scos.img")
     open(out, "wb").write(bytes(img))
     print(f"makedisk: {out}  kernel={len(kernel)} bytes "

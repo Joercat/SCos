@@ -1,3 +1,9 @@
+> **Resolved in r43:** the findings below describe the unchanged r42 archive.
+> The new `dist/scos-32bit-r43.img` addresses them; see
+> [corrections and actual verification](RELEASE-r43.md). Physical acceptance is
+> still pending. Keep this audit as the root-cause record, not a current claim
+> that r43 still writes to the first arbitrary ATA disk.
+
 # Final 32-bit review — NOT yet cleared for hardware acceptance
 
 Reviewed 2026-09-19. Image: the unchanged **r42 i386** image now retained as

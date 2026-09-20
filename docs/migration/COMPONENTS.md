@@ -10,8 +10,8 @@ local patches; do not rewrite whole libraries to conceal missing OS services.
 The expanded [hardware and browser comparison](HARDWARE-AND-BROWSER.md) covers
 auto-selection/fallback, Intel/AMD/NVIDIA, wired and wireless driver families,
 and genuinely integrated browser engines. Host QEMU is now obtained separately;
-no guest dependency has been imported. The [storage audit](../AUDIT-32BIT.md)
-blocks final 32-bit acceptance and therefore conversion.
+no guest dependency has been imported. The [storage audit](../AUDIT-32BIT.md) findings are corrected/tested in r43;
+final physical acceptance and conversion permission are still pending.
 
 ## Recommended first candidates
 

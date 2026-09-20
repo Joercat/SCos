@@ -45,7 +45,7 @@ void kmain(struct boot_info *bi)
         fmt_u32(n, (u32)boot_info.height); strcat(line, n); strcat(line, "x");
         fmt_u32(n, boot_info.bpp); strcat(line, n); strcat(line, " framebuffer");
         boot_screen_step(line, 45);
-        vfs_init_defaults();
+        if (!vfs_init_defaults()) kernel_panic("Cannot allocate initial filesystem");
         boot_screen_step("vfs:  factory file tree built", 55);
         int drives = ata_init();
         const char *model = ata_model();
@@ -55,9 +55,9 @@ void kmain(struct boot_info *bi)
         boot_screen_step(line, 65);
         boot_screen_step(fs_image_load() ? "fs:   saved image loaded from disk (LBA 2048)"
                                          : "fs:   no saved image on disk - using defaults", 75);
-        system_files_init(drives > 0);
-    if (drives > 0)
-        boot_screen_step("sys:  /system boot-chain files read from disk", 78);
+        system_files_init(fs_image_available());
+    if (fs_image_available())
+        boot_screen_step("sys:  copies from verified SCos persistence disk", 78);
     mouse_init();
         usb_init();
         {

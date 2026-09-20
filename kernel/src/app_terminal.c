@@ -721,9 +721,10 @@ static void run_command(struct term *t, const char *command)
         else strcat(response, " failed to launch");
     }
     else if (!strcmp(cmd, "save")) {
-        if (!ata_present()) strcpy(response, "No ATA disk detected.");
+        if (nargs != 1) strcpy(response, "Usage: save");
+        else if (!fs_image_available()) strcpy(response, "No unique verified SCos disk. No disk was written.");
         else if (fs_image_save()) strcpy(response, "Filesystem image written to disk.");
-        else strcpy(response, "Error: disk write failed.");
+        else strcpy(response, "Save failed. See klog; previous disk save may be incomplete.");
     }
     else if (!strcmp(cmd, "tty")) {
         int number=1;

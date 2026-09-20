@@ -5,6 +5,10 @@ It supports x86-64 system emulation and also boots the existing i386 image.
 TCG does not require KVM. This is a native host emulator, not a browser v86
 replacement with the same UI. No v86 runtime or diagnostic guest UI was restored.
 
+The current r43 safety corrections and further checks are documented in
+[RELEASE-r43.md](../RELEASE-r43.md); the explicit r42 archive still has its old
+defects. Temporary r43 test harnesses were retired after verification.
+
 ## Use
 
 The prepared local runtime is approximately 57 MiB and is ignored by Git. On a

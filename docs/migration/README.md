@@ -2,11 +2,12 @@
 
 Status: **planning, source research and host-emulator preparation only**, 2026-09-19. No long-mode entry,
 64-bit kernel build target, userspace ABI, driver port or imported library has
-been added. r42 remains the existing 32-bit OS. Starting the conversion requires
+been added. r43 is now the 32-bit bug-fix release; r42 remains archived. Starting the conversion requires
 separate approval. This plan does not replace SCos with Linux.
 
-**Current gate is closed:** [the final 32-bit audit](../AUDIT-32BIT.md) found a
-reproducible storage safety defect. Fix/retest it before the final hardware test.
+**Conversion gate remains closed:** [the 32-bit audit](../AUDIT-32BIT.md) found
+storage defects now corrected and tested in [r43](../RELEASE-r43.md). Final
+physical acceptance and explicit conversion permission remain outstanding.
 See the [wider hardware/browser comparison](HARDWARE-AND-BROWSER.md) and
 [obtained QEMU host tool](EMULATOR.md). The permanent image/provenance live in
 `dist/scos-32bit.img` and `docs/milestones/scos-32bit.json`; never replace/delete

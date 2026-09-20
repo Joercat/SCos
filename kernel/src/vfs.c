@@ -13,6 +13,7 @@ static void node_free_recursive(struct vfs_node *n);
 static struct vfs_node *node_new(const char *name, int is_dir, struct vfs_node *parent)
 {
     struct vfs_node *n = palloc(sizeof(struct vfs_node));
+    if (!n) return NULL;
     memset(n, 0, sizeof(*n));
     strncpy(n->name, name, VFS_NAME - 1);
     n->is_dir = is_dir;
@@ -31,18 +32,15 @@ static struct vfs_node *dir_child(struct vfs_node *dir, const char *name)
     return NULL;
 }
 
-void vfs_init_defaults(void)
+int vfs_init_defaults(void)
 {
-    if (vfs_root) node_free_recursive(vfs_root);
-    vfs_root = node_new("", 1, NULL);
-
-    struct vfs_node *home = node_new("home", 1, vfs_root);
-    struct vfs_node *docs = node_new("documents", 1, home);
-    node_new("downloads", 1, home);
-    node_new("desktop", 1, home);
-
+    struct vfs_node *old=vfs_root;
+    struct vfs_node *fresh=node_new("",1,NULL);
+    if (!fresh) return 0;
+    vfs_root=fresh;
     static const char welcome[] =
         "Welcome to SCos!\nThis is your personal computer system.";
+
     static const char changelog[] =
         "SCos 2.0.0 Changelog:\n"
         "- Bare-metal x86 kernel: bootloader, drivers, window manager\n"
@@ -51,27 +49,25 @@ void vfs_init_defaults(void)
         "- Terminal, Files, Notepad, Calendar, Settings, About apps\n"
         "- Optional ATA disk persistence ('save' in the terminal)";
 
-    struct vfs_node *f;
-    f = node_new("welcome.txt", 0, docs);
-    f->data = palloc(sizeof(welcome)); f->size = sizeof(welcome) - 1; f->cap = sizeof(welcome);
-    memcpy(f->data, welcome, f->size); f->data[f->size] = 0;
-    f = node_new("changelog.txt", 0, docs);
-    f->data = palloc(sizeof(changelog)); f->size = sizeof(changelog) - 1; f->cap = sizeof(changelog);
-    memcpy(f->data, changelog, f->size); f->data[f->size] = 0;
-
-    struct vfs_node *sys = node_new("system", 1, vfs_root);
     static const char settings[] = "{\n  \"theme\": \"matrix-1\",\n  \"version\": \"2.0.0\"\n}";
-    f = node_new("settings.json", 0, sys);
-    f->data = palloc(sizeof(settings)); f->size = sizeof(settings) - 1; f->cap = sizeof(settings);
-    memcpy(f->data, settings, f->size); f->data[f->size] = 0;
+
     static const char about[] =
         "SCos - bare-metal x86 operating system\n"
         "Version 2.0.0\n"
         "Boots from an MBR bootloader into 32-bit protected mode.\n"
         "Type 'neofetch' in the Terminal for a live hardware report.";
-    f = node_new("about.txt", 0, sys);
-    f->data = palloc(sizeof(about)); f->size = sizeof(about) - 1; f->cap = sizeof(about);
-    memcpy(f->data, about, f->size); f->data[f->size] = 0;
+
+    if (!vfs_mkdir("home") || !vfs_mkdir("home/documents") ||
+        !vfs_mkdir("home/downloads") || !vfs_mkdir("home/desktop") ||
+        !vfs_mkdir("system") ||
+        !vfs_write("home/documents/welcome.txt",welcome,sizeof(welcome)-1) ||
+        !vfs_write("home/documents/changelog.txt",changelog,sizeof(changelog)-1) ||
+        !vfs_write("system/settings.json",settings,sizeof(settings)-1) ||
+        !vfs_write("system/about.txt",about,sizeof(about)-1)) {
+        vfs_root=old; node_free_recursive(fresh); return 0;
+    }
+    if (old) node_free_recursive(old);
+    return 1;
 }
 
 struct vfs_node *vfs_lookup(const char *path)
@@ -126,31 +122,28 @@ char *vfs_read(const char *path, u32 *len)
     return n->data;
 }
 
-static void node_set_data(struct vfs_node *n, const char *data, u32 len)
+static int node_set_data(struct vfs_node *n, const char *data, u32 len)
 {
-    if (n->cap < len + 1) {
-        u32 cap = len + 1 + 64;
-        char *nd = palloc(cap);
-        if (!nd) return;                 /* OOM: keep the old buffer */
-        char *old = n->data;
-        u32 oldcap = n->cap;
-        n->data = nd;
-        n->cap = cap;
-        /* r31 leak fix: growing a file NEVER freed the old buffer - every
-         * save that outgrew the cap leaked it (settings.json/desktop.json
-         * rewrites, notepad saves, /system copies...). Skip the free only
-         * if the source pointer lives INSIDE the old buffer. */
-        if (old && !((const char *)data >= old &&
-                     (const char *)data < old + oldcap))
-            pfree(old, oldcap);
+    if (len > 0xffffffffu-65 || (len && !data)) return 0;
+    if (n->cap < len+1) {
+        u32 cap=len+65;
+        char *nd=palloc(cap);
+        if (!nd) return 0;
+        if (len) memcpy(nd,data,len); /* copy before releasing an aliased source */
+        nd[len]=0;
+        if (n->data) pfree(n->data,n->cap);
+        n->data=nd; n->cap=cap;
+    } else {
+        if (len) memmove(n->data,data,len);
+        n->data[len]=0;
     }
-    memcpy(n->data, data, len);
-    n->data[len] = 0;
-    n->size = len;
+    n->size=len;
+    return 1;
 }
 
 int vfs_write(const char *path, const char *data, u32 len)
 {
+    if (!path || strlen(path)>=256) return 0;
     char dirpath[256];
     vfs_parent_path(path, dirpath);
     struct vfs_node *dir = vfs_lookup(dirpath);
@@ -158,27 +151,29 @@ int vfs_write(const char *path, const char *data, u32 len)
 
     const char *base = path + strlen(path);
     while (base > path && *(base - 1) != '/') base--;
-    if (!*base) return 0;
+    if (!*base || strlen(base)>=VFS_NAME || !strcmp(base,".") || !strcmp(base,"..")) return 0;
 
     struct vfs_node *n = dir_child(dir, base);
+    int created=!n;
     if (!n) n = node_new(base, 0, dir);
-    if (n->is_dir) return 0;
-    node_set_data(n, data, len);
-    return 1;
+    if (!n || n->is_dir) return 0;
+    if (node_set_data(n,data,len)) return 1;
+    if (created) { dir->child=n->sibling; pfree(n,sizeof(*n)); }
+    return 0;
 }
 
 int vfs_mkdir(const char *path)
 {
+    if (!path || strlen(path)>=256) return 0;
     char dirpath[256];
     vfs_parent_path(path, dirpath);
     struct vfs_node *dir = vfs_lookup(dirpath);
     if (!dir || !dir->is_dir) return 0;
     const char *base = path + strlen(path);
     while (base > path && *(base - 1) != '/') base--;
-    if (!*base) return 0;
+    if (!*base || strlen(base)>=VFS_NAME || !strcmp(base,".") || !strcmp(base,"..")) return 0;
     if (dir_child(dir, base)) return 0;
-    node_new(base, 1, dir);
-    return 1;
+    return node_new(base, 1, dir) != NULL;
 }
 
 static void node_free_recursive(struct vfs_node *n)
@@ -236,11 +231,12 @@ char *vfs_parent_path(const char *path, char *out)
 
 int vfs_rename(const char *oldp, const char *newp)
 {
+    if (!oldp || !newp || strlen(newp)>=256) return 0;
     struct vfs_node *n = vfs_lookup(oldp);
     if (!n || !n->parent) return 0;
     const char *slash = newp;
     for (const char *q = newp; *q; q++) if (*q == '/') slash = q + 1;
-    if (!*slash) return 0;
+    if (!*slash || strlen(slash)>=VFS_NAME || !strcmp(slash,".") || !strcmp(slash,"..")) return 0;
     char parent[256];
     int pl = (int)(slash - newp);
     if (pl >= (int)sizeof(parent)) return 0;
@@ -249,6 +245,7 @@ int vfs_rename(const char *oldp, const char *newp)
     struct vfs_node *p = vfs_lookup(pl ? parent : "/");
     if (!p || !p->is_dir) return 0;
     if (dir_child(p, slash)) return 0;
+    for (struct vfs_node *a=p;a;a=a->parent) if (a==n) return 0;
     struct vfs_node **l = &n->parent->child;
     while (*l && *l != n) l = &(*l)->sibling;
     if (*l) *l = n->sibling;
@@ -261,11 +258,9 @@ int vfs_rename(const char *oldp, const char *newp)
 }
 
 /* wipe everything back to factory defaults (used by Settings) */
-void vfs_factory_reset(void)
+int vfs_factory_reset(void)
 {
-    node_free_recursive(vfs_root);
-    vfs_root->child = NULL;
-    vfs_init_defaults();
+    return vfs_init_defaults();
 }
 
 struct vfs_node *vfs_child(struct vfs_node *dir, const char *name)
@@ -281,11 +276,12 @@ struct vfs_node *vfs_child(struct vfs_node *dir, const char *name)
  * boot sectors are never rewritten, so a curious user cannot brick boot.
  * Deleting a copy is fine: the next boot recreates it from the disk.
  */
-extern char _bss_end[];
+void vfs_free_tree(struct vfs_node *n) { if (n) node_free_recursive(n); }
+
 
 void system_files_init(int have_disk)
 {
-    if (!have_disk) return;
+    if (!have_disk || !fs_image_available()) return;
     vfs_mkdir("/system/boot");
 
     static char buf[8192];
@@ -294,7 +290,8 @@ void system_files_init(int have_disk)
     if (ata_read_sectors(1, 16, buf))
         vfs_write("/system/boot/stage2.bin", buf, 8192);
 
-    u32 ksz = (u32)(_bss_end - (char *)0x100000);
+    u32 file_bytes = fs_image_kernel_bytes();
+    u32 ksz = file_bytes;
     ksz = (ksz + 511u) & ~511u;
     char *kb = palloc(ksz);
     if (kb) {
@@ -304,7 +301,7 @@ void system_files_init(int have_disk)
             if (!ata_read_sectors(17 + done / 512, n / 512, kb + done)) break;
             done += n;
         }
-        if (done == ksz) vfs_write("/system/kernel.bin", kb, ksz);
+        if (done == ksz) vfs_write("/system/kernel.bin", kb, file_bytes);
         pfree(kb, ksz);
     }
 
@@ -313,10 +310,10 @@ void system_files_init(int have_disk)
         "\n"
         "  boot/stage1.bin  512 B   MBR, read from disk LBA 0\n"
         "  boot/stage2.bin  8 KB    second-stage loader, LBA 1..16\n"
-        "  kernel.bin       ~133 KB flat 32-bit kernel image, LBA 17..\n"
+        "  kernel.bin       flat 32-bit kernel image, LBA 17..\n"
         "\n"
-        "These files are re-read from the disk every boot, so they always\n"
-        "match what the machine actually booted from. 'cat' shows a hex\n"
+        "These are copies from the verified SCos persistence disk, which\n"
+        "may differ from the BIOS boot medium. 'cat' shows a hex\n"
         "preview, 'hexdump' shows more, 'edit' opens the copy and\n"
         "'rm -s' removes it (restored next boot).\n"
         "\n"

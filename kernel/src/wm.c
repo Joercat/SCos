@@ -1843,6 +1843,7 @@ void wm_dialog(const char *title, const char *message, const char *input,
     struct window *w = wm_open_app("_dialog", NULL);
     if (!w) { if (cb) cb(0, NULL, ud); return; }
     struct dialog_data *d = palloc(sizeof(*d));
+    if (!d) { wm_close_window(w); if (cb) cb(0,NULL,ud); return; }
     memset(d, 0, sizeof(*d));
     strncpy(d->title, title, sizeof(d->title) - 1);
     strncpy(d->message, message, sizeof(d->message) - 1);
@@ -1886,6 +1887,8 @@ void wm_error_popup(const char *text)
     struct window *w = wm_open_app("_error", NULL);
     if (!w) return;
     struct err_data *d = palloc(sizeof(*d));
+    if (!d) { wm_close_window(w); err_notify("ui",text,NULL,0); return; }
+    memset(d,0,sizeof(*d));
     strncpy(d->text, text, sizeof(d->text) - 1);
     w->data = d;
     /* error windows appear near-randomly, like the web sim */

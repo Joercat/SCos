@@ -226,7 +226,7 @@ static void tty_exec(char *cmd)
             "  clear           clear this console\n"
             "  reboot          reboot the machine now\n"
             "  kill --system <pid> - confirmed stop (scwm only)\n"
-            "  shutdown [--confirm] - ACPI power-off");
+            "  save - Save to verified SCos disk\n  shutdown [--confirm] - ACPI power-off");
     }
     else if (!strcmp(args[0], "ls")) {
         char path[160];
@@ -712,6 +712,12 @@ static void tty_exec(char *cmd)
                   "'sysinfo' for real hardware).");
     }
     else if (!strcmp(args[0], "whoami")) tty_print("user");
+    else if (!strcmp(args[0], "save")) {
+        if (nargs != 1) tty_print("Usage: save");
+        else if (!fs_image_available()) tty_print("No unique verified SCos disk. No disk was written.");
+        else tty_print(fs_image_save() ? "Filesystem image written to disk."
+                      : "Save failed. See klog; previous disk save may be incomplete.");
+    }
     else if (!strcmp(args[0], "version"))
         tty_print("SCos version 2.0.0 (build " SCOS_BUILD_TAG
                   ") - kernel console v2.0");

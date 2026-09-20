@@ -12,7 +12,7 @@
  * "SCos 2.0 r27" on the boot screen - boot_screen.c had never been in the
  * per-round tag sweep, so nobody could tell which build was flashed.
  * Every visible version string now concatenates this macro. */
-#define SCOS_BUILD_TAG "r42"
+#define SCOS_BUILD_TAG "r43"
 
 typedef unsigned char      u8;
 typedef unsigned short     u16;
@@ -252,7 +252,7 @@ struct vfs_node {
 
 extern struct vfs_node *vfs_root;
 
-void vfs_init_defaults(void);
+int vfs_init_defaults(void);
 struct vfs_node *vfs_lookup(const char *path);
 int   vfs_list(struct vfs_node *dir, char names[][VFS_NAME], int max);
 char *vfs_read(const char *path, u32 *len);
@@ -261,7 +261,7 @@ int   vfs_mkdir(const char *path);
 int   vfs_delete(const char *path);
 struct vfs_node *vfs_child(struct vfs_node *dir, const char *name);
 int   vfs_rename(const char *oldp, const char *newp);
-void  vfs_factory_reset(void);
+int   vfs_factory_reset(void);
 void  system_files_init(int have_disk);
 int   vfs_is_dir(struct vfs_node *n);
 u32   vfs_usage_bytes(void);
@@ -280,6 +280,10 @@ int  ata_write_sectors(u32 lba, u32 count, const void *buf);
 int  ata_present(void);
 int  fs_image_load(void);                     /* 1 if an SCos FS image was found */
 int  fs_image_save(void);
+int  fs_image_available(void);
+u32 fs_image_kernel_bytes(void);
+const char *fs_image_target(void);
+void vfs_free_tree(struct vfs_node *n);
 extern int fs_image_found;
 
 /* ----------------------------------------------------------------- rtc ---- */

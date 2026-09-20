@@ -134,16 +134,26 @@ static void reset_confirm_cb(int ok, const char *text, void *ud)
     (void)text; (void)ud;
     if (!ok) return;
     /* wipe everything back to shipping defaults and persist the wipe */
+    if (!vfs_factory_reset()) {
+        wm_error_popup("Reset failed: out of memory.\nFiles unchanged; not restarting.");
+        return;
+    }
     theme_set_index(0);
     wm_theme_changed();
-    vfs_factory_reset();
+    prefs_set_mouse(3);
+    prefs_set_dbl(500);
     settings_save();
-    fs_image_save();
+    int persistent=fs_image_available();
+    if (persistent && !fs_image_save()) {
+        wm_error_popup("RAM defaults restored.\nDisk reset FAILED; see klog.\nNot restarting. Disk save\nmay be incomplete.");
+        return;
+    }
     /* tell the user what happened, then restart the machine */
     fb_clear(0x000000);
     const struct theme *t = theme_current();
     const char *m1 = "Factory reset complete";
-    const char *m2 = "All user data was erased and defaults were restored.";
+    const char *m2 = persistent ? "SCos saved-data region cleared; defaults verified on disk."
+                                : "RAM reset only. No verified persistence disk; disks untouched.";
     const char *m3 = "The system is restarting...";
     s_text_scaled(&screen, (screen_w - s_text_width(m1) * 3) / 2, screen_h / 2 - 70, m1, t->main, 3);
     s_text(&screen, (screen_w - s_text_width(m2)) / 2, screen_h / 2, m2, 0xCCCCCC);
@@ -206,10 +216,13 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
         wm_desktop_restore();
         wm_redraw(w);
     } else if (ui->hover_reset == 1) {
-        wm_dialog("Factory Reset",
-                  "Erase ALL user data (files, settings) and restore the "
-                  "system to factory defaults? The computer will restart.",
-                  NULL, reset_confirm_cb, NULL);
+        char message[256];
+        if (fs_image_available()) {
+            strcpy(message,"Reset RAM and SCos saved-data region on:\n");
+            strncat(message,fs_image_target(),40);
+            strcat(message,"\nMay differ from boot USB.\nNot whole-disk secure erasure.\nRestart after verified save?");
+        } else strcpy(message,"Reset RAM to defaults and restart?\nNo unique verified SCos disk.\nALL disks will remain untouched.");
+        wm_dialog("Factory Reset",message,NULL,reset_confirm_cb,NULL);
     }
 }
 

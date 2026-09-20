@@ -50,6 +50,13 @@ int confirm_command(struct shell_confirm *c, char *line, unsigned cap,
     }
     normalized[ni] = 0;
     const char *action = NULL;
+    char storage_action[160];
+    if (!strcmp(normalized,"save") && fs_image_available()) {
+        strcpy(storage_action,"Overwrite saved tree on SCos ATA disk: ");
+        strncat(storage_action,fs_image_target(),40);
+        strcat(storage_action,"\nThis may differ from the boot USB.");
+        action=storage_action;
+    }
     if (!strncmp(normalized,"kill --system ",14)) action = "Stopping scwm closes all GUI apps. Unsaved edits will be lost.";
     else if ((!strcmp(normalized,"reboot --confirm") || !strcmp(normalized,"reboot"))) action = "Reboot now? Unsaved changes may be lost.";
     else if ((!strcmp(normalized,"shutdown --confirm") || !strcmp(normalized,"poweroff --confirm") || !strcmp(normalized,"shutdown") || !strcmp(normalized,"poweroff"))) action = "Power off now? Unsaved changes may be lost.";
