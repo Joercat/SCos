@@ -20,6 +20,7 @@ void kmain(struct boot_info *bi)
     pit_init(100);
     kbd_init();
     irq_enable();          /* ticks must flow before splash animations sleep */
+    acpi_init();           /* discover firmware power controls before any shutdown path */
     cpu_meter_init();      /* needs sleeping, so only after interrupts are on */
 
     fb_init();
@@ -92,12 +93,8 @@ void kmain(struct boot_info *bi)
     if (err_pending()) err_show_pending();
     wm_run();
 
-    /* r36: wm_run is a for(;;) loop - landing here means the window
-     * manager EXITED (crash recovery).  Instead of hanging on a frozen
-     * desktop, fall into the kernel-owned maintenance console so the
-     * system keeps behaving like a Linux tty: real shell, real commands,
-     * and 'wm' can restart the desktop (up to 5 attempts). */
-    klog("kmain: wm_run RETURNED - falling back to the maintenance tty");
+    /* A terminated desktop leaves the base console available. */
+    klog("kmain: desktop stopped, entering tty");
     tty_run(0);
 
     for (;;) cpu_hlt();

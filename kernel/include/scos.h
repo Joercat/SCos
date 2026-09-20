@@ -12,7 +12,7 @@
  * "SCos 2.0 r27" on the boot screen - boot_screen.c had never been in the
  * per-round tag sweep, so nobody could tell which build was flashed.
  * Every visible version string now concatenates this macro. */
-#define SCOS_BUILD_TAG "r41"
+#define SCOS_BUILD_TAG "r42"
 
 typedef unsigned char      u8;
 typedef unsigned short     u16;
@@ -84,10 +84,7 @@ int  pci_find_class(u8 class, u8 subclass, u8 progif,
 void usb_init(void);
 void usb_poll(void);
 void usb_status(char *out, int max);
-void diag_run(void);
-int  is_v86_box(void);              /* running inside the v86 emulator box? */
 void usb_kbd_leds_off(void);        /* drive keyboard LEDs off (shutdown) */
-void diag_manual(void);
 void error_screen(const char *subsys, const char *msg,
                   const char *const *dump, int ndump);
 void err_notify(const char *subsys, const char *msg,
@@ -455,7 +452,6 @@ int confirm_command(struct shell_confirm *c, char *line, unsigned cap, char *mes
 int parse_pid(const char *s, int *pid);
 extern int wm_stop_requested;
 void tty_select(int number);
-void usb_inputtrace(const char *action, void (*emit)(const char *, void *), void *ctx);
 extern u32 input_key_enqueued, input_mouse_enqueued, input_key_dropped, input_mouse_dropped;
 
 #endif /* SCOS_H */

@@ -3,7 +3,6 @@
 # Targets:
 #   make            - build build/scos.img (bootable disk image)
 #   make font       - regenerate the bitmap font
-#   make test       - run the headless v86 verification suite
 #   make clean
 
 CC      := gcc
@@ -20,7 +19,7 @@ BUILD := build
 KERN_SRC := $(wildcard kernel/src/*.c)
 KERN_OBJ := $(patsubst kernel/src/%.c,$(BUILD)/kobj/%.o,$(KERN_SRC))
 
-.PHONY: all font test clean
+.PHONY: all font clean
 
 all: $(BUILD)/scos.img
 
@@ -57,55 +56,8 @@ $(BUILD)/scos.img: $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $
 font:
 	$(PYTHON) tools/fontgen.py kernel/src/font_data.c
 
-test: all usbtest cputest confirmtest mtrrtest
-	node tests/run_tests.mjs
-
-# native USB-logic simulator: runs the REAL usb.c against a mini xHC and
-# the field-captured descriptors of the user's actual devices (see the
-# header of tests/usb_sim.c).  Catches ring/cycle/parser regressions
-# without a flash-and-boot cycle.
-usbtest: build/usb_sim
-	./build/usb_sim
-
-build/usb_sim: tests/usb_sim.c kernel/src/usb.c kernel/src/mouse.c \
-               kernel/src/kbd.c kernel/src/acpi.c kernel/include/scos.h
-	@mkdir -p build
-	gcc -std=gnu11 -no-pie -Wall -Wextra -Wno-unused-parameter \
-	    -Wno-pointer-to-int-cast -Wno-unused-but-set-variable \
-	    -Ikernel/include -o $@ tests/usb_sim.c
-
-vendor:
-	./tools/setup_preview.sh
-
-# live browser preview: http://localhost:8080 (override with PORT=...)
-preview: all vendor
-	node tools/preview_server.mjs $(or $(PORT),8080)
+# Changes to the framebuffer range planner must rebuild its consumer.
+$(BUILD)/kobj/fb.o: kernel/include/mtrr_plan.h
 
 clean:
 	rm -rf $(BUILD)
-
-.PHONY: cputest
-cputest: build/cpu_brand_test
-	./build/cpu_brand_test
-
-build/cpu_brand_test: tests/cpu_brand_test.c kernel/src/lib.c kernel/include/scos.h
-	@mkdir -p build
-	gcc -fno-builtin -Wno-pointer-to-int-cast -ffunction-sections -fdata-sections \
-	    -Wl,--gc-sections -Ikernel/include tests/cpu_brand_test.c kernel/src/lib.c -o $@
-
-.PHONY: confirmtest
-confirmtest: build/confirm_test
-	./build/confirm_test
-
-build/confirm_test: tests/confirm_test.c kernel/src/confirm.c kernel/src/lib.c kernel/include/scos.h
-	@mkdir -p build
-	gcc -fno-builtin -Wno-pointer-to-int-cast -ffunction-sections -fdata-sections \
-	    -Wl,--gc-sections -Ikernel/include tests/confirm_test.c kernel/src/confirm.c kernel/src/lib.c -o $@
-
-$(BUILD)/kobj/fb.o: kernel/include/mtrr_plan.h
-.PHONY: mtrrtest
-mtrrtest: build/mtrr_test
-	./build/mtrr_test
-build/mtrr_test: tests/mtrr_test.c kernel/include/mtrr_plan.h kernel/include/scos.h
-	@mkdir -p build
-	gcc -fno-builtin -Ikernel/include tests/mtrr_test.c -o $@

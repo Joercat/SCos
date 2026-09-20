@@ -145,7 +145,7 @@ static void kbd_flush(void)
 /*
  * Real-hardware 8042 init. Firmware commonly hands over with the keyboard
  * port or its IRQ disabled, stale bytes in the output buffer and both
- * devices in an unknown state - v86 forgives all of that, a PC does not.
+ * devices in an unknown state.
  */
 /* HID boot-protocol usage -> scancode set 1 make code */
 static u8 hid_make(u8 u)

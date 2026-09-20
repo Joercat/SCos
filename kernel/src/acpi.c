@@ -20,10 +20,9 @@ struct rsdp {
 
 static u32 pm1_cnt;
 static u32 pm1b_cnt;
-static u32 pm1_evt;
 static u32 smi_cmd;
 static u8  acpi_enable_val;
-static u16 slp_typa;
+static u16 slp_typa, slp_typb;
 static int acpi_ok;
 
 static int mem_eq(const void *a, const char *b, int n)
@@ -62,65 +61,72 @@ static struct rsdp *find_rsdp(void)
     return NULL;
 }
 
-static u32 find_table(u32 rsdt_phys, int is_xsdt, const char *sig)
+/* The current kernel can only access tables below 4 GiB. Never truncate
+ * XSDT entries or walk unchecked lengths supplied by firmware. */
+static int valid_table(u32 addr, const char *sig)
 {
-    u32 *hdr = (u32 *)(u32)rsdt_phys;
-    u32 length = *(u32 *)(rsdt_phys + 4);
-    u32 entry_size = is_xsdt ? 8 : 4;
-    u32 n = (length - 36) / entry_size;
-    for (u32 i = 0; i < n; i++) {
-        u32 phys = is_xsdt ? (u32)(*(u64 *)(rsdt_phys + 36 + i * 8))
-                           : *(u32 *)(rsdt_phys + 36 + i * 4);
-        if (mem_eq((void *)phys, sig, 4)) return phys;
+    if (addr < 4096 || addr > 0xFFFFFFDBu) return 0;
+    const u8 *p=(const u8 *)addr;
+    u32 len=*(const u32 *)(p+4);
+    return mem_eq(p,sig,4) && len>=36 && len<=1024*1024 &&
+        addr<=0xFFFFFFFFu-len && sum_bytes(p,len)==0;
+}
+
+static u32 find_table(u32 root, int xsdt, const char *sig)
+{
+    if (!valid_table(root,xsdt ? "XSDT" : "RSDT")) return 0;
+    u32 len=*(const u32 *)(root+4), step=xsdt ? 8 : 4;
+    for (u32 off=36; off+step<=len; off+=step) {
+        u64 ptr=xsdt ? *(const u64 *)(root+off) : *(const u32 *)(root+off);
+        if (!(ptr>>32) && valid_table((u32)ptr,sig)) return (u32)ptr;
     }
-    (void)hdr;
     return 0;
 }
 
+static int aml_integer(const u8 *p, u32 end, u32 *at, u16 *out)
+{
+    if (*at>=end) return 0;
+    u8 op=p[(*at)++];
+    if (op<=1) { *out=op; return 1; }
+    u32 n=op==0x0A ? 1 : op==0x0B ? 2 : op==0x0C ? 4 : op==0x0E ? 8 : 0;
+    if (!n || n>end-*at) return 0;
+    u64 v=0;
+    for (u32 i=0;i<n;i++) v|=(u64)p[(*at)++]<<(8*i);
+    if (v>7) return 0; /* SLP_TYP is a three-bit field, not an AML opcode. */
+    *out=(u16)v; return 1;
+}
+
+/* Limited constant-package support, not an AML interpreter. Dynamic _S5,
+ * _PTS/_GTS and hardware-reduced sleep require a future ACPI library port. */
 static int parse_s5(const u8 *dsdt, u32 len)
 {
-    for (u32 i = 0; i + 6 < len; i++) {
-        if (!mem_eq(dsdt + i, "_S5_", 4)) continue;
-        /* r38 ROOT FIX for "shutdown just says it is safe to turn off":
-         * Name(\_S5_, Package...) compiles to
-         *     0x08 [0x5C...] "_S5_" 0x12 PkgLength NumElements element...
-         * The NameOp 0x08 comes BEFORE the nameseg - the old check
-         * demanded dsdt[i+4] == 0x08 (a byte that is the PackageOp 0x12
-         * on every real DSDT), so _S5_ was never found on real hardware,
-         * slp_typa stayed 0 and the firmware silently ignored the S5
-         * write.  Require a NameOp within the 3 bytes before the
-         * nameseg and the PackageOp right after it. */
-        int named = 0;
-        for (u32 b = 1; b <= 3 && i >= b; b++)
-            if (dsdt[i - b] == 0x08) { named = 1; break; }
-        if (!named) continue;
-        {
-            u32 j = i + 4;
-            if (j >= len) return 0;
-            if (dsdt[j] == 0x12) {                 /* PackageOp */
-                /* Package(PkgLength, NumElements, elements...) - the old code
-                 * read j+2, which lands on NumElements (often 4/5) and yields
-                 * a wrong SLP_TYP the firmware silently ignores. Walk the
-                 * real structure: PkgLength (1-4 bytes by its top 2 bits),
-                 * then NumElements, then the first element. */
-                u32 k = j + 1;
-                u8 lb = dsdt[k];
-                if ((lb & 0xC0) == 0x40)      k += 2;
-                else if ((lb & 0xC0) == 0x80) k += 3;
-                else if ((lb & 0xC0) == 0xC0) k += 4;
-                else                          k += 1;
-                k += 1;                        /* NumElements */
-                if (k + 2 >= len) return 0;
-                if (dsdt[k] == 0x0A) slp_typa = dsdt[k + 1];
-                else if (dsdt[k] == 0x0B) slp_typa = dsdt[k + 1] | (dsdt[k + 2] << 8);
-                else slp_typa = dsdt[k];
-                klog("acpi: _S5_ found at dsdt+%u: SLP_TYPa=%u", i,
-                     slp_typa);
-                return 1;
-            }
-        }
+    for (u32 i=0;i+6<len;i++) {
+        if (dsdt[i]!=0x08) continue; /* NameOp */
+        u32 name=i+1;
+        if (dsdt[name]==0x5C) name++; /* root prefix */
+        if (name+5>=len || !mem_eq(dsdt+name,"_S5_",4) || dsdt[name+4]!=0x12) continue;
+        u32 start=name+5, at=start;
+        u8 first=dsdt[at++], follow=first>>6;
+        if (follow>len-at) continue;
+        u32 size=follow ? first&15 : first&63;
+        for (u32 j=0;j<follow;j++) size|=(u32)dsdt[at++]<<(4+8*j);
+        if (size>len-start || size<=at-start) continue;
+        u32 end=start+size;
+        if (dsdt[at++]<2) continue;
+        u16 a,b;
+        if (!aml_integer(dsdt,end,&at,&a) || !aml_integer(dsdt,end,&at,&b)) continue;
+        slp_typa=a; slp_typb=b;
+        return 1;
     }
     return 0;
+}
+
+static u32 gas_io(u32 fadt, u32 len, u32 off)
+{
+    if (len<off+12) return 0;
+    const u8 *p=(const u8 *)(fadt+off);
+    u64 addr=*(const u64 *)(p+4);
+    return p[0]==1 && p[1]>=16 && !p[2] && p[3]<=2 && addr && addr<=65534 ? (u32)addr : 0;
 }
 
 void acpi_init(void)
@@ -128,63 +134,62 @@ void acpi_init(void)
     acpi_ok = 0;
     struct rsdp *r = find_rsdp();
     if (!r) { klog("acpi: no RSDP"); return; }
-    u32 rsdt = r->rsdt;
-    int xsdt = 0;
-    /* a 64-bit XSDT parked above 4 GB is unreachable from this 32-bit
-     * kernel - fall back to the RSDT in that case instead of truncating */
-    if (r->revision >= 2 && r->xsdt && !(r->xsdt >> 32)) {
-        rsdt = (u32)r->xsdt;
-        xsdt = 1;
+    u32 fadt=0;
+    if (r->revision>=2 && r->length>=36 && r->length<=4096 &&
+        !sum_bytes((const u8 *)r,r->length) && r->xsdt && !(r->xsdt>>32))
+        fadt=find_table((u32)r->xsdt,1,"FACP");
+    if (!fadt) fadt=find_table(r->rsdt,0,"FACP");
+    if (!fadt) { klog("acpi: valid FADT unavailable"); return; }
+    u32 len=*(const u32 *)(fadt+4);
+    if (len<116 || (*(const u32 *)(fadt+112)&(1u<<20))) {
+        klog("acpi: unsupported FADT/hardware-reduced power controls"); return;
     }
-
-    u32 fadt = find_table(rsdt, xsdt, "FACP");
-    if (!fadt) { klog("acpi: no FADT"); return; }
-    pm1_cnt = *(u32 *)(fadt + 64);
-    pm1b_cnt = *(u32 *)(fadt + 68);
-    pm1_evt = *(u32 *)(fadt + 56);
-    smi_cmd = *(u32 *)(fadt + 48);
-    acpi_enable_val = *(u8 *)(fadt + 52);
-    u32 dsdt = *(u32 *)(fadt + 40);
-    if (!pm1_cnt || !dsdt) { klog("acpi: incomplete FADT"); return; }
-    u32 dsdt_len = *(u32 *)(dsdt + 4);
-    if (!parse_s5((u8 *)dsdt, dsdt_len)) {
-        klog("acpi: no _S5_");
-        slp_typa = 0;   /* try anyway with 0 on some firmware */
+    pm1_cnt=gas_io(fadt,len,172); pm1b_cnt=gas_io(fadt,len,184);
+    if (!pm1_cnt) pm1_cnt=*(const u32 *)(fadt+64);
+    if (!pm1b_cnt) pm1b_cnt=*(const u32 *)(fadt+68);
+    smi_cmd=*(const u32 *)(fadt+48);
+    acpi_enable_val=*(const u8 *)(fadt+52);
+    u32 dsdt=*(const u32 *)(fadt+40);
+    if (len>=148) {
+        u64 x=*(const u64 *)(fadt+140);
+        if (x && !(x>>32) && valid_table((u32)x,"DSDT")) dsdt=(u32)x;
     }
-    acpi_ok = 1;
-    klog("acpi: pm1_cnt=%x pm1b_cnt=%x smi_cmd=%x enable=%u slp_typ=%u",
-         pm1_cnt, pm1b_cnt, smi_cmd, acpi_enable_val, slp_typa);
+    if (!pm1_cnt || pm1_cnt>65534 || pm1b_cnt>65534 || smi_cmd>65535 ||
+        *(const u8 *)(fadt+89)<2 || !valid_table(dsdt,"DSDT")) {
+        klog("acpi: unsupported ports or invalid DSDT"); return;
+    }
+    u32 dsdt_len=*(const u32 *)(dsdt+4);
+    if (!parse_s5((const u8 *)(dsdt+36),dsdt_len-36)) {
+        klog("acpi: constant _S5 package unavailable; not guessing a sleep type"); return;
+    }
+    acpi_ok=1;
+    klog("acpi: power ready, PM1a=%x PM1b=%x S5a=%u S5b=%u",
+         pm1_cnt,pm1b_cnt,slp_typa,slp_typb);
 }
 
 int acpi_shutdown(void)
 {
     if (!acpi_ok) {
-        /* emulator-only fallback: QEMU/v86-style debug port power-off */
-        if (is_v86_box()) { outw(0x604, 0x2000); sleep_ms(500); }
-        klog("acpi: shutdown unavailable (no ACPI tables)");
-        return 0;
+        klog("acpi: power-off unavailable"); return 0;
     }
-    /* make sure the chipset is in ACPI mode (SCI_EN set) - firmware may
-     * hand over in legacy mode, where PM1 writes do nothing */
-    if (!(inw(pm1_cnt) & 1) && smi_cmd && acpi_enable_val) {
-        outb(smi_cmd, acpi_enable_val);
-        for (int i = 0; i < 50 && !(inw(pm1_cnt) & 1); i++) sleep_ms(1);
+    if (!(inw(pm1_cnt)&1) && smi_cmd && acpi_enable_val) {
+        outb((u16)smi_cmd,acpi_enable_val);
+        /* sleep_ms(1) used to round to ZERO at our 100 Hz PIT. */
+        for (int i=0;i<300 && !(inw(pm1_cnt)&1);i++) sleep_ms(10);
     }
-    if (!(inw(pm1_cnt) & 1))
-        klog("acpi: warning - SCI_EN not set, S5 write may be ignored");
-    /* clear pending PM1 status bits, then request S5.  ACPI 6.4
-     * 4.8.10.3: when a PM1b_CNT block exists the SLP_TYP/SLP_EN write
-     * must go to BOTH blocks (split-brain chipsets ignore PM1a alone). */
-    u16 s5 = (u16)((slp_typa << 10) | (1 << 13));
-    if (pm1_evt) outw(pm1_evt, 0xFFFF);
-    outw(pm1_cnt, s5);
-    if (pm1b_cnt) outw(pm1b_cnt, s5);
-    for (int i = 0; i < 30; i++) sleep_ms(10);   /* give SMI time to act */
-    if (pm1_evt) outw(pm1_evt, 0xFFFF);          /* retry once */
-    outw(pm1_cnt, s5);
-    if (pm1b_cnt) outw(pm1b_cnt, s5);
-    for (int i = 0; i < 20; i++) sleep_ms(10);
-    if (is_v86_box()) outw(0x604, 0x2000);
-    klog("acpi: S5 write done but machine still running (slp_typ=%u)", slp_typa);
-    return 1;
+    if (!(inw(pm1_cnt)&1)) {
+        klog("acpi: firmware did not enable ACPI mode"); return 0;
+    }
+    const u16 fields=(7u<<10)|(1u<<13);
+    u16 a=(inw(pm1_cnt)&~fields)|(slp_typa<<10);
+    u16 b=pm1b_cnt ? (inw(pm1b_cnt)&~fields)|(slp_typb<<10) : 0;
+    /* Preserve SCI_EN and other unrelated control bits; each block has
+     * its OWN sleep type from the two elements of _S5. */
+    outw(pm1_cnt,a);
+    if (pm1b_cnt) outw(pm1b_cnt,b);
+    outw(pm1_cnt,a|(1u<<13));
+    if (pm1b_cnt) outw(pm1b_cnt,b|(1u<<13));
+    sleep_ms(1000);
+    klog("acpi: S5 requested but firmware left the machine powered on");
+    return 0; /* Successful power-off never returns. */
 }

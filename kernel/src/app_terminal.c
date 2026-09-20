@@ -103,7 +103,6 @@ static void term_type(struct term *t, const char *s)    /* typewriter */
     t->pending_active = 1;
 }
 
-static void trace_term_emit(const char *line, void *ctx) { term_print(ctx, line); }
 
 /* r39: bounded, ALWAYS-terminated copy into neofetch's info[] lines.
  * strncpy(dst, src, 40) leaves dst unterminated when src >= 40 chars -
@@ -138,29 +137,6 @@ static void prompt_str(struct term *t, char *out)
     strcpy(out, "user@scos:");
     strcat(out, disp);
     strcat(out, "$ ");
-}
-
-/* collect recent kernel-log lines mentioning `tag` for diag subsystems */
-static void klog_grep_into(char *out, u32 sz, const char *tag)
-{
-    static char hits[10][96];
-    int nh = 0;
-    int n = klog_ring_count();
-    for (int i = n - 1; i >= 0 && nh < 10; i--) {
-        char ln[96];
-        if (klog_ring(i, ln, sizeof(ln)) && strstr(ln, tag))
-            strcpy(hits[nh++], ln);
-    }
-    out[0] = 0;
-    for (int i = nh - 1; i >= 0; i--) {
-        if (out[0] && strlen(out) + 2 < sz) strcat(out, "\n");
-        strncat(out, hits[i], sz - strlen(out) - 2);
-    }
-    if (!out[0]) {
-        strcpy(out, "(no '");
-        strncat(out, tag, 16);
-        strcat(out, "' lines in the kernel log yet)");
-    }
 }
 
 /* ------------------------------------------------------------ commands --- */
@@ -199,9 +175,7 @@ static const char *help_text =
     "df        - Filesystem usage\n"
     "disks     - Detected ATA disks (IDENTIFY)\n"
     "neofetch  - System summary with logo\n"
-    "klog      - Kernel log ring (USB/input diagnostics)\n"
-    "diag [sub]- Full hardware scan; sub = pci|usb|input for a quick\n"
-            "            subsystem scan printed right here in the terminal\n"
+    "klog      - Kernel service/error log\n"
     "sysrq <a> - System request: a = panic|reboot|error|dump|time\n"
     "tty [1-6] - Switch to a text console; Ctrl+Alt+F7 returns to desktop\n"
     "theme     - List or switch themes\n"
@@ -211,7 +185,6 @@ static const char *help_text =
     "alias     - Create command aliases\n"
     "history   - Show command history\n"
     "save      - Write the filesystem image to disk\n"
-    "inputtrace start|stop|show|save - bounded USB report recorder\n"
     "kill --system <pid> - confirmed stop (scwm only)\n"
     "shutdown [--confirm] - Power the machine off\n"
     "reboot    - Restart the machine\n"
@@ -545,29 +518,6 @@ static void run_command(struct term *t, const char *command)
             strcpy(response, "sysrq: unknown action '");
             strncat(response, args[1], 32);
             strcat(response, "' - run 'sysrq' for the list");
-        }
-    }
-    else if (!strcmp(cmd, "diag")) {
-        const char *sub = nargs > 1 ? args[1] : NULL;
-        if (!sub || !strcmp(sub, "all")) {
-            diag_manual();
-            strcpy(response, "Diagnostics complete - see dmesg for the scan log");
-        } else if (!strcmp(sub, "pci")) {
-            pci_scan_dump();
-            klog_grep_into(response, sizeof(response), "pci");
-        } else if (!strcmp(sub, "usb")) {
-            char ul[96];
-            usb_status(ul, sizeof(ul));
-            klog("diag: %s", ul);
-            klog_grep_into(response, sizeof(response), "usb");
-        } else if (!strcmp(sub, "input")) {
-            klog("diag: ps/2 mouse %s", mouse_present() ? "present" : "absent");
-            klog("diag: input %s", input_last_tick ? "events seen" : "silent");
-            klog_grep_into(response, sizeof(response), "input");
-        } else {
-            strcpy(response, "diag: unknown subsystem '");
-            strncat(response, sub, 24);
-            strcat(response, "' - use pci, usb, input or all");
         }
     }
     else if (!strcmp(cmd, "klog") || !strcmp(cmd, "dmesg")) {
@@ -1200,10 +1150,7 @@ static void run_command(struct term *t, const char *command)
             strcat(response, "(more windows - see sysmon)\n");
         response[strlen(response) - 1] = 0;
     }
-    else if (!strcmp(cmd, "inputtrace")) {
-        usb_inputtrace(nargs == 1 ? "show" : nargs == 2 ? args[1] : "--help", trace_term_emit, t);
-        return;
-    }
+
     else if (!strcmp(cmd, "kill")) {
         int pid = -1;
         int system = nargs == 3 && !strcmp(args[1], "--system");
@@ -1709,7 +1656,7 @@ static void term_tick(struct window *w)
     if (t->shutting_down == 1) {
         sleep_ms(1200);
         usb_kbd_leds_off();
-        if (acpi_shutdown()) { /* may return on machines without ACPI */ }
+        acpi_shutdown();
         wm_poweroff_screen();
         for (;;) cpu_hlt();
     }

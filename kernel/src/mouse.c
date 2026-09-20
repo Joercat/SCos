@@ -212,8 +212,7 @@ void mouse_init(void)
     mouse_write(0xF2); mouse_read();
     u8 id = mouse_read();
     if (id == 3) {
-        /* try the 5-button (IntelliMouse Explorer) sequence so that both
-         * v86 and spec-compliant real mice end up with 4-byte packets */
+        /* Try the 5-button IntelliMouse Explorer packet format. */
         mouse_write(0xF3); mouse_read();
         mouse_write(200);  mouse_read();
         mouse_write(0xF3); mouse_read();

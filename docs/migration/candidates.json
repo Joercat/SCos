@@ -1,0 +1,76 @@
+{
+  "review_date": "2026-09-19",
+  "purpose": "Reproducible research references, NOT approved dependency versions. Check advisories, release tags and file-level licenses before import.",
+  "components": [
+    {
+      "project": "uACPI/uACPI",
+      "url": "https://github.com/uACPI/uACPI",
+      "review_reference": "f5f6cc29f85dd5db0dd79c47700c8f3ebce18be4",
+      "license_metadata": "MIT",
+      "status": "research candidate only; not imported, built, audited or integrated"
+    },
+    {
+      "project": "lwip-tcpip/lwip",
+      "url": "https://github.com/lwip-tcpip/lwip",
+      "review_reference": "d08f4773edd0182b7910fc8f046eed82ffcd67c9",
+      "license_metadata": "NOASSERTION",
+      "status": "research candidate only; not imported, built, audited or integrated"
+    },
+    {
+      "project": "Mbed-TLS/mbedtls",
+      "url": "https://github.com/Mbed-TLS/mbedtls",
+      "review_reference": "3361ae00b4d90cbee7553fb8cb402dde5ea7f0d9",
+      "license_metadata": "NOASSERTION",
+      "status": "research candidate only; not imported, built, audited or integrated"
+    },
+    {
+      "project": "curl/curl",
+      "url": "https://github.com/curl/curl",
+      "review_reference": "a40991b97c0ce721e85acbe16e16fe79b7b68c51",
+      "license_metadata": "NOASSERTION",
+      "status": "research candidate only; not imported, built, audited or integrated"
+    },
+    {
+      "project": "netsurf-browser/netsurf",
+      "url": "https://github.com/netsurf-browser/netsurf",
+      "review_reference": "39da3c3a40af4566d86500ff3052dfdc7f9a0378",
+      "license_metadata": "NOASSERTION",
+      "status": "research candidate only; not imported, built, audited or integrated"
+    },
+    {
+      "project": "managarm/mlibc",
+      "url": "https://github.com/managarm/mlibc",
+      "review_reference": "38d299b99965799b0a791726ec51746ecf81f1d2",
+      "license_metadata": "NOASSERTION",
+      "status": "research candidate only; not imported, built, audited or integrated"
+    },
+    {
+      "project": "picolibc/picolibc",
+      "url": "https://github.com/picolibc/picolibc",
+      "review_reference": "490465784aaa75b7f6aced48a61b27e5b2da500b",
+      "license_metadata": "NOASSERTION",
+      "status": "research candidate only; not imported, built, audited or integrated"
+    },
+    {
+      "project": "freetype/freetype",
+      "url": "https://github.com/freetype/freetype",
+      "review_reference": "a69e39ad9ed44818ca316683f6984d25b2a7492b",
+      "license_metadata": "NOASSERTION",
+      "status": "research candidate only; not imported, built, audited or integrated"
+    },
+    {
+      "project": "limine-bootloader/limine",
+      "url": "https://github.com/Limine-Bootloader/Limine",
+      "review_reference": "34fe53c3d27d229ea25c28fc3e04db362543715b",
+      "license_metadata": "BSD-2-Clause",
+      "status": "research candidate only; not imported, built, audited or integrated"
+    },
+    {
+      "project": "ipxe/ipxe",
+      "url": "https://github.com/ipxe/ipxe",
+      "review_reference": "65450656e502c2456b9b32b9dff09152f2a754b8",
+      "license_metadata": "NOASSERTION",
+      "status": "research candidate only; not imported, built, audited or integrated"
+    }
+  ]
+}

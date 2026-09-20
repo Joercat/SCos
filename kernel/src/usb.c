@@ -4,11 +4,11 @@
  * emulation sometimes fakes a PS/2 keyboard but essentially never a mouse,
  * and modern boards expose their USB ports only through an xHCI controller,
  * so without talking to the host controller the mouse is invisible on real
- * hardware (v86 wires PS/2 straight to the guest, which hid the problem).
+ * hardware.
  *
- * Scope: xHCI, HID boot protocol (keyboard 8-byte report, mouse 3/4-byte),
- * polled event ring from the WM loop (100 Hz), one control pipe plus one
- * interrupt-IN pipe per device, up to 4 slots, hot-plug port changes.
+ * Scope: xHCI, descriptor-decoded HID with boot-protocol fallbacks,
+ * polled event ring, one control pipe per device and interrupt-IN pipes
+ * per HID interface; bounded by MAX_SLOTS and MAX_HID_EPS below.
  * Reports are injected into the existing PS/2 input queues so everything
  * above the driver sees USB input identically.
  *
@@ -110,8 +110,6 @@ struct hid_ep {
     u16 frame_sizes[8], fragment_used, fragment_goal;
     u8 fragment[IN_BUF_BYTES];
     u8 report_buttons[8], report_modifiers[8], report_keys[8][6];
-    u8 report_descriptor[256];
-    u16 report_descriptor_len;
     int active;
     int iface;                /* bInterfaceNumber */
     int kind;                 /* 1 = boot keyboard, 2 = boot mouse */
@@ -126,7 +124,6 @@ struct hid_ep {
     u8 wide16;                /* r37: probe verdict: 16-bit axes behind ID */
     u8 rid_skip_logged;       /* rate limit: foreign report-ID drop logs */
     u8 hid_prefix_logged;     /* rate limit: hidden-prefix strip log (r38) */
-    u8 rep_logged;            /* rate limit for first-report hex dumps */
     u8 probe_n, probe_done;   /* r34 runtime offset probe state (mouse) */
     u8 nz[5];                 /* nonzero counts for report bytes 1..5 */
     u8 xh00ff, len6;          /* r37: 16-bit-axis evidence counters */
@@ -204,17 +201,6 @@ static u32 ring_full_hits;  /* code-21 (Event Ring Full) sightings - 21 is
                              * (invalid input-context field, Intel-strict) */
 static u32 restart_count;   /* xHC restarts after a halt */
 static u8 desc_buf[512];
-
-/* Manual, bounded flight recorder. Never performs I/O in the event path. */
-#define TRACE_N 128
-struct input_trace_record {
-    u32 tick, sequence;
-    u8 slot, ep, code, len, accepted, keys, mouse;
-    u8 bytes[64];
-};
-static struct input_trace_record input_trace[TRACE_N];
-static u32 trace_count, trace_key_drop_base, trace_mouse_drop_base;
-static int trace_active;
 
 /* Buffer CAPACITY is not the receive request length. An 8-byte packet
  * on an 8-byte endpoint is full-size and cannot terminate a 64-byte TD.
@@ -737,15 +723,6 @@ static int proc_events(void)
                         klog("usb: ev slot %d dci %u code %u rem %u ptr %x",
                              slot, ep, code, rem, ptr);
                     }
-                    struct input_trace_record *rec = NULL;
-                    u32 keys_before = input_key_enqueued, mouse_before = input_mouse_enqueued;
-                    if (trace_active) {
-                        rec = &input_trace[trace_count % TRACE_N];
-                        memset(rec, 0, sizeof(*rec));
-                        rec->sequence = ++trace_count;
-                        rec->tick = (u32)tick_count; rec->slot = slot; rec->ep = ep;
-                        rec->code = code; rec->len = 0;
-                    }
                     if (code != 1 && code != 13) h->fragment_used=h->fragment_goal=0;
                     if (code == 1 || code == 13) {
                         /* r31 field round 2 ROOT FIX: a real xHC posts the
@@ -769,9 +746,7 @@ static int proc_events(void)
                             u32 requested = h->inr[(u32)i*4+2] & 0x1FFFFu;
                             len = requested <= IN_BUF_BYTES && rem <= requested ? requested-rem : 0;
                             u8 *r = h->in_buf[i];
-                            if (rec) { rec->len = len; memcpy(rec->bytes,r,len); }
                             if (!hid_frame_packet(h,&r,&len)) {
-                                if (rec && h->fragment_used) rec->accepted=3;
                                 goto hid_packet_done;
                             }
                             h->last_rep_tick = tick_count;
@@ -815,23 +790,11 @@ static int proc_events(void)
                                 mouse_probe(h, r, len);
                                 hold = !h->probe_done && !h->has_id;
                             }
-                            /* r33: raw bytes of the first two reports per
-                             * EP, so a future offset/format question is
-                             * answerable from ONE photo - no guessing */
-                            if (h->rep_logged < 2) {
-                                h->rep_logged++;
-                                klog("usb: rep slot %d dci %u len %u id %d: "
-                                     "%02x %02x %02x %02x %02x %02x %02x "
-                                     "%02x %02x", slot, ep, len,
-                                     (u32)h->has_id, r[0], r[1], r[2],
-                                     r[3], r[4], r[5], r[6], r[7], r[8]);
-                            }
                             int off = h->has_id ? 1 : 0;
                             if (h->use_layout) {
                                 /* r37 PRIMARY: bit-accurate extraction via
                                  * the parsed report-descriptor field map */
-                                int accepted = hid_inject_layout(h, r, len, slot, ep);
-                                if (rec) rec->accepted = accepted ? 1 : 0;
+                                hid_inject_layout(h, r, len, slot, ep);
                             } else if (h->wide16 && h->kind == 2 &&
                                        len >= (u32)off + 5) {
                                 /* r37 LAST RESORT: statistical 16-bit
@@ -854,11 +817,7 @@ static int proc_events(void)
                             else if (h->kind == 1 && len >= (u32)off + 8)
                                 kbd_inject_hid(r[off], r + off + 2,
                                                h->prev_keys, &h->prev_mod);
-                            if (rec) {
-                                if (!h->use_layout) rec->accepted = hold ? 0 : 2;
-                                rec->keys = input_key_enqueued - keys_before;
-                                rec->mouse = input_mouse_enqueued - mouse_before;
-                            }
+
                         }
                     }
 hid_packet_done:
@@ -1064,8 +1023,8 @@ static void disable_slot(int slot)
  * transfer on that ring times out (rc -1) with the device perfectly healthy.
  * With EP0_TRBS=16 the hub's 15th TRB (first SET_PORT_FEATURE after the
  * 14-TRB descriptor dance) landed exactly on that slot, every single time,
- * on every recovery re-enumeration.  v86 never caught it: no xHCI there,
- * and no root-port device issues enough EP0 TRBs to wrap a ring. */
+ * on every recovery re-enumeration. Root-port-only coverage did not
+ * issue enough EP0 TRBs to exercise this boundary. */
 static volatile u32 *ep0_next(struct xdev *d)
 {
     volatile u32 *t = d->ep0 + (u32)d->ep0_idx * 4;
@@ -1401,7 +1360,7 @@ static int hub_port_status_r(int hslot, int p, u32 *st, u32 *chg)
 static int hub_port_status(int hslot, int p, u32 *st, u32 *chg)
 {
     /* background 1 Hz probe: SHORT budget and no controller restart -
-     * this runs inside the WM loop (and inside the diag/error hold
+     * this runs inside the WM loop (and inside the error hold
      * loops); an 800 ms stall + restart per silent port froze the whole
      * UI at a ~3 s cadence behind a deaf hub (r28 field report) */
     int rc = ctrl_xfer_to(hslot, 0xA3, 0, 0, (u16)p, desc_buf, 4, 1, 120, 0);
@@ -2080,7 +2039,6 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
         if (!h->binterval) h->binterval = 1;
         h->ctx_dumped = 0;
         h->ev_logged = 0;
-        h->rep_logged = 0;
         /* r37 LAYOUT-FIRST bring-up (the Linux model): fetch the HID
          * report descriptor and parse it into a real field map.  Only
          * when that fails do we fall back to boot protocol + the r33
@@ -2096,8 +2054,6 @@ static int enumerate_device(int root_port, u32 route, int speed, int mtt,
             int rrc = ctrl_xfer(slot, 0x81, 6, 0x2200, (u16)cand[j].iface,
                                 rdesc, (u16)rl, 1);
             if (rrc == 1) {
-                memcpy(h->report_descriptor, rdesc, rl);
-                h->report_descriptor_len = rl;
                 hid_set_frames(h,rdesc,rl);
                 struct hid_layout lay;
                 h->nlayouts = hid_parse_layouts(rdesc, rl, h->kind, h->layouts, 8);
@@ -2605,7 +2561,7 @@ void usb_init(void)
         strcat(nl, ", "); fmt_u32(tmp, (u32)hub_count); strcat(nl, tmp);
         strcat(nl, " hub(s)");
     }
-    if (fail_flag) strcat(nl, " - see diag");
+    if (fail_flag) strcat(nl, " - see klog");
     strcat(nl, " | ev "); fmt_u32(tmp, evt_seen); strcat(nl, tmp);
     strcat(nl, " rf "); fmt_u32(tmp, ring_full_hits); strcat(nl, tmp);
     strcat(nl, " hc "); fmt_u32(tmp, evt_hcevent); strcat(nl, tmp);
@@ -2618,92 +2574,4 @@ void usb_status(char *out, int max)
 {
     strncpy(out, status_line[0] ? status_line : "usb: not probed", max - 1);
     out[max - 1] = 0;
-}
-
-static void trace_number(char *line, const char *label, u32 n)
-{
-    char digits[16]; strcat(line,label); fmt_u32(digits,n); strcat(line,digits);
-}
-static void trace_hex(char *line, const u8 *bytes, unsigned n)
-{
-    static const char hex[] = "0123456789abcdef";
-    unsigned p = strlen(line);
-    for (unsigned i = 0; i < n; i++) {
-        line[p++] = ' '; line[p++] = hex[bytes[i] >> 4]; line[p++] = hex[bytes[i] & 15];
-    }
-    line[p] = 0;
-}
-struct trace_writer { char *buf; unsigned size, used; };
-static void trace_append(const char *line, void *ctx)
-{
-    struct trace_writer *w = ctx;
-    unsigned n = strlen(line);
-    if (w->used + n + 2 >= w->size) return;
-    memcpy(w->buf+w->used,line,n); w->used += n;
-    w->buf[w->used++] = '\n'; w->buf[w->used] = 0;
-}
-void usb_inputtrace(const char *action, void (*emit)(const char *, void *), void *ctx)
-{
-    if (!strcmp(action,"start")) {
-        trace_count = 0; trace_active = 1;
-        trace_key_drop_base = input_key_dropped; trace_mouse_drop_base = input_mouse_dropped;
-        emit("Recording last 128 USB reports. Test isolated inputs; inputtrace stop freezes them.",ctx);
-        return;
-    }
-    if (!strcmp(action,"stop")) { trace_active = 0; emit("Input recorder frozen.",ctx); return; }
-    int save = !strcmp(action,"save");
-    int desc = !strcmp(action,"desc");
-    if (!save && !desc && strcmp(action,"show")) {
-        emit("inputtrace start|stop|show|desc|save. save writes /home/inputtrace.txt and persists it.",ctx); return;
-    }
-    /* Freeze BEFORE formatting or writing; filesystem output cannot mutate the capture. */
-    trace_active = 0;
-    void (*sink)(const char *, void *) = emit; void *opaque = ctx;
-    struct trace_writer writer = {0};
-    if (save) {
-        writer.size = 65536; writer.buf = palloc(writer.size);
-        if (!writer.buf) { emit("inputtrace: out of memory",ctx); return; }
-        writer.buf[0] = 0; sink = trace_append; opaque = &writer;
-    }
-    char line[256];
-    strcpy(line,"Input capture " SCOS_BUILD_TAG);
-    trace_number(line," reports=",trace_count);
-    trace_number(line," key-drops=",input_key_dropped-trace_key_drop_base);
-    trace_number(line," mouse-drops=",input_mouse_dropped-trace_mouse_drop_base);
-    sink(line,opaque);
-    if (save || desc) {
-        for (int sl=1; sl<=MAX_SLOTS; sl++) if (devs[sl].used)
-            for (int j=0; j<devs[sl].nhid; j++) {
-                struct hid_ep *h=&devs[sl].hid[j];
-                strcpy(line,"slot"); trace_number(line,"=",sl); trace_number(line," ep=",h->dci);
-                trace_number(line," kind=",h->kind); trace_number(line," mps=",h->ep_mps & 0x7FF); trace_number(line," rx=",hid_rx_bytes(h)); trace_number(line," layout=",h->use_layout);
-                trace_number(line," rid=",h->lay.rid); trace_number(line," layouts=",h->nlayouts); trace_number(line," bits=",h->lay.rpt_bits);
-                sink(line,opaque);
-                for (unsigned off=0; off<h->report_descriptor_len; off+=16) {
-                    strcpy(line,"desc"); trace_number(line,"+",off);
-                    unsigned n=h->report_descriptor_len-off; if(n>16)n=16;
-                    trace_hex(line,h->report_descriptor+off,n); sink(line,opaque);
-                }
-            }
-    }
-    if (!desc) {
-        u32 count=trace_count>TRACE_N?TRACE_N:trace_count;
-        if (!save && count>16) count=16;
-        sink("seq tick slot ep len cc accepted key-events mouse-events : raw bytes",opaque);
-        for (u32 i=trace_count-count; i<trace_count; i++) {
-            struct input_trace_record *r=&input_trace[i%TRACE_N];
-            line[0]=0; trace_number(line,"",r->sequence); trace_number(line," ",r->tick);
-            trace_number(line," ",r->slot); trace_number(line," ",r->ep);
-            trace_number(line," ",r->len); trace_number(line," ",r->code);
-            trace_number(line," ",r->accepted); trace_number(line," ",r->keys);
-            trace_number(line," ",r->mouse); strcat(line," :");
-            trace_hex(line,r->bytes,save?r->len:(r->len>12?12:r->len)); sink(line,opaque);
-        }
-    }
-    if (save) {
-        int ok=vfs_write("/home/inputtrace.txt",writer.buf,writer.used);
-        pfree(writer.buf,writer.size);
-        if (ok && fs_image_save()) emit("Saved /home/inputtrace.txt to disk.",ctx);
-        else emit("inputtrace: save failed or disk persistence unavailable.",ctx);
-    }
 }

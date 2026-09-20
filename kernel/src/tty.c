@@ -178,7 +178,6 @@ static void tty_no_wm(const char *cmd)
               "everything else here works without it)");
 }
 
-static void trace_tty_emit(const char *line, void *ctx) { (void)ctx; tty_print(line); }
 
 static void tty_exec(char *cmd)
 {
@@ -219,8 +218,6 @@ static void tty_exec(char *cmd)
             "  appstrt <app>   launch a GUI app (needs wm; binds you back to it)\n"
             "  wm              return to the desktop / start the WM\n"
             "  dmesg           kernel log ring (USB, input, fb, mm...)\n"
-            "  diag [sub]      hardware diagnostics (all/pci/usb/input; bare\n"
-            "                  'diag' opens the held diagnostics screen)\n"
             "  free            memory pool + allocator counters\n"
             "  disks           storage devices\n"
             "  sysrq <act>     panic/reboot/error/dump/time - system requests\n"
@@ -228,7 +225,6 @@ static void tty_exec(char *cmd)
             "  whoami/version  identity\n"
             "  clear           clear this console\n"
             "  reboot          reboot the machine now\n"
-            "  inputtrace start|stop|show|save - USB recorder\n"
             "  kill --system <pid> - confirmed stop (scwm only)\n"
             "  shutdown [--confirm] - ACPI power-off");
     }
@@ -547,9 +543,7 @@ static void tty_exec(char *cmd)
         tty_print(m);
     }
     else if (!strcmp(args[0], "procs")) tty_procs();
-    else if (!strcmp(args[0], "inputtrace")) {
-        usb_inputtrace(nargs == 1 ? "show" : nargs == 2 ? args[1] : "--help", trace_tty_emit, NULL);
-    }
+
     else if (!strcmp(args[0], "kill")) {
         int pid = -1;
         int system = nargs == 3 && !strcmp(args[1], "--system");
@@ -603,36 +597,6 @@ static void tty_exec(char *cmd)
         int c = klog_ring_count();
         char out[200];
         int start = nargs > 1 && !strcmp(args[1], "-t") && c > 14 ? c - 14 : 0;
-        for (int i = start; i < c; i++) {
-            if (!klog_ring(i, out, (int)sizeof(out))) break;
-            tty_print(out);
-        }
-    }
-    else if (!strcmp(args[0], "diag")) {
-        const char *sub = nargs > 1 ? args[1] : NULL;
-        if (!sub || !strcmp(sub, "all") || !strcmp(sub, "hold")) {
-            tty_print("diag: opening the diagnostics screen (any key "
-                      "returns here, 30 s max)");
-            diag_run();
-            return;
-        }
-        char out[200];
-        if (!strcmp(sub, "pci")) pci_scan_dump();
-        else if (!strcmp(sub, "usb")) {
-            char ul[96];
-            usb_status(ul, sizeof ul);
-            klog("diag: %s", ul);
-        } else if (!strcmp(sub, "input")) {
-            klog("diag: ps/2 mouse %s", mouse_present() ? "present"
-                                                        : "absent");
-            klog("diag: input %s",
-                 input_last_tick ? "events seen" : "silent");
-        } else {
-            tty_print("diag: unknown subsystem - use pci, usb, input, all");
-            return;
-        }
-        int c = klog_ring_count();
-        int start = c > 14 ? c - 14 : 0;
         for (int i = start; i < c; i++) {
             if (!klog_ring(i, out, (int)sizeof(out))) break;
             tty_print(out);
@@ -767,9 +731,9 @@ static void tty_exec(char *cmd)
         if (nargs > 1 && (nargs != 2 || strcmp(args[1],"--confirm"))) { tty_print("Usage: shutdown [--confirm]"); return; }
         tty_print("powering off...");
         tty_draw();
-        if (acpi_shutdown()) { wm_poweroff_screen(); for (;;) cpu_hlt(); }
-        tty_print("shutdown: no ACPI power-off on this machine - hold the "
-                  "power button");
+        acpi_shutdown();
+        wm_poweroff_screen();
+        for (;;) cpu_hlt();
     }
     else {
         char m[TTY_COLS + 16];

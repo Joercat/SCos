@@ -29,6 +29,6 @@ u32 uptime_ms(void)
 
 void sleep_ms(u32 ms)
 {
-    u64 target = tick_count + (u64)ms * tick_hz / 1000;
+    u64 target = tick_count + ((u64)ms * tick_hz + 999) / 1000;
     while (tick_count < target) cpu_hlt();
 }

@@ -1675,12 +1675,6 @@ void wm_theme_changed(void)
     wm_full();
 }
 
-int is_v86_box(void)
-{
-    const char *m = ata_model();
-    return m && strstr(m, "v86");
-}
-
 /* Called only after dispatch has unwound, never from inside an app
  * callback. Terminating the compositor also destroys its dependent apps. */
 static void wm_destroy_session(void)
@@ -1713,12 +1707,6 @@ void wm_run(void)
     wm_full(); /* Restart from the base console must replace its entire scene. */
     input_guard_armed = 1;
     cyc_ok = cpu_mhz() != 0;   /* r39: per-app CPU metering needs TSC */
-
-    /* r39: the automatic diagnostics screens are GONE (field request:
-     * "remove the auto-diagnostic screen if it exists and anything that
-     * looks like debugging"). Diagnostics remain fully available on
-     * demand: Settings -> "System diagnostics (full scan)", the terminal
-     * 'diag' command, and the tty console. Nothing pops up by itself. */
 
     klog("wm: entering main loop");
     for (;;) {
