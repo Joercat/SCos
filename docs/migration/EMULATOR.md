@@ -21,6 +21,7 @@ make                               # current build/scos.img
 python3 tools/run_qemu.py --dry-run
 python3 tools/run_qemu.py            # CURRENT build, software TCG
 python3 tools/run_qemu.py --xhci     # emulated USB keyboard and mouse
+python3 tools/run_qemu.py --usb-boot # USB boot disk + xHCI keyboard/mouse
 ```
 
 **Historical r42 images have a storage safety defect**, corrected in the

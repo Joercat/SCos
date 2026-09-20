@@ -141,3 +141,7 @@ also remain. Physical-PC behavior still needs the user's verification.
 No new GPU, NIC, Wi-Fi, storage-controller or browser integrations are authorized
 by this work. Wait for a new request after that physical verification. The
 frozen 32-bit image and `os.html` stay unchanged.
+
+The subsequent [PC test guide](PC-TEST.md) records a fresh parity check and
+USB2/USB3, larger-media, hub, CPU-profile and alternate-GOP boot tests on the
+unchanged image, plus the remaining physical-machine prerequisites.

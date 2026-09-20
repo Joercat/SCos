@@ -24,6 +24,8 @@ unique supported ATA SCos-data partition is verified; `save` requires confirmati
 ACPI has a manual-power fallback for unsupported firmware. Emulator success is
 **not physical acceptance on the user's USB-input PC**. No new release number.
 
+For the first physical boot, use the [PC test guide and final USB-boot checks](docs/migration/PC-TEST.md). It distinguishes verified results from hardware requirements and includes safe flashing/UEFI settings.
+
 ## Build and emulator
 
 On Linux x86-64: GCC, GNU binutils (including the `i386pep` **AMD64 PE32+** linker

@@ -16,6 +16,8 @@ def main():
                     help="current build by default; pass the retained milestone explicitly")
     ap.add_argument("--qemu-dir", type=Path, default=ROOT / ".tools/qemu")
     ap.add_argument("--memory", type=int, default=256, help="guest RAM in MiB")
+    ap.add_argument("--usb-boot", action="store_true",
+                    help="boot via emulated USB storage, with xHCI keyboard/mouse; native saves remain unsupported on USB")
     ap.add_argument("--xhci", action="store_true", help="add emulated USB keyboard/mouse")
     ap.add_argument("--vnc", action="store_true", help="VNC on a private Unix socket, never a TCP listener")
     ap.add_argument("--dry-run", action="store_true", help="print the command without starting QEMU")
@@ -40,19 +42,23 @@ def main():
     # only the x86_64 CODE image executes. Never modify shared firmware state.
     shutil.copyfile(variables, run / "vars.fd")
     escape = lambda p: str(p).replace(",", ",,")
+    disk = (f"file={escape(image)},format=raw,if=none,id=bootdisk,snapshot=on"
+            if args.usb_boot else f"file={escape(image)},format=raw,if=ide,snapshot=on")
     command = [str(qemu / "lib/ld-musl-x86_64.so.1"), "--library-path", str(qemu / "lib"),
                str(qemu / "bin/qemu-system-x86_64"), "-L", str(qemu / "share/qemu"),
                "-machine", "q35",
                "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={escape(firmware)}",
                "-drive", f"if=pflash,format=raw,unit=1,file={escape(run / 'vars.fd')}",
                "-accel", "tcg", "-cpu", "max", "-m", str(args.memory), "-smp", "1",
-               "-drive", f"file={escape(image)},format=raw,if=ide,snapshot=on",
+               "-drive", disk,
                "-vga", "std", "-nic", "none", "-display", "none",
                "-serial", f"file:{run / 'serial.log'}",
                "-qmp", f"unix:{escape(run / 'qmp.sock')},server=on,wait=off", "-no-reboot"]
-    if args.xhci:
+    if args.xhci or args.usb_boot:
         command += ["-device", "qemu-xhci,id=xhci", "-device", "usb-kbd,bus=xhci.0",
                     "-device", "usb-mouse,bus=xhci.0"]
+    if args.usb_boot:
+        command += ["-device", "usb-storage,drive=bootdisk,bus=xhci.0,bootindex=1"]
     if args.vnc:
         command += ["-vnc", f"unix:{run / 'vnc.sock'}"]
     print(f"QMP / serial log directory: {run}", flush=True)
