@@ -1,6 +1,6 @@
 # SCos x86-64 conversion — custom kernel retained
 
-Status, 2026-09-19: **conversion authorized; first startup foundation implemented**.
+Status, 2026-09-20: **native x64 UEFI startup implemented; BIOS path removed**.
 See [BOOT64.md](BOOT64.md) for the implemented boot ABI, test results and explicit
 limitations. Root `make` is AMD64. Duplicate i386 sources were removed on 2026-09-20;
 retrieve individual porting references from commit `6717943` when needed.
@@ -81,7 +81,7 @@ have been provisioned. Only the AMD64 build remains active.
 
 **Gates A/B are open:** the user reported no major remaining 32-bit blockers
 and explicitly requested conversion. The final r43 image is frozen. The first
-boot/ABI foundation is implemented, not the entire architecture/desktop port.
+UEFI boot/ABI implementation is present, not the entire architecture/desktop port.
 No round number until conversion starts on the user's PC. **Wait for the user to
 choose the next subsystem; this roadmap is not permission to begin it now.**
 
@@ -91,8 +91,9 @@ completed or approved integrations.
 
 1. **Approve boot/ABI plan and exact hardware targets.** Resolve the blockers
    below; select release versions after license/security review.
-2. **64-bit boot only.** Memory map, serial/panic output, framebuffer and
-   exception handling; malformed boot data fails safely. No browser work yet.
+2. **Native UEFI startup implemented.** Relocatable kernel, memory map/ownership,
+   firmware exit, GOP output, page protection, allocator and exception/IRQ paths;
+   see BOOT64 for exact tests and limits. Physical acceptance remains outstanding.
 3. **Restore SCos behavior.** Allocator, interrupts, validated HID behavior,
    consoles, WM lifecycle and files. Re-run the r41 packet-boundary cases from
    history plus real-PC repeated input before changing any driver algorithm. This core

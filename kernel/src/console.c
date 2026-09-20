@@ -1,34 +1,42 @@
 #include "kernel.h"
-static volatile uint16_t *const video=(volatile uint16_t *)0xb8000;
-static size_t row,col;
-void *memset(void *d,int c,size_t n) { unsigned char *p=d; while(n--) *p++=(unsigned char)c; return d; }
-void *memcpy(void *d,const void *s,size_t n) { unsigned char *p=d; const unsigned char *q=s; while(n--) *p++=*q++; return d; }
-void console_init(void) {
-    row=col=0;
-    for(size_t i=0;i<80*25;i++) video[i]=0x0720;
-    out8(0x3d4,0x0a); out8(0x3d5,0x20); /* hide firmware cursor */
+extern const uint8_t font8x16[256][16];
+static struct boot_framebuffer fb;
+static size_t row,col,columns,rows;
+static uint32_t foreground,background;
+void *memset(void *d,int c,size_t n){unsigned char *p=d;while(n--)*p++=(unsigned char)c;return d;}
+void *memcpy(void *d,const void *s,size_t n){unsigned char *p=d;const unsigned char *q=s;while(n--)*p++=*q++;return d;}
+static uint32_t component(unsigned value,uint32_t mask){unsigned shift=0;while(!(mask&1)){mask>>=1;shift++;}return ((value*mask/255)<<shift);}
+static uint32_t color(unsigned r,unsigned g,unsigned b){return component(r,fb.red)|component(g,fb.green)|component(b,fb.blue);}
+void console_init(const struct boot_framebuffer *framebuffer){
+ fb=*framebuffer;columns=fb.width/8;rows=fb.height/16;row=col=0;
+ foreground=color(216,226,240);background=color(16,23,34);
+ volatile uint32_t *p=(void*)(uintptr_t)fb.base;
+ for(size_t y=0;y<fb.height;y++)for(size_t x=0;x<fb.width;x++)p[y*fb.stride+x]=background;
 }
-static void emit(char c) {
-    /* Missing UART must not hang a boot or panic. */
-    for(unsigned i=0;i<65536;i++) if(in8(0x3fd)&0x20) {out8(0x3f8,(uint8_t)c);break;}
-    /* A fatal NMI can interrupt a normal print between row++ and scrolling.
-     * It never returns, so normalize the cursor BEFORE indexing VGA memory.
-     * Do not use a lock here: the interrupted context may own it already.
-     * This bounds emergency output; it is not an SMP console implementation. */
-    if(col>=80) col=0;
-    if(row>=25) row=24;
-    if(c=='\n') {col=0;row++;}
-    else if(c!='\r') {video[row*80+col]=(uint16_t)(0x0700|(uint8_t)c);if(++col==80){col=0;row++;}}
-    if(row==25) {
-        for(size_t i=0;i<80*24;i++) video[i]=video[i+80];
-        for(size_t i=80*24;i<80*25;i++) video[i]=0x0720;
-        row=24;
-    }
+static void scroll(void){
+ volatile uint32_t *p=(void*)(uintptr_t)fb.base;
+ for(size_t y=0;y<(rows-1)*16;y++)for(size_t x=0;x<columns*8;x++)p[y*fb.stride+x]=p[(y+16)*fb.stride+x];
+ for(size_t y=(rows-1)*16;y<rows*16;y++)for(size_t x=0;x<columns*8;x++)p[y*fb.stride+x]=background;
+ row=rows-1;
 }
-void putstr(const char *s) {while(*s) emit(*s++);}
-void puthex(uint64_t n) {putstr("0x");for(int i=60;i>=0;i-=4) emit("0123456789abcdef"[(n>>i)&15]);}
-_Noreturn void panic(const char *s) {
-    __asm__ volatile("cli");
-    putstr("\nSCos PANIC: ");putstr(s);putstr("\nCPU halted. Power off manually.\n");
-    for(;;) __asm__ volatile("hlt");
+static void emit(char c){
+ for(unsigned i=0;i<65536;i++)if(in8(0x3fd)&32){out8(0x3f8,(uint8_t)c);break;}
+ if(!fb.base)return; /* Invalid handoff failures still have serial output. */
+ /* Fatal NMI may interrupt cursor update/scroll; never trust transient bounds. */
+ if(row>=rows)row=rows-1;
+ if(col>=columns)col=0;
+ if(c=='\n'){col=0;row++;}
+ else if(c=='\r')col=0;
+ else{
+  volatile uint32_t *p=(void*)(uintptr_t)fb.base;
+  for(size_t y=0;y<16;y++)for(size_t x=0;x<8;x++)p[(row*16+y)*fb.stride+col*8+x]=(font8x16[(uint8_t)c][y]&(128>>x))?foreground:background;
+  if(++col==columns){col=0;row++;}
+ }
+ if(row>=rows)scroll();
+}
+void putstr(const char *s){while(*s)emit(*s++);}
+void puthex(uint64_t n){putstr("0x");for(int i=60;i>=0;i-=4)emit("0123456789abcdef"[(n>>i)&15]);}
+_Noreturn void panic(const char *s){
+ __asm__ volatile("cli");putstr("\nSCos PANIC: ");putstr(s);putstr("\nCPU halted. Power off manually.\n");
+ for(;;)__asm__ volatile("hlt");
 }

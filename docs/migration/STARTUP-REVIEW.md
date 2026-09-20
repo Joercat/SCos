@@ -1,4 +1,8 @@
-# Startup-only review and cleanup — 2026-09-20
+# Historical BIOS-startup review and cleanup — 2026-09-20
+
+**Superseded later the same day by the explicitly authorized native UEFI rewrite.**
+This document records the earlier revision, not the current implementation or
+build instructions. See [BOOT64.md](BOOT64.md) for the active architecture.
 
 ## What “boots” means here
 

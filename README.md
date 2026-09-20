@@ -1,116 +1,61 @@
 # SCos — native operating system
 
-SCos is a custom operating system, not a Linux distribution. `os.html` remains
-its desktop design reference.
+**Active startup target: native x64 UEFI. There is no BIOS/CSM or 32-bit build.**
+SCos keeps its own kernel and identity; it is not a Linux distribution.
+`os.html` remains the desktop design reference.
 
-**The 64-bit OS is NOT fully working. Only its startup foundation is implemented.**
-A bootable image is an internal integration checkpoint, not a usable desktop
-release or a request to flash/test the PC now. The user will choose the next
-subsystem to convert.
+The startup path now loads a relocatable ELF64 kernel, exits UEFI boot services,
+uses the GOP framebuffer, owns its page tables and physical-memory allocator,
+and establishes exception handling and real timer interrupts. This is an
+implemented firmware-to-kernel path, **not the completed desktop OS**. Input,
+applications, storage persistence, power management and the desktop still await
+their separate conversion steps. No new release number is assigned.
 
-**Active development: unnumbered x86-64 startup foundation.** The user authorized
-conversion; the final working 32-bit r43 image is now permanently frozen.
-There is no new release number until conversion starts on the user's PC.
+## Build and emulator
 
-* **64-bit:** [`dist/scos.img`](dist/scos.img) — BIOS-to-long-mode bootstrap,
-  native kernel, protected page mappings, exceptions and real timer interrupts.
-  **No desktop, keyboard/mouse, storage persistence or interactive shell yet.**
-* **Frozen 32-bit:** [`dist/scos-32bit.img`](dist/scos-32bit.img) — existing desktop
-  and applications; [r43 notes](docs/RELEASE-r43.md),
-  [provenance](docs/milestones/scos-32bit.json). This file is not overwritten by builds.
-* [64-bit boot contract, checks, limitations and next steps](docs/migration/BOOT64.md).
-
-## Build and boot
-
-Use an x86 Linux host with GCC supporting freestanding `-m64` and `-m32`, GNU
-binutils, Make and Python 3. No host C library is linked into the kernel.
+On Linux x86-64: GCC, GNU binutils (including the `i386pep` **AMD64 PE32+** linker
+emulation), Make and Python 3. Tested with GCC 12.2.0 and binutils 2.40. No EFI SDK,
+Windows runtime, host libc, FAT utilities or mounted filesystem is needed.
 
 ```sh
-make                           # active AMD64 build/scos.img
-sha256sum -c dist/scos.img.sha256
+make                           # build/BOOTX64.EFI, kernel.elf and scos.img
 python3 tools/check_milestone.py
-make clean                     # remove active disposable build output
-python3 tools/setup_qemu.py     # optional pinned host emulator, no root required
-python3 tools/run_qemu.py       # snapshot boot; serial log and private QMP socket
+sha256sum -c dist/scos.img.sha256
+python3 tools/setup_qemu.py     # optional pinned host QEMU environment
+python3 tools/run_qemu.py       # x64 EDK2, q35, disposable disk/variable state
+make clean
 ```
 
-Duplicate 32-bit sources/build rules and the old font generator have been removed.
-They are recoverable from [Git history](https://github.com/Joercat/SCos/tree/6717943f977a7e0f95f0ace5fa48cfe6a564f873/legacy/i386)
-when individual ports are requested. Necessary 16/32-bit BIOS transition
-instructions remain in `boot/`; deleting those would break BIOS-to-64-bit startup.
-See the [detailed startup review](docs/migration/STARTUP-REVIEW.md) for changes,
-component contracts, test evidence and remaining limitations.
+The packaged `dist/scos.img` is a 64-MiB GPT disk with a FAT32 EFI system partition:
+`EFI/BOOT/BOOTX64.EFI`, `SCOS/KERNEL.ELF` and `SCOS/KERNEL.CRC`. It is a development
+integration artifact, not a request to flash or physically test the PC now.
+The kernel does not write to it after firmware exit.
 
-The images are raw bootable disks. Writing one to an entire USB drive destroys
-that drive's contents: back up and verify the target first. The new image needs
-**legacy BIOS/CSM, EDD disk services, VGA text output and an AMD64 CPU with NX**.
-It has no native UEFI/GOP path. QEMU boot is verified; physical-PC boot is not.
-The foundation stops at a readiness message and idles with real timer interrupts;
-use host controls or the physical power button to stop it. No USB driver or
-saved-data access is enabled in the new kernel.
+A later physical test must use **x64 UEFI boot, not the previous CSM configuration**.
+Secure Boot must be disabled for this unsigned image. The firmware must provide
+GOP direct framebuffer access and a readable boot filesystem. Writing a raw image
+to an entire USB device destroys existing contents; identify/back up the device
+first. Successful emulator USB boot does not establish motherboard/GPU acceptance.
 
-For the frozen desktop, persistence requires one uniquely verified SCos-owned
-legacy ATA disk. USB boot alone does not supply USB mass-storage persistence.
-See r43 notes for ownership checks and single-slot power-loss limitations.
+## Implementation details and evidence
 
-## Frozen 32-bit desktop controls (not yet in the 64-bit build)
+[Native UEFI startup contract, limits and verification](docs/migration/BOOT64.md)
+covers the loader, relocations, firmware exit/retry rules, memory ownership,
+GOP console, error paths, allocator, interrupts and exact testing scope.
 
-* Double-click desktop icons; launch apps from the terminal with `appstrt`.
-* Ctrl+Alt+F1–F6 select independent text consoles; Ctrl+Alt+F7 returns to a
-  desktop that is still alive. `tty [1-6]` also selects a console.
-* `kill --system 2`, after confirmation, terminates the compositor and GUI apps.
-  Unsaved GUI edits are lost. `wm` starts a fresh desktop from a stopped console.
-* Other built-in system rows are kernel subsystems, not independently scheduled
-  processes; unsupported system kills are rejected rather than simulated.
-* Power controls are in the taskbar menu; `shutdown` is also available in the
-  terminal and TTY. If firmware cannot power off, SCos displays the fallback
-  screen and halts. Factory Reset reports RAM-only operation when persistence is
-  unavailable; a failed disk reset reports failure without automatically rebooting.
-* `help` lists current commands. Kernel service/error logs, panic handling and
-  WM-independent error reporting remain; temporary input capture and hardware
-  diagnostic screens have been retired.
+* [Conversion roadmap](docs/migration/README.md) — the user chooses the next part.
+* [Host emulator provenance and usage](docs/migration/EMULATOR.md).
+* [Research only: GPU, networking and browser options](docs/migration/HARDWARE-AND-BROWSER.md).
 
-## r42: shutdown and cleanup
+No new GPU/NIC/browser stack was imported. The GOP console uses firmware-provided
+pixels, not a native GPU acceleration driver. The existing architecture-independent
+SCos bitmap font was retained for this console; the old desktop was not restored.
 
-The user confirmed **r41 input is fully functional on the real PC**: stationary
-clicks, repeated characters and Backspace no longer require spamming. Its
-packet-sized HID requests, report assembly and input behavior are retained.
+## Frozen historical milestone
 
-Shutdown had a definite boot integration bug: `acpi_init()` was never called,
-so every power-off action saw ACPI as unavailable. r42 initializes it during
-boot and hardens the newly reachable path:
-
-* Validate ACPI table sizes/checksums and avoid truncating 64-bit addresses.
-* Accept supported extended DSDT and I/O PM1 control descriptions, with legacy
-  table fallback where appropriate.
-* Bound constant `_S5` package decoding; read independent PM1a/PM1b sleep types;
-  never guess a missing sleep type.
-* Preserve unrelated PM1 control bits and wait for firmware's ACPI-mode handoff.
-* Fix sub-tick timer waits rounding down to zero.
-* Use the same halted fallback behavior from GUI and TTY; returning from a
-  power-off attempt is no longer reported as success.
-
-This remains a limited ACPI implementation, not a full AML interpreter.
-Dynamic sleep objects, required firmware methods such as `_PTS`, hardware-reduced
-sleep controls and unsupported address spaces need a fuller future implementation.
-The initialization defect is fixed; physical power-off still needs confirmation.
-
-At the user's request, the temporary test suite, v86 runtime/preview tooling,
-diagnostic screens/button, `diag`, `inputtrace`, raw-input recorder and raw HID
-report dumps were removed **after verification**. The old tooling is available
-in Git history at r41 (`72d6176445f1f5b66f2dd575de3f38b518ad32c3`); no emulator is
-required to build or run SCos. Panic/error handling and service logs are not
-removed. See [historical r42 verification notes](docs/RELEASE-r42.md).
-
-## Conversion and later integrations
-
-* [Migration plan and remaining contracts](docs/migration/README.md)
-* [Component research](docs/migration/COMPONENTS.md)
-* [GPU, Ethernet, Wi-Fi and integrated-browser comparison](docs/migration/HARDWARE-AND-BROWSER.md)
-* [QEMU provenance and usage](docs/migration/EMULATOR.md)
-* [Upstream research references](docs/migration/candidates.json)
-
-No new third-party driver/library has been imported into the guest. Porting the
-existing core/desktop comes first; new drivers and resources require separate
-permission after conversion. Network/browser support, protected userspace,
-SMP, high-RAM allocation and GPU acceleration are not implemented by this step.
+Per the user's explicit choice, `dist/scos-32bit.img`, its checksum and
+[provenance](docs/milestones/scos-32bit.json) remain permanently frozen at r43.
+They are an archive, **not a build target or dependency of the UEFI loader**.
+The integrity guard protects that retention. Previous implementations remain
+in Git history; duplicate legacy source/build trees have been removed.
+See [historical r43 behavior and limitations](docs/RELEASE-r43.md).

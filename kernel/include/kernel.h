@@ -8,7 +8,7 @@ static inline uint64_t read_cr3(void) { uint64_t v; __asm__ volatile("mov %%cr3,
 static inline uint64_t read_cr2(void) { uint64_t v; __asm__ volatile("mov %%cr2,%0":"=r"(v)); return v; }
 void *memset(void *,int,size_t);
 void *memcpy(void *,const void *,size_t);
-void console_init(void);
+void console_init(const struct boot_framebuffer *);
 void putstr(const char *);
 void puthex(uint64_t);
 _Noreturn void panic(const char *);
@@ -22,10 +22,11 @@ void interrupts_init(void);
 void interrupt_dispatch(struct interrupt_frame *);
 void timer_init(void);
 extern volatile uint64_t timer_ticks;
-void memory_init(const struct boot_handoff *,const struct boot_map_entry *);
+void memory_init(const struct boot_handoff *,const struct efi_memory *);
 uintptr_t page_allocate(void);
 void page_release(uintptr_t);
 uint64_t memory_free_pages(void);
+extern char _relro_start[],_relro_end[];
 extern char _kernel_start[],_kernel_end[],_text_start[],_text_end[],_rodata_start[],_rodata_end[],_file_end[];
 extern char stack_guard[],stack_top[],df_guard[],df_top[],nmi_guard[],nmi_top[],mc_guard[],mc_top[];
 #endif

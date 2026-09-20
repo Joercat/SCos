@@ -20,9 +20,7 @@ python3 tools/setup_qemu.py          # new .tools/qemu directory only
 make                               # current build/scos.img
 python3 tools/run_qemu.py --dry-run
 python3 tools/run_qemu.py            # CURRENT build, software TCG
-python3 tools/run_qemu.py --image dist/scos-32bit.img  # frozen 32-bit image
 python3 tools/run_qemu.py --xhci     # emulated USB keyboard and mouse
-python3 tools/run_qemu.py --no-acpi  # unsupported-power fallback configuration
 ```
 
 **Historical r42 images have a storage safety defect**, corrected in the
@@ -42,13 +40,19 @@ requests commands such as `{"execute":"query-status"}`. `screendump` takes a
 host filename argument and writes a PPM screenshot. Do not confuse host QMP
 `quit` with evidence of the guest's power-off path.
 
-The default image is now the AMD64 foundation. Supply `--image dist/scos.img`
-for published bytes. See [actual 64-bit verification](BOOT64.md). `--xhci` and
-`--no-acpi` provide hardware configurations; the foundation does not yet have
-USB input or ACPI power drivers.
-Current scripts default to legacy PC/BIOS; selecting and proving a future UEFI
-boot path is separate work. x86 OVMF firmware is retained in the tool bundle,
-but no SCos UEFI/64-bit guest boot has been claimed or implemented.
+The default is now native x64 UEFI on q35. The launcher uses bundled
+`edk2-x86_64-code.fd` read-only and copies the architecture-neutral variable
+store template `edk2-i386-vars.fd` into each disposable run. The template's
+historical filename does not select i386 execution. No BIOS/CSM fallback exists
+in the current launcher or guest. To reproduce old 32-bit tests, consult the
+historical tooling, not this command. Use at least 128 MiB guest RAM.
+
+The image is unsigned: use non-Secure-Boot firmware. `--xhci` supplies emulated
+hardware but does not enable a kernel USB input driver. See
+[actual UEFI verification and failures](BOOT64.md). Firmware is a host testing
+dependency from the pinned QEMU bundle, not shipped inside SCos. The bundle's
+`edk2-licenses.txt` contains its firmware notices; its firmware build has not
+been independently reproduced here.
 
 ## Acquisition/provenance
 
@@ -108,3 +112,17 @@ console/input, WM lifecycle and guest-triggered ACPI shutdown were exercised;
 see [the full audit](../AUDIT-32BIT.md). Physical USB/firmware behavior remains a
 separate test. No claim is made that a 64-bit SCos kernel exists simply because
 the selected emulator supports long mode.
+
+## Firmware used for the native UEFI checks
+
+Bundled EDK2 files (actual local SHA256, not an independently reproduced build):
+
+```text
+33090cc07675baa5190d9f1e84bf5176b33bcbfa9bacac522961150cdb6dbb2a  edk2-x86_64-code.fd
+5d2ac383371b408398accee7ec27c8c09ea5b74a0de0ceea6513388b15be5d1e  edk2-i386-vars.fd
+```
+
+The first is executable x64 firmware; the second is only a variable-store seed.
+Each run uses a private writable copy of the seed. Neither belongs in the guest
+image. Native UEFI checks and the constrained 64-MiB failure are in BOOT64.md;
+older ACPI/i386 checks elsewhere in this document are historical results only.

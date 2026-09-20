@@ -21,6 +21,6 @@ print('''    movq %rsp,%rdi
     call interrupt_dispatch
     movq %rbx,%rsp''')
 for r in reversed(regs): print(f'    popq %{r}')
-print('    addq $16,%rsp\n    iretq\n.section .rodata\n.balign 8\n.globl isr_stubs\nisr_stubs:')
+print('    addq $16,%rsp\n    iretq\n.section .data.rel.ro,"aw"\n.balign 8\n.globl isr_stubs\nisr_stubs:')
 for n in range(256): print(f'    .quad isr_{n}')
 print('.section .note.GNU-stack,"",@progbits')

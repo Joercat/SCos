@@ -1,8 +1,9 @@
 # SCos conversion rules
 
-The user authorized the first x86-64 conversion part on 2026-09-19 after reporting
-no major remaining 32-bit blockers. Root `make` now builds the unnumbered
-x86-64 startup foundation; see `docs/migration/BOOT64.md`.
+On 2026-09-20 the user explicitly chose native x64 UEFI only and confirmed the
+frozen 32-bit image should remain. The BIOS path is removed. Root `make` builds
+an AMD64 PE32+ UEFI application, relocatable ELF64 kernel and GPT/FAT32 image.
+See `docs/migration/BOOT64.md` for contracts, verification and limitations.
 
 * Keep the custom SCos kernel and identity. Never replace it with Linux.
 * `dist/scos-32bit.img` is now permanently frozen at the verified r43 bytes.
@@ -15,6 +16,9 @@ x86-64 startup foundation; see `docs/migration/BOOT64.md`.
 * Publish x86-64 development images as `dist/scos.img`, with checksum and truthful
   verification notes. No release/round number until conversion starts on the
   user's PC, per the latest instruction. Do not prematurely call this r1.
+* No BIOS/CSM, real-mode/protected-mode transitions or 32-bit build target should
+  be restored. `i386pep` is GNU ld's AMD64 PE backend name, not a 32-bit mode.
+  Keep native-width pointers and spec-sized protocol/register fields distinct.
 * Work only on the already-started startup components for now. The user will
   specify the next subsystem to convert; do NOT start additional ports on your
   own. A bootable test image is NOT a complete OS or physical-PC acceptance.

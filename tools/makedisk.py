@@ -1,139 +1,201 @@
 #!/usr/bin/env python3
-"""Package a matched BIOS bootstrap and ELF64 kernel; fail before writing on error.
+"""Deterministic GPT/ESP FAT32 image containing only native x64 UEFI startup.
 
-The raw payload has no ELF header at runtime. Its CRC only detects corruption,
-so build-time checks must establish that it really matches the linked ELF and
-its load addresses. A stale kernel.bin must not receive a fresh, valid CRC.
+No partitioning utilities, mounted filesystems, host disks or BIOS boot code.
+Firmware loads EFI/BOOT/BOOTX64.EFI; that application reads SCOS/KERNEL.ELF
+and its accidental-corruption CRC from the same EFI system partition.
 """
 from pathlib import Path
 import struct
-import subprocess
 import sys
 import tempfile
+import uuid
 import zlib
 
-KERNEL_BASE = 0x100000
-STAGING_BYTES = 0x60000
-MEMORY_LIMIT = 0x1000000
-IMAGE_BYTES = 8 * 1024 * 1024
+SECTOR = 512
+SECTORS = 131072  # 64 MiB, enough clusters for an actual FAT32 filesystem
+FIRST, LAST = 2048, SECTORS - 34
 
 
-def symbols(path):
-    result = {}
-    output = subprocess.check_output(['nm', '--defined-only', str(path)], text=True)
-    for line in output.splitlines():
-        fields = line.split()
-        if len(fields) == 3:
-            result[fields[2]] = int(fields[0], 16)
-    return result
-
-
-def checked_kernel(elf, raw, linked):
-    """Validate ELF program headers, then reconstruct its exact padded payload."""
+def validate(efi, elf):
+    if len(efi) < 64 or efi[:2] != b'MZ':
+        raise ValueError('missing PE image')
+    pe = struct.unpack_from('<I', efi, 60)[0]
+    if pe + 24 + 112 > len(efi) or efi[pe:pe+4] != b'PE\0\0':
+        raise ValueError('invalid PE header')
+    if (struct.unpack_from('<H', efi, pe+4)[0] != 0x8664 or
+            struct.unpack_from('<H', efi, pe+24)[0] != 0x20b or
+            struct.unpack_from('<H', efi, pe+24+68)[0] != 10):
+        raise ValueError('loader must be AMD64 PE32+ EFI application')
+    count = struct.unpack_from('<H', efi, pe+6)[0]
+    optional = struct.unpack_from('<H', efi, pe+20)[0]
+    section_alignment, file_alignment = struct.unpack_from('<II', efi, pe+24+32)
+    image_size, headers = struct.unpack_from('<II', efi, pe+24+56)
+    table = pe+24+optional
+    entry = struct.unpack_from('<I', efi, pe+24+16)[0]
+    if (optional < 240 or not 1 <= count <= 64 or table+40*count > headers or
+            headers > len(efi) or section_alignment != 4096 or file_alignment != 512):
+        raise ValueError('unsupported PE section/header layout')
+    sections = []
+    executable = False
+    for i in range(count):
+        virtual_size, rva, raw_size, raw = struct.unpack_from('<IIII', efi, table+i*40+8)
+        flags = struct.unpack_from('<I', efi, table+i*40+36)[0]
+        span = max(virtual_size, raw_size)
+        if (not span or rva < headers or rva % 4096 or rva+span > image_size or
+                (raw_size and (raw < headers or raw % 512 or raw+raw_size > len(efi))) or
+                (flags & 0xa0000000) == 0xa0000000):
+            raise ValueError('invalid PE section bounds/permissions')
+        if any(rva < b and rva+span > a for a,b,_,_ in sections):
+            raise ValueError('overlapping PE sections')
+        executable |= bool(flags & 0x20000000 and rva <= entry < rva+min(virtual_size, raw_size))
+        sections.append((rva,rva+span,raw,raw_size))
+    def pe_bytes(rva, size):
+        for start,end,raw,raw_size in sections:
+            if start <= rva and rva-start+size <= raw_size:
+                return efi[raw+rva-start:raw+rva-start+size]
+        raise ValueError('PE directory is not file backed')
+    imports, import_size = struct.unpack_from('<II', efi, pe+24+112+8)
+    if import_size and any(pe_bytes(imports, import_size)):
+        raise ValueError('UEFI application cannot import a Windows runtime')
+    reloc, reloc_size = struct.unpack_from('<II', efi, pe+24+112+40)
+    if not executable or not reloc_size:
+        raise ValueError('PE must have executable entry and base relocations')
+    data = pe_bytes(reloc, reloc_size)
+    offset = 0
+    while offset < len(data):
+        if len(data)-offset < 8:
+            raise ValueError('truncated PE relocation block')
+        page, size = struct.unpack_from('<II', data, offset)
+        if size < 8 or size % 2 or size > len(data)-offset:
+            raise ValueError('invalid PE relocation block')
+        for j in range(offset+8, offset+size, 2):
+            fixup = struct.unpack_from('<H', data, j)[0]
+            if fixup >> 12 not in (0,10):
+                raise ValueError('non-native PE relocation')
+            if fixup >> 12 == 10:
+                pe_bytes(page+(fixup & 4095),8)
+        offset += size
     if len(elf) < 64 or elf[:7] != b'\x7fELF\x02\x01\x01':
-        raise ValueError('kernel must be little-endian ELF64 version 1')
-    (_, kind, machine, version, entry, phoff, _, _, ehsize, phsize,
-     phcount, _, _, _) = struct.unpack_from('<16sHHIQQQIHHHHHH', elf)
-    if (kind, machine, version, entry, ehsize, phsize) != (2, 62, 1, KERNEL_BASE, 64, 56):
-        raise ValueError('invalid AMD64 executable/header/entry')
-    if not 1 <= phcount <= 128 or phoff < 64 or phoff + phcount * phsize > len(elf):
-        raise ValueError('invalid ELF program-header table')
-    file_end, memory_end = linked['_file_end'], linked['_kernel_end']
-    if (linked['_start'] != KERNEL_BASE or linked['_kernel_start'] != KERNEL_BASE or
-            not KERNEL_BASE < file_end <= memory_end <= MEMORY_LIMIT or memory_end % 4096):
-        raise ValueError('invalid linked kernel spans')
-    file_size = file_end - KERNEL_BASE
-    if not raw or len(raw) > file_size or file_size > STAGING_BYTES:
-        raise ValueError('kernel does not fit BIOS staging policy')
-    expected = bytearray(file_size)
+        raise ValueError('kernel must be ELF64 little-endian version 1')
+    _, kind, machine, version, entry, phoff, _, _, size, stride, count, _, _, _ = struct.unpack_from('<16sHHIQQQIHHHHHH', elf)
+    if (kind, machine, version, entry, size, stride) != (3, 62, 1, 0, 64, 56):
+        raise ValueError('invalid kernel executable/entry')
+    if not 1 <= count <= 32 or phoff < 64 or phoff + count*56 > len(elf):
+        raise ValueError('invalid ELF program table')
     spans = []
-    executable_entry = False
-    for i in range(phcount):
-        kind, flags, offset, virtual, physical, filesz, memsz, align = struct.unpack_from(
-            '<IIQQQQQQ', elf, phoff + i * phsize)
-        if kind in (2, 3):  # PT_DYNAMIC/PT_INTERP require a loader we do not have.
-            raise ValueError('dynamic/interpreted kernels are not supported')
-        if kind != 1:  # Only PT_LOAD contributes bytes or BSS.
+    entry_ok = False
+    for i in range(count):
+        t, f, off, va, pa, filesz, memsz, align = struct.unpack_from('<IIQQQQQQ', elf, phoff+i*56)
+        if t in (3, 7):
+            raise ValueError('dynamic/interpreted kernel unsupported')
+        if t != 1:
             continue
-        if (virtual != physical or filesz > memsz or offset + filesz > len(elf) or
-                physical < KERNEL_BASE or physical + memsz > memory_end or
-                (filesz and physical + filesz > file_end)):
-            raise ValueError('ELF load segment outside linked/file bounds')
-        if flags & ~7 or not flags & 4 or (flags & 3) == 3:
-            raise ValueError('unsupported or writable-executable ELF segment')
-        if align not in (0, 1) and (align & (align - 1) or (virtual - offset) % align):
-            raise ValueError('invalid ELF segment alignment')
+        if (va != pa or pa >= 0x4000000 or pa % 4096 or
+                filesz > memsz or pa+memsz > 0x4000000 or off+filesz > len(elf) or
+                not f & 4 or f & ~7 or f & 3 == 3):
+            raise ValueError('invalid load segment')
+        if align > 1 and (align & (align-1) or (pa-off) % align):
+            raise ValueError('invalid load alignment')
+        end = (pa+memsz+4095) & ~4095
         if memsz:
-            end = physical + memsz
-            if any(physical < b and end > a for a, b in spans):
-                raise ValueError('overlapping ELF load segments')
-            spans.append((physical, end))
-        if flags & 1 and physical <= entry < physical + filesz:
-            executable_entry = True
-        if filesz:
-            start = physical - KERNEL_BASE
-            expected[start:start + filesz] = elf[offset:offset + filesz]
-    if not executable_entry or not spans:
-        raise ValueError('entry is not backed by an executable load segment')
-    padded = raw.ljust(file_size, b'\0')
-    if padded != expected:
-        raise ValueError('kernel.bin does not match kernel.elf load bytes')
-    return padded
+            if any(pa < b and end > a for a, b in spans):
+                raise ValueError('overlapping segment permission pages')
+            spans.append((pa, end))
+        entry_ok |= bool(f & 1 and pa <= entry < pa+filesz)
+    if not entry_ok:
+        raise ValueError('entry not executable')
+
+
+def name(value):
+    base, _, ext = value.partition('.')
+    if len(base) > 8 or len(ext) > 3:
+        raise ValueError('only short FAT names used')
+    return (base.ljust(8)+ext.ljust(3)).encode('ascii')
 
 
 def main(directory):
     d = Path(directory)
-    mbr = (d / 'stage1.bin').read_bytes()
-    stage = bytearray((d / 'stage2.bin').read_bytes())
-    linked = symbols(d / 'kernel.elf')
-    stage_symbols = symbols(d / 'stage2.elf')
-    kernel = checked_kernel((d / 'kernel.elf').read_bytes(),
-                            (d / 'kernel.bin').read_bytes(), linked)
-    if len(mbr) != 512 or mbr[510:] != b'\x55\xaa' or any(mbr[400:510]):
-        raise ValueError('invalid MBR/reserved label area')
-    if not 0 < len(stage) <= 8192 or stage_symbols['_start'] != 0x8000:
-        raise ValueError('invalid stage2 size/entry')
-    # nm offsets are meaningful only for the exact binary derived from that ELF.
-    with tempfile.TemporaryDirectory(prefix='scos-package-') as temporary:
-        extracted = Path(temporary) / 'stage2.bin'
-        subprocess.run(['objcopy', '-O', 'binary', '-j', '.text',
-                        str(d / 'stage2.elf'), str(extracted)], check=True)
-        if extracted.read_bytes() != stage:
-            raise ValueError('stage2.bin does not match stage2.elf')
-    patches = {
-        'kernel_start_lba': 17,
-        'kernel_sector_count': (len(kernel) + 511) // 512,
-        'kernel_file_bytes': len(kernel),
-        'kernel_memory_end': linked['_kernel_end'],
-        'kernel_crc32': zlib.crc32(kernel),
-    }
-    used = set()
-    for name, value in patches.items():
-        offset = stage_symbols[name] - 0x8000
-        positions = set(range(offset, offset + 4))
-        if not 0 <= offset <= len(stage) - 4 or used & positions:
-            raise ValueError('bad/overlapping stage2 symbol ' + name)
-        used.update(positions)
-        struct.pack_into('<I', stage, offset, value)
-    image = bytearray(IMAGE_BYTES)
-    image[:512] = mbr
-    image[400:412] = b'SCOSBOOT64v1'  # Not legacy writable-persistence ownership.
-    image[512:512 + len(stage)] = stage
-    image[17 * 512:17 * 512 + len(kernel)] = kernel
-    # All input validation precedes publication; replace atomically on this host.
-    output = d / 'scos.img'
+    efi = (d/'BOOTX64.EFI').read_bytes()
+    elf = (d/'kernel.elf').read_bytes()
+    validate(efi, elf)
+    image = bytearray(SECTORS*SECTOR)
+    # Protective MBR is metadata, not an executable BIOS loader.
+    image[446:462] = struct.pack('<B3sB3sII', 0, b'\0\2\0', 0xee, b'\xff'*3, 1, SECTORS-1)
+    image[510:512] = b'\x55\xaa'
+    partition_id = uuid.UUID('b2a52b42-b792-4e85-9ce6-5e9bdcd425a7').bytes_le
+    disk_id = uuid.UUID('1cb5b534-9ee8-4a50-b9d5-600ce619b86c').bytes_le
+    entries = bytearray(128*128)
+    entries[:128] = struct.pack('<16s16sQQQ72s', uuid.UUID('c12a7328-f81f-11d2-ba4b-00a0c93ec93b').bytes_le,
+                               partition_id, FIRST, LAST, 0, 'SCos EFI system'.encode('utf-16le'))
+    for current, backup, table in ((1, SECTORS-1, 2), (SECTORS-1, 1, SECTORS-33)):
+        header = bytearray(struct.pack('<8sIIIIQQQQ16sQIII', b'EFI PART', 0x10000, 92, 0, 0,
+                                      current, backup, 34, SECTORS-34, disk_id, table, 128, 128, zlib.crc32(entries)))
+        struct.pack_into('<I', header, 16, zlib.crc32(header))
+        image[current*512:current*512+92] = header
+        image[table*512:table*512+len(entries)] = entries
+    total = LAST-FIRST+1
+    fat_sectors = (total-32+2+129)//130  # one sector/cluster, two FAT copies
+    data_sector = FIRST+32+2*fat_sectors
+    clusters = total-32-2*fat_sectors
+    if not 65525 <= clusters < 0x0ffffff5:
+        raise ValueError('invalid FAT32 cluster count')
+    boot = bytearray(512)
+    boot[:11] = b'\xeb\x58\x90SCOSUEFI'
+    struct.pack_into('<HBHBHHBHHHII', boot, 11, 512, 1, 32, 2, 0, 0, 0xf8, 0, 63, 255, FIRST, total)
+    struct.pack_into('<IHHIHH', boot, 36, fat_sectors, 0, 0, 2, 1, 6)
+    boot[64] = 0x80; boot[66] = 0x29
+    struct.pack_into('<I', boot, 67, 0x53434f53)
+    boot[71:82] = b'SCOS UEFI  '; boot[82:90] = b'FAT32   '; boot[510:] = b'\x55\xaa'
+    info = bytearray(512)
+    struct.pack_into('<I', info, 0, 0x41615252);struct.pack_into('<III', info, 484, 0x61417272, 0xffffffff, 0xffffffff)
+    struct.pack_into('<I', info, 508, 0xaa550000)
+    for offset, contents in ((0, boot), (6, boot), (1, info), (7, info)):
+        image[(FIRST+offset)*512:(FIRST+offset+1)*512] = contents
+    fat = bytearray(fat_sectors*512)
+    struct.pack_into('<II', fat, 0, 0x0ffffff8, 0x0fffffff)
+    next_cluster = 2
+    def allocate(data):
+        nonlocal next_cluster
+        count = max(1, (len(data)+511)//512)
+        first = next_cluster
+        if first+count > clusters+2:
+            raise ValueError('ESP capacity exceeded')
+        for c in range(first, first+count):
+            struct.pack_into('<I', fat, c*4, c+1 if c+1 < first+count else 0x0fffffff)
+        offset = (data_sector+first-2)*512
+        image[offset:offset+len(data)] = data
+        next_cluster += count
+        return first
+    def entry(filename, cluster, size=0, directory=False):
+        data = bytearray(32);data[:11] = name(filename);data[11] = 16 if directory else 32
+        struct.pack_into('<H', data, 16, 0x21);struct.pack_into('<H', data, 18, 0x21)
+        struct.pack_into('<H', data, 20, cluster >> 16);struct.pack_into('<H', data, 24, 0x21)
+        struct.pack_into('<HI', data, 26, cluster & 65535, size)
+        return data
+    dirs = [allocate(bytes(512)) for _ in range(4)]  # root, EFI, BOOT, SCOS
+    ec, kc, cc = allocate(efi), allocate(elf), allocate(struct.pack('<I', zlib.crc32(elf)))
+    def dot(parent, own):
+        a = entry('DOT', own, directory=True);a[:11] = b'.          '
+        b = entry('DOT', parent, directory=True);b[:11] = b'..         '
+        return a+b
+    directory_data = [entry('EFI', dirs[1], directory=True)+entry('SCOS', dirs[3], directory=True),
+                      dot(0, dirs[1])+entry('BOOT', dirs[2], directory=True),
+                      dot(dirs[1], dirs[2])+entry('BOOTX64.EFI', ec, len(efi)),
+                      dot(0, dirs[3])+entry('KERNEL.ELF', kc, len(elf))+entry('KERNEL.CRC', cc, 4)]
+    for c, data in zip(dirs, directory_data):
+        offset = (data_sector+c-2)*512;image[offset:offset+len(data)] = data
+    for i in range(2):
+        offset = (FIRST+32+i*fat_sectors)*512;image[offset:offset+len(fat)] = fat
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(dir=d, prefix='.scos-', delete=False) as f:
-            temporary = Path(f.name)
-            f.write(image)
-        temporary.replace(output)
+        with tempfile.NamedTemporaryFile(dir=d, prefix='.uefi-', delete=False) as f:
+            temporary = Path(f.name);f.write(image)
+        temporary.replace(d/'scos.img')
     finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    print(f'AMD64 startup-only image: {len(kernel)} kernel file bytes; '
-          f'memory end {linked["_kernel_end"]:#x}')
+        if temporary is not None:temporary.unlink(missing_ok=True)
+    print(f'x64 UEFI GPT/ESP: {len(image)} bytes; loader {len(efi)}; ELF {len(elf)}')
 
 
 if __name__ == '__main__':
-    main(sys.argv[1] if len(sys.argv) > 1 else 'build')
+    main(sys.argv[1] if len(sys.argv)>1 else 'build')

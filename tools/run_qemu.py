@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import shlex
+import shutil
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +17,6 @@ def main():
     ap.add_argument("--qemu-dir", type=Path, default=ROOT / ".tools/qemu")
     ap.add_argument("--memory", type=int, default=256, help="guest RAM in MiB")
     ap.add_argument("--xhci", action="store_true", help="add emulated USB keyboard/mouse")
-    ap.add_argument("--no-acpi", action="store_true", help="exercise unsupported-power fallback")
     ap.add_argument("--vnc", action="store_true", help="VNC on a private Unix socket, never a TCP listener")
     ap.add_argument("--dry-run", action="store_true", help="print the command without starting QEMU")
     args = ap.parse_args()
@@ -27,15 +27,24 @@ def main():
     # Only regular image files, never /dev disks or passed-through devices.
     if not (qemu / "lib/ld-musl-x86_64.so.1").is_file():
         ap.error("QEMU is not prepared; run python3 tools/setup_qemu.py")
-    if not 64 <= args.memory <= 8192:
-        ap.error("--memory must be 64..8192 MiB")
+    if not 128 <= args.memory <= 8192:
+        ap.error("--memory must be 128..8192 MiB for this UEFI environment")
     runs = ROOT / "build/qemu"
     runs.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix="run-", dir=runs))
+    firmware = qemu / "share/qemu/edk2-x86_64-code.fd"
+    variables = qemu / "share/qemu/edk2-i386-vars.fd"
+    if not firmware.is_file() or not variables.is_file():
+        ap.error("x64 EDK2 firmware/variable template missing from QEMU bundle")
+    # This package names the architecture-neutral variable template i386-vars;
+    # only the x86_64 CODE image executes. Never modify shared firmware state.
+    shutil.copyfile(variables, run / "vars.fd")
     escape = lambda p: str(p).replace(",", ",,")
     command = [str(qemu / "lib/ld-musl-x86_64.so.1"), "--library-path", str(qemu / "lib"),
                str(qemu / "bin/qemu-system-x86_64"), "-L", str(qemu / "share/qemu"),
-               "-machine", "pc,acpi=off" if args.no_acpi else "pc",
+               "-machine", "q35",
+               "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={escape(firmware)}",
+               "-drive", f"if=pflash,format=raw,unit=1,file={escape(run / 'vars.fd')}",
                "-accel", "tcg", "-cpu", "max", "-m", str(args.memory), "-smp", "1",
                "-drive", f"file={escape(image)},format=raw,if=ide,snapshot=on",
                "-vga", "std", "-nic", "none", "-display", "none",
