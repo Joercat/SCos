@@ -6,7 +6,7 @@ TCG does not require KVM. This is a native host emulator, not a browser v86
 replacement with the same UI. No v86 runtime or diagnostic guest UI was restored.
 
 The current r43 safety corrections and further checks are documented in
-[RELEASE-r43.md](../RELEASE-r43.md); the explicit r42 archive still has its old
+[RELEASE-r43.md](../RELEASE-r43.md); r42 in Git history still has its old
 defects. Temporary r43 test harnesses were retired after verification.
 
 ## Use
@@ -20,13 +20,13 @@ python3 tools/setup_qemu.py          # new .tools/qemu directory only
 make                               # current build/scos.img
 python3 tools/run_qemu.py --dry-run
 python3 tools/run_qemu.py            # CURRENT build, software TCG
-python3 tools/run_qemu.py --image dist/scos-32bit.img  # explicit archived baseline
+python3 tools/run_qemu.py --image dist/scos-32bit.img  # current published 32-bit image
 python3 tools/run_qemu.py --xhci     # emulated USB keyboard and mouse
 python3 tools/run_qemu.py --no-acpi  # unsupported-power fallback configuration
 ```
 
-**The r42 image has an open storage safety defect:** read
-[the audit](../AUDIT-32BIT.md). The launcher always uses a disposable snapshot,
+**Historical r42 images have a storage safety defect**, corrected in the
+current r43 image: see [the audit](../AUDIT-32BIT.md). The launcher always uses a disposable snapshot,
 so guest writes do not change the retained image. It never attaches a physical
 disk, host USB device, network interface or shared host filesystem.
 

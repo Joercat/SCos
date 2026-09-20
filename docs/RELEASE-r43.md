@@ -5,14 +5,14 @@ change to the physically accepted USB/PS/2 input algorithms. `os.html` remains.
 
 ## Image
 
-* New image: **`dist/scos-32bit-r43.img`**, 8,388,608 bytes.
+* New image: **`dist/scos-32bit.img`**, 8,388,608 bytes.
 * SHA-256: `43c2bce097389179aff9965779148c82a4907017c392f996a6602f727efb0c97`.
 * Kernel: ELF32/Intel 80386; flat kernel 201,688 bytes, 394 disk sectors.
-* Exact source provenance: `docs/milestones/scos-32bit-r43.json`.
-* The original `dist/scos-32bit.img` remains the **unchanged r42 archive** with
-  its original checksum/provenance. It still contains the old defects; do not
-  confuse that archive with this new fixed release. Never overwrite either
-  retained milestone when publishing another revision.
+* Exact source provenance: `docs/milestones/scos-32bit.json`.
+* After the user's naming clarification, r43 replaces r42 at the canonical
+  `dist/scos-32bit.img` path. The separate r43 image is removed as redundant.
+  Further verified 32-bit patches update this path until 64-bit starts; only
+  then is the final 32-bit image frozen permanently. r42 remains in Git history.
 
 ## Root causes and corrections
 
@@ -139,7 +139,7 @@ available as host tooling, not a restored v86 stack or diagnostic guest UI.
 
 ## Hardware test / migration gates
 
-Use **r43**, not the retained r42 archive, for the next hardware test. Check the
+Use **r43** at `dist/scos-32bit.img`, not a historical r42 download, for the next hardware test. Check the
 accepted keyboard/mouse behavior, TTY/WM switching, restart and power-off first.
 Boot through the previously working BIOS/CSM configuration. USB boot alone does
 not provide USB mass-storage persistence; refusing an unverified disk is now

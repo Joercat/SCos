@@ -1,16 +1,18 @@
 # SCos release and transition rules
 
 r43 fixes and verifies the r42 storage findings; see `docs/RELEASE-r43.md`.
-Final physical acceptance is still pending. Never use the archived r42 image's
-save/reset against real disks. Use `dist/scos-32bit-r43.img` for the next test;
-retain this new image/checksum/provenance permanently as well.
+The user's clarified milestone policy supersedes the earlier per-release freeze:
 
 * Keep the custom SCos kernel and identity; do not replace it with Linux.
-* `dist/scos-32bit.img` is a permanent, immutable 32-bit milestone. Never delete,
-  overwrite, rename away or boot it as a writable disk. Its expected SHA-256 is
-  `84f87224a5fef6e2cd0982b28708e68a8d44f0a523b010f8c2cb23f43e7cb926`.
-  Keep its checksum and `docs/milestones/scos-32bit.json`. New 32-bit fixes get
-  new filenames; they do not replace the retained milestone.
+* `dist/scos-32bit.img` is the canonical, updatable 32-bit image. Until the user
+  authorizes starting 64-bit, replace it with verified 32-bit patches, updating
+  its checksum, `docs/milestones/scos-32bit.json` and integrity-check pins together.
+  Remove stale/duplicate image files from the current tree; retain Git history.
+* At the authorized start of 64-bit development, freeze and permanently preserve
+  the then-current fixed `dist/scos-32bit.img`, checksum and provenance. Never
+  delete or overwrite that final 32-bit milestone with a 64-bit image.
+* Now WAIT for the user's bug reports/patch requests or explicit 64-bit start
+  instruction. Do not do further development speculatively.
 * `dist/scos.img` is reserved for the future 64-bit releases, not a placeholder
   or relabeled 32-bit image. `build/scos.img` is only a disposable build output.
 * Await the user's final 32-bit hardware test. Address any reported defects and

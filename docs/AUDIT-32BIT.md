@@ -1,13 +1,13 @@
-> **Resolved in r43:** the findings below describe the unchanged r42 archive.
-> The new `dist/scos-32bit-r43.img` addresses them; see
+> **Resolved in r43:** the findings below describe the historical r42 image.
+> The new `dist/scos-32bit.img` addresses them; see
 > [corrections and actual verification](RELEASE-r43.md). Physical acceptance is
 > still pending. Keep this audit as the root-cause record, not a current claim
 > that r43 still writes to the first arbitrary ATA disk.
 
 # Final 32-bit review — NOT yet cleared for hardware acceptance
 
-Reviewed 2026-09-19. Image: the unchanged **r42 i386** image now retained as
-`dist/scos-32bit.img`, SHA-256
+Reviewed 2026-09-19. Historical image: **r42 i386**, available in Git history
+(commit `8dc5b5e`), SHA-256
 `84f87224a5fef6e2cd0982b28708e68a8d44f0a523b010f8c2cb23f43e7cb926`.
 
 **The audit found a real storage safety defect. Do not treat this as a clean
@@ -134,8 +134,8 @@ Terminal behavior into TTY.
 5. Add targeted disposable-disk checks: foreign disk first, no supported disk,
    multiple candidate disks, full image, malformed image, failed writes,
    save/reboot/load, reset/reboot, unchanged boot sectors and unrelated disks.
-6. Publish any fix as a **new 32-bit revision and separately named artifact**.
-   Keep the archived r42 image and checksum unchanged. Re-run input, WM, console,
+6. Publish fixes as a new 32-bit revision at the canonical `dist/scos-32bit.img`
+   path, per the later user clarification. Re-run input, WM, console,
    ACPI and storage checks; only then ask for the user's final physical test.
 
 The x86-64 conversion and later driver/library integration remain blocked by

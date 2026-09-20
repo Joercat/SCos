@@ -9,8 +9,7 @@ and a VBE framebuffer. There is no UEFI-only or x86-64 kernel build yet.
 
 **Storage corrections verified:** r43 fixes the wrong-disk write, reset double-
 free and failure reporting, incomplete serialization, and malformed-load handling.
-Use the new **`dist/scos-32bit-r43.img`** for the next physical test, not the
-unchanged r42 archive. See [r43 changes, checks and limitations](docs/RELEASE-r43.md).
+Use **`dist/scos-32bit.img`** (currently r43) for the next physical test. See [r43 changes, checks and limitations](docs/RELEASE-r43.md).
 Final hardware acceptance and permission to convert are still pending.
 
 ## Build and boot
@@ -20,7 +19,7 @@ compilation, GNU binutils, Make and Python 3:
 
 ```sh
 make                         # build/scos.img
-sha256sum -c dist/scos-32bit-r43.img.sha256  # verify current release
+sha256sum -c dist/scos-32bit.img.sha256  # verify current release
 make font                    # optional: regenerate the bitmap font
 make clean                   # remove generated build files
 ```
@@ -34,13 +33,14 @@ USB does not by itself provide a USB mass-storage driver. See the release notes
 for the FS2 format and single-slot power-loss limitation. Back up older data: old
 unmarked images/FS1 saves are not automatically adopted or migrated.
 
-The current image/checksum are `dist/scos-32bit-r43.img` and
-`dist/scos-32bit-r43.img.sha256`. The permanently retained original **scos 32bit** image is `dist/scos-32bit.img`, with its
-SHA-256 in `dist/scos-32bit.img.sha256` and provenance in
-[the milestone manifest](docs/milestones/scos-32bit.json). It is the unchanged
-r42 image, not a newly fixed release. Never overwrite or delete it; further
-32-bit fixes must use new filenames. `dist/scos.img` is reserved for future
-64-bit releases. `build/scos.img` is only a disposable build output.
+The canonical image/checksum are `dist/scos-32bit.img` and
+`dist/scos-32bit.img.sha256`, with [provenance](docs/milestones/scos-32bit.json).
+Per the user's clarification, this image receives verified 32-bit fixes until
+64-bit development is explicitly started. At that point the final fixed 32-bit
+image is frozen and retained permanently. Stale r42 and duplicate versioned
+images are removed from the current tree; prior revisions remain in Git history.
+`dist/scos.img` is reserved for future 64-bit releases. `build/scos.img` is only
+a disposable build output.
 
 Run `python3 tools/check_milestone.py` to verify retention. The check also runs
 with `make`. No GitHub workflow was added: the connected GitHub App does not

@@ -2,16 +2,17 @@
 
 Status: **planning, source research and host-emulator preparation only**, 2026-09-19. No long-mode entry,
 64-bit kernel build target, userspace ABI, driver port or imported library has
-been added. r43 is now the 32-bit bug-fix release; r42 remains archived. Starting the conversion requires
+been added. r43 is now the 32-bit bug-fix release; r42 remains in Git history. Starting the conversion requires
 separate approval. This plan does not replace SCos with Linux.
 
 **Conversion gate remains closed:** [the 32-bit audit](../AUDIT-32BIT.md) found
 storage defects now corrected and tested in [r43](../RELEASE-r43.md). Final
 physical acceptance and explicit conversion permission remain outstanding.
 See the [wider hardware/browser comparison](HARDWARE-AND-BROWSER.md) and
-[obtained QEMU host tool](EMULATOR.md). The permanent image/provenance live in
-`dist/scos-32bit.img` and `docs/milestones/scos-32bit.json`; never replace/delete
-them when publishing a later fix or a 64-bit image.
+[obtained QEMU host tool](EMULATOR.md). The canonical image/provenance live in
+`dist/scos-32bit.img` and `docs/milestones/scos-32bit.json`. Update them for
+verified 32-bit fixes until 64-bit starts; then freeze and preserve the final
+32-bit image permanently. Do not replace it with a 64-bit image.
 
 ## Baseline and boundaries
 
@@ -89,8 +90,8 @@ flags are a separate configuration. Never link host glibc into the kernel.
 ## Ordered milestones and acceptance gates
 
 **Gate A — now:** finish 32-bit safety corrections and verification, then the
-user's physical test/fixes/retest and final acceptance. Preserve every published
-32-bit milestone; do not silently overwrite r42. Planning does not pass this gate.
+user's physical test/fixes/retest and final acceptance. Update the canonical
+32-bit image with verified patches; freeze it only when conversion starts. Planning does not pass this gate.
 
 **Gate B — explicit instruction:** only after acceptance and the user's separate
 conversion authorization may long-mode/kernel conversion start. Reset the new

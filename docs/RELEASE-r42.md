@@ -1,5 +1,5 @@
 > **Later audit notice (2026-09-19):** this is the historical r42 release record.
-> The same bytes are now permanently named `dist/scos-32bit.img`. A later QEMU
+> These bytes remain in Git history only; `dist/scos-32bit.img` now contains r43. A later QEMU
 > audit reproduced unsafe first-ATA-disk writes and found related reset issues.
 > Do not treat this historical verification record as final hardware clearance.
 > See [the current audit](AUDIT-32BIT.md) before using save/Factory Reset.
