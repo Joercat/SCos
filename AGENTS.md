@@ -48,3 +48,10 @@ See `docs/migration/BOOT64.md` for contracts, verification and limitations.
   never attach host physical disks/devices by default. Verify the actual image
   bytes pushed, not merely the checksum text. Build/emulator success is NOT
   physical-PC acceptance or proof of bug freedom.
+
+* On 2026-09-20 the user accepted the input/compositor fixes and explicitly
+  authorized this first open-source integration: independent app registration
+  and an adapted upstream Lua compiler/runtime for user-created apps. Lua and
+  its necessary freestanding numeric/format support subset are now approved.
+  This does not authorize new hardware drivers, networking, or a browser engine.
+  Keep upstream provenance/license notices and document port restrictions.

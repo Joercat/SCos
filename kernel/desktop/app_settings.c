@@ -229,8 +229,11 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
 static void st_key(struct window *w, struct key_event *e) { (void)w; (void)e; }
 
 struct app app_settings = {
+    .desktop_label = "Settings",
     .uses_data = 1, .id = "settings", .title = "Settings", .icon = ICON_SETTINGS, .single = 0,
     .def_w = 620, .def_h = 600, .min_w = 560, .min_h = 580,
     .open = st_open, .paint = st_paint, .key = st_key,
     .mouse = st_mouse, .close = st_close,
 };
+
+SCOS_APP(app_settings, 005);

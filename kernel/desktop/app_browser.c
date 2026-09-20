@@ -87,8 +87,11 @@ static void br_mouse(struct window *w, struct mouse_event *e, int x, int y)
 }
 
 struct app app_browser = {
+    .desktop_label = "Browser",
     .id = "browser", .title = "Web Browser", .icon = ICON_BROWSER, .single = 0,
     .def_w = 640, .def_h = 420,
     .open = br_open, .paint = br_paint, .key = br_key, .mouse = br_mouse,
     .close = br_close,
 };
+
+SCOS_APP(app_browser, 003);

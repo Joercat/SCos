@@ -52,11 +52,11 @@ void desktop_start(const struct boot_framebuffer *fb){
     strcpy(line,"rtc: ");fmt_u32(number,rtc.year);strcat(line,number);strcat(line,"-");fmt_pad2(number,rtc.mon);strcat(line,number);strcat(line,"-");fmt_pad2(number,rtc.day);strcat(line,number);
     boot_screen_step(line,82);
     theme_load_from_settings();apps_register_all();cpu_meter_init();wm_init();
-    boot_screen_step("wm: compositor initialized; original apps registered",94);
+    boot_screen_step("wm: compositor ready; native and Lua apps registered",94);
     boot_screen_step("Finishing... I think...",100);
     /* Original readable finished log; service input while showing it. */
     u64 until=timer_ticks+140;
     while(timer_ticks<until){usb_poll_events();cpu_hlt();}
-    klog_raw("desktop: original SCos apps active in x86-64; native PCI/USB/ATA/ACPI services initialized");
+    klog_raw("desktop: SCos native/Lua apps active in x86-64; native PCI/USB/ATA/ACPI services initialized");
     for(;;){wm_run();tty_run(0);}
 }

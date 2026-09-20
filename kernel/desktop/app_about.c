@@ -80,7 +80,10 @@ static void ab_key(struct window *w, struct key_event *e) { (void)w; (void)e; }
 static void ab_mouse(struct window *w, struct mouse_event *e, int x, int y) { (void)w; (void)e; (void)x; (void)y; }
 
 struct app app_about = {
+    .desktop_label = "About",
     .id = "about", .title = "About SCos", .icon = ICON_INFO, .single = 0,
     .def_w = 520, .def_h = 460,
     .paint = ab_paint, .key = ab_key, .mouse = ab_mouse,
 };
+
+SCOS_APP(app_about, 006);

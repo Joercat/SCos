@@ -26,11 +26,26 @@ ACPI has a manual-power fallback for unsupported firmware. Emulator success is
 
 For the first physical boot, use the [PC test guide and final USB-boot checks](docs/migration/PC-TEST.md). It distinguishes verified results from hardware requirements and includes safe flashing/UEFI settings.
 
+## Write your own apps
+
+The compositor now uses self-registering native apps and runtime-discovered Lua
+apps instead of hardcoded app/icon lists. **Lua 5.4.9's real compiler and VM** run
+inside SCos. Edit a `.lua` file in `/home/apps`, then launch it with `appstrt` —
+no rebuild or reboot. Try `appstrt counter` and `appstrt sketch`.
+
+See the [Lua app guide and API](docs/LUA-APPS.md),
+[verification record](docs/migration/LUA-VERIFICATION.md), and
+[open-source provenance/licenses](third_party/README.md). Runtime limits stop
+tested script failures; this remains a cooperative kernel, not a ring-3 security
+sandbox. Existing RAM-versus-ATA persistence limitations still apply.
+
 ## Build and emulator
 
 On Linux x86-64: GCC, GNU binutils (including the `i386pep` **AMD64 PE32+** linker
-emulation), Make and Python 3. Tested with GCC 12.2.0 and binutils 2.40. No EFI SDK,
-Windows runtime, host libc, FAT utilities or mounted filesystem is needed.
+emulation), Make, Python 3 and the standard Linux C development headers. Tested
+with GCC 12.2.0 and binutils 2.40. Headers provide declarations for the Lua port;
+no host libc or Windows runtime is linked. No EFI SDK, FAT utilities or mounted
+filesystem is needed.
 
 ```sh
 make                           # build/BOOTX64.EFI, kernel.elf and scos.img

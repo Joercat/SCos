@@ -293,8 +293,11 @@ static void np_mouse(struct window *w, struct mouse_event *e, int x, int y)
 }
 
 struct app app_notepad = {
+    .desktop_label = "Notepad", .file_editor = 1,
     .uses_data = 1, .id = "notepad", .title = "Notepad", .icon = ICON_NOTEPAD, .single = 0,
     .def_w = 700, .def_h = 500,
     .open = np_open, .paint = np_paint, .key = np_key,
     .mouse = np_mouse, .close = np_close,
 };
+
+SCOS_APP(app_notepad, 002);

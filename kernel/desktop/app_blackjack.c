@@ -254,8 +254,11 @@ static void bj_close(struct window *w)
 }
 
 struct app app_blackjack = {
+    .desktop_label = "Blackjack",
     .uses_data = 1, .id = "blackjack", .title = "Blackjack", .icon = ICON_CARDS, .single = 1,
     .def_w = 640, .def_h = 480,
     .open = bj_open, .paint = bj_paint, .key = bj_key,
     .mouse = bj_mouse, .close = bj_close,
 };
+
+SCOS_APP(app_blackjack, 007);

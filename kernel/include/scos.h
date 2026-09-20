@@ -316,6 +316,9 @@ struct app {
     void (*mouse)(struct window *w, struct mouse_event *e, int x, int y);
     void (*tick)(struct window *w);
     void (*close)(struct window *w);
+    const char *desktop_label;    /* optional short icon label */
+    int file_editor;             /* default editable-document handler */
+    const char *(*failure)(struct window *w); /* optional startup/runtime status */
 };
 
 #define WIN_TITLEBAR 26
@@ -406,14 +409,19 @@ void wm_fatal_screen(const char *line1, const char *line2);
 void wm_poweroff_screen(void);
 
 /* apps registry */
+#define SCOS_APP(symbol, order) \
+    static struct app * const scos_register_##symbol \
+    __attribute__((used,section(".scos_apps." #order),aligned(8))) = &(symbol)
+int app_register(struct app *app);
+struct window *app_open_document(const char *path);
+struct app *lua_app_install(const char *path);
+void lua_apps_refresh(void);
 void apps_register_all(void);
 struct app *app_find(const char *id);
 void wm_desktop_pin_file(const char *path);
 int  app_count(void);
 struct app *app_at(int i);
 
-struct app *wm_dialog_app(void);
-struct app *wm_error_app(void);
 
 /* boot screen */
 void boot_screen_step(const char *msg, int progress_pct);

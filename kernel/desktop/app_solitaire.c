@@ -370,8 +370,11 @@ static void sl_close(struct window *w)
 }
 
 struct app app_solitaire = {
+    .desktop_label = "Solitaire",
     .uses_data = 1, .id = "solitaire", .title = "Solitaire", .icon = ICON_SOL, .single = 1,
     .def_w = 700, .def_h = 500,
     .open = sl_open, .paint = sl_paint, .key = sl_key,
     .mouse = sl_mouse, .close = sl_close,
 };
+
+SCOS_APP(app_solitaire, 009);

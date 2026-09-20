@@ -26,7 +26,7 @@ $(BUILD)/vectors.S: tools/gen_vectors.py | $(BUILD)
 $(BUILD)/vectors.o: $(BUILD)/vectors.S
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
 $(BUILD)/kernel.elf: $(DRIVER_OBJECTS) $(DESKTOP_OBJECTS) $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o kernel/x86_64/linker.ld Makefile
-	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -Bsymbolic --build-id=none -z noexecstack -z max-page-size=0x1000 -T kernel/x86_64/linker.ld -o $@ $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o $(DESKTOP_OBJECTS) $(DRIVER_OBJECTS)
+	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -Bsymbolic --build-id=none -z noexecstack -z max-page-size=0x1000 -T kernel/x86_64/linker.ld -o $@ $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o $(DESKTOP_OBJECTS) $(DRIVER_OBJECTS) $(BUILD)/lua-runtime.o
 $(BUILD)/efi-main.o: boot/uefi/main.c boot/uefi/efi.h kernel/include/boot.h Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
 $(BUILD)/efi-font.o: kernel/src/font.c Makefile | $(BUILD)
@@ -45,3 +45,5 @@ $(BUILD)/desktop-%.o: kernel/desktop/%.c kernel/include/scos.h kernel/include/ke
 $(BUILD)/desktop-kbd.o $(BUILD)/desktop-mouse.o $(BUILD)/desktop-cpumeter.o $(BUILD)/desktop-klog.o $(BUILD)/desktop-platform.o: APP_CFLAGS = $(CFLAGS) -fno-strict-aliasing
 $(BUILD)/driver-%.o: kernel/drivers/%.c kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD)
 	$(CC) $(CFLAGS) -fno-strict-aliasing -c $< -o $@
+
+include kernel/lua/runtime.mk

@@ -380,8 +380,11 @@ static void files_key(struct window *w, struct key_event *e)
 }
 
 struct app app_files = {
+    .desktop_label = "Files",
     .uses_data = 1, .id = "files", .title = "File Explorer", .icon = ICON_FOLDER, .single = 0,
     .def_w = 700, .def_h = 500,
     .open = files_open, .paint = files_paint, .key = files_key,
     .mouse = files_mouse, .close = files_close,
 };
+
+SCOS_APP(app_files, 000);

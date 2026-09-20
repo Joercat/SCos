@@ -24,7 +24,13 @@ SECTIONS {
     . = ALIGN(4096);
     _rodata_end = .;
     _relro_start = .;
-    .data.rel.ro : { *(.data.rel.ro*) } :data
+    .data.rel.ro : {
+        *(.data.rel.ro*)
+        . = ALIGN(8);
+        __scos_apps_start = .;
+        KEEP(*(SORT_BY_NAME(.scos_apps.*)))
+        __scos_apps_end = .;
+    } :data
     . = ALIGN(4096);
     _relro_end = .;
     .dynamic : { *(.dynamic) } :data :dynamic

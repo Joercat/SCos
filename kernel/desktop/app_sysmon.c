@@ -266,8 +266,11 @@ static void sm_close(struct window *w)
 }
 
 struct app app_sysmon = {
+    .desktop_label = "SysMon",
     .uses_data = 1, .id = "sysmon", .title = "System Monitor", .icon = ICON_CHART, .single = 1,
     .def_w = 640, .def_h = 540,
     .open = sm_open, .paint = sm_paint, .key = sm_key,
     .mouse = sm_mouse, .tick = sm_tick, .close = sm_close,
 };
+
+SCOS_APP(app_sysmon, 008);

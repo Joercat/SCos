@@ -87,19 +87,6 @@ static u64 egg_last_spawn;
 
 static u64 last_blink_phase;
 
-static const struct { const char *app; int icon; const char *label; } desk_icons[] = {
-    { "files",    ICON_FOLDER,   "Files"    },
-    { "terminal", ICON_TERMINAL, "Terminal" },
-    { "notepad",  ICON_NOTEPAD,  "Notepad"  },
-    { "browser",  ICON_BROWSER,  "Browser"  },
-    { "calendar", ICON_CALENDAR, "Calendar" },
-    { "settings", ICON_SETTINGS, "Settings" },
-    { "about",    ICON_INFO,     "About"    },
-    { "blackjack", ICON_CARDS,   "Blackjack" },
-    { "sysmon",   ICON_CHART,    "SysMon"   },
-    { "solitaire", ICON_SOL,     "Solitaire" },
-};
-#define N_ICONS ((int)(sizeof(desk_icons)/sizeof(desk_icons[0])))
 static int icon_hover = -1;
 
 /* ---- taskbar layout: scrollable app buttons + power button + clock ---- */
@@ -465,7 +452,7 @@ static u32 desk_sel;                       /* selection bitmask */
 static int desk_drag = -1, desk_drag_ox, desk_drag_oy, desk_drag_moved;
 static int desk_sx, desk_sy;
 static int band_active, band_x0, band_y0, band_x1, band_y1;
-static struct { int active; char q[48]; int qpos; int hover; } launch;
+static struct { int active; char q[48]; int qpos; int hover, offset; } launch;
 
 static int ditem_icon(struct ditem *d)
 {
@@ -519,20 +506,22 @@ static void desktop_load(void)
         }
     }
     if (!nitems) {
-        for (int i = 0; i < N_ICONS && nitems < DESK_MAX; i++) {
+        for (int i = 0; i < app_count() && nitems < DESK_MAX; i++) {
+            const struct app *a = app_at(i);
+            if (a->id[0] == '_') continue;
             struct ditem *d = &items[nitems++];
             d->kind = 0;
-            strncpy(d->app, desk_icons[i].app, 31);
+            strncpy(d->app, a->id, 31);
             d->path[0] = 0;
-            strncpy(d->label, desk_icons[i].label, 39);
-            d->gx = i % 8; d->gy = i / 8; d->hidden = 0;
+            strncpy(d->label, a->desktop_label ? a->desktop_label : a->title, 39);
+            d->gx = (nitems - 1) % 8; d->gy = (nitems - 1) / 8; d->hidden = 0;
         }
     }
 }
 static void desktop_open(struct ditem *d)
 {
     if (d->kind == 0) wm_open_app(d->app, NULL);
-    else wm_open_app("notepad", d->path);
+    else app_open_document(d->path);
 }
 static void desk_remove_sel(void)
 {
@@ -582,10 +571,12 @@ static void desk_item_menu_cb(int item, void *ud)
 /* bring back every hidden app icon and re-add missing registered apps */
 static void desk_restore(void)
 {
+    lua_apps_refresh();
     for (int i = 0; i < nitems; i++)
         if (items[i].kind == 0) items[i].hidden = 0;
     for (int a = 0; a < app_count(); a++) {
         const struct app *ap = app_at(a);
+        if (ap->id[0] == '_') continue;
         int found = 0;
         for (int i = 0; i < nitems; i++)
             if (items[i].kind == 0 && strcmp(items[i].app, ap->id) == 0) found = 1;
@@ -594,7 +585,7 @@ static void desk_restore(void)
         memset(d, 0, sizeof(*d));
         d->kind = 0;
         strcpy(d->app, ap->id);
-        strcpy(d->label, ap->title);
+        strcpy(d->label, ap->desktop_label ? ap->desktop_label : ap->title);
         int placed = 0;
         for (int gy = 0; gy < DESK_ROWS && !placed; gy++)
             for (int gx = 0; gx < DESK_COLS && !placed; gx++)
@@ -986,7 +977,7 @@ static void paint_cursor(void)
 static int launch_match(int idx)
 {
     struct app *a = app_at(idx);
-    if (!a) return 0;
+    if (!a || a->id[0] == '_') return 0;
     if (!launch.q[0]) return 1;
     return strstr(a->id, launch.q) || strstr(a->title, launch.q);
 }
@@ -994,9 +985,10 @@ static int launch_match(int idx)
 /* Hit testing must not depend on the previous rendered hover frame. */
 static int launcher_at_point(void)
 {
-    int row = 0;
+    int row = 0, skipped = 0;
     for (int i = 0; i < app_count() && row < 10; i++) {
         if (!launch_match(i)) continue;
+        if (skipped++ < launch.offset) continue;
         if (in_rect(mx, my, 14, screen_h - TASKBAR_H - 255 + row * 24, 288, 22)) return i;
         row++;
     }
@@ -1009,16 +1001,17 @@ static void paint_launcher(void)
     int px = 8, py = screen_h - TASKBAR_H - 308, pw = 300, ph = 300;
     s_fill(&screen, px, py, pw, ph, t->win_bg);
     s_frame_rect(&screen, px, py, pw, ph, t->main);
-    s_text(&screen, px + 10, py + 8, "Launch an app (type to search)", t->main);
+    s_text(&screen, px + 10, py + 8, "Apps: type to search / scroll", t->main);
     s_frame_rect(&screen, px + 10, py + 26, pw - 20, 20, t->main);
     s_text(&screen, px + 14, py + 30, launch.q, t->text);
     if ((tick_count / 50) % 2 == 0)
         s_fill(&screen, px + 14 + s_text_width(launch.q), py + 30, 2, 12, t->main);
     int y = py + 56;
     launch.hover = -1;
-    int row = 0;
+    int row = 0, skipped = 0;
     for (int i = 0; i < app_count(); i++) {
         if (!launch_match(i)) continue;
+        if (skipped++ < launch.offset) continue;
         if (row >= 10) break;
         if (in_rect(mx, my, px + 6, y - 3, pw - 12, 22)) {
             launch.hover = i;
@@ -1344,6 +1337,15 @@ static void handle_mouse(struct mouse_event *e)
         (void)zone;
         return;
     }
+    if (e->type == MEV_WHEEL && launch.active &&
+        in_rect(mx,my,8,screen_h-TASKBAR_H-308,300,308)) {
+        int count=0;
+        for(int i=0;i<app_count();i++)if(launch_match(i))count++;
+        launch.offset += e->wheel>0 ? -1 : 1;
+        if(launch.offset>count-10)launch.offset=count>10?count-10:0;
+        if(launch.offset<0)launch.offset=0;
+        launch_dirty=1;dirty=1;return;
+    }
     if (e->type == MEV_WHEEL && my >= screen_h - TASKBAR_H) {
         int x0, x1, vis, scrollable;
         tb_geom(&x0, &x1, &vis, &scrollable);
@@ -1568,6 +1570,8 @@ static void handle_mouse(struct mouse_event *e)
     /* taskbar */
     if (my >= screen_h - TASKBAR_H) {
         if (in_rect(mx, my, 8, screen_h - TASKBAR_H + 6, 34, TASKBAR_H - 12)) {
+            lua_apps_refresh();
+            launch.offset = 0;
             launch.active = !launch.active;
             wm_full();
             launch.q[0] = 0; launch.qpos = 0;
@@ -1630,13 +1634,17 @@ static void handle_key(struct key_event *e)
     if (launch.active) {
         if (e->pressed && e->keycode == 27) { launch.active = 0; wm_full(); return; }
         if (e->pressed && e->keycode == '\n') {
+            int matches = 0;
             for (int i = 0; i < app_count(); i++)
-                if (launch_match(i)) { wm_open_app(app_at(i)->id, NULL); break; }
+                if (launch_match(i) && matches++ >= launch.offset) {
+                    wm_open_app(app_at(i)->id, NULL); break;
+                }
             launch.active = 0;
             wm_full();
             return;
         }
         edit_line(launch.q, &launch.qpos, sizeof(launch.q), e);
+        launch.offset = 0;
         launch_dirty = 1;
         dirty = 1;
         return;
@@ -1973,9 +1981,9 @@ void wm_fatal_screen(const char *line1, const char *line2)
     fb_flip();
 }
 
-/* app registry lives in apps.c; expose dialog/error apps to it */
-struct app *wm_dialog_app(void) { return &dialog_app; }
-struct app *wm_error_app(void) { return &error_app; }
+/* The WM registers its internal clients through the same app interface. */
+SCOS_APP(dialog_app, 900);
+SCOS_APP(error_app, 901);
 
 void wm_poweroff_screen(void)
 {

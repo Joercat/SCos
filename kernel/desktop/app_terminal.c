@@ -667,19 +667,24 @@ static void run_command(struct term *t, const char *command)
         }
     }
     else if (!strcmp(cmd, "appstrt")) {
+        lua_apps_refresh();
         /* r27: THE way to launch apps from the terminal. Like running a
          * program from a Linux shell: the window opens, this tab becomes
          * its console, and the app's real events stream in here. */
         if (nargs < 2) {
-            strcpy(response, "Usage: appstrt <app> [file]\nInstalled:");
+            strcpy(response, "Usage: appstrt <app|file.lua> [file]\nInstalled:");
             for (int i2 = 0; i2 < app_count(); i2++) {
                 struct app *a = app_at(i2);
                 if (!a || a->id[0] == '_') continue;
+                if (strlen(response)+strlen(a->id)+6 >= sizeof(response)) {
+                    strcat(response,"\n...");break;
+                }
                 strcat(response, " ");
                 strcat(response, a->id);
             }
         } else {
             struct app *a = app_find(args[1]);
+            if (!a) { char source[256]; resolve_path(t,args[1],source); a=lua_app_install(source); }
             if (!a || a->id[0] == '_') {
                 strcpy(response, "app "); strcat(response, args[1]);
                 strcat(response, " failed to launch: unknown app");
@@ -694,8 +699,12 @@ static void run_command(struct term *t, const char *command)
                     strcat(response, " failed to launch");
                 } else {
                     strcpy(response, "app "); strcat(response, args[1]);
-                    strcat(response, already ? " already running - focused"
-                                             : " started successfully");
+                    const char *failure=nw->app->failure ? nw->app->failure(nw) : NULL;
+                    if (failure) {
+                        strcat(response," stopped: ");
+                        strncat(response,failure,256);
+                    } else strcat(response, already ? " already running - focused"
+                                                    : " started successfully");
                 }
             }
         }
@@ -1076,6 +1085,7 @@ static void run_command(struct term *t, const char *command)
         }
     }
     else if (!strcmp(cmd, "apps")) {
+        lua_apps_refresh();
         strcpy(response, "ID          TITLE                 RUNNING\n");
         for (int i2 = 0; i2 < app_count(); i2++) {
             struct app *a = app_at(i2);
@@ -1088,8 +1098,10 @@ static void run_command(struct term *t, const char *command)
             char n[8];
             fmt_u32(n, (u32)wm_app_running(a->id));
             strcat(row, n); strcat(row, "\n");
-            if (strlen(response) + strlen(row) < sizeof(response) - 2)
-                strcat(response, row);
+            if (strlen(response)+strlen(row) >= sizeof(response)-40) {
+                strcat(response,"... use launcher search for more\n");break;
+            }
+            strcat(response,row);
         }
         response[strlen(response) - 1] = 0;
     }
@@ -1653,8 +1665,11 @@ static void term_tick(struct window *w)
 }
 
 struct app app_terminal = {
+    .desktop_label = "Terminal",
     .uses_data = 1, .id = "terminal", .title = "Terminal", .icon = ICON_TERMINAL, .single = 0,
     .def_w = 700, .def_h = 450,
     .open = term_open, .paint = term_paint, .key = term_key,
     .mouse = term_mouse, .tick = term_tick, .close = term_close,
 };
+
+SCOS_APP(app_terminal, 001);

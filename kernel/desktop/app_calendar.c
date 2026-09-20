@@ -175,8 +175,11 @@ static void cal_mouse(struct window *w, struct mouse_event *e, int x, int y)
 static void cal_key(struct window *w, struct key_event *e) { (void)w; (void)e; }
 
 struct app app_calendar = {
+    .desktop_label = "Calendar",
     .uses_data = 1, .id = "calendar", .title = "Calendar", .icon = ICON_CALENDAR, .single = 0,
     .def_w = 600, .def_h = 460,
     .open = cal_open, .paint = cal_paint, .key = cal_key,
     .mouse = cal_mouse, .close = cal_close,
 };
+
+SCOS_APP(app_calendar, 004);
