@@ -1,9 +1,16 @@
 # SCos x86-64 preparation — custom kernel retained
 
-Status: **planning and source research only**, 2026-09-19. No long-mode entry,
+Status: **planning, source research and host-emulator preparation only**, 2026-09-19. No long-mode entry,
 64-bit kernel build target, userspace ABI, driver port or imported library has
 been added. r42 remains the existing 32-bit OS. Starting the conversion requires
 separate approval. This plan does not replace SCos with Linux.
+
+**Current gate is closed:** [the final 32-bit audit](../AUDIT-32BIT.md) found a
+reproducible storage safety defect. Fix/retest it before the final hardware test.
+See the [wider hardware/browser comparison](HARDWARE-AND-BROWSER.md) and
+[obtained QEMU host tool](EMULATOR.md). The permanent image/provenance live in
+`dist/scos-32bit.img` and `docs/milestones/scos-32bit.json`; never replace/delete
+them when publishing a later fix or a 64-bit image.
 
 ## Baseline and boundaries
 
@@ -62,12 +69,13 @@ These are design requirements, not new compiled headers:
 ## Toolchain preparation
 
 Current build uses GCC 12.2.0, GNU binutils 2.40 and Python, targeting i386.
-The current environment does not provide a dedicated `x86_64-elf-gcc` or QEMU
-binary. The existing host compiler's availability is not a cross-toolchain
-readiness guarantee. A standalone compiler probe (not OS code) did produce an
-ELF64 AMD64 object with 8-byte pointers; this verifies code generation only.
-A QEMU installation attempt was blocked by package mirror
-access; no QEMU boot or ACPI power-off result is claimed.
+A dedicated `x86_64-elf-gcc` toolchain is not yet provisioned. The host compiler's
+availability is not a cross-toolchain readiness guarantee. A standalone compiler
+probe (not OS code) produced an ELF64 AMD64 object with 8-byte pointers; this
+verifies code generation only. **QEMU 11.0.2 is now obtained and running** through
+a pinned third-party musl package/local loader; see [provenance](EMULATOR.md).
+It booted the unchanged 32-bit image and exercised guest ACPI power-off.
+This is not a 64-bit SCos boot or a physical motherboard shutdown result.
 
 Before conversion, provision a version-pinned `x86_64-elf` GCC/binutils toolchain
 (or reviewed Clang/lld cross configuration), assembler and ELF inspection tools.
@@ -79,14 +87,30 @@ flags are a separate configuration. Never link host glibc into the kernel.
 
 ## Ordered milestones and acceptance gates
 
+**Gate A — now:** finish 32-bit safety corrections and verification, then the
+user's physical test/fixes/retest and final acceptance. Preserve every published
+32-bit milestone; do not silently overwrite r42. Planning does not pass this gate.
+
+**Gate B — explicit instruction:** only after acceptance and the user's separate
+conversion authorization may long-mode/kernel conversion start. Reset the new
+architecture's round to r1 at that point, not now. Reserve `dist/scos.img` for
+those future x86-64 images. The existing custom kernel/desktop remains the goal.
+
+**Gate C — after conversion:** restore and validate the converted core before
+asking for permission to add drivers/resources. New GPU/NIC/Wi-Fi/browser/libc
+imports are NOT implicitly approved by Gate B. The later milestones below are
+proposed order only and remain blocked until this separate instruction.
+
+
 1. **Approve boot/ABI plan and exact hardware targets.** Resolve the blockers
    below; select release versions after license/security review.
 2. **64-bit boot only.** Memory map, serial/panic output, framebuffer and
    exception handling; malformed boot data fails safely. No browser work yet.
 3. **Restore SCos behavior.** Allocator, interrupts, validated HID behavior,
    consoles, WM lifecycle and files. Re-run the r41 packet-boundary cases from
-   history plus real-PC repeated input before changing any driver algorithm.
-4. **Protected execution.** Separate userspace mappings, ELF loader, threads,
+   history plus real-PC repeated input before changing any driver algorithm. This core
+   conversion must be finished before the separate integration approval.
+4. **After Gate C: protected execution.** Separate userspace mappings, ELF loader, threads,
    syscalls and resource cleanup. A crashing app must not corrupt the kernel.
 5. **Wired network and libc.** Real NIC link/RX/TX, ARP, DHCP, DNS and TCP;
    test partial I/O, timeouts, disconnects and retransmission. No fake ping.
@@ -104,7 +128,8 @@ history, not in the current release tree.
 
 ## Blockers / information still needed
 
-* Dedicated GPU vendor/device/subsystem IDs and model; wired NIC PCI IDs.
+* Dedicated GPU vendor/device/subsystem IDs and model; wired/wireless NIC PCI
+  IDs or USB VID/PIDs, plus the display connector and enabled iGPU/dGPU setup.
   The i5-11400 CPU does not identify the installed dedicated GPU or NIC.
 * BIOS/CSM versus UEFI requirement for the next image, storage controller and
   intended persistent boot medium. Do not assume legacy ATA reaches USB storage.

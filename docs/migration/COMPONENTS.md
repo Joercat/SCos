@@ -7,6 +7,12 @@ versions. Recheck release tags, advisories and licenses before downloading a
 shipping dependency. Keep upstream code separate from SCos adapters and track
 local patches; do not rewrite whole libraries to conceal missing OS services.
 
+The expanded [hardware and browser comparison](HARDWARE-AND-BROWSER.md) covers
+auto-selection/fallback, Intel/AMD/NVIDIA, wired and wireless driver families,
+and genuinely integrated browser engines. Host QEMU is now obtained separately;
+no guest dependency has been imported. The [storage audit](../AUDIT-32BIT.md)
+blocks final 32-bit acceptance and therefore conversion.
+
 ## Recommended first candidates
 
 | Area | Candidate and reason | SCos adapter / prerequisites | License review |
@@ -70,7 +76,9 @@ archive SHA-256, complete licenses/notices, dependency closure, required host
 APIs, patch list, security advisory review and update owner. Test the unmodified
 upstream build separately before adding a narrow SCos adapter. Keep downloaded
 source archives and build outputs outside Git until intentionally vendored.
-No dependency source, firmware, binary package or library port is included now.
+No dependency source, firmware, binary package or library port is included in
+the guest or committed as a shipping dependency. The ignored host-only QEMU
+runtime and its bootstrap are documented separately in [EMULATOR.md](EMULATOR.md).
 In particular, do not assume an Apache-2.0 dependency is compatible with a
 GPL-2.0-only browser: review the actual licenses and any compatible dual-license
 option or choose another backend before combining distributions.

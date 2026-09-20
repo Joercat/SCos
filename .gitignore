@@ -3,3 +3,5 @@ build/
 *.iso
 node_modules/
 __pycache__/
+
+.tools/

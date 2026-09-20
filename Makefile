@@ -19,9 +19,12 @@ BUILD := build
 KERN_SRC := $(wildcard kernel/src/*.c)
 KERN_OBJ := $(patsubst kernel/src/%.c,$(BUILD)/kobj/%.o,$(KERN_SRC))
 
-.PHONY: all font clean
+.PHONY: all font clean milestone-check
 
-all: $(BUILD)/scos.img
+all: milestone-check $(BUILD)/scos.img
+
+milestone-check:
+	python3 tools/check_milestone.py
 
 $(BUILD)/kobj:
 	@mkdir -p $(BUILD)/kobj

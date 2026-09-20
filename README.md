@@ -7,6 +7,11 @@ applications, terminal and six text consoles. It is not a Linux distribution.
 **Current release: r42, still 32-bit.** Boot uses legacy BIOS/CSM, an MBR loader
 and a VBE framebuffer. There is no UEFI-only or x86-64 kernel build yet.
 
+**Final-test hold:** the new audit reproduced an unsafe disk-selection bug in
+`save` and found related Factory Reset error handling problems. Do not use those
+operations on real hardware with other attached ATA-accessible disks. This is
+not a bug-free/finally accepted image; see [the audit and required fixes](docs/AUDIT-32BIT.md).
+
 ## Build and boot
 
 On an x86 Linux development machine with GCC capable of `-m32` freestanding
@@ -14,7 +19,7 @@ compilation, GNU binutils, Make and Python 3:
 
 ```sh
 make                         # build/scos.img
-sha256sum -c dist/scos.img.sha256  # verify a published image, from repo root
+sha256sum -c dist/scos-32bit.img.sha256  # verify a published image, from repo root
 make font                    # optional: regenerate the bitmap font
 make clean                   # remove generated build files
 ```
@@ -25,8 +30,16 @@ back up the correct device first. Boot in the working BIOS/CSM configuration.
 Disk persistence currently depends on supported legacy ATA access: booting from
 USB does not by itself provide a USB mass-storage driver.
 
-The published image is `dist/scos.img`, with its SHA-256 in
-`dist/scos.img.sha256`. Build products are not source dependencies.
+The permanently retained **scos 32bit** image is `dist/scos-32bit.img`, with its
+SHA-256 in `dist/scos-32bit.img.sha256` and provenance in
+[the milestone manifest](docs/milestones/scos-32bit.json). It is the unchanged
+r42 image, not a newly fixed release. Never overwrite or delete it; further
+32-bit fixes must use new filenames. `dist/scos.img` is reserved for future
+64-bit releases. `build/scos.img` is only a disposable build output.
+
+Run `python3 tools/check_milestone.py` to verify retention. The check also runs
+with `make`. No GitHub workflow was added: the connected GitHub App does not
+have workflow-write permission. Build products are not source dependencies.
 
 ## Everyday controls
 
@@ -39,7 +52,8 @@ The published image is `dist/scos.img`, with its SHA-256 in
   processes; unsupported system kills are rejected rather than simulated.
 * Power controls are in the taskbar menu; `shutdown` is also available in the
   terminal and TTY. If firmware cannot power off, SCos displays the fallback
-  screen and halts. Restart and confirmed Factory Reset remain available.
+  screen and halts. Restart remains available; Factory Reset is currently subject
+  to the storage safety hold above.
 * `help` lists current commands. Kernel service/error logs, panic handling and
   WM-independent error reporting remain; temporary input capture and hardware
   diagnostic screens have been retired.
@@ -74,16 +88,23 @@ diagnostic screens/button, `diag`, `inputtrace`, raw-input recorder and raw HID
 report dumps were removed **after verification**. The old tooling is available
 in Git history at r41 (`72d6176445f1f5b66f2dd575de3f38b518ad32c3`); no emulator is
 required to build or run SCos. Panic/error handling and service logs are not
-removed. See [verification notes](docs/RELEASE-r42.md).
+removed. See [historical r42 verification notes](docs/RELEASE-r42.md).
+
+The new, separately requested [QEMU host environment](docs/migration/EMULATOR.md)
+is obtained and tested. It boots this 32-bit image and supports future x86-64
+full-system testing. It is not imported into the guest or required by the build.
 
 ## Preparing x86-64 — implementation has NOT begun
 
-The custom kernel and SCos identity will remain. The next step is a staged
-port, with lightweight upstream libraries and selected driver source adapted
+The custom kernel and SCos identity will remain. After the current 32-bit safety fixes, final physical test and explicit user
+permission, the next architectural step is a staged port, with lightweight
+upstream libraries and selected driver source adapted
 where practical, not automatic Linux binary/module compatibility.
 
 * [Migration plan, source audit, contracts and blocking decisions](docs/migration/README.md)
 * [Researched component shortlist and porting requirements](docs/migration/COMPONENTS.md)
+* [Wider GPU, Ethernet, Wi-Fi and integrated-browser comparison](docs/migration/HARDWARE-AND-BROWSER.md)
+* [Obtained QEMU runtime, reproducible bootstrap and usage](docs/migration/EMULATOR.md)
 * [Exact upstream research references](docs/migration/candidates.json)
 
 No library, GPU/network driver or new bootloader has been integrated. Browser,
@@ -91,3 +112,7 @@ network stack, protected userspace, 64-bit memory management and GPU acceleratio
 are future work. The current browser remains a stub; network metrics are not
 fabricated. The planning documents explicitly separate researched candidates
 from tested, working SCos support.
+
+The round remains **r42** during planning. Reset to **r1** only when the user
+explicitly authorizes conversion. Completing conversion is not permission to
+start drivers/resources: that requires a separate instruction afterward.

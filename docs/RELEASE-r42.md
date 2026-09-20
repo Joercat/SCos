@@ -1,3 +1,9 @@
+> **Later audit notice (2026-09-19):** this is the historical r42 release record.
+> The same bytes are now permanently named `dist/scos-32bit.img`. A later QEMU
+> audit reproduced unsafe first-ATA-disk writes and found related reset issues.
+> Do not treat this historical verification record as final hardware clearance.
+> See [the current audit](AUDIT-32BIT.md) before using save/Factory Reset.
+
 # r42 verification and scope record
 
 Date: 2026-09-19. This is still the custom **32-bit** SCos kernel.

@@ -71,6 +71,41 @@
       "review_reference": "65450656e502c2456b9b32b9dff09152f2a754b8",
       "license_metadata": "NOASSERTION",
       "status": "research candidate only; not imported, built, audited or integrated"
+    },
+    {
+      "project": "SerenityOS/serenity",
+      "url": "https://github.com/SerenityOS/serenity",
+      "review_reference": "5e5e449bc9a96885f17a9d0bc2de0450808d5850",
+      "license_metadata": "BSD-2-Clause",
+      "status": "research candidate only; not imported, built, fully audited or integrated"
+    },
+    {
+      "project": "LadybirdBrowser/ladybird",
+      "url": "https://github.com/LadybirdBrowser/ladybird",
+      "review_reference": "574594bd71e4af072547c2673bfd09117a379398",
+      "license_metadata": "BSD-2-Clause",
+      "status": "research candidate only; not imported, built, fully audited or integrated"
+    },
+    {
+      "project": "servo/servo",
+      "url": "https://github.com/servo/servo",
+      "review_reference": "08ac5f466f90e1c38599f6861914843147659b44",
+      "license_metadata": "MPL-2.0",
+      "status": "research candidate only; not imported, built, fully audited or integrated"
+    },
+    {
+      "project": "litehtml/litehtml",
+      "url": "https://github.com/litehtml/litehtml",
+      "review_reference": "b58fd1023244557949d859b61dd52149420b8762",
+      "license_metadata": "BSD-3-Clause",
+      "status": "research candidate only; not imported, built, fully audited or integrated"
+    },
+    {
+      "project": "bellard/quickjs",
+      "url": "https://github.com/bellard/quickjs",
+      "review_reference": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+      "license_metadata": "NOASSERTION",
+      "status": "research candidate only; not imported, built, fully audited or integrated"
     }
   ]
 }
