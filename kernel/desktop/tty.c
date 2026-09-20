@@ -746,6 +746,7 @@ static void tty_console_loop(void)
     tty_exit = 0;
     tty_draw();
     while (!tty_exit) {
+        interrupt_poll();
         usb_poll(); /* foreground only: never drive USB from SIMD-free IRQs */
         /* r37: error screens no longer depend on the WM - while this
          * console owns the screen IT presents pending non-fatal errors

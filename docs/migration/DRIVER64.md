@@ -130,6 +130,9 @@ Temporary test scripts, disposable disks, screenshots, reference downloads and
 logs are retired after verification; the legitimate pinned host QEMU tools stay.
 No temporary diagnostic guest commands/UI or v86 were added.
 
+The subsequent [complete existing-source audit](CONVERSION-AUDIT.md) goes beyond
+this driver inventory and records startup/diagnostic omissions found and restored.
+
 ## Explicit remaining limits
 
 * No physical i5-11400/GPU/USB-device acceptance yet; QEMU is not that hardware.

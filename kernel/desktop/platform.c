@@ -30,10 +30,33 @@ void desktop_start(const struct boot_framebuffer *fb){
     __asm__ volatile("mov %0,%%cr0;mov %1,%%cr4;fninit"::"r"(cr0),"r"(cr4):"memory");
     u32 mxcsr=0x1f80;__asm__ volatile("ldmxcsr %0"::"m"(mxcsr));
     mm_init();desktop_framebuffer(fb);fb_init();
+    boot_screen_init();
+    boot_screen_step("core: native IDT, PIT interrupts and page allocator ready",10);
+    char line[128],number[24],cpu[49];
+    cpu_brand(cpu,sizeof(cpu));strcpy(line,"cpu: ");strncat(line,cpu,48);
+    boot_screen_step(line,18);
+    strcpy(line,"mem: ");fmt_u64(number,mm_total_kb());strcat(line,number);strcat(line," KB managed");
+    boot_screen_step(line,25);
+    strcpy(line,"video: GOP ");fmt_u32(number,fb->width);strcat(line,number);strcat(line,"x");fmt_u32(number,fb->height);strcat(line,number);
+    boot_screen_step(line,32);
     if(!vfs_init_defaults())panic("initial desktop filesystem allocation failed");
-    acpi_init();ata_init();fs_image_load();
-    system_files_init(fs_image_available());theme_load_from_settings();apps_register_all();
-    kbd_init();mouse_init();usb_init();cpu_meter_init();wm_init();
+    boot_screen_step("vfs: factory file tree built",40);
+    acpi_init();int drives=ata_init();
+    strcpy(line,"ata: ");fmt_u32(number,(u32)drives);strcat(line,number);strcat(line," drive(s); ");strncat(line,fs_image_target(),70);
+    boot_screen_step(line,52);
+    int loaded=fs_image_load();system_files_init(fs_image_available());
+    boot_screen_step(loaded?"fs: verified saved tree loaded":fs_image_available()?"fs: defaults active; verified save target available":"fs: RAM-only; no supported verified save target",62);
+    kbd_init();mouse_init();usb_init();
+    input_status(line,sizeof(line));boot_screen_step(line,75);
+    struct rtc_time rtc;rtc_read(&rtc);
+    strcpy(line,"rtc: ");fmt_u32(number,rtc.year);strcat(line,number);strcat(line,"-");fmt_pad2(number,rtc.mon);strcat(line,number);strcat(line,"-");fmt_pad2(number,rtc.day);strcat(line,number);
+    boot_screen_step(line,82);
+    theme_load_from_settings();apps_register_all();cpu_meter_init();wm_init();
+    boot_screen_step("wm: compositor initialized; original apps registered",94);
+    boot_screen_step("Finishing... I think...",100);
+    /* Original readable finished log; service input while showing it. */
+    u64 until=timer_ticks+140;
+    while(timer_ticks<until){usb_poll_events();cpu_hlt();}
     klog_raw("desktop: original SCos apps active in x86-64; native PCI/USB/ATA/ACPI services initialized");
     for(;;){wm_run();tty_run(0);}
 }

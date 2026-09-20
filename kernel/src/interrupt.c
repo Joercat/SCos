@@ -14,6 +14,25 @@ static uint64_t gdt[5] __attribute__((aligned(16)));
 extern const uintptr_t isr_stubs[256];
 extern void load_gdt(const struct table_pointer *);
 volatile uint64_t timer_ticks;
+/* Original rate protection, with warnings deferred out of the IRQ graph. */
+static uint32_t irq_rate[16];
+static uint16_t storm_pending,unhandled_pending;
+static void irq_storm_sweep(void){
+    if(timer_ticks%100)return;
+    for(unsigned i=1;i<16;i++){
+        if(irq_rate[i]>=1500){pic_set_mask((uint8_t)i);storm_pending|=(uint16_t)(1u<<i);}
+        irq_rate[i]=0;
+    }
+}
+extern void klog(const char *,...);
+extern void err_notify(const char *,const char *,const char *const *,int);
+void interrupt_poll(void){
+    uint64_t flags;__asm__ volatile("pushfq;popq %0;cli":"=r"(flags)::"memory");
+    uint16_t storms=storm_pending,unknown=unhandled_pending;storm_pending=unhandled_pending=0;
+    if(flags&512)__asm__ volatile("sti":::"memory");
+    for(unsigned i=1;i<16;i++)if((storms|unknown)&(1u<<i))klog("interrupt: IRQ %u masked (%s)",i,(storms&(1u<<i))?"storm":"no handler");
+    if(storms||unknown)err_notify("interrupt controller","IRQ masked; see klog for line and cause",NULL,0);
+}
 static void (*irq_handlers[16])(struct interrupt_frame *);
 extern void cpu_meter_tick(void);
 extern void cpu_meter_irq_enter(void);
@@ -61,16 +80,22 @@ void timer_init(void) {
 }
 void interrupt_dispatch(struct interrupt_frame *f) {
     if(f->vector>=32&&f->vector<48)cpu_meter_irq_enter();
-    if(f->vector==32) {timer_ticks++;cpu_meter_tick();out8(0x20,0x20);return;}
+    if(f->vector==39) {out8(0x20,0x0b);if(!(in8(0x20)&128))return;}
+    if(f->vector==47) {out8(0xa0,0x0b);if(!(in8(0xa0)&128)){out8(0x20,0x20);return;}}
+    if(f->vector>32&&f->vector<48&&irq_rate[f->vector-32]!=UINT32_MAX)irq_rate[f->vector-32]++;
+    if(f->vector==32) {timer_ticks++;irq_storm_sweep();cpu_meter_tick();out8(0x20,0x20);return;}
     if(f->vector>32&&f->vector<48&&irq_handlers[f->vector-32]){
         irq_handlers[f->vector-32](f);
         if(f->vector>=40)out8(0xa0,0x20);
         out8(0x20,0x20);return;
     }
-    if(f->vector==39) {out8(0x20,0x0b);if(!(in8(0x20)&128))return;}
-    if(f->vector==47) {out8(0xa0,0x0b);if(!(in8(0xa0)&128)){out8(0x20,0x20);return;}}
-    /* Snapshot fault addresses before console I/O. Never dereference the
-     * interrupted RIP/RSP: they may themselves be unmapped/noncanonical. */
+    if(f->vector>32&&f->vector<48){
+        uint8_t irq=(uint8_t)(f->vector-32);pic_set_mask(irq);unhandled_pending|=(uint16_t)(1u<<irq);
+        if(irq>=8)out8(0xa0,0x20);
+        out8(0x20,0x20);return;
+    }
+    /* Snapshot fault addresses before console I/O. Stack inspection below
+     * requires mapped RAM; RIP is never dereferenced. */
     uint64_t fault_address=read_cr2(), page_root=read_cr3();
     console_fault_begin();
     putstr("\nEXCEPTION/UNEXPECTED INTERRUPT vector=");puthex(f->vector);
@@ -79,5 +104,15 @@ void interrupt_dispatch(struct interrupt_frame *f) {
     putstr("\nCR2=");puthex(fault_address);putstr(" CR3=");puthex(page_root);
     putstr("\nRAX=");puthex(f->rax);putstr(" RBX=");puthex(f->rbx);
     putstr(" RCX=");puthex(f->rcx);putstr(" RDX=");puthex(f->rdx);
+    putstr("\nRSI=");puthex(f->rsi);putstr(" RDI=");puthex(f->rdi);putstr(" RBP=");puthex(f->rbp);
+    putstr("\nR8 =");puthex(f->r8);putstr(" R9 =");puthex(f->r9);putstr(" R10=");puthex(f->r10);putstr(" R11=");puthex(f->r11);
+    putstr("\nR12=");puthex(f->r12);putstr(" R13=");puthex(f->r13);putstr(" R14=");puthex(f->r14);putstr(" R15=");puthex(f->r15);
+    putstr("\nCS=");puthex(f->cs);putstr(" SS=");puthex(f->ss);
+    putstr("\nStack at RSP (mapped RAM only):");
+    for(unsigned i=0;i<16;i++){
+        uint64_t value,offset=(uint64_t)i*8;
+        if(f->rsp>UINT64_MAX-offset||!memory_read_u64(f->rsp+offset,&value)){putstr(" <unavailable>");break;}
+        if(!(i%4))putstr("\n");else putstr(" ");puthex(value);
+    }
     panic("unhandled exception/interrupt");
 }

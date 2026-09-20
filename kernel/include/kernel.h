@@ -19,10 +19,13 @@ struct interrupt_frame {
 };
 _Static_assert(offsetof(struct interrupt_frame,vector)==120,"ISR ABI");
 _Static_assert(sizeof(struct interrupt_frame)==176,"ISR frame size");
+void pic_set_mask(uint8_t irq);
 void interrupts_init(void);
+void interrupt_poll(void); /* foreground-only deferred IRQ warnings */
 void interrupt_dispatch(struct interrupt_frame *);
 void timer_init(void);
 extern volatile uint64_t timer_ticks;
+int memory_read_u64(uint64_t address,uint64_t *out);
 void memory_init(const struct boot_handoff *,const struct efi_memory *);
 uintptr_t pages_allocate(size_t count);
 void pages_release(uintptr_t,size_t);

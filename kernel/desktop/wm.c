@@ -1733,6 +1733,7 @@ void wm_run(void)
         if (wm_stop_requested) goto stopped;
         irq_watchdog();
         if (err_pending()) err_show_pending();
+        interrupt_poll();
         usb_poll(); /* foreground only: never drive USB from SIMD-free IRQs */
         struct mouse_event me;
         while (mouse_poll(&me)) handle_mouse(&me);

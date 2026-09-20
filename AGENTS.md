@@ -33,6 +33,9 @@ See `docs/migration/BOOT64.md` for contracts, verification and limitations.
   remaining ORIGINAL PCI/xHCI/ATA/ACPI drivers; see DRIVER64.md. New hardware
   drivers/libraries remain outside that authorization.
   A bootable test image is NOT a complete OS or physical-PC acceptance.
+* The latest clarification authorizes completion of ALL already-written source,
+  not only driver files. See CONVERSION-AUDIT.md for the full disposition audit.
+  Do not start new drivers until the user verifies behavior and requests them.
 * Conversion approval is OPEN, but follow the user's component-by-component scope.
   New GPU/NIC/Wi-Fi/browser driver/library integration requires a SEPARATE
   instruction after conversion. Research is not approved integration.

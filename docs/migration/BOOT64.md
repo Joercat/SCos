@@ -1,4 +1,7 @@
 > Historical startup-only verification record. The active app/desktop integration
+
+> Follow-up: [CONVERSION-AUDIT.md](CONVERSION-AUDIT.md) records the restored
+> original boot presentation and extended native fault/IRQ diagnostics.
 > is documented in [APP64.md](APP64.md); startup-only limitations and image hashes
 > below describe that earlier checkpoint, not the current distribution.
 

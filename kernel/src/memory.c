@@ -155,3 +155,13 @@ static void *map_physical(uint64_t address,size_t bytes,int device){
 }
 void *mmio_map(uint64_t address,size_t bytes){return map_physical(address,bytes,1);}
 const void *firmware_map(uint64_t address,size_t bytes){return map_physical(address,bytes,0);}
+
+/* Fault-time inspection: no allocation, device reads or unmapped stack walks.
+ * Only backed RAM in our current identity map is eligible. */
+int memory_read_u64(uint64_t address,uint64_t *out){
+ if(!initialized||!out||address>=PHYSICAL_LIMIT||8>PHYSICAL_LIMIT-address)return 0;
+ int ram=0;
+ for(size_t i=0;i<owned_count;i++)if((boot_memory_usable(&owned_map[i])||owned_map[i].type==1||owned_map[i].type==2)&&address>=owned_map[i].physical&&address+8<=owned_map[i].physical+owned_map[i].pages*PAGE){ram=1;break;}
+ if(!ram||!mapped_leaf(address)||!mapped_leaf(address+7))return 0;
+ memcpy(out,(const void*)(uintptr_t)address,8);return 1;
+}

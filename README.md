@@ -54,6 +54,10 @@ first. Successful emulator USB boot does not establish motherboard/GPU acceptanc
 
 ## Implementation details and evidence
 
+[Existing-source completion audit](docs/migration/CONVERSION-AUDIT.md) accounts
+for every original kernel C file and records the restored startup presentation,
+native fault diagnostics and interrupt-rate protection. No new drivers were added.
+
 [App/desktop port provenance, fixes and verification](docs/migration/APP64.md)
 documents the current integration.
 
