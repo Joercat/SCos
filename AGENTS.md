@@ -19,9 +19,11 @@ See `docs/migration/BOOT64.md` for contracts, verification and limitations.
 * No BIOS/CSM, real-mode/protected-mode transitions or 32-bit build target should
   be restored. `i386pep` is GNU ld's AMD64 PE backend name, not a 32-bit mode.
   Keep native-width pointers and spec-sized protocol/register fields distinct.
-* Work only on the already-started startup components for now. The user will
-  specify the next subsystem to convert; do NOT start additional ports on your
-  own. A bootable test image is NOT a complete OS or physical-PC acceptance.
+* The user subsequently authorized apps and their necessary shared desktop
+  dependencies. Reuse/adapt original feature source from `6717943`, not simplified
+  replacements. `kernel/desktop/` is the active x64 port, not a legacy build.
+  USB/storage and additional hardware ports remain separate work; see APP64.md.
+  A bootable test image is NOT a complete OS or physical-PC acceptance.
 * Conversion approval is OPEN, but follow the user's component-by-component scope.
   New GPU/NIC/Wi-Fi/browser driver/library integration requires a SEPARATE
   instruction after conversion. Research is not approved integration.

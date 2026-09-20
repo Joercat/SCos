@@ -13,6 +13,7 @@ static uint64_t *root;
 static struct efi_memory owned_map[BOOT_MAP_MAX];
 static size_t owned_count;
 static int initialized;
+static uint64_t reserved_pages;
 static uint64_t irq_save(void){uint64_t f;__asm__ volatile("pushfq;popq %0;cli":"=r"(f)::"memory");return f;}
 static void irq_restore(uint64_t f){if(f&512)__asm__ volatile("sti":::"memory");}
 static uint64_t *new_table(void){
@@ -39,6 +40,7 @@ static int guard(uintptr_t p){return p==(uintptr_t)stack_guard||p==(uintptr_t)df
 static int overlaps(uint64_t a,uint64_t b,uint64_t c,uint64_t d){return a<d&&b>c;}
 void memory_init(const struct boot_handoff *b,const struct efi_memory *map){
  if(initialized)panic("memory initialized twice");
+ reserved_pages=(b->kernel_end-b->kernel_start+b->arena_size)/PAGE;
  owned_count=b->map_size/b->map_stride;
  memcpy(owned_map,map,owned_count*sizeof(*map));
  /* Reserve handoff/map prefix; table arena was explicitly allocated by UEFI,
@@ -82,28 +84,46 @@ void memory_init(const struct boot_handoff *b,const struct efi_memory *map){
  __asm__ volatile("wbinvd; mov %0,%%cr0"::"r"(cr0):"memory");
  initialized=1;
 }
-uintptr_t page_allocate(void){
+/* Contiguous extents are needed by existing surface/document buffers. Both the
+ * single-page API and desktop heap use this one ownership/accounting authority. */
+uintptr_t pages_allocate(size_t count){
  uint64_t f=irq_save();
  if(!initialized)panic("allocation before memory ownership established");
- if(!range_count){irq_restore(f);return 0;}
- uintptr_t p=free_ranges[0].start;free_ranges[0].start+=PAGE;free_pages--;
- if(free_ranges[0].start==free_ranges[0].end){for(size_t i=1;i<range_count;i++)free_ranges[i-1]=free_ranges[i];range_count--;}
- memset((void*)p,0,PAGE);irq_restore(f);return p;
+ if(!count||count>PHYSICAL_LIMIT/PAGE){irq_restore(f);return 0;}
+ uint64_t bytes=count*PAGE;
+ for(size_t i=0;i<range_count;i++)if(free_ranges[i].end-free_ranges[i].start>=bytes){
+  uintptr_t p=free_ranges[i].start;free_ranges[i].start+=bytes;free_pages-=count;
+  if(free_ranges[i].start==free_ranges[i].end){for(size_t j=i+1;j<range_count;j++)free_ranges[j-1]=free_ranges[j];range_count--;}
+  memset((void*)p,0,bytes);irq_restore(f);return p;
+ }
+ irq_restore(f);return 0;
 }
-void page_release(uintptr_t p){
+static int span_owned(uintptr_t p,uintptr_t end){
+ while(p<end){uintptr_t next=p;
+  for(size_t i=0;i<owned_count;i++)if(boot_memory_usable(&owned_map[i])&&p>=owned_map[i].physical&&p<owned_map[i].physical+owned_map[i].pages*PAGE){next=owned_map[i].physical+owned_map[i].pages*PAGE;break;}
+  if(next==p)return 0;
+  p=next;
+ }
+ return 1;
+}
+void pages_release(uintptr_t p,size_t count){
  uint64_t f=irq_save();
- if(!initialized||!p||(p&(PAGE-1))||!boot_range_usable(owned_map,owned_count,p,PAGE))panic("release outside owned conventional RAM");
+ if(!initialized||!p||(p&(PAGE-1))||!count||p>=PHYSICAL_LIMIT||count>(PHYSICAL_LIMIT-p)/PAGE||!span_owned(p,p+count*PAGE))panic("release outside owned conventional RAM");
+ uintptr_t end=p+count*PAGE;
  size_t i=0;while(i<range_count&&free_ranges[i].end<=p)i++;
- if(i<range_count&&free_ranges[i].start<p+PAGE)panic("double page release");
+ if(i<range_count&&free_ranges[i].start<end)panic("double/overlapping page release");
  if(i&&free_ranges[i-1].end==p){
-  free_ranges[i-1].end+=PAGE;
-  if(i<range_count&&free_ranges[i].start==p+PAGE){free_ranges[i-1].end=free_ranges[i].end;for(size_t j=i+1;j<range_count;j++)free_ranges[j-1]=free_ranges[j];range_count--;}
- }else if(i<range_count&&free_ranges[i].start==p+PAGE)free_ranges[i].start=p;
+  free_ranges[i-1].end=end;
+  if(i<range_count&&free_ranges[i].start==end){free_ranges[i-1].end=free_ranges[i].end;for(size_t j=i+1;j<range_count;j++)free_ranges[j-1]=free_ranges[j];range_count--;}
+ }else if(i<range_count&&free_ranges[i].start==end)free_ranges[i].start=p;
  else{
   if(range_count==EXTENTS)panic("free-range fragmentation capacity exceeded");
   for(size_t j=range_count;j>i;j--)free_ranges[j]=free_ranges[j-1];
-  free_ranges[i]=(struct extent){p,p+PAGE};range_count++;
+  free_ranges[i]=(struct extent){p,end};range_count++;
  }
- free_pages++;irq_restore(f);
+ free_pages+=count;irq_restore(f);
 }
+uintptr_t page_allocate(void){return pages_allocate(1);}
+void page_release(uintptr_t p){pages_release(p,1);}
 uint64_t memory_free_pages(void){return free_pages;}
+uint64_t memory_reserved_pages(void){return reserved_pages;}

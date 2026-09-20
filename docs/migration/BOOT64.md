@@ -1,3 +1,7 @@
+> Historical startup-only verification record. The active app/desktop integration
+> is documented in [APP64.md](APP64.md); startup-only limitations and image hashes
+> below describe that earlier checkpoint, not the current distribution.
+
 # Native x64 UEFI startup — implementation and verification
 
 2026-09-20. The user explicitly selected **UEFI only** and separately confirmed

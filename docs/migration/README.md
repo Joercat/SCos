@@ -1,6 +1,8 @@
 # SCos x86-64 conversion — custom kernel retained
 
 Status, 2026-09-20: **native x64 UEFI startup implemented; BIOS path removed**.
+The subsequently authorized app/shared-desktop port is described in
+[APP64.md](APP64.md); it reuses original source and is now active.
 See [BOOT64.md](BOOT64.md) for the implemented boot ABI, test results and explicit
 limitations. Root `make` is AMD64. Duplicate i386 sources were removed on 2026-09-20;
 retrieve individual porting references from commit `6717943` when needed.
@@ -28,8 +30,9 @@ We prefer narrow upstream adapters over maintaining large rewritten forks.
 ## Original i386 audit and remaining conversion work
 
 The paths below refer to historical `legacy/i386/` at commit `6717943`,
-not present-tree files. Boot/interrupt/basic page-pool work
-is implemented as documented in BOOT64; the remaining entries are a roadmap.
+not present-tree files. This table records the original audit, not current
+bootloader choices. BOOT64 supersedes its boot/paging proposals; APP64 covers
+implemented app/shared-desktop work. Other entries remain a roadmap.
 
 | Current location/assumption | Future requirement |
 | --- | --- |
@@ -119,15 +122,15 @@ history, not in the current release tree.
 * Dedicated GPU vendor/device/subsystem IDs and model; wired/wireless NIC PCI
   IDs or USB VID/PIDs, plus the display connector and enabled iGPU/dGPU setup.
   The i5-11400 CPU does not identify the installed dedicated GPU or NIC.
-* BIOS/CSM versus UEFI requirement for the next image, storage controller and
-  intended persistent boot medium. Do not assume legacy ATA reaches USB storage.
+* Storage controller and intended persistent boot medium. The boot decision is
+  already resolved: x64 UEFI only. Do not assume legacy ATA reaches USB storage.
 * Which websites/browser features define success. A small browser for documents
   is a different target from Chromium-class web applications and video/DRM.
 * SCos project license/redistribution policy, upstream component license review,
   firmware redistribution rights, version pins and security update ownership.
-* Approved bootloader, userspace ABI, toolchain and a repeatable 64-bit boot
-  verification environment. Neither full hardware support nor completion of
-  these gates is claimed by this preparation package.
+* Future userspace/isolation ABI and remaining driver interfaces. The native
+  bootloader, toolchain and host QEMU environment are already implemented.
+  Full hardware support and physical acceptance remain outstanding.
 
 See [COMPONENTS.md](COMPONENTS.md) for the researched shortlist and
 [candidates.json](candidates.json) for exact research reference commits.

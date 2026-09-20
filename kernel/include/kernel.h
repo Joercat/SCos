@@ -9,6 +9,7 @@ static inline uint64_t read_cr2(void) { uint64_t v; __asm__ volatile("mov %%cr2,
 void *memset(void *,int,size_t);
 void *memcpy(void *,const void *,size_t);
 void console_init(const struct boot_framebuffer *);
+void console_fault_begin(void);
 void putstr(const char *);
 void puthex(uint64_t);
 _Noreturn void panic(const char *);
@@ -23,6 +24,9 @@ void interrupt_dispatch(struct interrupt_frame *);
 void timer_init(void);
 extern volatile uint64_t timer_ticks;
 void memory_init(const struct boot_handoff *,const struct efi_memory *);
+uintptr_t pages_allocate(size_t count);
+void pages_release(uintptr_t,size_t);
+uint64_t memory_reserved_pages(void);
 uintptr_t page_allocate(void);
 void page_release(uintptr_t);
 uint64_t memory_free_pages(void);

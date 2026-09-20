@@ -36,7 +36,20 @@ static void emit(char c){
 }
 void putstr(const char *s){while(*s)emit(*s++);}
 void puthex(uint64_t n){putstr("0x");for(int i=60;i>=0;i-=4)emit("0123456789abcdef"[(n>>i)&15]);}
+/* Fatal output owns scanout directly, even with a dead/corrupt compositor.
+ * Clear only once so panic does not erase the preceding register dump. */
+void console_fault_begin(void){
+ static int started;
+ if(started)return;
+ started=1;
+ if(fb.base)console_init(&fb);
+}
+extern const char *const panic_art[];
+extern const int panic_art_lines;
 _Noreturn void panic(const char *s){
- __asm__ volatile("cli");putstr("\nSCos PANIC: ");putstr(s);putstr("\nCPU halted. Power off manually.\n");
+ __asm__ volatile("cli");
+ console_fault_begin();
+ for(int i=0;i<panic_art_lines;i++){putstr("\n");putstr(panic_art[i]);}
+ putstr("\nSCos PANIC: ");putstr(s);putstr("\nCPU halted. Power off manually.\n");
  for(;;)__asm__ volatile("hlt");
 }

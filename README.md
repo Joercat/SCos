@@ -7,9 +7,18 @@ SCos keeps its own kernel and identity; it is not a Linux distribution.
 The startup path now loads a relocatable ELF64 kernel, exits UEFI boot services,
 uses the GOP framebuffer, owns its page tables and physical-memory allocator,
 and establishes exception handling and real timer interrupts. This is an
-implemented firmware-to-kernel path, **not the completed desktop OS**. Input,
-applications, storage persistence, power management and the desktop still await
-their separate conversion steps. No new release number is assigned.
+implemented firmware-to-kernel path, **not the completed OS conversion**.
+The original SCos apps and shared desktop have now been adapted to x64 rather
+than replaced: Terminal, Files, Notepad, Calendar, Settings, About, Blackjack,
+Solitaire, SysMon and the existing browser-unavailable notice. The compositor,
+six TTYs, RAM filesystem, themes and PS/2 input are connected to the native core.
+No new release number is assigned.
+
+**Still unavailable:** native USB HID, disk persistence, networking/browser
+engine, accelerated GPU drivers and ACPI power-off. Files/settings are RAM-only;
+shutdown shows the safe-to-turn-off fallback. A USB boot medium is not the same
+thing as USB keyboard/mouse support after UEFI exits. Do not treat this build as
+ready for the user's USB-input PC.
 
 ## Build and emulator
 
@@ -39,6 +48,9 @@ first. Successful emulator USB boot does not establish motherboard/GPU acceptanc
 
 ## Implementation details and evidence
 
+[App/desktop port provenance, fixes and verification](docs/migration/APP64.md)
+documents the current integration.
+
 [Native UEFI startup contract, limits and verification](docs/migration/BOOT64.md)
 covers the loader, relocations, firmware exit/retry rules, memory ownership,
 GOP console, error paths, allocator, interrupts and exact testing scope.
@@ -49,7 +61,8 @@ GOP console, error paths, allocator, interrupts and exact testing scope.
 
 No new GPU/NIC/browser stack was imported. The GOP console uses firmware-provided
 pixels, not a native GPU acceleration driver. The existing architecture-independent
-SCos bitmap font was retained for this console; the old desktop was not restored.
+SCos bitmap font and original desktop drawing primitives are reused. No BIOS,
+VBE startup or obsolete i386 allocator was brought back.
 
 ## Frozen historical milestone
 

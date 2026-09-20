@@ -14,6 +14,16 @@ static uint64_t gdt[5] __attribute__((aligned(16)));
 extern const uintptr_t isr_stubs[256];
 extern void load_gdt(const struct table_pointer *);
 volatile uint64_t timer_ticks;
+static void (*irq_handlers[16])(struct interrupt_frame *);
+extern void cpu_meter_tick(void);
+extern void cpu_meter_irq_enter(void);
+void irq_install(uint8_t irq,void (*handler)(struct interrupt_frame *)){
+    if(irq>=16||irq==0)panic("invalid app-platform IRQ registration");
+    irq_handlers[irq]=handler;
+}
+void pic_clear_mask(uint8_t irq){if(irq<16){uint16_t p=irq<8?0x21:0xa1;out8(p,in8(p)&~(1u<<(irq&7)));}}
+void pic_set_mask(uint8_t irq){if(irq<16){uint16_t p=irq<8?0x21:0xa1;out8(p,in8(p)|(1u<<(irq&7)));}}
+
 void interrupts_init(void) {
     memset(&tss,0,sizeof(tss));
     tss.rsp0=(uintptr_t)stack_top;
@@ -50,12 +60,19 @@ void timer_init(void) {
     out8(0x43,0x36);out8(0x40,(uint8_t)divisor);out8(0x40,(uint8_t)(divisor>>8));
 }
 void interrupt_dispatch(struct interrupt_frame *f) {
-    if(f->vector==32) {timer_ticks++;out8(0x20,0x20);return;}
+    if(f->vector>=32&&f->vector<48)cpu_meter_irq_enter();
+    if(f->vector==32) {timer_ticks++;cpu_meter_tick();out8(0x20,0x20);return;}
+    if(f->vector>32&&f->vector<48&&irq_handlers[f->vector-32]){
+        irq_handlers[f->vector-32](f);
+        if(f->vector>=40)out8(0xa0,0x20);
+        out8(0x20,0x20);return;
+    }
     if(f->vector==39) {out8(0x20,0x0b);if(!(in8(0x20)&128))return;}
     if(f->vector==47) {out8(0xa0,0x0b);if(!(in8(0xa0)&128)){out8(0x20,0x20);return;}}
     /* Snapshot fault addresses before console I/O. Never dereference the
      * interrupted RIP/RSP: they may themselves be unmapped/noncanonical. */
     uint64_t fault_address=read_cr2(), page_root=read_cr3();
+    console_fault_begin();
     putstr("\nEXCEPTION/UNEXPECTED INTERRUPT vector=");puthex(f->vector);
     putstr(" error=");puthex(f->error);putstr("\nRIP=");puthex(f->rip);
     putstr(" RSP=");puthex(f->rsp);putstr(" RFLAGS=");puthex(f->rflags);
