@@ -146,3 +146,22 @@ as having been rerun in full for every app edit.
 
 Distribution: `dist/scos.img`, 67,108,864 bytes. SHA-256:
 `3726da9c3a700c7f12a0f5bcda22c40d3e43722423c68b7094c7c683970f71df`.
+
+## Follow-up review of the reuse decision
+
+The repeated clarification was checked against the existing published port
+`d2ea7ad49af0dbaebb3f13f0f5583ef543971a82`; that implementation was preserved,
+not replaced by a second rewrite. There are 8,871 lines in the 29 desktop C
+files. In particular, the Solitaire feature source is byte-identical to the
+original reference. Other app files retain original code with targeted fixes
+and native-interface changes as described above. Line counts describe source
+retention, not correctness or functional completeness.
+
+The follow-up review rebuilt the current source, checked exact equality with
+`dist/scos.img`, and independently booted that image under x64 EDK2/QEMU at
+256 MiB. Real PS/2 keyboard events switched to TTY1, executed `calc 6 - 2`
+with visible result `4`, and ran `appstrt solitaire`, returning to the original
+compositor with the Solitaire window and cards rendered. These are fresh smoke
+checks; the broader fixture and interaction matrix above records the existing
+port's earlier verification, not a claim that every case was rerun here.
+Temporary screenshots and emulator state from this review were removed.

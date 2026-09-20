@@ -6,6 +6,13 @@ an AMD64 PE32+ UEFI application, relocatable ELF64 kernel and GPT/FAT32 image.
 See `docs/migration/BOOT64.md` for contracts, verification and limitations.
 
 * Keep the custom SCos kernel and identity. Never replace it with Linux.
+* The user clarified that conversion means adapting the original implementation,
+  not rewriting the OS from scratch. Preserve reusable app/desktop behavior and
+  source; architecture cleanup is not permission to discard unported features.
+  Rework only components whose actual dependencies or correctness require it.
+  Do not use a smaller line count or a clean compile as evidence of equivalence.
+  Keep the user's detailed, thoughtful implementation and verification rule in
+  force for every conversion part, including shared app dependencies.
 * `dist/scos-32bit.img` is now permanently frozen at the verified r43 bytes.
   Preserve its checksum, provenance and integrity guard. Do not overwrite it
   with future builds. Historical revisions remain in Git history.
