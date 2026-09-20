@@ -11,7 +11,8 @@ The expanded [hardware and browser comparison](HARDWARE-AND-BROWSER.md) covers
 auto-selection/fallback, Intel/AMD/NVIDIA, wired and wireless driver families,
 and genuinely integrated browser engines. Host QEMU is now obtained separately;
 no guest dependency has been imported. The [storage audit](../AUDIT-32BIT.md) findings are corrected/tested in r43;
-final physical acceptance and conversion permission are still pending.
+the user has now authorized conversion and the first [startup foundation](BOOT64.md)
+is implemented. Separate post-conversion integration permission is still required.
 
 ## Recommended first candidates
 

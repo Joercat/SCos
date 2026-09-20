@@ -1,90 +1,50 @@
 #!/usr/bin/env python3
-"""
-SCos native - assemble the bootable disk image.
-
-Layout:
-  sector 0        stage1 (MBR)
-  sectors 1..16   stage2 (padded to 8 KB)
-  sector 17..     kernel flat binary
-
-stage2 contains two patchable u32 fields (kernel_start_lba,
-kernel_sector_count); their offsets are read from the stage2 ELF symbol
-table and patched here.
-"""
-import re
+"""Package the BIOS bootstrap + ELF64-derived kernel, never a 32-bit persistence disk."""
+from pathlib import Path
+import struct
 import subprocess
 import sys
-import os
+import zlib
 
-SECTOR = 512
-STAGE2_SECTORS = 16
-KERNEL_START = 17
-IMG_SECTORS = 16384      # 8 MB
+def symbols(path):
+    result={}
+    for line in subprocess.check_output(['nm','--defined-only',str(path)],text=True).splitlines():
+        fields=line.split()
+        if len(fields)==3: result[fields[2]]=int(fields[0],16)
+    return result
 
+def main(directory):
+    d=Path(directory)
+    mbr=(d/'stage1.bin').read_bytes()
+    stage=bytearray((d/'stage2.bin').read_bytes())
+    kernel=(d/'kernel.bin').read_bytes()
+    elf=(d/'kernel.elf').read_bytes()
+    if elf[:6]!=b'\x7fELF\x02\x01' or struct.unpack_from('<H',elf,18)[0]!=62:
+        raise ValueError('kernel must be little-endian ELF64 AMD64')
+    k=symbols(d/'kernel.elf');s=symbols(d/'stage2.elf')
+    if k['_start']!=0x100000 or not 0x100000<k['_file_end']<=k['_kernel_end']<=0x1000000:
+        raise ValueError('invalid linked kernel spans')
+    file_size=k['_file_end']-0x100000
+    if not kernel or len(kernel)>file_size or not 0<file_size<=0x60000:
+        raise ValueError('kernel does not fit legacy BIOS staging policy')
+    kernel=kernel.ljust(file_size,b'\0')
+    if len(mbr)!=512 or mbr[510:]!=b'\x55\xaa' or any(mbr[400:510]):
+        raise ValueError('invalid MBR/reserved label area')
+    if len(stage)>8192: raise ValueError('stage2 exceeds 16 sectors')
+    patches={'kernel_start_lba':17,'kernel_sector_count':(file_size+511)//512,
+             'kernel_file_bytes':file_size,'kernel_memory_end':k['_kernel_end'],'kernel_crc32':zlib.crc32(kernel)}
+    for name,value in patches.items():
+        off=s[name]-0x8000
+        if not 0<=off<=len(stage)-4: raise ValueError('bad stage2 symbol '+name)
+        struct.pack_into('<I',stage,off,value)
+    image=bytearray(8*1024*1024)
+    image[:512]=mbr
+    image[400:412]=b'SCOSBOOT64v1' # not recognized as writable by legacy SCos
+    image[512:512+len(stage)]=stage
+    image[17*512:17*512+file_size]=kernel
+    if len(image)!=8*1024*1024 or image[510:512]!=b'\x55\xaa':
+        raise ValueError('image length/signature mismatch')
+    (d/'scos.img').write_bytes(image)
+    print(f'AMD64 image: {file_size} kernel file bytes; memory end {k["_kernel_end"]:#x}')
 
-def symbol_offsets(elf, names):
-    out = subprocess.run(["objdump", "-t", elf], capture_output=True, text=True)
-    offs = {}
-    for line in out.stdout.splitlines():
-        for n in names:
-            m = re.search(r"^([0-9a-f]+)\s.*\s\.text\s+" + n + r"$", line)
-            if not m:
-                m = re.search(r"^([0-9a-f]+)\s.*\s" + n + r"$", line)
-            if m:
-                offs[n] = int(m.group(1), 16)
-    return offs
-
-
-def main(build_dir):
-    stage1 = open(os.path.join(build_dir, "stage1.bin"), "rb").read()
-    stage2 = open(os.path.join(build_dir, "stage2.bin"), "rb").read()
-    kernel = open(os.path.join(build_dir, "kernel.bin"), "rb").read()
-
-    if len(stage1)!=SECTOR or stage1[510:]!=b"\x55\xaa":
-        raise ValueError("invalid MBR")
-    if any(stage1[400:510]):
-        raise ValueError("MBR code overlaps reserved ownership descriptor")
-    if len(stage2)>STAGE2_SECTORS*SECTOR:
-        raise ValueError("stage2 too big")
-    # Conservative legacy low-memory staging cap: 0x20000..0x80000.
-    if not kernel or (len(kernel)+511)//512*512 > 0x60000:
-        raise ValueError("kernel exceeds legacy BIOS staging policy")
-    if KERNEL_START*512+len(kernel)>2048*512:
-        raise ValueError("kernel overlaps persistence")
-    import struct
-    stage1=bytearray(stage1)
-    stage1[400:412]=b"SCOSDISK32v1"
-    struct.pack_into("<IIII",stage1,412,2048,256,IMG_SECTORS,len(kernel))
-
-    offs = symbol_offsets(os.path.join(build_dir, "stage2.elf"),
-                          ["kernel_start_lba", "kernel_sector_count"])
-    kernel_lba = KERNEL_START
-    kernel_sectors = (len(kernel) + SECTOR - 1) // SECTOR
-
-    for name in ("kernel_start_lba","kernel_sector_count"):
-        if name not in offs or not 0 <= offs[name]-0x8000 <= len(stage2)-4:
-            raise ValueError("invalid stage2 patch symbol: "+name)
-    stage2 = bytearray(stage2 + b"\0" * (STAGE2_SECTORS * SECTOR - len(stage2)))
-    import struct
-    o = offs["kernel_start_lba"] - 0x8000
-    struct.pack_into("<I", stage2, o, kernel_lba)
-    o = offs["kernel_sector_count"] - 0x8000
-    struct.pack_into("<I", stage2, o, kernel_sectors)
-
-    img = bytearray(IMG_SECTORS * SECTOR)
-    img[0:SECTOR] = stage1
-    img[SECTOR:SECTOR + len(stage2)] = stage2
-    kstart = KERNEL_START * SECTOR
-    img[kstart:kstart + len(kernel)] = kernel
-
-    if len(img)!=IMG_SECTORS*SECTOR or img[510:512]!=b"\x55\xaa":
-        raise ValueError("assembled image size/signature mismatch")
-    out = os.path.join(build_dir, "scos.img")
-    open(out, "wb").write(bytes(img))
-    print(f"makedisk: {out}  kernel={len(kernel)} bytes "
-          f"({kernel_sectors} sectors @ LBA {kernel_lba})")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "build"))
+if __name__=='__main__': main(sys.argv[1] if len(sys.argv)>1 else 'build')

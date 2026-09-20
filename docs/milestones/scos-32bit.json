@@ -5,9 +5,9 @@
   "source_commit": "edb89550fff5f32363be53d6f47a2ceb1973fa2f",
   "sha256": "43c2bce097389179aff9965779148c82a4907017c392f996a6602f727efb0c97",
   "bytes": 8388608,
-  "retention": "Update with verified 32-bit fixes until authorized 64-bit development starts; then retain the final 32-bit image permanently unchanged",
-  "hardware_acceptance": "Host and QEMU storage/input/WM/power checks passed; final physical acceptance pending",
+  "retention": "Permanently frozen at the authorized start of x86-64 conversion on 2026-09-19; never overwrite or delete",
+  "hardware_acceptance": "User reported no major remaining blockers and explicitly authorized conversion; detailed r43 checks remain documented separately",
   "verification": "docs/RELEASE-r43.md",
-  "future_fix_policy": "Before conversion, replace this canonical image and update checksum/provenance/guard together. Remove obsolete duplicate release images from the current tree; Git history preserves prior revisions.",
-  "status": "Updating 32-bit baseline; not yet frozen"
+  "future_fix_policy": "Frozen reference. Publish x86-64 development images separately as dist/scos.img; prior 32-bit revisions remain in Git history.",
+  "status": "Frozen final 32-bit baseline"
 }

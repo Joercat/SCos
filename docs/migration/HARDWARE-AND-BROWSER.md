@@ -1,9 +1,10 @@
 # Wider hardware and browser plan
 
 Research date: 2026-09-19. **Recommendations, not implemented support.** No guest
-library, firmware or driver is being imported. The final 32-bit safety review,
-explicit conversion permission, and separate post-conversion integration
-permission remain mandatory. See [the audit blockers](../AUDIT-32BIT.md).
+library, firmware or driver is being imported. The user has authorized conversion;
+see the [first startup foundation](BOOT64.md). Separate post-conversion integration
+permission is still mandatory. The [32-bit audit](../AUDIT-32BIT.md) findings were
+corrected in r43 before its final image was frozen.
 
 ## Graphics: automatic selection without losing the screen
 

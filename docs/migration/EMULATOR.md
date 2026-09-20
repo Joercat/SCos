@@ -20,7 +20,7 @@ python3 tools/setup_qemu.py          # new .tools/qemu directory only
 make                               # current build/scos.img
 python3 tools/run_qemu.py --dry-run
 python3 tools/run_qemu.py            # CURRENT build, software TCG
-python3 tools/run_qemu.py --image dist/scos-32bit.img  # current published 32-bit image
+python3 tools/run_qemu.py --image dist/scos-32bit.img  # frozen 32-bit image
 python3 tools/run_qemu.py --xhci     # emulated USB keyboard and mouse
 python3 tools/run_qemu.py --no-acpi  # unsupported-power fallback configuration
 ```
@@ -42,7 +42,10 @@ requests commands such as `{"execute":"query-status"}`. `screendump` takes a
 host filename argument and writes a PPM screenshot. Do not confuse host QMP
 `quit` with evidence of the guest's power-off path.
 
-For a future **authorized** 64-bit kernel, supply `--image path/to/new.img`.
+The default image is now the AMD64 foundation. Supply `--image dist/scos.img`
+for published bytes. See [actual 64-bit verification](BOOT64.md). `--xhci` and
+`--no-acpi` provide hardware configurations; the foundation does not yet have
+USB input or ACPI power drivers.
 Current scripts default to legacy PC/BIOS; selecting and proving a future UEFI
 boot path is separate work. x86 OVMF firmware is retained in the tool bundle,
 but no SCos UEFI/64-bit guest boot has been claimed or implemented.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail if the current verified 32-bit artifact, checksum or provenance drifts."""
-# Update pins only alongside a verified 32-bit patch before conversion.
-# Freeze this image/pin when the user authorizes starting 64-bit.
+# Permanently frozen: x86-64 conversion was authorized on 2026-09-19.
+# Never update these pins to match a new or modified image.
 import hashlib
 import json
 from pathlib import Path

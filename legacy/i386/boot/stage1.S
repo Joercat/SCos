@@ -4,7 +4,9 @@
  *
  * Real-hardware notes:
  *  - the BIOS drive number (DL) is trusted first but every read is retried
- *    with LBA extensions (AH=42h) and then classic CHS (AH=02h), on the SAME BIOS boot drive. Never fall back to an unrelated disk.
+ *    with LBA extensions (AH=42h) and then classic CHS (AH=02h), and then
+ *    against drives 0x80 and 0x00, because USB sticks under a real CSM BIOS
+ *    may appear as 0x80, 0x81 or 0x00 depending on firmware and port.
  *  - interrupts stay masked for the whole stage: we run for milliseconds
  *    and cannot afford a BIOS timer tick pushing over our scratch area.
  *  - scratch: 0x7b00 = BIOS drive, 0x7b10 = disk address packet.
@@ -27,10 +29,21 @@ _start:
     jnc  go
     call rd_chs                 /* BIOS drive, classic CHS */
     jnc  go
-    jmp fail
+    cmpb $0x80, 0x7b00          /* already tried 0x80? */
+    je   try_floppy
+    movb $0x80, 0x7b00          /* first hard disk */
+    call rd_lba
+    jnc  go
+    call rd_chs
+    jnc  go
+try_floppy:
+    movb $0x00, 0x7b00          /* floppy / USB floppy emulation */
+    call rd_lba
+    jnc  go
+    call rd_chs
+    jnc  go
 
 fail:
-    cld
     movb $0x0e, %ah
     movw $0x0007, %bx
     leaw fail_str, %si
@@ -59,11 +72,7 @@ rd_lba:
     movl $0x00000000, 12(%si)   /* LBA high */
     movb 0x7b00, %dl
     movw $0x4200, %ax
-    pushw %ds
-    pushw %es
     int  $0x13
-    popw %es
-    popw %ds
     ret
 
 /* read 16 sectors from CHS (0,0,2) to 0x0800:0, drive in 0x7b00 */
@@ -75,11 +84,7 @@ rd_chs:
     movw $0x0002, %cx           /* cylinder 0, sector 2 */
     movb $0x00, %dh             /* head 0 */
     movb 0x7b00, %dl
-    pushw %ds
-    pushw %es
     int  $0x13
-    popw %es
-    popw %ds
     ret
 
 fail_str: .asciz "\r\nSCos: disk read error (no bootable stage2)\r\n"

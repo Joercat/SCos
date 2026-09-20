@@ -1,18 +1,15 @@
-# SCos x86-64 preparation — custom kernel retained
+# SCos x86-64 conversion — custom kernel retained
 
-Status: **planning, source research and host-emulator preparation only**, 2026-09-19. No long-mode entry,
-64-bit kernel build target, userspace ABI, driver port or imported library has
-been added. r43 is now the 32-bit bug-fix release; r42 remains in Git history. Starting the conversion requires
-separate approval. This plan does not replace SCos with Linux.
+Status, 2026-09-19: **conversion authorized; first startup foundation implemented**.
+See [BOOT64.md](BOOT64.md) for the implemented boot ABI, test results and explicit
+limitations. Root `make` is AMD64; prior sources live under `legacy/i386/`.
+`dist/scos-32bit.img` is permanently frozen at r43. `dist/scos.img` is the
+unnumbered foundation, not a replacement desktop release. The user deferred
+numbering until conversion starts on their PC. New driver/library integration
+still requires separate permission after the existing core is converted.
 
-**Conversion gate remains closed:** [the 32-bit audit](../AUDIT-32BIT.md) found
-storage defects now corrected and tested in [r43](../RELEASE-r43.md). Final
-physical acceptance and explicit conversion permission remain outstanding.
-See the [wider hardware/browser comparison](HARDWARE-AND-BROWSER.md) and
-[obtained QEMU host tool](EMULATOR.md). The canonical image/provenance live in
-`dist/scos-32bit.img` and `docs/milestones/scos-32bit.json`. Update them for
-verified 32-bit fixes until 64-bit starts; then freeze and preserve the final
-32-bit image permanently. Do not replace it with a 64-bit image.
+See [hardware/browser research](HARDWARE-AND-BROWSER.md) and
+[host QEMU tooling](EMULATOR.md); no researched guest component is imported.
 
 ## Baseline and boundaries
 
@@ -27,7 +24,10 @@ kernel modules is **not** an automatic consequence of selecting `-m64`.
 The adapters, memory model, execution environment and licenses are real work.
 We prefer narrow upstream adapters over maintaining large rewritten forks.
 
-## Source audit and required changes — NOT implemented yet
+## Original i386 audit and remaining conversion work
+
+The paths below now refer to `legacy/i386/`. Boot/interrupt/basic page-pool work
+is implemented as documented in BOOT64; the remaining entries are a roadmap.
 
 | Current location/assumption | Future requirement |
 | --- | --- |
@@ -50,7 +50,8 @@ interrupt save frames, all DMA pointers and pointer-to-integer round trips.
 
 ## Proposed contracts
 
-These are design requirements, not new compiled headers:
+The broader requirements below extend the implemented minimal boot contract;
+framebuffer, RSDP, modules and userspace are not in boot ABI version 1:
 
 * Boot handoff: magic + version + structure size; 64-bit framebuffer address,
   pitch/format; typed memory-map entries; RSDP physical address; module spans.
@@ -68,41 +69,22 @@ These are design requirements, not new compiled headers:
   files, time, VM, threads/synchronization and process exit. Defer dynamic linking
   until static userspace works. Do not expose arbitrary physical memory to apps.
 
-## Toolchain preparation
+## Toolchain and approval state
 
-Current build uses GCC 12.2.0, GNU binutils 2.40 and Python, targeting i386.
-A dedicated `x86_64-elf-gcc` toolchain is not yet provisioned. The host compiler's
-availability is not a cross-toolchain readiness guarantee. A standalone compiler
-probe (not OS code) produced an ELF64 AMD64 object with 8-byte pointers; this
-verifies code generation only. **QEMU 11.0.2 is now obtained and running** through
-a pinned third-party musl package/local loader; see [provenance](EMULATOR.md).
-It booted the unchanged 32-bit image and exercised guest ACPI power-off.
-This is not a 64-bit SCos boot or a physical motherboard shutdown result.
+The tested build uses host GCC 12.2.0 and GNU binutils 2.40 with explicit AMD64
+freestanding/no-host-library flags, no red zone, general-register-only C and
+SysV stack alignment. BIOS stages deliberately use `-m32` assembly. A dedicated
+version-pinned cross toolchain remains desirable; it is not falsely claimed to
+have been provisioned. Root and legacy build output directories are separate.
 
-Before conversion, provision a version-pinned `x86_64-elf` GCC/binutils toolchain
-(or reviewed Clang/lld cross configuration), assembler and ELF inspection tools.
-Build it outside the source tree; record source hashes and configure options.
-Use separate i386 and x86_64 output directories. The future kernel build needs
-freestanding/no-host-libraries flags, `-mno-red-zone`, an explicit code model,
-16-byte C call alignment, and a deliberate FPU/SIMD state policy. Userspace
-flags are a separate configuration. Never link host glibc into the kernel.
+**Gates A/B are open:** the user reported no major remaining 32-bit blockers
+and explicitly requested conversion. The final r43 image is frozen. The first
+boot/ABI foundation is implemented, not the entire architecture/desktop port.
+No round number until conversion starts on the user's PC.
 
-## Ordered milestones and acceptance gates
-
-**Gate A — now:** finish 32-bit safety corrections and verification, then the
-user's physical test/fixes/retest and final acceptance. Update the canonical
-32-bit image with verified patches; freeze it only when conversion starts. Planning does not pass this gate.
-
-**Gate B — explicit instruction:** only after acceptance and the user's separate
-conversion authorization may long-mode/kernel conversion start. Reset the new
-architecture's round to r1 at that point, not now. Reserve `dist/scos.img` for
-those future x86-64 images. The existing custom kernel/desktop remains the goal.
-
-**Gate C — after conversion:** restore and validate the converted core before
-asking for permission to add drivers/resources. New GPU/NIC/Wi-Fi/browser/libc
-imports are NOT implicitly approved by Gate B. The later milestones below are
-proposed order only and remain blocked until this separate instruction.
-
+**Gate C stays closed:** separate permission after conversion is required for
+new drivers/resources. The sequence below remains a roadmap, not a list of
+completed or approved integrations.
 
 1. **Approve boot/ABI plan and exact hardware targets.** Resolve the blockers
    below; select release versions after license/security review.

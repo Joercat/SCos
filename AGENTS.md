@@ -1,34 +1,27 @@
-# SCos release and transition rules
+# SCos conversion rules
 
-r43 fixes and verifies the r42 storage findings; see `docs/RELEASE-r43.md`.
-The user's clarified milestone policy supersedes the earlier per-release freeze:
+The user authorized the first x86-64 conversion part on 2026-09-19 after reporting
+no major remaining 32-bit blockers. Root `make` now builds the unnumbered
+x86-64 startup foundation; see `docs/migration/BOOT64.md`.
 
-* Keep the custom SCos kernel and identity; do not replace it with Linux.
-* `dist/scos-32bit.img` is the canonical, updatable 32-bit image. Until the user
-  authorizes starting 64-bit, replace it with verified 32-bit patches, updating
-  its checksum, `docs/milestones/scos-32bit.json` and integrity-check pins together.
-  Remove stale/duplicate image files from the current tree; retain Git history.
-* At the authorized start of 64-bit development, freeze and permanently preserve
-  the then-current fixed `dist/scos-32bit.img`, checksum and provenance. Never
-  delete or overwrite that final 32-bit milestone with a 64-bit image.
-* Now WAIT for the user's bug reports/patch requests or explicit 64-bit start
-  instruction. Do not do further development speculatively.
-* `dist/scos.img` is reserved for the future 64-bit releases, not a placeholder
-  or relabeled 32-bit image. `build/scos.img` is only a disposable build output.
-* Await the user's final 32-bit hardware test. Address any reported defects and
-  await their retest. Do NOT begin conversion until the user explicitly says so.
-* Reset the round counter to r1 only when the authorized conversion begins.
-  Do not reset the current i386 r43 tag during planning. Label future artifacts
-  with architecture as well as round, so historical 32-bit r1 is not confused
-  with x86-64 r1.
-* Convert and validate the existing core/desktop first. New GPU/NIC/Wi-Fi/browser
-  driver/library integration requires a SEPARATE instruction from the user after
-  conversion is done. Research and host-side QEMU preparation are allowed now.
+* Keep the custom SCos kernel and identity. Never replace it with Linux.
+* `dist/scos-32bit.img` is now permanently frozen at the verified r43 bytes.
+  Preserve its checksum, provenance and integrity guard. Do not overwrite it
+  with future builds. Historical revisions remain in Git history.
+* `legacy/i386/` contains the old build, bootloader, kernel, desktop and drivers.
+  Preserve it as the behavior/porting reference; it is not linked into AMD64.
+* Publish x86-64 development images as `dist/scos.img`, with checksum and truthful
+  verification notes. No release/round number until conversion starts on the
+  user's PC, per the latest instruction. Do not prematurely call this r1.
+* Conversion approval is OPEN. Port and validate the existing core first.
+  New GPU/NIC/Wi-Fi/browser driver/library integration requires a SEPARATE
+  instruction after conversion. Research is not approved integration.
 * Preserve r41's physically validated packet-sized HID reception and report
-  assembly. No sensitivity guesses or emulator-only shortcuts.
-* Preserve `os.html` as the design reference. Do not restore the old v86 stack
-  or temporary diagnostic UI. Host QEMU tooling is separate from the guest OS.
-* Run `python3 tools/check_milestone.py` before delivery. Use QEMU snapshots or
-  separate overlays. Never attach host physical disks or passed-through devices
-  by default. Do not claim a clean build/emulator run proves physical acceptance
-  or proves the absence of all bugs.
+  assembly when porting. No sensitivity guesses or emulator-only shortcuts.
+* Preserve `os.html`. Do not restore v86 or temporary diagnostic guest UI.
+  Retain legitimate host QEMU tools; retire temporary verification harnesses,
+  disposable images and logs after recording results.
+* Run `python3 tools/check_milestone.py` before delivery. Use QEMU snapshots;
+  never attach host physical disks/devices by default. Verify the actual image
+  bytes pushed, not merely the checksum text. Build/emulator success is NOT
+  physical-PC acceptance or proof of bug freedom.
