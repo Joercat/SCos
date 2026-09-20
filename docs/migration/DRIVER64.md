@@ -153,3 +153,37 @@ No temporary diagnostic guest commands/UI or v86 were added.
 * New accelerated GPU, Ethernet/Wi-Fi/networking and real browser integrations
   still require separate user permission. The browser remains its original
   unavailable notice. None is implied by finishing these original drivers.
+
+## Follow-up inventory and integration recheck
+
+A subsequent request to continue converting the remaining drivers prompted a
+fresh comparison against the original `6717943` source tree. No additional
+original hardware-driver implementation was found waiting to be ported:
+
+| Original component | Active native implementation |
+| --- | --- |
+| PCI, xHCI/HID, ATA/FS2, ACPI | `kernel/drivers/{pci,usb,ata,acpi}.c` |
+| PS/2 keyboard/mouse and CMOS RTC | `kernel/desktop/{kbd,mouse,rtc}.c` |
+| PIT/PIC/IDT and interrupt dispatch | `kernel/src/interrupt.c`, native vector stubs |
+| Framebuffer drawing and firmware display setup | Original drawing in `kernel/desktop/fb.c`; native GOP handoff/console instead of BIOS/VBE |
+| Memory and CPU accounting support | `kernel/src/memory.c`, `kernel/desktop/{heap,cpumeter}.c` |
+
+This is a **driver inventory**, not a claim that every historical feature or UI
+has been exhaustively checked. AHCI, NVMe, USB mass storage, accelerated GPU,
+Ethernet and Wi-Fi would be new implementations/integrations, not additional
+original drivers recovered from that tree.
+
+Fresh q35 and PC/legacy-IDE guests booted the unchanged published image with
+xHCI keyboard/mouse attached. Real keyboard events launched Solitaire, switched
+back to TTY, evaluated `calc 6 - 2`, and confirmed ACPI shutdown. Screenshots
+were inspected: Solitaire rendered, TTY showed `Result: 4`, and the PC guest
+created `/home/recheck.txt` and reported a successful confirmed `save` on its
+disposable snapshot. Both guests exited through guest shutdown. This narrower
+smoke recheck does not replace or claim to repeat every row of the earlier
+matrix, including persistence across restart and factory reset.
+
+`make`, build/published-image byte comparison, checksum and frozen-image checks
+passed. Temporary scripts/screenshots/logs and guest state were removed. No
+kernel/image change was required by this recheck. Broader new-driver scope still
+needs an explicit choice; hardware-specific networking/GPU work also needs the
+actual device models/IDs.
