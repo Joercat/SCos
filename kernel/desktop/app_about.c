@@ -39,7 +39,7 @@ static void ab_paint(struct window *w)
 
     const char *model = ata_model();
     strcpy(line, "Disk:     ");
-    strcat(line, model && model[0] ? model : "driver not ported");
+    strcat(line, model && model[0] ? model : "no supported ATA disk");
     s_clip_text(s, 28, y, line, t->text, s->w - 56); y += 20;
 
     strcpy(line, "Video:    ");
@@ -65,7 +65,7 @@ static void ab_paint(struct window *w)
         "Native x64 UEFI loader and relocatable 64-bit kernel",
         "PS/2 keyboard + mouse drivers, PIT timer, CMOS realtime clock",
         "GOP framebuffer compositor with window manager and themes",
-        "RAM filesystem; disk persistence is not ported",
+        "RAM filesystem; verified ATA data-partition saves",
         "Terminal, Files, Notepad, Calendar, Settings,",
         "Blackjack, System Monitor, Web Browser (stub)",
     };

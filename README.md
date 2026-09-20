@@ -14,11 +14,15 @@ Solitaire, SysMon and the existing browser-unavailable notice. The compositor,
 six TTYs, RAM filesystem, themes and PS/2 input are connected to the native core.
 No new release number is assigned.
 
-**Still unavailable:** native USB HID, disk persistence, networking/browser
-engine, accelerated GPU drivers and ACPI power-off. Files/settings are RAM-only;
-shutdown shows the safe-to-turn-off fallback. A USB boot medium is not the same
-thing as USB keyboard/mouse support after UEFI exits. Do not treat this build as
-ready for the user's USB-input PC.
+The remaining original PCI, xHCI USB HID, ATA PIO/persistence and ACPI power
+implementations have now been adapted and integration-tested; see
+[driver verification and limitations](docs/migration/DRIVER64.md).
+
+**Still unavailable:** AHCI/NVMe/USB mass-storage persistence, networking/real
+browser engine and accelerated GPU drivers. Files remain RAM-only unless a
+unique supported ATA SCos-data partition is verified; `save` requires confirmation.
+ACPI has a manual-power fallback for unsupported firmware. Emulator success is
+**not physical acceptance on the user's USB-input PC**. No new release number.
 
 ## Build and emulator
 
@@ -31,14 +35,16 @@ make                           # build/BOOTX64.EFI, kernel.elf and scos.img
 python3 tools/check_milestone.py
 sha256sum -c dist/scos.img.sha256
 python3 tools/setup_qemu.py     # optional pinned host QEMU environment
-python3 tools/run_qemu.py       # x64 EDK2, q35, disposable disk/variable state
+python3 tools/run_qemu.py --xhci # x64 EDK2/q35, native USB HID, disposable disk state
 make clean
 ```
 
 The packaged `dist/scos.img` is a 64-MiB GPT disk with a FAT32 EFI system partition:
 `EFI/BOOT/BOOTX64.EFI`, `SCOS/KERNEL.ELF` and `SCOS/KERNEL.CRC`. It is a development
 integration artifact, not a request to flash or physically test the PC now.
-The kernel does not write to it after firmware exit.
+It also contains a separate 128-KiB SCos-data partition. Only the verified ATA
+path can save there; the default q35/AHCI guest cannot persist. Neither a USB
+boot medium nor the xHCI HID driver implies USB mass-storage support.
 
 A later physical test must use **x64 UEFI boot, not the previous CSM configuration**.
 Secure Boot must be disabled for this unsigned image. The firmware must provide

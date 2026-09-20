@@ -14,7 +14,8 @@ import zlib
 
 SECTOR = 512
 SECTORS = 131072  # 64 MiB, enough clusters for an actual FAT32 filesystem
-FIRST, LAST = 2048, SECTORS - 34
+DATA_FIRST, DATA_SECTORS = 129024, 256
+FIRST, LAST = 2048, DATA_FIRST - 1
 
 
 def validate(efi, elf):
@@ -123,11 +124,16 @@ def main(directory):
     # Protective MBR is metadata, not an executable BIOS loader.
     image[446:462] = struct.pack('<B3sB3sII', 0, b'\0\2\0', 0xee, b'\xff'*3, 1, SECTORS-1)
     image[510:512] = b'\x55\xaa'
+    image[400:412] = b'SCOSDATA64v1'
+    struct.pack_into('<III', image, 412, DATA_FIRST, DATA_SECTORS, SECTORS)
     partition_id = uuid.UUID('b2a52b42-b792-4e85-9ce6-5e9bdcd425a7').bytes_le
     disk_id = uuid.UUID('1cb5b534-9ee8-4a50-b9d5-600ce619b86c').bytes_le
     entries = bytearray(128*128)
     entries[:128] = struct.pack('<16s16sQQQ72s', uuid.UUID('c12a7328-f81f-11d2-ba4b-00a0c93ec93b').bytes_le,
                                partition_id, FIRST, LAST, 0, 'SCos EFI system'.encode('utf-16le'))
+    entries[128:256] = struct.pack('<16s16sQQQ72s', uuid.UUID('1ffcb787-a904-4fce-8fbd-c728ac57e333').bytes_le,
+                                   uuid.UUID('1f5b84d1-9560-4345-9f49-74bc872143e4').bytes_le,
+                                   DATA_FIRST, DATA_FIRST+DATA_SECTORS-1, 0, 'SCos data'.encode('utf-16le'))
     for current, backup, table in ((1, SECTORS-1, 2), (SECTORS-1, 1, SECTORS-33)):
         header = bytearray(struct.pack('<8sIIIIQQQQ16sQIII', b'EFI PART', 0x10000, 92, 0, 0,
                                       current, backup, 34, SECTORS-34, disk_id, table, 128, 128, zlib.crc32(entries)))

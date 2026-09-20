@@ -86,12 +86,12 @@ void memory_init(const struct boot_handoff *b,const struct efi_memory *map){
 }
 /* Contiguous extents are needed by existing surface/document buffers. Both the
  * single-page API and desktop heap use this one ownership/accounting authority. */
-uintptr_t pages_allocate(size_t count){
+uintptr_t pages_allocate_limit(size_t count,uint64_t limit){
  uint64_t f=irq_save();
  if(!initialized)panic("allocation before memory ownership established");
  if(!count||count>PHYSICAL_LIMIT/PAGE){irq_restore(f);return 0;}
  uint64_t bytes=count*PAGE;
- for(size_t i=0;i<range_count;i++)if(free_ranges[i].end-free_ranges[i].start>=bytes){
+ for(size_t i=0;i<range_count;i++)if(free_ranges[i].end-free_ranges[i].start>=bytes&&free_ranges[i].start<limit&&bytes<=limit-free_ranges[i].start){
   uintptr_t p=free_ranges[i].start;free_ranges[i].start+=bytes;free_pages-=count;
   if(free_ranges[i].start==free_ranges[i].end){for(size_t j=i+1;j<range_count;j++)free_ranges[j-1]=free_ranges[j];range_count--;}
   memset((void*)p,0,bytes);irq_restore(f);return p;
@@ -127,3 +127,31 @@ uintptr_t page_allocate(void){return pages_allocate(1);}
 void page_release(uintptr_t p){pages_release(p,1);}
 uint64_t memory_free_pages(void){return free_pages;}
 uint64_t memory_reserved_pages(void){return reserved_pages;}
+
+uintptr_t pages_allocate(size_t count){return pages_allocate_limit(count,PHYSICAL_LIMIT);}
+
+/* Device mappings never alias allocated/firmware RAM with a different cache
+ * policy. Firmware-table reads require ACPI reclaim/NVS ownership. No guessed
+ * direct physical casts survive the switch away from firmware page tables. */
+static uint64_t mapped_leaf(uintptr_t address){
+ uint64_t *t=root;
+ for(int level=3;level>=0;level--){uint64_t e=t[(address>>(12+level*9))&511];if(!(e&1))return 0;if(!level||(e&128))return e;t=(void*)(uintptr_t)(e&ADDRESS);}
+ return 0;
+}
+static void *map_physical(uint64_t address,size_t bytes,int device){
+ if(!initialized||!bytes||address<4096||address>=PHYSICAL_LIMIT||bytes>PHYSICAL_LIMIT-address)return NULL;
+ uint64_t start=address&~4095ULL,end=(address+bytes+4095)&~4095ULL;
+ if(device){
+  for(size_t i=0;i<owned_count;i++)if(owned_map[i].pages&&owned_map[i].type!=0&&owned_map[i].type!=11&&overlaps(start,end,owned_map[i].physical,owned_map[i].physical+owned_map[i].pages*PAGE))return NULL;
+ }else{
+  int found=0;
+  for(size_t i=0;i<owned_count;i++)if((owned_map[i].type==9||owned_map[i].type==10)&&start>=owned_map[i].physical&&end<=owned_map[i].physical+owned_map[i].pages*PAGE)found=1;
+  if(!found)return NULL;
+ }
+ uint64_t flags=1|NX|(device?0x1a:0),saved=irq_save();
+ for(uintptr_t p=start;p<end;p+=PAGE){uint64_t old=mapped_leaf(p);if(old&&((old&0x1b)!=(flags&0x1b))){irq_restore(saved);return NULL;}}
+ for(uintptr_t p=start;p<end;p+=PAGE)if(!mapped_leaf(p)){map_leaf(p,flags,0);__asm__ volatile("invlpg (%0)"::"r"(p):"memory");}
+ irq_restore(saved);return (void*)(uintptr_t)address;
+}
+void *mmio_map(uint64_t address,size_t bytes){return map_physical(address,bytes,1);}
+const void *firmware_map(uint64_t address,size_t bytes){return map_physical(address,bytes,0);}

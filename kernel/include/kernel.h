@@ -33,4 +33,8 @@ uint64_t memory_free_pages(void);
 extern char _relro_start[],_relro_end[];
 extern char _kernel_start[],_kernel_end[],_text_start[],_text_end[],_rodata_start[],_rodata_end[],_file_end[];
 extern char stack_guard[],stack_top[],df_guard[],df_top[],nmi_guard[],nmi_top[],mc_guard[],mc_top[];
+uintptr_t pages_allocate_limit(size_t,uint64_t);
+void *mmio_map(uint64_t,size_t);
+const void *firmware_map(uint64_t,size_t);
+extern uint64_t platform_rsdp;
 #endif

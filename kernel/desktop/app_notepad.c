@@ -168,7 +168,7 @@ static void save_as_cb(int ok, const char *text, void *ud)
         strcat(lg, " bytes)");
         app_log(w, lg);
     }
-    wm_dialog("Notepad", "Saved in RAM only; lost on reboot.", NULL, saved_cb, NULL);
+    wm_dialog("Notepad", fs_image_available()?"Saved in RAM. Run save in Terminal to persist.":"Saved in RAM only; no verified disk.", NULL, saved_cb, NULL);
 }
 
 static void np_save(struct window *w, int as)
@@ -182,7 +182,7 @@ static void np_save(struct window *w, int as)
         strcat(lg, " ("); fmt_u32(n, np->len); strcat(lg, n);
         strcat(lg, " bytes)");
         app_log(w, lg);
-        wm_dialog("Notepad", "Saved in RAM only; lost on reboot.", NULL, saved_cb, NULL);
+        wm_dialog("Notepad", fs_image_available()?"Saved in RAM. Run save in Terminal to persist.":"Saved in RAM only; no verified disk.", NULL, saved_cb, NULL);
         return;
     }
     struct np_save_ctx *ctx = palloc(sizeof(*ctx));

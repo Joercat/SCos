@@ -135,7 +135,7 @@ static void power_menu_cb(int item, void *ud)
     if(item<0)return;
     (void)ud;
     sleep_ms(400);
-    /* USB has not been initialized by this build. */                    /* no lit LEDs on standby power */
+    usb_kbd_leds_off();                    /* no lit LEDs on standby power */
     if (item == 0) {                       /* Restart */
         cpu_reboot_8042();
         for (;;) cpu_hlt();
@@ -1733,7 +1733,7 @@ void wm_run(void)
         if (wm_stop_requested) goto stopped;
         irq_watchdog();
         if (err_pending()) err_show_pending();
-        /* PS/2 input queues are populated by native IRQs. */
+        usb_poll(); /* foreground only: never drive USB from SIMD-free IRQs */
         struct mouse_event me;
         while (mouse_poll(&me)) handle_mouse(&me);
         resize_flush(0);           /* r36: once-per-frame resize apply */

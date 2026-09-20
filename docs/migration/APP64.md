@@ -3,6 +3,10 @@
 Status: unnumbered development conversion, 2026-09-20. This is not physical-PC
 acceptance or a claim that the entire OS/hardware conversion is finished.
 
+> Historical app-port checkpoint: the USB/storage/ACPI-unavailable statements
+> below describe this earlier step. [DRIVER64.md](DRIVER64.md) records the
+> subsequently authorized original-driver conversion and current integration.
+
 ## Provenance and scope
 
 The earlier deletion of feature source was broader than the user intended.

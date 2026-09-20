@@ -48,8 +48,11 @@ in the current launcher or guest. To reproduce old 32-bit tests, consult the
 historical tooling, not this command. Use at least 128 MiB guest RAM.
 
 The image is unsigned: use non-Secure-Boot firmware. `--xhci` supplies emulated
-hardware but does not enable a kernel USB input driver. See
-[actual UEFI verification and failures](BOOT64.md). Firmware is a host testing
+hardware exercised by the converted native xHCI HID driver. q35 uses AHCI,
+which the original ATA PIO driver does not support, so this default guest is
+RAM-only. The separate PC/legacy-IDE persistence verification and exact driver
+limits are in [DRIVER64.md](DRIVER64.md); startup details remain in
+[BOOT64.md](BOOT64.md). Firmware is a host testing
 dependency from the pinned QEMU bundle, not shipped inside SCos. The bundle's
 `edk2-licenses.txt` contains its firmware notices; its firmware build has not
 been independently reproduced here.

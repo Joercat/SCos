@@ -2,7 +2,9 @@
 
 Status, 2026-09-20: **native x64 UEFI startup implemented; BIOS path removed**.
 The subsequently authorized app/shared-desktop port is described in
-[APP64.md](APP64.md); it reuses original source and is now active.
+[APP64.md](APP64.md); it reuses original source and is now active. The user then
+authorized the remaining original drivers and combined verification, now recorded
+in [DRIVER64.md](DRIVER64.md). This does not authorize new driver/library imports.
 See [BOOT64.md](BOOT64.md) for the implemented boot ABI, test results and explicit
 limitations. Root `make` is AMD64. Duplicate i386 sources were removed on 2026-09-20;
 retrieve individual porting references from commit `6717943` when needed.
@@ -32,7 +34,8 @@ We prefer narrow upstream adapters over maintaining large rewritten forks.
 The paths below refer to historical `legacy/i386/` at commit `6717943`,
 not present-tree files. This table records the original audit, not current
 bootloader choices. BOOT64 supersedes its boot/paging proposals; APP64 covers
-implemented app/shared-desktop work. Other entries remain a roadmap.
+implemented app/shared-desktop work; DRIVER64 covers the original drivers.
+Other entries remain a roadmap.
 
 | Current location/assumption | Future requirement |
 | --- | --- |
@@ -78,7 +81,8 @@ framebuffer, RSDP, modules and userspace are not in boot ABI version 1:
 
 The tested build uses host GCC 12.2.0 and GNU binutils 2.40 with explicit AMD64
 freestanding/no-host-library flags, no red zone, general-register-only C and
-SysV stack alignment. BIOS stages deliberately use `-m32` assembly. A dedicated
+SysV stack alignment (desktop foreground callbacks may use SSE2; IRQ paths may
+not). There are no active BIOS stages or `-m32` target. A dedicated
 version-pinned cross toolchain remains desirable; it is not falsely claimed to
 have been provisioned. Only the AMD64 build remains active.
 

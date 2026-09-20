@@ -1,6 +1,7 @@
 #include "kernel.h"
 extern uint64_t cpu_tsc_hz;
 extern void desktop_start(const struct boot_framebuffer *);
+uint64_t platform_rsdp;
 static struct boot_handoff boot;
 static struct efi_memory memory_map[BOOT_MAP_MAX];
 static uint64_t ticks(void){uint32_t a,d;__asm__ volatile("lfence; rdtsc":"=a"(a),"=d"(d)::"memory");return ((uint64_t)d<<32)|a;}
@@ -61,8 +62,9 @@ void kernel_main(const struct boot_handoff *incoming){
  uint64_t start=ticks();__asm__ volatile("sti");
  while(timer_ticks<3){if(ticks()-start>boot.tsc_hz*3)panic("PIT IRQ timeout; platform IRQ routing unsupported");__asm__ volatile("pause");}
  putstr("Startup complete: real timer interrupts verified\n");
- putstr("Starting converted SCos apps; persistence and USB are not yet ported.\n");
+ putstr("Starting converted SCos apps and native platform drivers.\n");
  cpu_tsc_hz=boot.tsc_hz;
+ platform_rsdp=boot.rsdp;
  desktop_start(&boot.framebuffer);
  for(;;)__asm__ volatile("hlt");
 }

@@ -102,7 +102,7 @@ void error_screen(const char *subsys, const char *msg,
     int elapsed = 0, stuck = 0;
     u32 last_tick = tick_count;
     for (;;) {
-        /* PS/2 input queues are populated by native IRQs. */
+        usb_poll_events(); /* no sleeps/hotplug probes in RTC-bounded error loop */
         struct key_event ke;
         struct mouse_event me;
         if (kbd_poll(&ke)) break;

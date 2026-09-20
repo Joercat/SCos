@@ -627,7 +627,7 @@ static void run_command(struct term *t, const char *command)
           fmt_u32(cc, cpu_thread_count()); strcat(response, cc);
           strcat(response, " threads)\n"); }
         strcat(response, "Storage Used: "); strcat(response, a); strcat(response, "\n");
-        strcat(response, "Disk: "); strcat(response, ata_present() ? "ATA present" : "driver not ported");
+        strcat(response, "Disk: "); strcat(response, ata_present() ? "ATA present" : "no supported ATA disk");
         strcat(response, fs_image_found ? " (SCos image loaded)" : "");
         strcat(response, "\nCurrent Time: ");
         fmt_pad2(b, rt.hour); strcat(response, b); strcat(response, ":");
@@ -706,7 +706,7 @@ static void run_command(struct term *t, const char *command)
     }
     else if (!strcmp(cmd, "save")) {
         if (nargs != 1) strcpy(response, "Usage: save");
-        else if (!fs_image_available()) strcpy(response, "Persistence is not ported. Files are RAM-only; no disk was written.");
+        else if (!fs_image_available()) strcpy(response, "No verified ATA persistence target. Files are RAM-only; no disk was written.");
         else if (fs_image_save()) strcpy(response, "Filesystem image written to disk.");
         else strcpy(response, "Save failed. See klog; previous disk save may be incomplete.");
     }
@@ -932,11 +932,11 @@ static void run_command(struct term *t, const char *command)
         fmt_u32(n, vfs_usage_bytes()); strcat(response, n); strcat(response, " bytes used (in memory)\n");
         strcat(response, "disk:  ");
         if (ata_present()) { strcat(response, "fs image at LBA 2048, 'save' writes, loaded at boot"); }
-        else strcat(response, "storage driver not ported");
+        else strcat(response, "no supported ATA disk");
     }
     else if (!strcmp(cmd, "disks")) {
         const char *m = ata_model();
-        if (!m) strcpy(response, "Disk enumeration/persistence driver is not ported.");
+        if (!m) strcpy(response, "No supported ATA PIO disk detected.");
         else { strcpy(response, "ATA0:  "); strcat(response, m); }
     }
     else if (!strcmp(cmd, "theme")) {
@@ -1640,14 +1640,14 @@ static void term_tick(struct window *w)
     }
     if (t->shutting_down == 1) {
         sleep_ms(1200);
-        /* USB has not been initialized by this build. */
+        usb_kbd_leds_off();
         acpi_shutdown();
         wm_poweroff_screen();
         for (;;) cpu_hlt();
     }
     if (t->shutting_down == 2) {
         sleep_ms(1200);
-        /* USB has not been initialized by this build. */
+        usb_kbd_leds_off();
         cpu_reboot_8042();
     }
 }

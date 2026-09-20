@@ -29,7 +29,9 @@ See `docs/migration/BOOT64.md` for contracts, verification and limitations.
 * The user subsequently authorized apps and their necessary shared desktop
   dependencies. Reuse/adapt original feature source from `6717943`, not simplified
   replacements. `kernel/desktop/` is the active x64 port, not a legacy build.
-  USB/storage and additional hardware ports remain separate work; see APP64.md.
+  The user then authorized integration verification and conversion of the
+  remaining ORIGINAL PCI/xHCI/ATA/ACPI drivers; see DRIVER64.md. New hardware
+  drivers/libraries remain outside that authorization.
   A bootable test image is NOT a complete OS or physical-PC acceptance.
 * Conversion approval is OPEN, but follow the user's component-by-component scope.
   New GPU/NIC/Wi-Fi/browser driver/library integration requires a SEPARATE

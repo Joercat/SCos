@@ -60,6 +60,18 @@ u32  pci_read32(u8 bus, u8 dev, u8 fn, u8 off);
 void pci_write32(u8 bus, u8 dev, u8 fn, u8 off, u32 v);
 int  pci_find_class(u8 class, u8 subclass, u8 progif,
                     u8 *bus, u8 *dev, u8 *fn, int max);
+u16 pci_read16(u8,u8,u8,u8);
+void pci_write16(u8,u8,u8,u8,u16);
+int pci_scan_dump(void);
+int pci_memory_bar(u8,u8,u8,u8,u64 *,u64 *);
+u64 usb_dma_bytes(void);
+void usb_init(void);
+void usb_poll(void);
+void usb_poll_events(void);
+void usb_status(char *,int);
+void usb_kbd_leds_off(void);
+int ata_init(void);
+int fs_image_load(void);
 /* usb (xHCI + HID boot) */
 void input_status(char *out, int max);
 void error_screen(const char *subsys, const char *msg,

@@ -444,7 +444,7 @@ static void tty_exec(char *cmd)
         strcat(m, n); strcat(m, " KB");
         tty_print(m);
         strcpy(m, "Disk: ");
-        strcat(m, ata_present() ? "ATA present" : "driver not ported");
+        strcat(m, ata_present() ? "ATA present" : "no supported ATA disk");
         if (fs_image_found) strcat(m, " (SCos image loaded)");
         tty_print(m);
         char cpu[49];
@@ -623,7 +623,7 @@ static void tty_exec(char *cmd)
     }
     else if (!strcmp(args[0], "disks")) {
         tty_print(ata_present() ? "ata0: ATA disk present"
-                                : "ata0: storage driver not ported");
+                                : "ata0: no supported ATA disk");
         tty_print(fs_image_found ? "fs:   SCos disk image loaded"
                                  : "fs:   no SCos disk image (RAM vfs)");
         char m[80], n[16];
@@ -704,7 +704,7 @@ static void tty_exec(char *cmd)
     else if (!strcmp(args[0], "whoami")) tty_print("user");
     else if (!strcmp(args[0], "save")) {
         if (nargs != 1) tty_print("Usage: save");
-        else if (!fs_image_available()) tty_print("Persistence is not ported. Files are RAM-only; no disk was written.");
+        else if (!fs_image_available()) tty_print("No verified ATA persistence target. Files are RAM-only; no disk was written.");
         else tty_print(fs_image_save() ? "Filesystem image written to disk."
                       : "Save failed. See klog; previous disk save may be incomplete.");
     }
@@ -727,6 +727,7 @@ static void tty_exec(char *cmd)
         if (nargs > 1 && (nargs != 2 || strcmp(args[1],"--confirm"))) { tty_print("Usage: shutdown [--confirm]"); return; }
         tty_print("powering off...");
         tty_draw();
+        usb_kbd_leds_off();
         acpi_shutdown();
         wm_poweroff_screen();
         for (;;) cpu_hlt();
@@ -745,7 +746,7 @@ static void tty_console_loop(void)
     tty_exit = 0;
     tty_draw();
     while (!tty_exit) {
-        /* PS/2 input queues are populated by native IRQs. */
+        usb_poll(); /* foreground only: never drive USB from SIMD-free IRQs */
         /* r37: error screens no longer depend on the WM - while this
          * console owns the screen IT presents pending non-fatal errors
          * (error_screen draws + holds by itself, then returns here) */

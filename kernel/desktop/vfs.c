@@ -47,7 +47,7 @@ int vfs_init_defaults(void)
         "- GOP framebuffer desktop with mouse-driven window manager\n"
         "- PS/2 keyboard and mouse drivers, PIT clock, CMOS RTC\n"
         "- Terminal, Files, Notepad, Calendar, Settings, About apps\n"
-        "- RAM-only documents/settings; no disk persistence yet";
+        "- PCI/xHCI HID, verified ATA data saves, UEFI ACPI power";
 
     static const char settings[] = "{\n  \"theme\": \"matrix-1\",\n  \"version\": \"x64-dev\"\n}";
 
@@ -274,11 +274,13 @@ void vfs_free_tree(struct vfs_node *n) { if (n) node_free_recursive(n); }
 
 void system_files_init(int have_disk)
 {
-    (void)have_disk;
-    static const char info[] =
+    const char *info=have_disk ?
+        "SCos native x64 UEFI desktop.\n"
+        "Verified ATA data partition available. Use save to persist files/settings.\n"
+        "Save is verified, not journaled. Boot files stay outside the data partition.\n" :
         "SCos native x64 UEFI desktop conversion.\n"
-        "This filesystem is RAM-backed. Disk persistence is not ported yet.\n"
+        "No unique supported ATA persistence target. This filesystem is RAM-backed.\n"
         "Settings and documents are lost at shutdown/reboot.\n"
         "The running boot files are not exposed as pretend disk copies.\n";
-    vfs_write("/system/README.txt", info, sizeof(info)-1);
+    vfs_write("/system/README.txt", info, strlen(info));
 }

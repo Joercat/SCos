@@ -33,7 +33,7 @@ const char *proc_sys_name(int i)
  * app state and dynamically added tabs/documents. Static state stays in sckern. */
 u64 proc_win_mem_kb(struct window *w){return heap_owner_bytes((uintptr_t)w)/1024;}
 u64 proc_wm_mem_kb(void){return heap_owner_bytes(HEAP_WM)/1024;}
-u64 proc_kernel_mem_kb(void){return memory_reserved_pages()*4+heap_owner_bytes(0)/1024;}
+u64 proc_kernel_mem_kb(void){return memory_reserved_pages()*4+(heap_owner_bytes(0)+usb_dma_bytes())/1024;}
 
 struct smon {
     int sel;              /* selected row, -1 = none; >= SYS_TASKS = app */
