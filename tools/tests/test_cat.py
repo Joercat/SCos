@@ -16,7 +16,7 @@ def check(g,source,error=None,flags=0):
 def test():
   for ide in [False,True]:
     with Guest('cat-ide' if ide else 'cat-usb',ide=ide) as g:
-      assert g.call('app_count')==15
+      assert g.call('app_count')==13
       # Raw source and project files are never launchable applications.
       g.save('home/apps/raw.lua','return {}');g.debug.write(g.scratch,b'home/apps/raw.lua\0');assert not g.call('lua_app_install',g.scratch)
       good=package('return {}')
@@ -97,11 +97,11 @@ end}'''
       g.snapshot('settings-short');g.close(settings)
       # Check all native apps remain C clients and repaint against the custom palette.
       windows=[]
-      for name in ['files','terminal','notepad','browser','calendar','settings','about','blackjack','sysmon','solitaire','counter','sketch','studio']:
+      for name in ['files','terminal','notepad','browser','calendar','settings','about','blackjack','sysmon','solitaire','studio']:
         w=g.launch(name);windows.append(w)
-      assert g.call('wm_win_count')==13;g.snapshot('native-apps')
+      assert g.call('wm_win_count')==11;g.snapshot('native-apps')
       for w in windows:g.close(w)
-      print('PASS confirmed persistent custom palette/background and all 13 built-in C app lifecycles',flush=True)
+      print('PASS confirmed persistent custom palette/background and all 11 built-in C app lifecycles',flush=True)
       # Studio: keyboard shortcuts drive its real editor/compiler/save/run path.
       studio=g.launch('studio');g.debug.send('c');g.press('ctrl','s');g.pause()
       assert g.read('home/projects/my-app.project')[:8]==b'SCOSPRJ1'
@@ -110,7 +110,8 @@ end}'''
       assert g.read('home/apps/my-app.cat')[:8]==b'SCOSCAT1'
       g.close(child);g.snapshot('studio');g.close(studio)
       # File association opens a bundled project in native Studio, not raw-source launch.
-      template=g.read('home/projects/sample-counter.project');assert template[:8]==b'SCOSPRJ1'
+      demo=g.read('home/demos/counter.cat');assert demo[:8]==b'SCOSCAT1'
+      template=bytearray(demo);template[:8]=b'SCOSPRJ1';struct.pack_into('<I',template,16,0);struct.pack_into('<I',template,16,zlib.crc32(template));g.save('home/projects/sample-counter.project',template)
       g.debug.write(g.scratch,b'home/projects/sample-counter.project\0');studio=g.call('app_open_document',g.scratch);assert studio;g.run()
       d=g.ptr(studio+80);original=g.string(g.ptr(d),65536);assert original==template[128:].decode()
       g.type('x');assert g.string(g.ptr(d),65536)=='x'+original
@@ -120,10 +121,21 @@ end}'''
       g.debug.write(g.scratch,b'home/projects/sample-sketch.project\0');assert g.call('app_open_document',g.scratch)==studio
       assert g.call('wm_dialog_active');g.debug.send('c');g.press('esc');g.pause();assert g.string(g.ptr(d),65536)=='x'+original
       g.close(studio);recovery=g.read('home/projects/studio-recovery.project');assert recovery[128:]==('x'+original).encode()
-      assert recovery[36:68].split(b'\0')[0]==b'sample-counter'
+      assert recovery[36:68].split(b'\0')[0]==b'counter'
       g.debug.write(g.scratch,b'home/projects/studio-recovery.project\0');studio=g.call('app_open_document',g.scratch);assert studio;g.run();assert g.string(g.ptr(g.ptr(studio+80)),65536)=='x'+original;g.close(studio)
       g.debug.write(g.scratch,b'home/apps/my-app.cat\0');child=g.call('app_open_document',g.scratch);assert child;g.run();assert g.state(child)==(0,'');g.close(child)
       print('PASS sample projects, document dispatch, Studio undo/redo, discard cancellation and metadata-preserving recovery',flush=True)
+      # Demos are not registered until the user explicitly installs them.
+      for name in ['counter','sketch']:
+        g.debug.write(g.scratch,name.encode()+b'\0');assert not g.call('app_find',g.scratch)
+        path=('home/demos/'+name+'.cat').encode()+b'\0'
+        g.debug.write(g.scratch,path);assert not g.call('app_open_document',g.scratch)
+        assert g.call('wm_dialog_active');g.debug.send('c');g.press('esc');g.pause()
+        assert g.read('home/apps/'+name+'.cat') is None
+        g.debug.write(g.scratch,path);g.call('app_open_document',g.scratch);g.type('\n')
+        assert g.read('home/apps/'+name+'.cat')==g.read('home/demos/'+name+'.cat')
+        child=g.call('wm_win_at',0);assert child and g.state(child)==(0,'');g.close(child)
+      print('PASS optional CAT demos: not preinstalled, cancel, install and execute',flush=True)
       if ide:
         assert g.call('fs_image_save')==1;g.reboot()
         theme=g.call('theme_current');assert g.string(g.ptr(theme))=='user-test'

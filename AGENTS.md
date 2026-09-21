@@ -60,3 +60,5 @@ See `docs/migration/BOOT64.md` for contracts, verification and limitations.
   C App Studio and validated .cat packages replacing directly launchable .lua
   files. All built-in apps must be C. Preserve reusable test tools from now on;
   this supersedes the earlier requirement to delete temporary verification tools.
+
+User correction: Counter/Sketch are optional Lua CAT demonstrations under home/demos, not C built-ins or preinstalled apps. Studio clipboard must be bounded; retain reusable regression tests.

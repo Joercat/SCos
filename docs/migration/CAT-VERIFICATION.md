@@ -1,5 +1,8 @@
 # CAT / native Studio / API 2 verification
 
+Historical baseline: demo distribution and editor behavior are superseded by
+[the optional demos/clipboard verification](STUDIO-CLIPBOARD-VERIFICATION.md).
+
 Date: 2026-09-20. Unnumbered x64 development build; **not physical-PC acceptance**.
 No new drivers were introduced. `os.html` and the permanently frozen 32-bit
 milestone remain in place. The older LUA-VERIFICATION.md records the previous

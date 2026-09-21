@@ -24,4 +24,4 @@ $(BUILD)/desktop-vfs.o: APP_CFLAGS += -I$(BUILD)
 $(BUILD)/desktop-lua_apps.o: $(wildcard third_party/lua/*.h)
 
 $(BUILD)/desktop-lua_apps.o: kernel/desktop/lua_api.inc kernel/include/cat.h
-$(BUILD)/desktop-cat.o $(BUILD)/desktop-app_studio.o: kernel/include/cat.h
+$(BUILD)/desktop-cat.o $(BUILD)/desktop-app_studio.o $(BUILD)/desktop-apps.o: kernel/include/cat.h

@@ -28,15 +28,17 @@ For the first physical boot, use the [PC test guide and final USB-boot checks](d
 
 ## Write your own apps
 
-All shipped desktop apps are **native C**, including Counter, Sketch and the
-new **App Studio**. Run `appstrt studio` to edit a project, syntax-check it with
+All preinstalled desktop apps are **native C**, including **App Studio**.
+Counter and Sketch are optional Lua demonstrations in `/home/demos/*.cat`: open
+them in Files and approve installation. They are not preinstalled. Run `appstrt studio` to edit a project, syntax-check it with
 the real Lua 5.4.9 compiler, build a `.cat` package and launch it with F5.
-Raw `.lua` launching is removed. API 2 offers 48 functions for drawing, widgets,
+Studio supports range selection and Ctrl+C/X/V with a 16 KiB clipboard and
+64 KiB source limit. Raw `.lua` launching is removed. API 2 offers 48 functions for drawing, widgets,
 window control, private data, system queries and confirmed global themes.
 Settings selects four presets or up to eight custom palettes/backgrounds.
 
 See the [Studio and API guide](docs/LUA-APPS.md), [CAT format](docs/CAT-FORMAT.md),
-[current verification record](docs/migration/CAT-VERIFICATION.md), and
+[current verification record](docs/migration/STUDIO-CLIPBOARD-VERIFICATION.md), and
 [open-source provenance/licenses](third_party/README.md). This remains a
 cooperative kernel, not a ring-3 security sandbox. RAM-versus-ATA persistence
 limitations still apply. The [earlier Lua verification](docs/migration/LUA-VERIFICATION.md)

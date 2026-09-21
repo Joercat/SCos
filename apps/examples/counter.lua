@@ -1,4 +1,4 @@
--- Studio template: build sample-counter.cat. The built-in Counter is C.
+-- Optional CAT demonstration. Install from /home/demos in Files.
 -- Mouse/keyboard state belongs to this window, not to the compositor.
 local count = 0
 local function increment()

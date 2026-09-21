@@ -73,7 +73,7 @@ class Guest:
     def close(self,w):self.call('wm_close_window',w);self.run()
     def state(self,w):
         d=self.ptr(w+80);return int.from_bytes(self.debug.read(d+28,4),'little'),self.string(d+52,224)
-    def press(self,*keys):self.qmp('send-key',{'keys':[{'type':'qcode','data':k} for k in keys],'hold-time':25});time.sleep(.06)
+    def press(self,*keys):self.qmp('send-key',{'keys':[{'type':'qcode','data':k} for k in keys],'hold-time':25});time.sleep(.2)
     def type(self,text):
         codes={' ':'spc','\n':'ret','/':'slash','.':'dot','-':'minus'}
         self.debug.send('c')

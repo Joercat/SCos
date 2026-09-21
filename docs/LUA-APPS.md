@@ -1,7 +1,7 @@
 # App Studio, CAT packages and Lua API 2
 
-All **13 shipped desktop applications are native C**, including App Studio,
-Counter and Sketch. Themes can change their appearance; editable Lua does not
+All **11 preinstalled desktop applications are native C**, including App Studio.
+Counter and Sketch are optional Lua CAT demonstrations, not native built-ins. Themes can change their appearance; editable Lua does not
 replace system applications. Lua 5.4.9's real compiler and VM remain available
 for your own apps, loaded exclusively from **`.cat` packages**. Raw `.lua`
 files and `.project` files cannot be launched as applications.
@@ -23,7 +23,7 @@ files and `.project` files cannot be launched as applications.
    double-click the package in Files. No OS rebuild or reboot is required.
 
 Studio has line numbers, scrolling, lexical syntax colors, metadata caret
-editing, one-level source undo/redo (Ctrl+Z/Y), select-all (Ctrl+A), an API
+editing, one-level source undo/redo (Ctrl+Z/Y), select-all (Ctrl+A), Shift+navigation and mouse-drag range selection, an API
 reference (F1), diagnostics, and New/Open/Save/Check/Build/Run/API/Recover
 controls. Ctrl+N/O create/open projects. Open accepts `.project` or `.cat`;
 opening another document in an already-running dirty Studio asks before
@@ -33,9 +33,40 @@ is preserved; invalid metadata falls back to recovery defaults. This is not
 continuous autosave, multi-level undo, a filesystem tree, autocomplete, or a
 full Android Studio port. Coloring is a lightweight lexical aid, not a parser.
 
-Open `/home/projects/sample-counter.project` or `sample-sketch.project` for
-editable **user-app templates**, separate from the built-in C Counter/Sketch.
+## Optional demos — install them yourself
+
+In Files open `/home/demos/README.txt` for the walkthrough. Counter and Sketch
+ship there as `counter.cat` and `sketch.cat`; they are **not** discovered at boot
+or preinstalled in the launcher. Double-click a package, then approve the native
+install confirmation. The installer validates the package and compiles its source,
+copies it into `/home/apps`, registers it and runs it. Cancel changes nothing.
+Conflicting IDs and existing destinations are refused without overwriting files.
+This same Files workflow handles other CAT packages outside `/home/apps`.
+An installed package can later be opened directly or via `appstrt counter`.
+Explicit Terminal launch of an outside CAT remains session registration rather
+than a durable installation; use Files to install its copy into `/home/apps`.
+
+To inspect or adapt a demo, use Studio's **Open** button and enter
+`/home/demos/counter.cat` or `/home/demos/sketch.cat`. Change the ID for a new app.
 Files associates `.project` with Studio and ordinary text with Notepad.
+Older saved sample `.project` files are left alone, not deleted on upgrade.
+
+## Bounded Studio clipboard
+
+- **Ctrl+C / Ctrl+X / Ctrl+V** copy, cut and paste. Select source with Shift+arrows,
+  Shift+Home/End/PageUp/PageDown, mouse drag, or Ctrl+A. Ctrl+Home/End moves to
+  the start/end of the document; Shift can extend selection to these positions.
+- Clipboard capacity is **16,384 bytes**, stored in a fixed-size buffer. A copy
+  or cut larger than this is rejected, preserving the old clipboard and source.
+- Source capacity is **65,536 bytes**. Paste, replacement and auto-indented Enter
+  are checked before mutation and never silently truncate or partially insert.
+  Accepted replacements/cuts/pastes are one undoable source operation.
+- Metadata fields support select-all copy/cut and insertion/replacement paste,
+  with their own smaller limits (ID 30, title 39, size fields 7 ASCII bytes).
+  Multiline/non-printable field paste is rejected. Metadata has no undo history.
+- This is a Studio-local, session-memory clipboard, retained across Studio
+  windows—not a host/browser clipboard, a Lua API, or an OS-wide Notepad clipboard.
+- The editor footer displays line, column, source bytes and clipboard usage.
 
 ### Discovery and names
 
@@ -165,8 +196,8 @@ the Terminal's confirmed `save` command persists the tree. The saved region is
 quotas are ceilings, not guarantees that a combined disk save will fit.
 
 USB boot/AHCI/NVMe still lack supported native persistence: your changes are
-lost on reboot there. No new storage drivers were added. Missing sample
-projects are installed on upgrade without overwriting existing project edits;
+lost on reboot there. No new storage drivers were added. Missing demo
+packages are supplied on upgrade without overwriting existing edits;
 old `.lua` files remain ordinary data, never executable apps.
 
 ## Lua compatibility and limits

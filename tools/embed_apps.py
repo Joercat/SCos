@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Embed editable source examples in the initial VFS, not in the compositor."""
+"""Embed optional CAT demo packages outside the installed-app discovery folder."""
 import pathlib
 import sys
 import struct
 import zlib
+import json
 out = pathlib.Path(sys.argv[1])
 files = sorted(pathlib.Path('apps/examples').glob('*.lua'))
 lines = ['/* Generated from apps/examples; do not edit. */']
@@ -12,9 +13,9 @@ for i, p in enumerate(files):
     if not 0 < len(data) <= 65536:
         raise SystemExit(f'invalid Lua source size: {p}')
     header=bytearray(128)
-    header[:8]=b'SCOSPRJ1'
+    header[:8]=b'SCOSCAT1'
     struct.pack_into('<7I',header,8,128,len(data),0,2,0,560,360)
-    app_id=('sample-'+p.stem).encode(); title=('Sample '+p.stem).encode()
+    app_id=p.stem.encode(); title=('Sample '+p.stem).encode()
     if len(app_id)>30 or len(title)>39:raise SystemExit('example metadata too long')
     header[36:36+len(app_id)]=app_id;header[68:68+len(title)]=title
     data=header+data;struct.pack_into('<I',data,16,zlib.crc32(data))
@@ -22,9 +23,35 @@ for i, p in enumerate(files):
     for j in range(0, len(data), 24):
         lines.append(','.join(str(n) for n in data[j:j+24]) + ',')
     lines.append('};')
+instructions = """OPTIONAL CAT APPLICATION DEMOS
+
+Counter and Sketch are Lua demonstrations, not built-in system applications.
+They are NOT installed or listed in the launcher on a fresh boot.
+
+1. In Files open /home/demos.
+2. Double-click counter.cat or sketch.cat.
+3. Read the native install confirmation; Cancel changes nothing.
+4. Approve to validate, install a copy into /home/apps, and run it.
+5. Later find it in the launcher or use appstrt counter / appstrt sketch.
+
+To inspect or modify a demo, open App Studio, choose Open, and enter
+/home/demos/counter.cat (or sketch.cat). Change its ID for your own app.
+Ctrl+S saves a .project; Ctrl+B builds .cat; F5 builds and runs.
+
+Studio: Shift+arrows or mouse drag selects text. Ctrl+A selects all.
+Ctrl+C copies, Ctrl+X cuts, Ctrl+V pastes. Clipboard maximum: 16 KiB.
+Source maximum: 64 KiB. Oversized edits are rejected, not truncated.
+This clipboard belongs to Studio, not the host computer.
+
+All installs and edits are RAM-only until the confirmed Terminal save command
+persists them on supported ATA disks. USB boot has no native disk persistence.
+Only install trusted packages. A checksum is not a security signature.
+"""
+lines.append('static const unsigned char demo_readme[] = '+json.dumps(instructions)+';')
 lines.append('static const struct { const char *path; const unsigned char *data; u32 size; } lua_examples[] = {')
 for i, p in enumerate(files):
-    lines.append(f'{{"home/projects/sample-{p.stem}.project",lua_example_{i},sizeof(lua_example_{i})}},')
+    lines.append(f'{{"home/demos/{p.stem}.cat",lua_example_{i},sizeof(lua_example_{i})}},')
+lines.append('{"home/demos/README.txt",demo_readme,sizeof(demo_readme)-1},')
 lines.append('};')
 notice = pathlib.Path('third_party/NOTICES.txt').read_bytes()
 lines.append('static const unsigned char lua_notices[] = {')

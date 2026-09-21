@@ -67,7 +67,7 @@ int vfs_init_defaults(void)
         !vfs_write("system/about.txt",about,sizeof(about)-1)) {
         vfs_root=old; node_free_recursive(fresh); return 0;
     }
-    if (!vfs_mkdir("home/apps") || !vfs_mkdir("home/projects")) {
+    if (!vfs_mkdir("home/apps") || !vfs_mkdir("home/projects") || !vfs_mkdir("home/demos")) {
         vfs_root=old; node_free_recursive(fresh); return 0;
     }
     for (unsigned i=0;i<sizeof(lua_examples)/sizeof(lua_examples[0]);i++) {
@@ -289,6 +289,7 @@ void system_files_init(int have_disk)
     /* Install missing native-Studio project templates, never overwrite edits.
      * Old .lua files remain data; the app loader now accepts only .cat. */
     if(!vfs_lookup("home/apps"))vfs_mkdir("home/apps");
+    if(!vfs_lookup("home/demos"))vfs_mkdir("home/demos");
     if(!vfs_lookup("home/projects"))vfs_mkdir("home/projects");
     for(unsigned i=0;i<sizeof(lua_examples)/sizeof(lua_examples[0]);i++)
         if(!vfs_lookup(lua_examples[i].path)&&!vfs_write(lua_examples[i].path,(const char *)lua_examples[i].data,lua_examples[i].size))
