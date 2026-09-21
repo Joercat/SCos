@@ -12,7 +12,7 @@
 #define TASKBAR_H 40
 static void desktop_load(void);
 static void desktop_save(void);
-static void menu_cancel(void);
+static __attribute__((noinline)) void menu_cancel(void);
 #define BTN_SZ 18
 
 /* Stable slots: app/tab/dialog back-pointers must survive closing an earlier window. */
@@ -70,7 +70,7 @@ void wm_request_full(void) { wm_full(); }
 static int mx = 300, my = 300;
 static int mouse_rx, mouse_ry, mouse_sens;
 static u8 mbuttons;
-static struct window *drag_win, *resize_win;
+static struct window *drag_win, *resize_win, *app_capture;
 static int drag_ox, drag_oy, resize_ox, resize_oy;
 
 static struct {
@@ -90,24 +90,23 @@ static u64 last_blink_phase;
 static int icon_hover = -1;
 
 /* ---- taskbar layout: scrollable app buttons + power button + clock ---- */
-#define TB_BTN_W   124
-#define TB_BTN_GAP 6
 #define TB_CLOCK_W 68
 #define TB_POWER_W 34
-static int tb_off = 0;            /* index of first visible task button */
-static int power_hover = 0;
-
-static void tb_geom(int *x0, int *x1, int *vis, int *scrollable)
-{
-    *x0 = 8 + 40;                        /* after the launcher button */
-    *x1 = screen_w - TB_CLOCK_W - TB_POWER_W - 24;
-    int cap = (*x1 - *x0) / (TB_BTN_W + TB_BTN_GAP);
-    if (cap < 1) cap = 1;
-    *scrollable = win_count > cap;
-    if (*scrollable) { *x0 += 12; *x1 -= 12; cap = (*x1 - *x0) / (TB_BTN_W + TB_BTN_GAP); if (cap < 1) cap = 1; }
-    *vis = cap;
-    if (tb_off > win_count - cap) tb_off = win_count - cap;
-    if (tb_off < 0) tb_off = 0;
+static int power_hover;
+static int picker_ids[MAX_WINDOWS];
+static char picker_labels[MAX_WINDOWS][80];
+static const char *picker_items[MAX_WINDOWS];
+static void picker_answer(int item,void *ud){
+    (void)ud;if(item<0||item>=MAX_WINDOWS)return;
+    for(int i=0;i<win_count;i++)if(wins[i]->id==picker_ids[item]){
+        struct window *w=wins[i];if(w->state==WIN_STATE_MIN)w->state=w->restore_state==WIN_STATE_MAX?WIN_STATE_MAX:WIN_STATE_NORMAL;wm_focus(w);return;
+    }
+}
+static __attribute__((noinline)) void picker_open(void){
+    if(!win_count){static const char *empty[]={"No open windows"};wm_menu(48,screen_h-TASKBAR_H-32,empty,1,NULL,NULL);return;}
+    for(int i=0;i<win_count;i++){picker_ids[i]=wins[i]->id;strcpy(picker_labels[i],wins[i]->state==WIN_STATE_MIN?"[-] ":wins[i]==focused_w?"[+] ":"    ");strncat(picker_labels[i],wins[i]->title,63);picker_items[i]=picker_labels[i];}
+    wm_menu(48,screen_h-TASKBAR_H-win_count*24-8,picker_items,win_count,picker_answer,NULL);
+    menu.w=320;if(menu.w>screen_w-4)menu.w=screen_w-4;
 }
 
 static void tb_power_rect(int *x, int *y, int *w, int *h)
@@ -217,14 +216,24 @@ void wm_set_title(struct window *w, const char *title)
 
 void wm_focus(struct window *w)
 {
-    if (!w) return;
+    if (!w||w->state==WIN_STATE_MIN) return;
     w->z = ++next_z;
     focused_w = w;
     wm_full();
 }
 
+void wm_minimize_window(struct window *w)
+{
+    if(!w||w->state==WIN_STATE_MIN)return;
+    w->restore_state=w->state;w->state=WIN_STATE_MIN;
+    if(app_capture==w)app_capture=NULL;
+    if(focused_w==w){focused_w=NULL;for(int i=0;i<win_count;i++)if(wins[i]->state!=WIN_STATE_MIN&&(!focused_w||wins[i]->z>focused_w->z))focused_w=wins[i];}
+    wm_full();
+}
+
 static struct window *win_at_point(int x, int y)
 {
+    if(y>=screen_h-TASKBAR_H)return NULL;
     struct window *best = NULL;
     for (int i = 0; i < win_count; i++) {
         struct window *w = wins[i];
@@ -305,11 +314,12 @@ void wm_close_window(struct window *w)
     if (focused_w == w) focused_w = NULL;
     if (modal_w == w) modal_w = NULL;
     if (drag_win == w) drag_win = NULL;
+    if (app_capture == w) app_capture = NULL;
     if (resize_win == w) resize_win = NULL;
     if (!focused_w) {
         struct window *top = NULL;
         for (int i = 0; i < win_count; i++)
-            if (!top || wins[i]->z > top->z) top = wins[i];
+            if (wins[i]->state!=WIN_STATE_MIN&&(!top || wins[i]->z > top->z)) top = wins[i];
         focused_w = top;
     }
     wm_full();
@@ -326,7 +336,7 @@ struct window *wm_open_app(const char *app_id, void *arg)
     if (app->single)
         for (int i = 0; i < win_count; i++)
             if (wins[i]->app == app) {
-                if (wins[i]->state == WIN_STATE_MIN) wins[i]->state = WIN_STATE_NORMAL;
+                if (wins[i]->state == WIN_STATE_MIN) wins[i]->state = wins[i]->restore_state==WIN_STATE_MAX?WIN_STATE_MAX:WIN_STATE_NORMAL;
                 if (cons) wins[i]->console = cons;
                 wm_focus(wins[i]);
                 if(arg&&app->document){APP_T0(wins[i]);app->document(wins[i],arg);APP_T1(wins[i]);}
@@ -371,7 +381,7 @@ struct window *wm_open_app(const char *app_id, void *arg)
                    "windows or apps and try again.", NULL, 0);
         return NULL;
     }
-    focused_w = modal_w ? modal_w : w;
+    if(modal_w)focused_w=modal_w;else if(w->state!=WIN_STATE_MIN)focused_w=w;
     wm_full();
     return w;
 }
@@ -388,7 +398,7 @@ void wm_init(void)
 }
 
 /* -------------------------------------------------------------- menus ---- */
-static void menu_cancel(void){
+static __attribute__((noinline)) void menu_cancel(void){
     if(!menu.active)return;
     menu.active=0;
     if(menu.cb)menu.cb(-1,menu.ud);
@@ -402,10 +412,13 @@ void wm_menu(int x, int y, const char **items, int n, menu_cb cb, void *ud)
     menu.cb = cb;
     menu.ud = ud;
     menu.w = 170;
+    for(int i=0;i<n;i++){int width=s_text_width(items[i])+20;if(width>320)width=320;if(width>menu.w)menu.w=width;}
     menu.h = n * 24 + 6;
     menu.x = x; menu.y = y;
     if (menu.x + menu.w > screen_w) menu.x = screen_w - menu.w - 2;
     if (menu.y + menu.h > screen_h) menu.y = screen_h - menu.h - 2;
+    if(menu.y<2)menu.y=2;
+    if(menu.x<2)menu.x=2;
     menu_dirty = 1;
     dirty = 1;
 }
@@ -480,6 +493,7 @@ static int nitems;
 static u32 desk_sel;                       /* selection bitmask */
 static int desk_drag = -1, desk_drag_ox, desk_drag_oy, desk_drag_moved;
 static int desk_sx, desk_sy;
+static int band_button;
 static int band_active, band_x0, band_y0, band_x1, band_y1;
 static struct { int active; char q[48]; int qpos; int hover, offset; } launch;
 
@@ -608,7 +622,7 @@ static void desk_restore(void)
         if (ap->id[0] == '_') continue;
         int found = 0;
         for (int i = 0; i < nitems; i++)
-            if (items[i].kind == 0 && strcmp(items[i].app, ap->id) == 0) found = 1;
+            if (items[i].kind == 0 && strcmp(items[i].app, ap->id) == 0) {found = 1;strncpy(items[i].label,ap->desktop_label?ap->desktop_label:ap->title,39);items[i].label[39]=0;}
         if (found || nitems >= DESK_MAX) continue;
         struct ditem *d = &items[nitems];
         memset(d, 0, sizeof(*d));
@@ -629,6 +643,19 @@ static void desk_restore(void)
 void wm_desktop_restore(void) { desk_restore(); }
 
 /* enumerate visible desktop items for the file manager's desktop view */
+/* Install only this application's shortcut, without unhiding unrelated icons. */
+void wm_desktop_install(const char *id)
+{
+    struct app *a=app_find(id);if(!a||id[0]=='_')return;
+    for(int i=0;i<nitems;i++)if(items[i].kind==0&&!strcmp(items[i].app,id)){
+        items[i].hidden=0;strncpy(items[i].label,a->desktop_label?a->desktop_label:a->title,39);items[i].label[39]=0;desktop_save();wm_full();return;
+    }
+    if(nitems>=DESK_MAX)return;
+    for(int y=0;y<DESK_ROWS;y++)for(int x=0;x<DESK_COLS;x++)if(!cell_taken(x,y,-1)){
+        struct ditem *d=&items[nitems++];memset(d,0,sizeof(*d));strcpy(d->app,id);strncpy(d->label,a->desktop_label?a->desktop_label:a->title,39);d->gx=x;d->gy=y;desktop_save();wm_full();return;
+    }
+}
+
 int wm_desk_vis_count(void)
 {
     int n = 0;
@@ -709,7 +736,7 @@ static void paint_icons(void)
             s_fill(&screen, x, y, w, h, blend(t->bg_top, t->main, 18));
         }
         s_icon(&screen, ditem_icon(&items[i]), x + (w - 24) / 2, y + 8, t->main);
-        int tw = s_text_width(items[i].label);
+        int tw = s_text_width(items[i].label);if(tw>w)tw=w;
         s_clip_text(&screen, x + (w - tw) / 2, y + 40, items[i].label, t->text, w);
     }
     if (band_active) {
@@ -778,6 +805,10 @@ static void paint_launcher(void);
 
 static void damage_add(int x, int y, int w, int h)
 {
+    if(x<0){w+=x;x=0;}if(y<0){h+=y;y=0;}
+    if(w>screen_w-x)w=screen_w-x;
+    if(h>screen_h-y)h=screen_h-y;
+    if(w<=0||h<=0)return;
     if (ndmg >= 8) { ndmg = 0; dmg[0].x = 0; dmg[0].y = 0;
                     dmg[0].w = screen_w; dmg[0].h = screen_h; ndmg = 1; return; }
     for (int i = 0; i < ndmg; i++) {
@@ -795,105 +826,39 @@ static void damage_add(int x, int y, int w, int h)
     ndmg++;
 }
 
-static int dmg_intersects(int x, int y, int w, int h)
+/* Rebuild damaged pixels from wallpaper upward under a scissor. Never mutate
+ * the scene while collecting mouse reports and never expand damage by blitting
+ * an entire overlapping window. Cached app surfaces remain independent. */
+static __attribute__((noinline)) void paint_partial(void)
 {
-    for (int i = 0; i < ndmg; i++)
-        if (x < dmg[i].x + dmg[i].w && dmg[i].x < x + w &&
-            y < dmg[i].y + dmg[i].h && dmg[i].y < y + h)
-            return 1;
-    return 0;
-}
-
-static void paint_partial(void)
-{
-    /* r34 ghost-cursor fix: the back buffer must be cursor-free BEFORE
-     * anything saves a new cursor background.  The old code cleared
-     * cur_have here and let cur_draw() "save" a background that still
-     * contained the OLD cursor pixels wherever the damage rects had not
-     * repainted - every later restore then stamped dead cursor copies
-     * into the scene (the field report's "dead copies of the mouse").
-     * Invariant now: back buffer holds cursor pixels iff cur_have == 1,
-     * so a restore at the top always leaves a clean scene. */
-    if (cur_have) {
-        damage_add(cur_bx, cur_by, cur_bw, cur_bh);
-        cur_restore();
+    if(cur_have){damage_add(cur_bx,cur_by,cur_bw,cur_bh);cur_restore();}
+    if(icons_dirty)damage_add(0,0,screen_w,icon_band);
+    if(tb_dirty)damage_add(0,screen_h-TASKBAR_H,screen_w,TASKBAR_H);
+    if(menu.active&&menu_dirty)damage_add(menu.x,menu.y,menu.w,menu.h);
+    if(launch.active&&launch_dirty)damage_add(8,screen_h-TASKBAR_H-308,300,308);
+    for(int i=0;i<win_count;i++){
+        struct window *w=wins[i];if(w->state==WIN_STATE_MIN)continue;
+        if(w->dirty&&w->app&&w->app->paint){APP_T0(w);w->app->paint(w);APP_T1(w);damage_add(w->x+1,w->y+WIN_TITLEBAR,w->surf.w,w->surf.h);w->dirty=0;}
+        if(w->chrome_dirty){damage_add(w->x,w->y,w->w+4,w->h+4);w->chrome_dirty=0;}
     }
-    if (icons_dirty) {
-        paint_icons();
-        damage_add(0, 0, screen_w, icon_band);
-        icons_dirty = 0;
-    }
-    /* Pass 1: repaint dirty windows bottom-up in z-order, so a higher dirty
-     * window always blits after a lower one it overlaps. */
-    static u8 drawn[MAX_WINDOWS];
-    for (int i = 0; i < win_count; i++) drawn[i] = 0;
-    for (int pass = 0; pass < win_count; pass++) {
-        struct window *lowest = NULL;
-        for (int i = 0; i < win_count; i++) {
-            if (drawn[i] || wins[i]->state == WIN_STATE_MIN) continue;
-            if (!lowest || wins[i]->z < lowest->z) lowest = wins[i];
+    damage_add(mx,my,CUR_W,CUR_H);
+    for(int r=0;r<ndmg;r++){
+        struct drect *d=&dmg[r];fb_scene_clip(d->x,d->y,d->w,d->h);
+        wp_restore_rect(d->x,d->y,d->w,d->h);
+        in_full=1;paint_icons();in_full=0;
+        u8 drawn[MAX_WINDOWS]={0};
+        for(int pass=0;pass<win_count;pass++){
+            int k=-1;for(int i=0;i<win_count;i++)if(!drawn[i]&&wins[i]->state!=WIN_STATE_MIN&&(k<0||wins[i]->z<wins[k]->z))k=i;
+            if(k<0)break;
+            drawn[k]=1;struct window *w=wins[k];
+            if(w->x<d->x+d->w&&w->x+w->w+4>d->x&&w->y<d->y+d->h&&w->y+w->h+4>d->y)paint_window(w);
         }
-        if (!lowest) break;
-        for(int di=0;di<win_count;di++)if(wins[di]==lowest){drawn[di]=1;break;}
-        if (lowest->dirty && lowest->app && lowest->app->paint) {
-            { APP_T0(lowest); lowest->app->paint(lowest); APP_T1(lowest); }
-            lowest->dirty = 0;
-            paint_win_content(lowest);
-            damage_add(lowest->x + 1, lowest->y + WIN_TITLEBAR, lowest->w - 2,
-                       lowest->h - WIN_TITLEBAR - 1);
-        }
-        if (lowest->chrome_dirty) {
-            lowest->chrome_dirty = 0;
-            /* chrome paints the whole frame background first, so the content
-             * surface must be re-blitted over it in the same pass */
-            paint_window(lowest);
-            damage_add(lowest->x, lowest->y, lowest->w + 4, lowest->h + 4);
-        }
+        paint_taskbar();paint_menu();if(launch.active)paint_launcher();
+        fb_scene_unclip();
     }
-    /* Pass 2: occlusion repair. Any window overlapping accumulated damage
-     * that was NOT repainted gets re-blitted, so a lower window's repaint
-     * (or icon/cursor erase) can never bleed through a window above it. */
-    for (int i = 0; i < win_count; i++) drawn[i] = 0;
-    for (int pass = 0; pass < win_count; pass++) {
-        struct window *lowest = NULL;
-        for (int i = 0; i < win_count; i++) {
-            if (drawn[i] || wins[i]->state == WIN_STATE_MIN) continue;
-            if (!lowest || wins[i]->z < lowest->z) lowest = wins[i];
-        }
-        if (!lowest) break;
-        for(int di=0;di<win_count;di++)if(wins[di]==lowest){drawn[di]=1;break;}
-        if (dmg_intersects(lowest->x, lowest->y, lowest->w + 4, lowest->h + 4)) {
-            paint_window(lowest);
-            /* Whole-frame blits can touch higher windows outside the
-             * original damage. Propagate those bounds up the z stack. */
-            damage_add(lowest->x, lowest->y, lowest->w + 4, lowest->h + 4);
-        }
-    }
-    for (int i = 0; i < win_count; i++) drawn[i] = 0;
-    if (tb_dirty || dmg_intersects(0, screen_h - TASKBAR_H, screen_w, TASKBAR_H)) {
-        paint_taskbar();
-        damage_add(0, screen_h - TASKBAR_H, screen_w, TASKBAR_H);
-        tb_dirty = 0;
-    }
-    if (menu.active && (menu_dirty || dmg_intersects(menu.x, menu.y, menu.w, menu.h))) {
-        paint_menu();
-        damage_add(menu.x, menu.y, menu.w, menu.h);
-        menu_dirty = 0;
-    }
-    if (launch.active && (launch_dirty ||
-        dmg_intersects(8, screen_h - 348, 300, 308))) {
-        paint_launcher();
-        damage_add(8, screen_h - 348, 300, 308);
-        launch_dirty = 0;
-    }
-    /* the scene was repainted cursor-free (restore at the top), so stamp
-     * the pointer now - cur_draw saves a provably clean background - and
-     * include its rect in the flip */
     cur_draw();
-    damage_add(mx, my, CUR_W, CUR_H);
-    for (int i = 0; i < ndmg; i++)
-        fb_flip_rect(dmg[i].x, dmg[i].y, dmg[i].w, dmg[i].h);
-    ndmg = 0;
+    for(int i=0;i<ndmg;i++)fb_flip_rect(dmg[i].x,dmg[i].y,dmg[i].w,dmg[i].h);
+    ndmg=0;icons_dirty=tb_dirty=menu_dirty=launch_dirty=0;
 }
 
 static void paint_menu(void)
@@ -906,7 +871,7 @@ static void paint_menu(void)
         int iy = menu.y + 3 + i * 24;
         if (in_rect(mx, my, menu.x, iy, menu.w, 24))
             s_fill(&screen, menu.x + 1, iy, menu.w - 2, 24, blend(t->win_bg, t->main, 25));
-        s_text(&screen, menu.x + 10, iy + 4, menu.items[i], t->text);
+        s_clip_text(&screen, menu.x + 10, iy + 4, menu.items[i], t->text,menu.w-20);
     }
 }
 
@@ -925,29 +890,10 @@ static void paint_taskbar(void)
     for (int q = 0; q < 4; q++)
         s_fill(&screen, 15 + (q % 2) * 11, y + 12 + (q / 2) * 9, 8, 6, lc);
 
-    int x0, x1, vis, scrollable;
-    tb_geom(&x0, &x1, &vis, &scrollable);
-    if (scrollable) {
-        u32 ac = blend(t->taskbar_bg, t->main, 60);
-        for (int k = 0; k < 3; k++) {        /* left/right scroll arrows */
-            int ay = y + 14 + k * 4;
-            if (tb_off > 0)
-                s_fill(&screen, 8 + k, ay, 1, 8 - k * 2, ac);
-            if (tb_off + vis < win_count)
-                s_fill(&screen, x1 + 12 - 1 - k, ay, 1, 8 - k * 2, ac);
-        }
-    }
-    int bx = x0;
-    for (int i = tb_off; i < win_count && bx + TB_BTN_W <= x1; i++) {
-        struct window *w = wins[i];
-        u32 bg = (w == focused_w && w->state != WIN_STATE_MIN)
-                 ? blend(t->taskbar_bg, t->main, 35)
-                 : blend(t->taskbar_bg, t->main, 12);
-        s_fill(&screen, bx, y + 6, TB_BTN_W, TASKBAR_H - 12, bg);
-        s_frame_rect(&screen, bx, y + 6, TB_BTN_W, TASKBAR_H - 12, blend(t->taskbar_bg, t->main, 50));
-        s_clip_text(&screen, bx + 6, y + 12, w->title, t->text, TB_BTN_W - 12);
-        bx += TB_BTN_W + TB_BTN_GAP;
-    }
+    s_fill(&screen,48,y+6,110,TASKBAR_H-12,blend(t->taskbar_bg,t->main,20));
+    s_frame_rect(&screen,48,y+6,110,TASKBAR_H-12,t->main);
+    char label[24],count[12];strcpy(label,"Windows ");fmt_u32(count,win_count);strcat(label,count);
+    s_clip_text(&screen,56,y+12,label,t->text,94);
 
     /* power button */
     int px, py, pw, ph;
@@ -1047,14 +993,14 @@ static void paint_launcher(void)
             s_fill(&screen, px + 6, y - 3, pw - 12, 22, blend(t->win_bg, t->main, 25));
         }
         s_icon(&screen, app_at(i)->icon, px + 12, y, t->main);
-        s_text(&screen, px + 44, y + 4, app_at(i)->title, t->text);
+        s_clip_text(&screen, px + 44, y + 4, app_at(i)->title, t->text,pw-52);
         y += 24; row++;
     }
     if (!row) s_text(&screen, px + 14, y, "(no matching app)", ((t->main >> 1) & 0x7F7F7F));
 }
 
 
-static void paint_all(void)
+static __attribute__((noinline)) void paint_all(void)
 {
     paint_wallpaper();
     in_full = 1;
@@ -1077,8 +1023,8 @@ static void paint_all(void)
         }
         paint_window(lowest);
     }
-    paint_menu();
     paint_taskbar();
+    paint_menu();
     if (launch.active) paint_launcher();
     tb_dirty = 0; icons_dirty = 0; menu_dirty = 0; launch_dirty = 0; ndmg = 0;
     for (int i = 0; i < win_count; i++) wins[i]->chrome_dirty = 0;
@@ -1144,6 +1090,7 @@ static int move_needs_composite(struct window **wout)
         in_rect(mx, my, 8, screen_h - TASKBAR_H - 308, 300, 308)) return 1;
     if (my >= screen_h - TASKBAR_H) return 1;
     struct window *w = win_at_point(mx, my);
+    if(modal_w&&w!=modal_w)return 0;
     if (w) { *wout = w; return 1; }
     for (int i = 0; i < nitems; i++) {
         if (items[i].hidden) continue;
@@ -1165,21 +1112,6 @@ static void interact_repaint(int x, int y, int w, int h)
     if (x + w > screen_w) w = screen_w - x;
     if (y + h > screen_h) h = screen_h - y;
     if (w <= 0 || h <= 0) return;
-    /* Remove the saved cursor BEFORE changing its underlying scene.
-     * Restoring it later would paste old window pixels onto wallpaper. */
-    if (cur_have) {
-        damage_add(cur_bx, cur_by, cur_bw, cur_bh);
-        cur_restore();
-    }
-    wp_restore_rect(x, y, w, h);
-    if (y < icon_band + 8) icons_dirty = 1;
-    for (int i = 0; i < win_count; i++) {
-        struct window *v = wins[i];
-        if (v->state == WIN_STATE_MIN) continue;
-        if (x < v->x + v->w + 4 && v->x < x + w + 4 &&
-            y < v->y + v->h + 4 && v->y < y + h + 4)
-            v->chrome_dirty = 1;
-    }
     damage_add(x, y, w, h);
     dirty = 1;
 }
@@ -1206,17 +1138,41 @@ static void resize_flush(int force)
     int cw = nw - 2, ch = nh - WIN_TITLEBAR - 1;
     u32 *np = palloc_owned((size_t)cw * ch * 4,(uintptr_t)w);
     if (!np) return;                       /* OOM: keep the old geometry */
+    int oldw=w->w,oldh=w->h;
     pfree(w->surf.px, (u32)w->surf.w * w->surf.h * 4);
     w->w = nw; w->h = nh;
     w->surf.px = np; w->surf.w = cw; w->surf.h = ch;
     memset(np, 0, (u32)cw * ch * 4);
     if (w->app && w->app->paint) { APP_T0(w); w->app->paint(w); APP_T1(w); }
     w->dirty = 0;
-    damage_add(w->x, w->y, w->w + 4, w->h + 4);
+    interact_repaint(w->x,w->y,(oldw>nw?oldw:nw)+4,(oldh>nh?oldh:nh)+4);
 }
 
 /* -------------------------------------------------------------- input ---- */
-static void handle_mouse(struct mouse_event *e)
+static void desktop_context(void)
+{
+        int hit = -1;
+        for (int i = 0; i < nitems; i++) {
+            if (items[i].hidden) continue;
+            int x, y, ww, hh;
+            icon_rect(i, &x, &y, &ww, &hh);
+            if (in_rect(mx, my, x, y, ww, hh)) { hit = i; break; }
+        }
+        if (hit >= 0) {
+            if (!(desk_sel & (1u << hit))) desk_sel = (1u << hit);
+            static const char *m[2] = { "Open", "Remove from Desktop" };
+            wm_menu(mx, my, m, 2, desk_item_menu_cb, NULL);
+        } else if (desk_sel) {
+            static const char *m[2] = { "Remove from Desktop", "Clear Selection" };
+            wm_menu(mx, my, m, 2, desk_sel_menu_cb, NULL);
+        } else {
+            static const char *m[1] = { "Restore removed icons" };
+            wm_menu(mx, my, m, 1, desk_empty_menu_cb, NULL);
+        }
+    wm_full();
+}
+
+static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
 {
     if (e->type == MEV_MOVE) {
         /* pre-move geometry for the interaction damage union */
@@ -1323,6 +1279,9 @@ static void handle_mouse(struct mouse_event *e)
             interact_repaint(x0, y0, x1 - x0, y1 - y0);
             return;
         }
+        if(app_capture&&(!modal_w||modal_w==app_capture)){
+            struct window *c=app_capture;if(c->app&&c->app->mouse){APP_T0(c);c->app->mouse(c,e,mx-c->x-1,my-c->y-WIN_TITLEBAR);APP_T1(c);}cur_move();return;
+        }
         struct window *hw = NULL;
         int zone = move_needs_composite(&hw);
         /* hover signature: composite only when the hover TARGET changes,
@@ -1360,7 +1319,7 @@ static void handle_mouse(struct mouse_event *e)
             last_mrow = mrow; last_lrow = lrow;
             dirty = 1;
         }
-        if (hw && hw->app && hw->app->mouse)
+        if (hw && (!modal_w||modal_w==hw) && hw->app && hw->app->mouse)
             { APP_T0(hw); hw->app->mouse(hw, e, mx - (hw->x + 1), my - (hw->y + WIN_TITLEBAR)); APP_T1(hw); }
         cur_move();                  /* cheap overlay-only cursor move */
         (void)zone;
@@ -1375,21 +1334,10 @@ static void handle_mouse(struct mouse_event *e)
         if(launch.offset<0)launch.offset=0;
         launch_dirty=1;dirty=1;return;
     }
-    if (e->type == MEV_WHEEL && my >= screen_h - TASKBAR_H) {
-        int x0, x1, vis, scrollable;
-        tb_geom(&x0, &x1, &vis, &scrollable);
-        if (scrollable) {
-            tb_off += (e->wheel > 0) ? -1 : 1;
-            if (tb_off < 0) tb_off = 0;
-            if (tb_off > win_count - vis) tb_off = win_count - vis;
-        }
-        tb_dirty = 1;
-        dirty = 1;
-        return;
-    }
+    if(e->type==MEV_WHEEL&&my>=screen_h-TASKBAR_H)return;
     if (e->type == MEV_WHEEL) {
         struct window *w = win_at_point(mx, my);
-        if (w && w->app && w->app->mouse) {
+        if (w && (!modal_w||modal_w==w) && w->app && w->app->mouse) {
             { APP_T0(w); w->app->mouse(w, e, mx - (w->x + 1), my - (w->y + WIN_TITLEBAR)); APP_T1(w); }
             w->dirty = 1;            /* app scrolled: repaint its content */
         }
@@ -1407,7 +1355,7 @@ static void handle_mouse(struct mouse_event *e)
                    my - last_down_y <= 6 && my - last_down_y >= -6);
         last_down_tick = tick_count;
         last_down_x = mx; last_down_y = my; last_down_btn = e->button;
-        if (dbl && e->button == MBTN_LEFT && my < screen_h - TASKBAR_H &&
+        if (dbl && !menu.active && !launch.active && !modal_w && e->button == MBTN_LEFT && my < screen_h - TASKBAR_H &&
             !win_at_point(mx, my)) {
             for (int i = 0; i < nitems; i++) {
                 if (items[i].hidden) continue;
@@ -1422,6 +1370,9 @@ static void handle_mouse(struct mouse_event *e)
         }
     }
     if (!e->down) {
+        if(app_capture){struct window *c=app_capture;if(!e->buttons)app_capture=NULL;if(c->app&&c->app->mouse){APP_T0(c);c->app->mouse(c,e,mx-c->x-1,my-c->y-WIN_TITLEBAR);APP_T1(c);}dirty=1;return;}
+        if(band_active&&e->button!=band_button)return;
+        if(band_active&&band_button==MBTN_RIGHT&&mx-band_x0<=4&&mx-band_x0>=-4&&my-band_y0<=4&&my-band_y0>=-4){band_active=0;desktop_context();return;}
         if (desk_drag >= 0) {
             if (desk_drag_moved) {
                 int gx = (mx - desk_drag_ox + 40 - 16) / 88;
@@ -1502,15 +1453,16 @@ static void handle_mouse(struct mouse_event *e)
     }
 
     struct window *w = win_at_point(mx, my);
+    if(modal_w&&w!=modal_w)return;
     if (w) {
         wm_focus(w);
         int rx = mx - w->x, ry = my - w->y;
         /* title buttons */
-        if (ry < WIN_TITLEBAR) {
+        if (ry < WIN_TITLEBAR && e->button==MBTN_LEFT) {
             for (int b = 0; b < 3; b++) {
                 int bx = w->w - 22 - (2 - b) * 22;
                 if (in_rect(rx, ry, bx, 3, BTN_SZ, BTN_SZ)) {
-                    if (b == 0) { w->state = WIN_STATE_MIN; wm_full(); }
+                    if (b == 0) { wm_minimize_window(w); }
                     else if (b == 1) {
                         if (w->state == WIN_STATE_MAX) {
                             win_free_buf(w);
@@ -1534,18 +1486,20 @@ static void handle_mouse(struct mouse_event *e)
                     return;
                 }
             }
+            if(w->state==WIN_STATE_MAX)return;
             drag_win = w;
             drag_ox = rx; drag_oy = ry;
             wm_full();
             return;
         }
         /* resize handle */
-        if (in_rect(rx, ry, w->w - 16, w->h - 16, 16, 16) && w->state != WIN_STATE_MAX) {
+        if (e->button==MBTN_LEFT && in_rect(rx, ry, w->w - 16, w->h - 16, 16, 16) && w->state != WIN_STATE_MAX) {
             resize_win = w;
             resize_ox = w->w - rx; resize_oy = w->h - ry;
             wm_full();
             return;
         }
+        app_capture=w;
         if (w->app && w->app->mouse)
             { APP_T0(w); w->app->mouse(w, e, mx - (w->x + 1), my - (w->y + WIN_TITLEBAR)); APP_T1(w); }
         dirty = 1;
@@ -1568,33 +1522,14 @@ static void handle_mouse(struct mouse_event *e)
                 return;
             }
         }
-        band_active = 1;
+        band_active = 1;band_button=MBTN_LEFT;
         band_x0 = band_x1 = mx; band_y0 = band_y1 = my;
         desk_sel = 0;
         dirty = 1;
         return;
     }
-    if (e->button == MBTN_RIGHT && my < screen_h - TASKBAR_H) {
-        int hit = -1;
-        for (int i = 0; i < nitems; i++) {
-            if (items[i].hidden) continue;
-            int x, y, ww, hh;
-            icon_rect(i, &x, &y, &ww, &hh);
-            if (in_rect(mx, my, x, y, ww, hh)) { hit = i; break; }
-        }
-        if (hit >= 0) {
-            if (!(desk_sel & (1u << hit))) desk_sel = (1u << hit);
-            static const char *m[2] = { "Open", "Remove from Desktop" };
-            wm_menu(mx, my, m, 2, desk_item_menu_cb, NULL);
-        } else if (desk_sel) {
-            static const char *m[2] = { "Remove from Desktop", "Clear Selection" };
-            wm_menu(mx, my, m, 2, desk_sel_menu_cb, NULL);
-        } else {
-            static const char *m[1] = { "Restore removed icons" };
-            wm_menu(mx, my, m, 1, desk_empty_menu_cb, NULL);
-        }
-        dirty = 1;
-        return;
+    if(e->button==MBTN_RIGHT&&my<screen_h-TASKBAR_H){
+        band_active=1;band_button=MBTN_RIGHT;band_x0=band_x1=mx;band_y0=band_y1=my;dirty=1;return;
     }
     /* taskbar */
     if (my >= screen_h - TASKBAR_H) {
@@ -1615,25 +1550,7 @@ static void handle_mouse(struct mouse_event *e)
             dirty = 1;
             return;
         }
-        int x0, x1, vis, scrollable;
-        tb_geom(&x0, &x1, &vis, &scrollable);
-        for (int i = tb_off; i < win_count; i++) {
-            int bx = x0 + (i - tb_off) * (TB_BTN_W + TB_BTN_GAP);
-            if (bx + TB_BTN_W > x1) break;
-            if (in_rect(mx, my, bx, screen_h - TASKBAR_H + 6, TB_BTN_W, TASKBAR_H - 12)) {
-                struct window *tw = wins[i];
-                if (tw->state == WIN_STATE_MIN) {
-                    tw->state = WIN_STATE_NORMAL;
-                    wm_focus(tw);
-                } else if (tw == focused_w) {
-                    tw->state = WIN_STATE_MIN; wm_full();
-                } else {
-                    wm_focus(tw);
-                }
-                dirty = 1;
-                return;
-            }
-        }
+        if(in_rect(mx,my,48,screen_h-TASKBAR_H+6,110,TASKBAR_H-12)){picker_open();wm_full();return;}
     }
     dirty = 1;
 }
@@ -1789,7 +1706,7 @@ static void wm_destroy_session(void)
     focused_w=modal_w=drag_win=resize_win=NULL;
     mouse_rx=mouse_ry=mouse_sens=0;
     rs_pending=0; band_active=0; desk_drag=-1; desk_sel=0;
-    menu.active=0; launch.active=0; ndmg=0; mbuttons=0;
+    menu.active=0; launch.active=0; ndmg=0; mbuttons=0;app_capture=NULL;
     if (wp_cache.px) {
         pfree(wp_cache.px,(u32)wp_cache.w*wp_cache.h*4);
         memset(&wp_cache,0,sizeof(wp_cache));
@@ -1867,22 +1784,27 @@ struct dialog_data {
 #define DLG_CANCEL_X 130
 #define DLG_BTN_Y_OFF 24
 
+/* Native dialogs wrap within their own content box, never over controls. */
+static int dialog_text(struct surface *s,const char *text,int width,int height,u32 color)
+{
+    int cols=width/8,rows=height/18,used=0;if(cols>127)cols=127;if(cols<1)return 0;
+    while(*text&&used<rows){char line[128];int n=0;while(*text&&*text!='\n'&&n<cols)line[n++]=*text++;if(*text=='\n')text++;line[n]=0;if(used==rows-1&&*text&&n>=3){line[n-1]='.';line[n-2]='.';line[n-3]='.';}if(s)s_text(s,14,14+used*18,line,color);used++;}
+    return used;
+}
+
 static void dlg_paint(struct window *w)
 {
     struct dialog_data *d = w->data;
     const struct theme *t = theme_current();
     struct surface *s = &w->surf;
     s_fill(s, 0, 0, s->w, s->h, t->win_bg);
-    s_text(s, 14, 14, d->message, t->text);
-    int y = 14 + 20;
-    for (char *p = d->message; *p; p++) if (*p == '\n') y += 20;
-    if (d->has_input) {
-        s_frame_rect(s, 14, y, s->w - 28, 24, t->main);
-        s_clip_text(s, 18, y + 4, d->input, t->text, s->w - 40);
-        int cx = 18 + d->pos * FONT_W;
-        if ((tick_count / 50) % 2 == 0)
-            s_fill(s, cx, y + 4, 2, 16, t->main);
-        y += 32;
+    int y=s->h-76;
+    dialog_text(s,d->message,s->w-28,d->has_input?y-20:s->h-58,t->text);
+    if(d->has_input){
+        s_frame_rect(s,14,y,s->w-28,24,t->main);
+        int cols=(s->w-40)/8,start=d->pos>=cols?d->pos-cols+1:0;
+        s_clip_text(s,18,y+4,d->input+start,t->text,s->w-40);
+        if((tick_count/50)%2==0)s_fill(s,18+(d->pos-start)*8,y+4,2,16,t->main);
     }
     y = s->h - 40;
     s_fill(s, DLG_OK_X, y, 70, 26, blend(t->win_bg, t->main, 25));
@@ -1959,6 +1881,8 @@ void wm_dialog(const char *title, const char *message, const char *input,
     }
     d->cb = cb; d->ud = ud;
     w->data = d;
+    int lines=dialog_text(NULL,d->message,390,4096,0);
+    wm_resize_window(w,420,lines*18+90+(d->has_input?36:0));
     wm_set_title(w, title);
     modal_w = w;
     wm_full();
@@ -1972,7 +1896,7 @@ static void err_paint(struct window *w)
 {
     struct surface *s = &w->surf;
     s_fill(s, 0, 0, s->w, s->h, 0x1a1a1a);
-    s_text(s, 14, 14, w->data ? ((struct err_data *)w->data)->text : "Error", 0xFF3333);
+    dialog_text(s,w->data?((struct err_data *)w->data)->text:"Error",s->w-28,s->h-28,0xFF3333);
 }
 
 static void err_close(struct window *w)
@@ -1983,7 +1907,7 @@ static void err_close(struct window *w)
 
 static struct app error_app = {
     .id = "_error", .title = "ERROR", .icon = ICON_INFO, .single = 0,
-    .def_w = 300, .def_h = 120,
+    .def_w = 400, .def_h = 180,
     .paint = err_paint, .close = err_close,
 };
 

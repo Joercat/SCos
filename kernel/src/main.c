@@ -46,7 +46,7 @@ void kernel_main(const struct boot_handoff *incoming){
  if((lo&0xd00)!=0xd00)panic("long mode/NX not active");
  memory_init(&boot,memory_map);
  putstr("Owned page tables active; RX text, R-NX constants, RW-NX RAM\n");
- putstr("Null/stack guards unmapped; GOP mapped uncached\n");
+ putstr("Null/stack guards unmapped; GOP mapped write-combining (PAT)\n");
  putstr("UEFI descriptors: ");puthex(count);putstr(" free conventional pages: ");puthex(memory_free_pages());putstr("\n");
  for(size_t i=0;i<count;i++)if(boot_memory_usable(&memory_map[i])&&memory_map[i].physical+memory_map[i].pages*4096>UINT64_C(0x100000000)){
   putstr("Usable RAM above 4 GiB is mapped and allocatable\n");break;

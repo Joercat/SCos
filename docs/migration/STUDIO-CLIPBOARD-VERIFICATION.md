@@ -1,5 +1,8 @@
 # Optional CAT demos and bounded Studio editing verification
 
+Historical baseline. Installer auto-launch behavior is superseded by
+[the compositor/installer verification](COMPOSITOR-VERIFICATION.md).
+
 Unnumbered x64 development build, 2026-09-20 local session date.
 This supersedes the demo distribution/editor portions of CAT-VERIFICATION.md.
 No new drivers, no physical-PC acceptance, no frozen-32-bit changes.

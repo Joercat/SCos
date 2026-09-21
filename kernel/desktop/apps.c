@@ -41,7 +41,9 @@ static void install_answer(int ok,const char *text,void *ud)
     if(!vfs_write(dest,bytes,n)){wm_error_popup("Package install failed: cannot write RAM file.");return;}
     struct app *a=lua_app_install(dest);
     if(!a){vfs_delete(dest);wm_error_popup("Package registration failed. Install rolled back.");return;}
-    wm_open_app(a->id,NULL);
+    wm_desktop_install(a->id);
+    int persistent=fs_image_available(),saved=persistent?fs_image_save():0;
+    wm_dialog("Application installed",saved?"Installed and saved to supported disk.\nOpen it from Desktop or the launcher.":persistent?"Installed in RAM, but disk save FAILED.\nUse Terminal save before restarting.":"Installed in RAM: Desktop and launcher.\nNo supported persistence disk.\nReboot will lose this installation.",NULL,NULL,NULL);
 }
 
 struct window *app_open_document(const char *path)
@@ -55,7 +57,11 @@ struct window *app_open_document(const char *path)
             u32 size=0;char *bytes=vfs_read(path,&size),err[256];struct cat_info m;
             if(!cat_validate(bytes,size,&m,err,sizeof(err))){wm_error_popup(err);return NULL;}
             strcpy(install_path,path);
-            wm_dialog("Install CAT application","Install this package into home/apps and run?\nOnly install code you trust.\nSaved in RAM; disk persistence requires save.",NULL,install_answer,NULL);
+            char prompt[256];strcpy(prompt,"Install package and desktop shortcut?");
+            if(fs_image_available()){strcat(prompt,"\nSaves current filesystem to:\n");strncat(prompt,fs_image_target(),48);strcat(prompt,"\nMay differ from boot USB.");}
+            else strcat(prompt,"\nRAM only; lost on reboot.");
+            strcat(prompt,"\nOnly install trusted packages.");
+            wm_dialog("Install CAT application",prompt,NULL,install_answer,NULL);
             return NULL;
         }
         struct app *a=lua_app_install(path);

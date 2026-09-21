@@ -62,3 +62,5 @@ See `docs/migration/BOOT64.md` for contracts, verification and limitations.
   this supersedes the earlier requirement to delete temporary verification tools.
 
 User correction: Counter/Sketch are optional Lua CAT demonstrations under home/demos, not C built-ins or preinstalled apps. Studio clipboard must be bounded; retain reusable regression tests.
+
+Current display task: repair compositor drag damage and mouse capture, fixed-size app icons, bounded text, confirmed real package installation with shortcuts, and a Windows picker beside the launcher. Do not claim SMP or hardware-vsync from QEMU tests.

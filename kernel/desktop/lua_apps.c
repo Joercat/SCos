@@ -143,6 +143,7 @@ static const luaL_Reg api[]={
     {"app_id",api_app_id},{"memory",api_memory},{"date",api_date},{"uptime",api_clock},
     {"exists",api_exists},{"file_size",api_file_size},{"remove",api_remove},{"rename",api_rename},{"files",api_files},
     {"theme",api_theme},{"themes",api_themes},{"theme_apply",api_theme_apply},{"theme_custom",api_theme_custom},
+    {"icon_size",api_icon_size},{"icons",api_icons},{"set_icon",api_set_icon},{"text_clip",api_text_clip},{"text_wrap",api_text_wrap},{"focused",api_focused},{"minimize",api_minimize},
     {"theme_status",api_theme_status},{"message",api_message},{"api_info",api_info},{NULL,NULL}
 };
 static int initialize(lua_State *L) {

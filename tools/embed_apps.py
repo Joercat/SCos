@@ -15,7 +15,7 @@ for i, p in enumerate(files):
     header=bytearray(128)
     header[:8]=b'SCOSCAT1'
     struct.pack_into('<7I',header,8,128,len(data),0,2,0,560,360)
-    app_id=p.stem.encode(); title=('Sample '+p.stem).encode()
+    app_id=p.stem.encode(); title=p.stem.capitalize().encode()
     if len(app_id)>30 or len(title)>39:raise SystemExit('example metadata too long')
     header[36:36+len(app_id)]=app_id;header[68:68+len(title)]=title
     data=header+data;struct.pack_into('<I',data,16,zlib.crc32(data))
@@ -31,7 +31,7 @@ They are NOT installed or listed in the launcher on a fresh boot.
 1. In Files open /home/demos.
 2. Double-click counter.cat or sketch.cat.
 3. Read the native install confirmation; Cancel changes nothing.
-4. Approve to validate, install a copy into /home/apps, and run it.
+4. Approve to install a copy into /home/apps plus a desktop shortcut.
 5. Later find it in the launcher or use appstrt counter / appstrt sketch.
 
 To inspect or modify a demo, open App Studio, choose Open, and enter
@@ -43,8 +43,9 @@ Ctrl+C copies, Ctrl+X cuts, Ctrl+V pastes. Clipboard maximum: 16 KiB.
 Source maximum: 64 KiB. Oversized edits are rejected, not truncated.
 This clipboard belongs to Studio, not the host computer.
 
-All installs and edits are RAM-only until the confirmed Terminal save command
-persists them on supported ATA disks. USB boot has no native disk persistence.
+Installation saves the current filesystem on supported ATA disks. Failures are
+reported. USB-only storage is session RAM: reboot loses the installation.
+Use the confirmed Terminal save command to persist later edits on supported disks.
 Only install trusted packages. A checksum is not a security signature.
 """
 lines.append('static const unsigned char demo_readme[] = '+json.dumps(instructions)+';')

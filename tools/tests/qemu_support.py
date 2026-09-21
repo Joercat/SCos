@@ -25,13 +25,14 @@ class Debugger:
     def reg(self,i):return int.from_bytes(bytes.fromhex(self.command(f'p{i:x}')),'little')
     def setreg(self,i,v):assert self.command(f'P{i:x}='+v.to_bytes(8 if i<17 else 4,'little').hex())=='OK'
 class Guest:
-    def __init__(self,name='cat',ide=False):
-        self.name=name;self.ide=ide
+    def __init__(self,name='cat',ide=False,cpus=1):
+        self.name=name;self.ide=ide;self.cpus=cpus
     def __enter__(self):
         RESULTS.mkdir(parents=True,exist_ok=True)
         args=['python3','tools/run_qemu.py','--memory','128','--dry-run']
         if not self.ide:args+=['--usb-boot']
         lines=subprocess.check_output(args,cwd=ROOT,text=True).splitlines();self.directory=Path(lines[0].split(': ',1)[1]);cmd=shlex.split(lines[-1]);cmd=[('pc' if self.ide and x=='q35' else x) for x in cmd if x!='-no-reboot'];cmd+=['-gdb',f'unix:{self.directory}/debug,server=on,wait=off']
+        cmd[cmd.index('-smp')+1]=str(self.cpus)
         self.log=(self.directory/'host.log').open('wb');self.process=subprocess.Popen(cmd,stdout=self.log,stderr=self.log)
         try:self.connect();return self
         except BaseException:self.process.terminate();self.process.wait();self.log.close();raise

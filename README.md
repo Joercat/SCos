@@ -33,16 +33,28 @@ Counter and Sketch are optional Lua demonstrations in `/home/demos/*.cat`: open
 them in Files and approve installation. They are not preinstalled. Run `appstrt studio` to edit a project, syntax-check it with
 the real Lua 5.4.9 compiler, build a `.cat` package and launch it with F5.
 Studio supports range selection and Ctrl+C/X/V with a 16 KiB clipboard and
-64 KiB source limit. Raw `.lua` launching is removed. API 2 offers 48 functions for drawing, widgets,
+64 KiB source limit. Raw `.lua` launching is removed. API 2 offers 55 functions for drawing, widgets,
 window control, private data, system queries and confirmed global themes.
 Settings selects four presets or up to eight custom palettes/backgrounds.
 
 See the [Studio and API guide](docs/LUA-APPS.md), [CAT format](docs/CAT-FORMAT.md),
-[current verification record](docs/migration/STUDIO-CLIPBOARD-VERIFICATION.md), and
+[current verification record](docs/migration/COMPOSITOR-VERIFICATION.md), and
 [open-source provenance/licenses](third_party/README.md). This remains a
 cooperative kernel, not a ring-3 security sandbox. RAM-versus-ATA persistence
 limitations still apply. The [earlier Lua verification](docs/migration/LUA-VERIFICATION.md)
 is historical, not the current package contract.
+
+## Desktop and windows
+
+The bottom bar has **Launcher**, **Windows** (an open/minimized-window picker),
+power and clock controls—not a row of app buttons. Drag with either mouse button
+on the desktop to select icons; a stationary right click opens the context menu
+on release. Installed CAT apps get a desktop shortcut and a launcher entry.
+
+The compositor reconstructs clipped damage regions from the wallpaper upward,
+and GOP scanout uses write-combining rather than uncached pixel writes. This is
+still a one-active-CPU kernel, not SMP, and GOP does not provide a hardware-vsync
+or page-flip driver. Emulator pixel tests are not a promise of tear-free PC output.
 
 ## Build and emulator
 

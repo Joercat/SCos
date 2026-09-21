@@ -161,7 +161,9 @@ extern int screen_w, screen_h;
 u32 fb_bpp(void);
 void fb_init(void);
 u32 fb_bpp(void);
-void fb_flip(void);                        /* back buffer -> LFB */
+void fb_flip(void);                        /* back buffer -> GOP */
+void fb_scene_clip(int x,int y,int w,int h);
+void fb_scene_unclip(void);
 void fb_flip_rect(int x, int y, int w, int h);   /* damaged region only */
 void fb_clear(u32 color);
 
@@ -350,6 +352,7 @@ struct window {
     int chrome_dirty;
     size_t data_bytes;                /* legacy requested-payload tally; process metrics use
                                      * the allocator ownership ledger, including rounding */
+    int restore_state;               /* state before minimize */
     void *console;                  /* terminal tab that launched this app
                                      * via `appstrt`: receives its logs */
 };
@@ -398,6 +401,7 @@ void wm_redraw(struct window *w);
 void wm_request_full(void);     /* full repaint after a held overlay exits */
 void wm_theme_changed(void);
 void wm_focus(struct window *w);
+void wm_minimize_window(struct window *w);
 struct window *wm_focused(void);
 int  wm_content_w(struct window *w);
 static inline int mx_abs(struct window *w, int x) { return w->x + 1 + x; }
@@ -447,6 +451,7 @@ const struct prefs *prefs_get(void);
 void prefs_set_mouse(int sens);
 void prefs_set_dbl(int ms);
 void wm_desktop_restore(void);
+void wm_desktop_install(const char *id);
 int wm_desk_vis_count(void);
 int wm_desk_vis_get(int idx, char *app, char *path, char *label, int *kind);
 void wm_wallpaper_invalidate(void);

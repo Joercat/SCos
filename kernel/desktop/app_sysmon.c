@@ -83,8 +83,8 @@ static void sm_paint(struct window *w)
     strcat(line, " (CPUID leaf 1/4)");
     s_text(s, 12, y, line, t->text); y += 18;
     u32 load = cpu_usage_pct();
-    strcpy(line, "  load:   ");
-    fmt_u32(n, load); strcat(line, n); strcat(line, "%  (TSC idle accounting, 1s window)");
+    strcpy(line, "  BSP load: ");
+    fmt_u32(n, load); strcat(line, n); strcat(line, "% (one active CPU, 1s sample)");
     s_text(s, 12, y, line, t->text); y += 18;
     int bw = 300;
     s_frame_rect(s, 30, y, bw, 12, t->main);

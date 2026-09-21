@@ -39,7 +39,10 @@ In Files open `/home/demos/README.txt` for the walkthrough. Counter and Sketch
 ship there as `counter.cat` and `sketch.cat`; they are **not** discovered at boot
 or preinstalled in the launcher. Double-click a package, then approve the native
 install confirmation. The installer validates the package and compiles its source,
-copies it into `/home/apps`, registers it and runs it. Cancel changes nothing.
+copies it into `/home/apps`, registers it and creates its desktop shortcut.
+It does **not** auto-launch the app. Cancel changes nothing. Installation saves
+the current filesystem when a supported ATA persistence disk is available;
+otherwise the result explicitly says RAM-only. Failed disk saves are reported.
 Conflicting IDs and existing destinations are refused without overwriting files.
 This same Files workflow handles other CAT packages outside `/home/apps`.
 An installed package can later be opened directly or via `appstrt counter`.
@@ -104,7 +107,7 @@ not the framebuffer address. There is no user close/finalizer callback: closing
 or killing the window releases the entire runtime arena without executing
 additional app code.
 
-## `scos` API — 48 functions, `scos.version == 2`
+## `scos` API — 55 functions, `scos.version == 2`
 
 Drawing functions are **paint-only**. RGB colors are integers `0xRRGGBB`;
 coordinates are -4096..4096, drawing dimensions 0..4096, text ≤1024 bytes.
@@ -120,6 +123,11 @@ clicks in `mouse` and call `hit` yourself. There is no hidden widget state.
 | `circle(x,y,r,rgb)`, `disc(x,y,r,rgb)` | Outline/filled circle; radius 0..1024. |
 | `gradient(x,y,w,h,top,bottom)` | Vertical RGB gradient. |
 | `icon(id,x,y,rgb)` | Native icon by valid `ICON_*` numeric index. |
+| `icon_size()`, `icons()` | Always returns 24,24; name-to-ID table for folder,terminal,notepad,browser,calendar,settings,info,cards,chart,solitaire. |
+| `set_icon(id)` | Sets this registered user app's launcher/desktop icon; fixed native size, no scale parameter. Not in paint. Runtime choice: call in `open` to restore on launch. |
+| `text_clip(x,y,width,text,rgb)` | Single-line, bounded text with ellipsis; safely draws nothing when width <8. |
+| `text_wrap(x,y,width,height,text,rgb)` | Character wrapping at 8×16; returns rows drawn, complete boolean. At most 127 columns per line; no font scaling. |
+| `focused()`, `minimize()` | Focus boolean; minimize this window (not in paint). Restore through the Windows picker. |
 | `text_width(text)`, `text_scaled(x,y,text,rgb,scale)` | Width in pixels; scaled text with scale 1..4. |
 | `rgb(r,g,b)`, `blend(a,b,percent)` | RGB channels 0..255; 0..100 percent of color b. |
 | `clamp(value,min,max)`, `hit(x,y,rx,ry,w,h)` | Numeric clamp; half-open rectangular hit test. |
@@ -189,7 +197,9 @@ Message dialogs have a separate five-second throttle.
 
 ## Saving and persistence
 
-Studio, custom themes and app-data writes save to the **RAM VFS**. Recovery is
+Studio, custom themes and app-data writes save to the **RAM VFS**.
+Explicit package installation additionally attempts a whole-VFS save on supported
+ATA storage, after the install confirmation explains this. Recovery is
 also RAM-only until persisted. On an existing supported/verified ATA target,
 the Terminal's confirmed `save` command persists the tree. The saved region is
 128 KiB for the whole filesystem, including licenses and other files. Per-app

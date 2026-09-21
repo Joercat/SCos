@@ -34,6 +34,7 @@ def test():
       print('PASS CAT format, raw-source refusal, compiler diagnostics, byte-exact build, failed-build preservation',flush=True)
       source='''assert(scos.version==2)
 assert(scos.rgb(1,2,3)==0x010203)
+assert(scos.blend(0,0xffffff,100)==0xffffff and scos.blend(0,0xffffff,0)==0)
 assert(scos.hit(3,4,0,0,10,10) and not scos.hit(10,10,0,0,10,10))
 assert(scos.clamp(200,0,100)==100)
 assert(scos.text_width('abc')==24)
@@ -42,6 +43,8 @@ assert(scos.app_id()=='test-app')
 local bytes,limit=scos.memory();assert(bytes>=limit and limit==2097152)
 assert(scos.date().year>=2026)
 assert(scos.api_info().version==2)
+local iw,ih=scos.icon_size();assert(iw==24 and ih==24);scos.set_icon(scos.icons().chart)
+assert(type(scos.focused())=='boolean')
 assert(scos.write('old.txt','hello'));assert(scos.exists('old.txt'))
 assert(scos.file_size('old.txt')==5);assert(scos.rename('old.txt','new.txt'))
 assert(scos.read('new.txt')=='hello');assert(#scos.files()==1)
@@ -57,8 +60,11 @@ scos.icon(0,170,50,t.main);scos.text_scaled(220,50,'CAT',t.text,2)
 scos.button(8,90,150,28,'button',false)
 scos.checkbox(8,130,'checkbox',true);scos.progress(8,160,200,18,70)
 scos.text(8,200,'API v2',t.text)
+for width=0,40 do scos.text_clip(8,220,width,'long label',t.text) end
+local rows,done=scos.text_wrap(8,240,160,32,'wrapped text',t.text);assert(rows==1 and done)
 end}'''
       check(g,source)
+      check(g,'scos.minimize();assert(not scos.focused());return {}')
       check(g,'assert(scos.resize(640,400));assert(scos.move(-100,-100));local w=scos.window();assert(w.width==640 and w.height==400 and w.x>=0 and w.y>=0);return {}')
       check(g,'return {paint=function() scos.resize(640,400) end}','paint')
       check(g,'scos.resize(12,12);return {}','range')
@@ -127,6 +133,7 @@ end}'''
       print('PASS sample projects, document dispatch, Studio undo/redo, discard cancellation and metadata-preserving recovery',flush=True)
       # Demos are not registered until the user explicitly installs them.
       for name in ['counter','sketch']:
+        icons_before=g.call('wm_desk_vis_count')
         g.debug.write(g.scratch,name.encode()+b'\0');assert not g.call('app_find',g.scratch)
         path=('home/demos/'+name+'.cat').encode()+b'\0'
         g.debug.write(g.scratch,path);assert not g.call('app_open_document',g.scratch)
@@ -134,13 +141,16 @@ end}'''
         assert g.read('home/apps/'+name+'.cat') is None
         g.debug.write(g.scratch,path);g.call('app_open_document',g.scratch);g.type('\n')
         assert g.read('home/apps/'+name+'.cat')==g.read('home/demos/'+name+'.cat')
-        child=g.call('wm_win_at',0);assert child and g.state(child)==(0,'');g.close(child)
+        assert g.call('wm_desk_vis_count')==icons_before+1
+        assert g.call('wm_dialog_active');g.type('\n');assert g.call('wm_win_count')==0
+        child=g.launch(name);assert g.state(child)==(0,'');g.close(child)
       print('PASS optional CAT demos: not preinstalled, cancel, install and execute',flush=True)
       if ide:
-        assert g.call('fs_image_save')==1;g.reboot()
+        g.reboot()  # No manual save: installation itself must have persisted the tree.
         theme=g.call('theme_current');assert g.string(g.ptr(theme))=='user-test'
         assert g.read('home/projects/my-app.project') and g.read('home/apps/my-app.cat')
+        assert g.read('home/apps/counter.cat') and g.read('home/apps/sketch.cat')
         w=g.launch('my-app');assert g.state(w)==(0,'');g.close(w)
-        print('PASS ATA save/reboot: custom theme, Studio project, CAT discovery and execution',flush=True)
+        print('PASS installer ATA save/reboot: custom theme, Studio project, CAT discovery and execution',flush=True)
       print('PASS Studio save/build/run on '+('IDE/PS2' if ide else 'USB/xHCI'),flush=True)
 if __name__=='__main__':test()

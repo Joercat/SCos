@@ -3,6 +3,9 @@
 struct surface screen;
 int screen_w,screen_h;
 static struct boot_framebuffer output;
+static int clip_on,clip_x,clip_y,clip_r,clip_b;
+void fb_scene_clip(int x,int y,int w,int h){clip_on=1;clip_x=x;clip_y=y;clip_r=x+w;clip_b=y+h;}
+void fb_scene_unclip(void){clip_on=0;}
 void desktop_framebuffer(const struct boot_framebuffer *fb){output=*fb;}
 u32 fb_bpp(void){return 32;}
 void fb_init(void){
@@ -17,15 +20,18 @@ void fb_flip_rect(int x,int y,int w,int h){
  if(w>screen_w-x)w=screen_w-x;
  if(h>screen_h-y)h=screen_h-y;
  volatile u32 *fb=(void*)(uintptr_t)output.base;
+ int native=output.red==0xff0000&&output.green==0xff00&&output.blue==0xff;
  for(int r=0;r<h;r++){
   const u32 *src=screen.px+(size_t)(y+r)*screen_w+x;
   volatile u32 *dst=fb+(size_t)(y+r)*output.stride+x;
+  if(native){size_t count=(size_t)w;__asm__ volatile("rep movsl":"+S"(src),"+D"(dst),"+c"(count)::"memory");continue;}
   for(int c=0;c<w;c++){
    u32 rgb=src[c];
-   dst[c]=output.red==0xff0000&&output.green==0xff00&&output.blue==0xff?rgb:
+   dst[c]=native?rgb:
        component((rgb>>16)&255,output.red)|component((rgb>>8)&255,output.green)|component(rgb&255,output.blue);
   }
  }
+ __asm__ volatile("sfence":::"memory");
 }
 void fb_flip(void){fb_flip_rect(0,0,screen_w,screen_h);}
 void fb_clear(u32 color)
@@ -37,15 +43,18 @@ void fb_clear(u32 color)
 void s_pixel(struct surface *s, int x, int y, u32 c)
 {
     if (x < 0 || y < 0 || x >= s->w || y >= s->h) return;
+    if(s==&screen&&clip_on&&(x<clip_x||y<clip_y||x>=clip_r||y>=clip_b))return;
     s->px[y * s->w + x] = c;
 }
 
 void s_fill(struct surface *s, int x, int y, int w, int h, u32 c)
 {
+    if(s==&screen&&clip_on){if(x<clip_x){w-=clip_x-x;x=clip_x;}if(y<clip_y){h-=clip_y-y;y=clip_y;}if(w>clip_r-x)w=clip_r-x;if(h>clip_b-y)h=clip_b-y;}
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
     if (x + w > s->w) w = s->w - x;
     if (y + h > s->h) h = s->h - y;
+    if(w<=0||h<=0)return;
     for (int j = 0; j < h; j++) {
         u32 *row = s->px + (y + j) * s->w + x;
         for (int i = 0; i < w; i++) row[i] = c;
@@ -184,18 +193,13 @@ int s_text_width(const char *str)
 
 void s_clip_text(struct surface *s, int x, int y, const char *str, u32 fg, int max_w)
 {
-    int n = max_w / FONT_W;
-    int len = (int)strlen(str);
-    char tmp[128];
-    if (len <= n || n <= 1) {
-        if (len < (int)sizeof(tmp)) { s_text(s, x, y, str, fg); return; }
+    int n=max_w/FONT_W;if(n<=0)return;if(n>127)n=127;
+    char tmp[128];int len=0;
+    while(str[len]&&str[len]!='\n'&&str[len]!='\r'&&len<n){tmp[len]=str[len];len++;}
+    if(len==n&&str[len]&&str[len]!='\n'&&str[len]!='\r'){
+        int dots=n<3?n:3;for(int i=0;i<dots;i++)tmp[n-1-i]='.';
     }
-    if (n > (int)sizeof(tmp) - 1) n = sizeof(tmp) - 1;
-    strncpy(tmp, str, n - 1);
-    tmp[n - 1] = 0;
-    tmp[n - 2] = '.';
-    tmp[n - 3] = '.';
-    s_text(s, x, y, tmp, fg);
+    tmp[len]=0;s_text(s,x,y,tmp,fg);
 }
 
 /* -------------------------------------------------------------- icons ---- */
@@ -275,10 +279,12 @@ void s_icon(struct surface *s, int id, int x, int y, u32 c)
 void s_blit(struct surface *d, struct surface *s, int dx, int dy)
 {
     int sx = 0, sy = 0, w = s->w, h = s->h;
+    if(d==&screen&&clip_on){if(dx<clip_x){sx=clip_x-dx;w-=sx;dx=clip_x;}if(dy<clip_y){sy=clip_y-dy;h-=sy;dy=clip_y;}if(w>clip_r-dx)w=clip_r-dx;if(h>clip_b-dy)h=clip_b-dy;}
     if (dx < 0) { sx = -dx; w += dx; dx = 0; }
     if (dy < 0) { sy = -dy; h += dy; dy = 0; }
     if (dx + w > d->w) w = d->w - dx;
     if (dy + h > d->h) h = d->h - dy;
+    if(w<=0||h<=0)return;
     for (int y = 0; y < h; y++)
         memcpy(d->px + (dy + y) * d->w + dx,
                s->px + (sy + y) * s->w + sx, w * 4);

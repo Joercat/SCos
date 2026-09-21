@@ -68,16 +68,18 @@ void memory_init(const struct boot_handoff *b,const struct efi_memory *map){
   map_leaf(p,flags,0);
  }
  map_range(b->arena_start,table_end,3|NX);
- map_range(fb_start,fb_end,3|NX|0x18);
+ /* PAT slot 1 is WC, only for validated GOP pixel memory. Device registers
+  * remain UC in slot 3, RAM remains WB. No MTRRs are rewritten. */
+ map_range(fb_start,fb_end,3|NX|0x08);
  if(!free_pages)panic("no conventional RAM available");
  /* Firmware may leave global translations/PAT settings behind. Disable global
-  * translations, flush caches while changing PAT, then use our UC slot 3.
+  * translations, flush caches while changing PAT, use WC slot 1 for GOP and UC slot 3 for device registers.
   * No AP runs; no runtime firmware calls are permitted after this point. */
  uint64_t cr0,cr4;__asm__ volatile("mov %%cr0,%0":"=r"(cr0));
  __asm__ volatile("mov %%cr4,%0":"=r"(cr4));
  uint64_t cache_off=(cr0|(1ULL<<30))&~(1ULL<<29);
  __asm__ volatile("mov %0,%%cr0; wbinvd"::"r"(cache_off):"memory");
- __asm__ volatile("wrmsr"::"c"(0x277),"a"(0x00070406u),"d"(0x00070406u):"memory");
+ __asm__ volatile("wrmsr"::"c"(0x277),"a"(0x00070106u),"d"(0x00070106u):"memory");
  cr4&=~(1ULL<<7);__asm__ volatile("mov %0,%%cr4"::"r"(cr4):"memory");
  __asm__ volatile("mov %0,%%cr3"::"r"((uintptr_t)root):"memory");
  cr0=(cr0|(1ULL<<16))&~((1ULL<<30)|(1ULL<<29));

@@ -12,10 +12,10 @@ static int api_icon(lua_State *L){int id=integer(L,1,0,ICON_COUNT-1),x=xy(L,2),y
 static int api_text_width(lua_State *L){lua_pushinteger(L,s_text_width(label(L,1)));return 1;}
 static int api_text_scaled(lua_State *L){int x=xy(L,1),y=xy(L,2);const char *s=label(L,3);u32 c=color(L,4);int scale=integer(L,5,1,4);s_text_scaled(canvas(L,(u32)strlen(s)*128*scale*scale),x,y,s,c,scale);return 0;}
 static int api_rgb(lua_State *L){int r=integer(L,1,0,255),g=integer(L,2,0,255),b=integer(L,3,0,255);lua_pushinteger(L,(r<<16)|(g<<8)|b);return 1;}
-static int api_blend(lua_State *L){u32 a=color(L,1),b=color(L,2);int p=integer(L,3,0,100);lua_pushinteger(L,color_blend(a,b,p));return 1;}
+static int api_blend(lua_State *L){u32 a=color(L,1),b=color(L,2);int p=integer(L,3,0,100);lua_pushinteger(L,color_blend(a,b,p*255/100));return 1;}
 static int api_clamp(lua_State *L){lua_Number x=luaL_checknumber(L,1),lo=luaL_checknumber(L,2),hi=luaL_checknumber(L,3);if(lo>hi)return luaL_error(L,"clamp bounds reversed");lua_pushnumber(L,x<lo?lo:x>hi?hi:x);return 1;}
 static int api_hit(lua_State *L){int x=xy(L,1),y=xy(L,2),rx=xy(L,3),ry=xy(L,4),w=extent(L,5),h=extent(L,6);lua_pushboolean(L,x>=rx&&y>=ry&&x<rx+w&&y<ry+h);return 1;}
-static int api_button(lua_State *L){int x=xy(L,1),y=xy(L,2),w=extent(L,3),h=extent(L,4);const char *s=label(L,5);int active=lua_toboolean(L,6);const struct theme *t=theme_current();struct surface *c=canvas(L,(u32)w*h+(u32)strlen(s)*128+2*(u32)(w+h));if(w&&h){s_fill(c,x,y,w,h,active?t->main:color_blend(t->win_bg,t->main,18));s_frame_rect(c,x,y,w,h,t->main);s_clip_text(c,x+8,y+(h-FONT_H)/2,s,active?t->title_text:t->text,w>16?w-16:0);}return 0;}
+static int api_button(lua_State *L){int x=xy(L,1),y=xy(L,2),w=extent(L,3),h=extent(L,4);const char *s=label(L,5);int active=lua_toboolean(L,6);const struct theme *t=theme_current();struct surface *c=canvas(L,(u32)w*h+(u32)strlen(s)*128+2*(u32)(w+h));if(w&&h){s_fill(c,x,y,w,h,active?t->main:color_blend(t->win_bg,t->main,18));s_frame_rect(c,x,y,w,h,t->main);if(h>=FONT_H)s_clip_text(c,x+8,y+(h-FONT_H)/2,s,active?t->title_text:t->text,w>16?w-16:0);}return 0;}
 static int api_checkbox(lua_State *L){int x=xy(L,1),y=xy(L,2),checked=lua_toboolean(L,4);const char *s=label(L,3);const struct theme *t=theme_current();struct surface *c=canvas(L,2048+(u32)strlen(s)*128);s_frame_rect(c,x,y,16,16,t->main);if(checked)s_fill(c,x+4,y+4,8,8,t->main);s_text(c,x+24,y,s,t->text);return 0;}
 static int api_progress(lua_State *L){int x=xy(L,1),y=xy(L,2),w=extent(L,3),h=extent(L,4),p=integer(L,5,0,100);const struct theme *t=theme_current();struct surface *c=canvas(L,2*(u32)w*h+2*(u32)(w+h));if(w&&h){s_fill(c,x,y,w,h,t->win_bg);s_fill(c,x,y,w*p/100,h,t->main);s_frame_rect(c,x,y,w,h,t->text);}return 0;}
 static void field(lua_State *L,const char *s,lua_Integer n){lua_pushinteger(L,n);lua_setfield(L,-2,s);}
@@ -45,3 +45,18 @@ static int api_info(lua_State *L){lua_newtable(L);field(L,"version",2);field(L,"
 
 static int api_resize(lua_State *L){struct lua_window *d=context(L);if(d->painting)return luaL_error(L,"resize is not allowed in paint");int w=integer(L,1,320,2048),h=integer(L,2,200,2048);scos_lua_charge(L,(size_t)w*h/16+1);lua_pushboolean(L,wm_resize_window(d->w,w,h));return 1;}
 static int api_move(lua_State *L){struct lua_window *d=context(L);if(d->painting)return luaL_error(L,"move is not allowed in paint");int x=xy(L,1),y=xy(L,2);lua_pushboolean(L,wm_move_window(d->w,x,y));return 1;}
+
+/* Icons are always native 24x24 pixels; scripts cannot request a scaled icon. */
+static const char *icon_names[]={"folder","terminal","notepad","browser","calendar","settings","info","cards","chart","solitaire"};
+static int api_icon_size(lua_State *L){lua_pushinteger(L,24);lua_pushinteger(L,24);return 2;}
+static int api_icons(lua_State *L){lua_newtable(L);for(int i=0;i<ICON_COUNT;i++)field(L,icon_names[i],i);return 1;}
+static int api_set_icon(lua_State *L){struct lua_window *d=context(L);if(d->painting)return luaL_error(L,"set_icon is not allowed in paint");int id=integer(L,1,0,ICON_COUNT-1);if(d->w->app->icon!=id){d->w->app->icon=id;wm_request_full();}return 0;}
+static int api_text_clip(lua_State *L){int x=xy(L,1),y=xy(L,2),width=extent(L,3);const char *s=label(L,4);u32 c=color(L,5);s_clip_text(canvas(L,(u32)strlen(s)*128),x,y,s,c,width);return 0;}
+static int api_text_wrap(lua_State *L){
+    int x=xy(L,1),y=xy(L,2),width=extent(L,3),height=extent(L,4);const char *s=label(L,5);u32 c=color(L,6);
+    struct surface *surf=canvas(L,(u32)strlen(s)*128);int cols=width/8,rows=height/16,used=0;if(cols>127)cols=127;
+    while(*s&&cols>0&&used<rows){char line[128];int n=0;while(*s&&*s!='\n'&&n<cols){char ch=*s++;if(ch!='\r')line[n++]=ch;}if(*s=='\n')s++;line[n]=0;s_text(surf,x,y+used*16,line,c);used++;}
+    lua_pushinteger(L,used);lua_pushboolean(L,!*s);return 2;
+}
+static int api_focused(lua_State *L){lua_pushboolean(L,wm_focused()==context(L)->w);return 1;}
+static int api_minimize(lua_State *L){struct lua_window *d=context(L);if(d->painting)return luaL_error(L,"minimize is not allowed in paint");wm_minimize_window(d->w);return 0;}
