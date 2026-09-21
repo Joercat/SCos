@@ -1,0 +1,1833 @@
+{
+  "cautions": [
+    "a device table that lists a chip is not evidence that chip works: radeon_hd lists many newer parts than the ones its build supports, and rows inside #if 0 are explicitly not bound",
+    "hook presence is not hook correctness: these hooks are no longer exercised by Haiku app_server (see GPU-BASIC-2D-RESEARCH.md)",
+    "engine capability bits are the accelerant self-report; the 2D entry points can exist while the token advertises nothing"
+  ],
+  "families": {
+    "3dfx": {
+      "closure_files": 17,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 0,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 0,
+          "distinct_ids": 0,
+          "files": [],
+          "newest_row": null,
+          "oldest_row": null,
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": {
+        "advertises_2d": true,
+        "declaration": "engine_token engineToken = { 1, B_2D_ACCELERATION, NULL }",
+        "file": "src/add-ons/accelerants/3dfx/engine.cpp",
+        "line": 12,
+        "note": "advertises_2d is read from the initializer after removing /* */ comments, so `{1, 0 /*B_2D_ACCELERATION*/}` reports False and `{1, B_2D_ACCELERATION, NULL}` True"
+      },
+      "hooks": {
+        "absent": [
+          "backlight"
+        ],
+        "found": {
+          "dpms": {
+            "decision_text": "return (void*)(TDFX_SetDPMSMode);",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 67,
+            "return": "return (void*)(TDFX_SetDPMSMode);",
+            "returns_at_line": 68,
+            "status": "direct"
+          },
+          "edid": {
+            "decision_text": "return (void*)GetEdidInfo;",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 48,
+            "return": "return (void*)GetEdidInfo;",
+            "returns_at_line": 49,
+            "status": "direct"
+          },
+          "engine_count": {
+            "decision_text": "return (void*)AccelerantEngineCount;",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 79,
+            "return": "return (void*)AccelerantEngineCount;",
+            "returns_at_line": 80,
+            "status": "direct"
+          },
+          "fill_rectangle": {
+            "decision_text": "return (void*)(TDFX_FillRectangle);",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 95,
+            "return": "return (void*)(TDFX_FillRectangle);",
+            "returns_at_line": 96,
+            "status": "direct"
+          },
+          "fill_span": {
+            "decision_text": "return (void*)(TDFX_FillSpan);",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 99,
+            "return": "return (void*)(TDFX_FillSpan);",
+            "returns_at_line": 100,
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "decision_text": "return (void*)GetFrameBufferConfig;",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 51,
+            "return": "return (void*)GetFrameBufferConfig;",
+            "returns_at_line": 52,
+            "status": "direct"
+          },
+          "hardware_cursor_move": {
+            "decision_text": "return (void*)MoveCursor;",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 73,
+            "return": "return (void*)MoveCursor;",
+            "returns_at_line": 74,
+            "status": "direct"
+          },
+          "hardware_cursor_shape": {
+            "decision_text": "return (void*)SetCursorShape;",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 71,
+            "return": "return (void*)SetCursorShape;",
+            "returns_at_line": 72,
+            "status": "direct"
+          },
+          "overlay_allocate": {
+            "decision_text": "return (void*)AllocateOverlayBuffer;",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 109,
+            "return": "return (void*)AllocateOverlayBuffer;",
+            "returns_at_line": 110,
+            "status": "direct"
+          },
+          "pan_display": {
+            "decision_text": "return (void*)MoveDisplay;",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 55,
+            "return": "return (void*)MoveDisplay;",
+            "returns_at_line": 56,
+            "status": "direct"
+          },
+          "screen_to_screen_blit": {
+            "decision_text": "return (void*)(TDFX_ScreenToScreenBlit);",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 93,
+            "return": "return (void*)(TDFX_ScreenToScreenBlit);",
+            "returns_at_line": 94,
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "decision_text": "return (void*)SetDisplayMode;",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 41,
+            "return": "return (void*)SetDisplayMode;",
+            "returns_at_line": 42,
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "decision_text": "return NULL;",
+            "file": "src/add-ons/accelerants/3dfx/hooks.cpp",
+            "line": 31,
+            "return": "return NULL;",
+            "returns_at_line": 32,
+            "status": "denied"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "ati": {
+      "closure_files": 24,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 0,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 34,
+          "distinct_ids": 34,
+          "files": [
+            "src/add-ons/kernel/drivers/graphics/ati/driver.cpp"
+          ],
+          "newest_row": {
+            "file": "src/add-ons/kernel/drivers/graphics/ati/driver.cpp",
+            "id": "0x4D4C",
+            "name": "RAGE 128 Mobility 4",
+            "text": "{ 0x4D4C, RAGE128_MOBILITY,\t\t\"RAGE 128 Mobility 4\"\t},\t\t// ML"
+          },
+          "oldest_row": {
+            "file": "src/add-ons/kernel/drivers/graphics/ati/driver.cpp",
+            "id": "0x4742",
+            "name": "3D RAGE PRO, AGP",
+            "text": "{ 0x4742, MACH64_264GTPRO,\t\t\"3D RAGE PRO, AGP\"\t\t},\t\t// GB"
+          },
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": {
+        "advertises_2d": true,
+        "declaration": "engine_token engineToken = { 1, B_2D_ACCELERATION, NULL }",
+        "file": "src/add-ons/accelerants/ati/engine.cpp",
+        "line": 12,
+        "note": "advertises_2d is read from the initializer after removing /* */ comments, so `{1, 0 /*B_2D_ACCELERATION*/}` reports False and `{1, B_2D_ACCELERATION, NULL}` True"
+      },
+      "hooks": {
+        "absent": [
+          "backlight"
+        ],
+        "found": {
+          "dpms": {
+            "decision_text": "return (void*)(gInfo.SetDPMSMode);",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 65,
+            "return": "return (void*)(gInfo.SetDPMSMode);",
+            "returns_at_line": 66,
+            "status": "direct"
+          },
+          "edid": {
+            "decision_text": "return (void*)GetEdidInfo;",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 47,
+            "return": "return (void*)GetEdidInfo;",
+            "returns_at_line": 48,
+            "status": "direct"
+          },
+          "engine_count": {
+            "decision_text": "return (void*)AccelerantEngineCount;",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 77,
+            "return": "return (void*)AccelerantEngineCount;",
+            "returns_at_line": 78,
+            "status": "direct"
+          },
+          "fill_rectangle": {
+            "decision_text": "return (void*)(gInfo.FillRectangle);",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 93,
+            "return": "return (void*)(gInfo.FillRectangle);",
+            "returns_at_line": 94,
+            "status": "direct"
+          },
+          "fill_span": {
+            "decision_text": "return (void*)(gInfo.FillSpan);",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 97,
+            "return": "return (void*)(gInfo.FillSpan);",
+            "returns_at_line": 98,
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "decision_text": "return (void*)GetFrameBufferConfig;",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 49,
+            "return": "return (void*)GetFrameBufferConfig;",
+            "returns_at_line": 50,
+            "status": "direct"
+          },
+          "hardware_cursor_move": {
+            "decision_text": "return (void*)MoveCursor;",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 71,
+            "return": "return (void*)MoveCursor;",
+            "returns_at_line": 72,
+            "status": "direct"
+          },
+          "hardware_cursor_shape": {
+            "decision_text": "return (void*)SetCursorShape;",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 69,
+            "return": "return (void*)SetCursorShape;",
+            "returns_at_line": 70,
+            "status": "direct"
+          },
+          "overlay_allocate": {
+            "decision_text": "return (void*)AllocateOverlayBuffer;",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 107,
+            "return": "return (void*)AllocateOverlayBuffer;",
+            "returns_at_line": 108,
+            "status": "direct"
+          },
+          "pan_display": {
+            "decision_text": "return (void*)MoveDisplay;",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 53,
+            "return": "return (void*)MoveDisplay;",
+            "returns_at_line": 54,
+            "status": "direct"
+          },
+          "screen_to_screen_blit": {
+            "decision_text": "return (void*)(gInfo.ScreenToScreenBlit);",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 91,
+            "return": "return (void*)(gInfo.ScreenToScreenBlit);",
+            "returns_at_line": 92,
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "decision_text": "return (void*)SetDisplayMode;",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 41,
+            "return": "return (void*)SetDisplayMode;",
+            "returns_at_line": 42,
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "decision_text": "return (void*)AccelerantRetraceSemaphore;",
+            "file": "src/add-ons/accelerants/ati/hooks.cpp",
+            "line": 31,
+            "return": "return (void*)AccelerantRetraceSemaphore;",
+            "returns_at_line": 32,
+            "status": "direct"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "et6x00": {
+      "closure_files": 18,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 2,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 0,
+          "distinct_ids": 0,
+          "files": [],
+          "newest_row": null,
+          "oldest_row": null,
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": {
+        "advertises_2d": true,
+        "declaration": "engine_token et6000EngineToken = {1, B_2D_ACCELERATION, NULL}",
+        "file": "src/add-ons/accelerants/et6x00/EngineManagment.c",
+        "line": 11,
+        "note": "advertises_2d is read from the initializer after removing /* */ comments, so `{1, 0 /*B_2D_ACCELERATION*/}` reports False and `{1, B_2D_ACCELERATION, NULL}` True"
+      },
+      "hooks": {
+        "absent": [
+          "pan_display",
+          "hardware_cursor_shape",
+          "hardware_cursor_move",
+          "overlay_allocate",
+          "fill_span",
+          "dpms",
+          "backlight",
+          "edid"
+        ],
+        "found": {
+          "engine_count": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/et6x00/GetAccelerantHook.c",
+            "line": 52,
+            "macro_line": 21,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "fill_rectangle": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/et6x00/GetAccelerantHook.c",
+            "line": 61,
+            "macro_line": 21,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/et6x00/GetAccelerantHook.c",
+            "line": 48,
+            "macro_line": 21,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "screen_to_screen_blit": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/et6x00/GetAccelerantHook.c",
+            "line": 60,
+            "macro_line": 21,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/et6x00/GetAccelerantHook.c",
+            "line": 46,
+            "macro_line": 21,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/et6x00/GetAccelerantHook.c",
+            "line": 40,
+            "macro_line": 21,
+            "return": "case B_##x: return (void *)x",
+            "status": "disabled-by-comment"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "framebuffer": {
+      "closure_files": 11,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 0,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 0,
+          "distinct_ids": 0,
+          "files": [],
+          "newest_row": null,
+          "oldest_row": null,
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": null,
+      "hooks": {
+        "absent": [
+          "pan_display",
+          "hardware_cursor_shape",
+          "hardware_cursor_move",
+          "overlay_allocate",
+          "fill_rectangle",
+          "screen_to_screen_blit",
+          "fill_span",
+          "dpms",
+          "backlight",
+          "engine_count"
+        ],
+        "found": {
+          "edid": {
+            "decision_text": "return (void*)framebuffer_get_edid_info;",
+            "file": "src/add-ons/accelerants/framebuffer/hooks.cpp",
+            "line": 43,
+            "return": "return (void*)framebuffer_get_edid_info;",
+            "returns_at_line": 44,
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "decision_text": "return (void*)framebuffer_get_frame_buffer_config;",
+            "file": "src/add-ons/accelerants/framebuffer/hooks.cpp",
+            "line": 45,
+            "return": "return (void*)framebuffer_get_frame_buffer_config;",
+            "returns_at_line": 46,
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "decision_text": "return (void*)framebuffer_set_display_mode;",
+            "file": "src/add-ons/accelerants/framebuffer/hooks.cpp",
+            "line": 39,
+            "return": "return (void*)framebuffer_set_display_mode;",
+            "returns_at_line": 40,
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "decision_text": "return (void*)framebuffer_accelerant_retrace_semaphore;",
+            "file": "src/add-ons/accelerants/framebuffer/hooks.cpp",
+            "line": 31,
+            "return": "return (void*)framebuffer_accelerant_retrace_semaphore;",
+            "returns_at_line": 32,
+            "status": "direct"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "intel_810": {
+      "closure_files": 12,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 0,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 4,
+          "distinct_ids": 4,
+          "files": [
+            "src/add-ons/kernel/drivers/graphics/intel_810/driver.cpp"
+          ],
+          "newest_row": {
+            "file": "src/add-ons/kernel/drivers/graphics/intel_810/driver.cpp",
+            "id": "0x1132",
+            "name": "i815",
+            "text": "{ 0x1132, \"i815\" },"
+          },
+          "oldest_row": {
+            "file": "src/add-ons/kernel/drivers/graphics/intel_810/driver.cpp",
+            "id": "0x7121",
+            "name": "i810",
+            "text": "{ 0x7121, \"i810\" },"
+          },
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": {
+        "advertises_2d": true,
+        "declaration": "engine_token sEngineToken = { 1, B_2D_ACCELERATION, NULL }",
+        "file": "src/add-ons/accelerants/intel_810/engine.cpp",
+        "line": 14,
+        "note": "advertises_2d is read from the initializer after removing /* */ comments, so `{1, 0 /*B_2D_ACCELERATION*/}` reports False and `{1, B_2D_ACCELERATION, NULL}` True"
+      },
+      "hooks": {
+        "absent": [
+          "hardware_cursor_shape",
+          "hardware_cursor_move",
+          "overlay_allocate",
+          "fill_rectangle",
+          "screen_to_screen_blit",
+          "fill_span",
+          "backlight"
+        ],
+        "found": {
+          "dpms": {
+            "decision_text": "return (void*)(I810_SetDPMSMode);",
+            "file": "src/add-ons/accelerants/intel_810/hooks.cpp",
+            "line": 67,
+            "return": "return (void*)(I810_SetDPMSMode);",
+            "returns_at_line": 68,
+            "status": "direct"
+          },
+          "edid": {
+            "decision_text": "return (void*)GetEdidInfo;",
+            "file": "src/add-ons/accelerants/intel_810/hooks.cpp",
+            "line": 48,
+            "return": "return (void*)GetEdidInfo;",
+            "returns_at_line": 49,
+            "status": "direct"
+          },
+          "engine_count": {
+            "decision_text": "return (void*)AccelerantEngineCount;",
+            "file": "src/add-ons/accelerants/intel_810/hooks.cpp",
+            "line": 71,
+            "return": "return (void*)AccelerantEngineCount;",
+            "returns_at_line": 72,
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "decision_text": "return (void*)GetFrameBufferConfig;",
+            "file": "src/add-ons/accelerants/intel_810/hooks.cpp",
+            "line": 51,
+            "return": "return (void*)GetFrameBufferConfig;",
+            "returns_at_line": 52,
+            "status": "direct"
+          },
+          "pan_display": {
+            "decision_text": "return (void*)MoveDisplay;",
+            "file": "src/add-ons/accelerants/intel_810/hooks.cpp",
+            "line": 55,
+            "return": "return (void*)MoveDisplay;",
+            "returns_at_line": 56,
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "decision_text": "return (void*)SetDisplayMode;",
+            "file": "src/add-ons/accelerants/intel_810/hooks.cpp",
+            "line": 43,
+            "return": "return (void*)SetDisplayMode;",
+            "returns_at_line": 44,
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "decision_text": "return NULL;",
+            "file": "src/add-ons/accelerants/intel_810/hooks.cpp",
+            "line": 33,
+            "return": "return NULL;",
+            "returns_at_line": 34,
+            "status": "denied"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "intel_extreme": {
+      "closure_files": 35,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 31,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 146,
+          "distinct_ids": 143,
+          "files": [
+            "src/add-ons/kernel/drivers/graphics/intel_extreme/driver.cpp"
+          ],
+          "newest_row": {
+            "file": "src/add-ons/kernel/drivers/graphics/intel_extreme/driver.cpp",
+            "id": "0x46D1",
+            "name": "Alder Lake-N",
+            "text": "{0x46d1, INTEL_MODEL_ALDM,  \"Alder Lake-N\"},"
+          },
+          "oldest_row": {
+            "file": "src/add-ons/kernel/drivers/graphics/intel_extreme/driver.cpp",
+            "id": "0x3577",
+            "name": "i830GM",
+            "text": "{0x3577, INTEL_GROUP_83x, \"i830GM\"},"
+          },
+          "rows_inside_if0": 6
+        }
+      },
+      "engine_token": {
+        "advertises_2d": false,
+        "declaration": "engine_token sEngineToken = {1, 0 /*B_2D_ACCELERATION*/, NULL}",
+        "file": "src/add-ons/accelerants/intel_extreme/engine.cpp",
+        "line": 29,
+        "note": "advertises_2d is read from the initializer after removing /* */ comments, so `{1, 0 /*B_2D_ACCELERATION*/}` reports False and `{1, B_2D_ACCELERATION, NULL}` True"
+      },
+      "hooks": {
+        "absent": [],
+        "found": {
+          "backlight": {
+            "decision_text": "if (gInfo->shared_info->device_type.IsMobile()) | return (void*)intel_set_brightness;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 52,
+            "return": "return (void*)intel_set_brightness;",
+            "returns_at_line": 54,
+            "status": "gated"
+          },
+          "dpms": {
+            "decision_text": "return (void*)intel_set_dpms_mode;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 77,
+            "return": "return (void*)intel_set_dpms_mode;",
+            "returns_at_line": 78,
+            "status": "direct"
+          },
+          "edid": {
+            "decision_text": "return (void*)intel_get_edid_info;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 48,
+            "return": "return (void*)intel_get_edid_info;",
+            "returns_at_line": 49,
+            "status": "direct"
+          },
+          "engine_count": {
+            "decision_text": "return (void*)intel_accelerant_engine_count;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 94,
+            "return": "return (void*)intel_accelerant_engine_count;",
+            "returns_at_line": 95,
+            "status": "direct"
+          },
+          "fill_rectangle": {
+            "decision_text": "return (void*)intel_fill_rectangle;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 110,
+            "return": "return (void*)intel_fill_rectangle;",
+            "returns_at_line": 111,
+            "status": "direct"
+          },
+          "fill_span": {
+            "decision_text": "return NULL;//(void*)intel_fill_span;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 114,
+            "return": "return NULL;//(void*)intel_fill_span;",
+            "returns_at_line": 115,
+            "status": "denied"
+          },
+          "frame_buffer_config": {
+            "decision_text": "return (void*)intel_get_frame_buffer_config;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 61,
+            "return": "return (void*)intel_get_frame_buffer_config;",
+            "returns_at_line": 62,
+            "status": "direct"
+          },
+          "hardware_cursor_move": {
+            "decision_text": "if (gInfo->shared_info->cursor_memory != NULL) | return (void*)intel_move_cursor;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 84,
+            "return": "return (void*)intel_move_cursor;",
+            "returns_at_line": 86,
+            "status": "gated"
+          },
+          "hardware_cursor_shape": {
+            "decision_text": "if (gInfo->shared_info->cursor_memory != NULL) | return (void*)intel_set_cursor_shape;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 81,
+            "return": "return (void*)intel_set_cursor_shape;",
+            "returns_at_line": 83,
+            "status": "gated"
+          },
+          "overlay_allocate": {
+            "decision_text": "// TODO: overlay doesn't seem to work on these chips | if (gInfo->shared_info->device_type.InGroup(INTEL_GROUP_91x) | || gInfo->shared_info->device_type.InGroup(INTEL_GROUP_94x) | || gInfo->shared_info->device_type.IsModel(INTEL_MODEL_965M) | || gInfo->shared_info->device_type.InGroup(INTEL_GROUP_G4",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 124,
+            "return": "return NULL;",
+            "returns_at_line": 134,
+            "status": "denied-for-some-devices"
+          },
+          "pan_display": {
+            "decision_text": "return (void*)intel_move_display;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 65,
+            "return": "return (void*)intel_move_display;",
+            "returns_at_line": 66,
+            "status": "direct"
+          },
+          "screen_to_screen_blit": {
+            "decision_text": "return (void*)intel_screen_to_screen_blit;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 108,
+            "return": "return (void*)intel_screen_to_screen_blit;",
+            "returns_at_line": 109,
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "decision_text": "return (void*)intel_set_display_mode;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 43,
+            "return": "return (void*)intel_set_display_mode;",
+            "returns_at_line": 44,
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "decision_text": "return (void*)intel_accelerant_retrace_semaphore;",
+            "file": "src/add-ons/accelerants/intel_extreme/hooks.cpp",
+            "line": 31,
+            "return": "return (void*)intel_accelerant_retrace_semaphore;",
+            "returns_at_line": 32,
+            "status": "direct"
+          }
+        }
+      },
+      "kernel_signals": {
+        "faked_vblank": {
+          "file": "src/add-ons/kernel/drivers/graphics/intel_extreme/intel_extreme.cpp",
+          "line": 469,
+          "text": "info.fake_interrupts = false;"
+        },
+        "gart_aperture": {
+          "file": "src/add-ons/kernel/drivers/graphics/intel_extreme/device.cpp",
+          "line": 316,
+          "text": "status_t status = intel_allocate_memory(*info, allocMemory.size,"
+        },
+        "gen8_interrupts": {
+          "file": "src/add-ons/kernel/drivers/graphics/intel_extreme/intel_extreme.cpp",
+          "line": 88,
+          "text": "gen8_enable_interrupts(intel_info& info, pipe_index pipe, bool enable)"
+        },
+        "modern_pll": {
+          "file": "src/add-ons/kernel/drivers/graphics/intel_extreme/intel_extreme.cpp",
+          "line": 495,
+          "text": "mask |= ICL_AUX_CHANNEL_E;"
+        },
+        "msi_interrupts": {
+          "file": "src/add-ons/kernel/drivers/graphics/intel_extreme/intel_extreme.cpp",
+          "line": 453,
+          "text": "if (gPCI->get_msi_count(info.pci->bus,"
+        },
+        "vblank_semaphore": {
+          "file": "src/add-ons/kernel/drivers/graphics/intel_extreme/intel_extreme.cpp",
+          "line": 73,
+          "text": "release_vblank_sem(intel_info &info)"
+        }
+      }
+    },
+    "matrox": {
+      "closure_files": 32,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 10,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 0,
+          "distinct_ids": 0,
+          "files": [],
+          "newest_row": null,
+          "oldest_row": null,
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": {
+        "advertises_2d": true,
+        "declaration": "engine_token gx00_engine_token = { 1, B_2D_ACCELERATION, NULL }",
+        "file": "src/add-ons/accelerants/matrox/EngineManagment.c",
+        "line": 15,
+        "note": "advertises_2d is read from the initializer after removing /* */ comments, so `{1, 0 /*B_2D_ACCELERATION*/}` reports False and `{1, B_2D_ACCELERATION, NULL}` True"
+      },
+      "hooks": {
+        "absent": [
+          "backlight",
+          "edid"
+        ],
+        "found": {
+          "dpms": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/matrox/GetAccelerantHook.c",
+            "line": 70,
+            "macro_line": 31,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "engine_count": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/matrox/GetAccelerantHook.c",
+            "line": 78,
+            "macro_line": 31,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "fill_rectangle": {
+            "dispatch_macro": "CHKA",
+            "file": "src/add-ons/accelerants/matrox/GetAccelerantHook.c",
+            "line": 116,
+            "macro_line": 29,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "fill_span": {
+            "dispatch_macro": "CHKA",
+            "file": "src/add-ons/accelerants/matrox/GetAccelerantHook.c",
+            "line": 118,
+            "macro_line": 29,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/matrox/GetAccelerantHook.c",
+            "line": 62,
+            "macro_line": 31,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "hardware_cursor_move": {
+            "dispatch_macro": "HRDC",
+            "file": "src/add-ons/accelerants/matrox/GetAccelerantHook.c",
+            "line": 74,
+            "macro_line": 33,
+            "return": "case B_##x: return si->settings.hardcursor? (void *)x: (void *)0; // apsed",
+            "status": "conditional"
+          },
+          "hardware_cursor_shape": {
+            "dispatch_macro": "HRDC",
+            "file": "src/add-ons/accelerants/matrox/GetAccelerantHook.c",
+            "line": 73,
+            "macro_line": 33,
+            "return": "case B_##x: return si->settings.hardcursor? (void *)x: (void *)0; // apsed",
+            "status": "conditional"
+          },
+          "overlay_allocate": {
+            "dispatch_macro": "CHKO",
+            "file": "src/add-ons/accelerants/matrox/GetAccelerantHook.c",
+            "line": 96,
+            "macro_line": 27,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "pan_display": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/matrox/GetAccelerantHook.c",
+            "line": 64,
+            "macro_line": 31,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "screen_to_screen_blit": {
+            "dispatch_macro": "CHKA",
+            "file": "src/add-ons/accelerants/matrox/GetAccelerantHook.c",
+            "line": 115,
+            "macro_line": 29,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/matrox/GetAccelerantHook.c",
+            "line": 60,
+            "macro_line": 31,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/matrox/GetAccelerantHook.c",
+            "line": 54,
+            "macro_line": 31,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "neomagic": {
+      "closure_files": 27,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 9,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 0,
+          "distinct_ids": 0,
+          "files": [],
+          "newest_row": null,
+          "oldest_row": null,
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": {
+        "advertises_2d": true,
+        "declaration": "engine_token nm_engine_token = { 1, B_2D_ACCELERATION, NULL }",
+        "file": "src/add-ons/accelerants/neomagic/EngineManagment.c",
+        "line": 15,
+        "note": "advertises_2d is read from the initializer after removing /* */ comments, so `{1, 0 /*B_2D_ACCELERATION*/}` reports False and `{1, B_2D_ACCELERATION, NULL}` True"
+      },
+      "hooks": {
+        "absent": [
+          "backlight",
+          "edid"
+        ],
+        "found": {
+          "dpms": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/neomagic/GetAccelerantHook.c",
+            "line": 69,
+            "macro_line": 30,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "engine_count": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/neomagic/GetAccelerantHook.c",
+            "line": 77,
+            "macro_line": 30,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "fill_rectangle": {
+            "dispatch_macro": "CHKA",
+            "file": "src/add-ons/accelerants/neomagic/GetAccelerantHook.c",
+            "line": 115,
+            "macro_line": 28,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "fill_span": {
+            "dispatch_macro": "CHKA",
+            "file": "src/add-ons/accelerants/neomagic/GetAccelerantHook.c",
+            "line": 117,
+            "macro_line": 28,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/neomagic/GetAccelerantHook.c",
+            "line": 61,
+            "macro_line": 30,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "hardware_cursor_move": {
+            "dispatch_macro": "HRDC",
+            "file": "src/add-ons/accelerants/neomagic/GetAccelerantHook.c",
+            "line": 73,
+            "macro_line": 32,
+            "return": "case B_##x: return si->settings.hardcursor? (void *)x: (void *)0;",
+            "status": "conditional"
+          },
+          "hardware_cursor_shape": {
+            "dispatch_macro": "HRDC",
+            "file": "src/add-ons/accelerants/neomagic/GetAccelerantHook.c",
+            "line": 72,
+            "macro_line": 32,
+            "return": "case B_##x: return si->settings.hardcursor? (void *)x: (void *)0;",
+            "status": "conditional"
+          },
+          "overlay_allocate": {
+            "dispatch_macro": "CHKO",
+            "file": "src/add-ons/accelerants/neomagic/GetAccelerantHook.c",
+            "line": 95,
+            "macro_line": 26,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "pan_display": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/neomagic/GetAccelerantHook.c",
+            "line": 63,
+            "macro_line": 30,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "screen_to_screen_blit": {
+            "dispatch_macro": "CHKA",
+            "file": "src/add-ons/accelerants/neomagic/GetAccelerantHook.c",
+            "line": 114,
+            "macro_line": 28,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/neomagic/GetAccelerantHook.c",
+            "line": 59,
+            "macro_line": 30,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/neomagic/GetAccelerantHook.c",
+            "line": 53,
+            "macro_line": 30,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "nvidia": {
+      "closure_files": 34,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 239,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 0,
+          "distinct_ids": 0,
+          "files": [],
+          "newest_row": null,
+          "oldest_row": null,
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": {
+        "advertises_2d": true,
+        "declaration": "engine_token nv_engine_token = { 1, B_2D_ACCELERATION, NULL }",
+        "file": "src/add-ons/accelerants/nvidia/EngineManagment.c",
+        "line": 22,
+        "note": "advertises_2d is read from the initializer after removing /* */ comments, so `{1, 0 /*B_2D_ACCELERATION*/}` reports False and `{1, B_2D_ACCELERATION, NULL}` True"
+      },
+      "hooks": {
+        "absent": [
+          "backlight"
+        ],
+        "found": {
+          "dpms": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 78,
+            "macro_line": 35,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "edid": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 67,
+            "macro_line": 35,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "engine_count": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 86,
+            "macro_line": 35,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "fill_rectangle": {
+            "dispatch_macro": "CHKA",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 124,
+            "macro_line": 29,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "fill_span": {
+            "dispatch_macro": "CHKA",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 126,
+            "macro_line": 29,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 70,
+            "macro_line": 35,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "hardware_cursor_move": {
+            "dispatch_macro": "HRDC",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 82,
+            "macro_line": 37,
+            "return": "case B_##x: return si->settings.hardcursor? (void *)x: (void *)0; // apsed",
+            "status": "conditional"
+          },
+          "hardware_cursor_shape": {
+            "dispatch_macro": "HRDC",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 81,
+            "macro_line": 37,
+            "return": "case B_##x: return si->settings.hardcursor? (void *)x: (void *)0; // apsed",
+            "status": "conditional"
+          },
+          "overlay_allocate": {
+            "dispatch_macro": "CHKO",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 104,
+            "macro_line": 27,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "pan_display": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 72,
+            "macro_line": 35,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "screen_to_screen_blit": {
+            "dispatch_macro": "CHKA",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 123,
+            "macro_line": 29,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 64,
+            "macro_line": 35,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/nvidia/GetAccelerantHook.c",
+            "line": 58,
+            "macro_line": 35,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "radeon": {
+      "closure_files": 78,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 147,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 0,
+          "distinct_ids": 0,
+          "files": [],
+          "newest_row": null,
+          "oldest_row": null,
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": {
+        "advertises_2d": true,
+        "declaration": "engine_token radeon_engine_token = { 1, B_2D_ACCELERATION, NULL }",
+        "file": "src/add-ons/accelerants/radeon/EngineManagment.c",
+        "line": 49,
+        "note": "advertises_2d is read from the initializer after removing /* */ comments, so `{1, 0 /*B_2D_ACCELERATION*/}` reports False and `{1, B_2D_ACCELERATION, NULL}` True"
+      },
+      "hooks": {
+        "absent": [
+          "backlight"
+        ],
+        "found": {
+          "dpms": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 72,
+            "macro_line": 33,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "edid": {
+            "decision_text": "return (void*)radeon_get_edid_info;",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 66,
+            "return": "return (void*)radeon_get_edid_info;",
+            "returns_at_line": 67,
+            "status": "direct"
+          },
+          "engine_count": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 81,
+            "macro_line": 33,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "fill_rectangle": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 97,
+            "macro_line": 33,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "fill_span": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 99,
+            "macro_line": 33,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 58,
+            "macro_line": 33,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "hardware_cursor_move": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 77,
+            "macro_line": 33,
+            "return": "case B_##x: return (void *)x",
+            "status": "disabled-by-comment"
+          },
+          "hardware_cursor_shape": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 76,
+            "macro_line": 33,
+            "return": "case B_##x: return (void *)x",
+            "status": "disabled-by-comment"
+          },
+          "overlay_allocate": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 105,
+            "macro_line": 33,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "pan_display": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 60,
+            "macro_line": 33,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "screen_to_screen_blit": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 96,
+            "macro_line": 33,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 56,
+            "macro_line": 33,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/radeon/GetAccelerantHook.c",
+            "line": 50,
+            "macro_line": 33,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "radeon_hd": {
+      "closure_files": 55,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 1,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 340,
+          "distinct_ids": 340,
+          "files": [
+            "src/add-ons/kernel/drivers/graphics/radeon_hd/driver.cpp"
+          ],
+          "newest_row": {
+            "file": "src/add-ons/kernel/drivers/graphics/radeon_hd/driver.cpp",
+            "id": "0x73FF",
+            "name": "Radeon RX Navi (Dimgrey)",
+            "text": "{0x73ff, 13, 5, RADEON_NAVI, CHIP_STD, \"Radeon RX Navi (Dimgrey)\"},"
+          },
+          "oldest_row": {
+            "file": "src/add-ons/kernel/drivers/graphics/radeon_hd/driver.cpp",
+            "id": "0x94C7",
+            "name": "Radeon HD 2350",
+            "text": "{0x94c7, 2, 0, RADEON_RV610, CHIP_STD, \"Radeon HD 2350\"},"
+          },
+          "rows_inside_if0": 119
+        }
+      },
+      "engine_token": {
+        "advertises_2d": false,
+        "declaration": "engine_token sEngineToken = {1, 0 /*B_2D_ACCELERATION*/, NULL}",
+        "file": "src/add-ons/accelerants/radeon_hd/engine.cpp",
+        "line": 27,
+        "note": "advertises_2d is read from the initializer after removing /* */ comments, so `{1, 0 /*B_2D_ACCELERATION*/}` reports False and `{1, B_2D_ACCELERATION, NULL}` True"
+      },
+      "hooks": {
+        "absent": [
+          "pan_display",
+          "hardware_cursor_shape",
+          "hardware_cursor_move",
+          "overlay_allocate"
+        ],
+        "found": {
+          "backlight": {
+            "decision_text": "return (void*)radeon_set_brightness;",
+            "file": "src/add-ons/accelerants/radeon_hd/hooks.cpp",
+            "line": 59,
+            "return": "return (void*)radeon_set_brightness;",
+            "returns_at_line": 60,
+            "status": "direct"
+          },
+          "dpms": {
+            "decision_text": "return (void*)radeon_dpms_set_hook;",
+            "file": "src/add-ons/accelerants/radeon_hd/hooks.cpp",
+            "line": 41,
+            "return": "return (void*)radeon_dpms_set_hook;",
+            "returns_at_line": 42,
+            "status": "direct"
+          },
+          "edid": {
+            "decision_text": "return (void*)radeon_get_edid_info;",
+            "file": "src/add-ons/accelerants/radeon_hd/hooks.cpp",
+            "line": 47,
+            "return": "return (void*)radeon_get_edid_info;",
+            "returns_at_line": 48,
+            "status": "direct"
+          },
+          "engine_count": {
+            "decision_text": "return (void*)radeon_accelerant_engine_count;",
+            "file": "src/add-ons/accelerants/radeon_hd/hooks.cpp",
+            "line": 69,
+            "return": "return (void*)radeon_accelerant_engine_count;",
+            "returns_at_line": 70,
+            "status": "direct"
+          },
+          "fill_rectangle": {
+            "decision_text": "return (void*)radeon_fill_rectangle;",
+            "file": "src/add-ons/accelerants/radeon_hd/hooks.cpp",
+            "line": 80,
+            "return": "return (void*)radeon_fill_rectangle;",
+            "returns_at_line": 81,
+            "status": "direct"
+          },
+          "fill_span": {
+            "decision_text": "return (void*)radeon_fill_span;",
+            "file": "src/add-ons/accelerants/radeon_hd/hooks.cpp",
+            "line": 84,
+            "return": "return (void*)radeon_fill_span;",
+            "returns_at_line": 85,
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "decision_text": "return (void*)radeon_get_frame_buffer_config;",
+            "file": "src/add-ons/accelerants/radeon_hd/hooks.cpp",
+            "line": 63,
+            "return": "return (void*)radeon_get_frame_buffer_config;",
+            "returns_at_line": 64,
+            "status": "direct"
+          },
+          "screen_to_screen_blit": {
+            "decision_text": "return (void*)radeon_screen_to_screen_blit;",
+            "file": "src/add-ons/accelerants/radeon_hd/hooks.cpp",
+            "line": 78,
+            "return": "return (void*)radeon_screen_to_screen_blit;",
+            "returns_at_line": 79,
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "decision_text": "return (void*)radeon_set_display_mode;",
+            "file": "src/add-ons/accelerants/radeon_hd/hooks.cpp",
+            "line": 53,
+            "return": "return (void*)radeon_set_display_mode;",
+            "returns_at_line": 54,
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "decision_text": "return (void*)radeon_accelerant_retrace_semaphore;",
+            "file": "src/add-ons/accelerants/radeon_hd/hooks.cpp",
+            "line": 30,
+            "return": "return (void*)radeon_accelerant_retrace_semaphore;",
+            "returns_at_line": 31,
+            "status": "direct"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "s3": {
+      "closure_files": 30,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 0,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 34,
+          "distinct_ids": 34,
+          "files": [
+            "src/add-ons/kernel/drivers/graphics/s3/driver.cpp"
+          ],
+          "newest_row": {
+            "file": "src/add-ons/kernel/drivers/graphics/s3/driver.cpp",
+            "id": "0x9102",
+            "name": "Savage2000",
+            "text": "{ 0x9102, S3_SAVAGE2000,\t\"Savage2000\"\t\t\t},"
+          },
+          "oldest_row": {
+            "file": "src/add-ons/kernel/drivers/graphics/s3/driver.cpp",
+            "id": "0x8811",
+            "name": "Trio64",
+            "text": "{ 0x8811, S3_TRIO64,\t\t\"Trio64\"\t\t\t},\t\t// see comment above"
+          },
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": {
+        "advertises_2d": true,
+        "declaration": "engine_token engineToken = { 1, B_2D_ACCELERATION, NULL }",
+        "file": "src/add-ons/accelerants/s3/engine.cpp",
+        "line": 12,
+        "note": "advertises_2d is read from the initializer after removing /* */ comments, so `{1, 0 /*B_2D_ACCELERATION*/}` reports False and `{1, B_2D_ACCELERATION, NULL}` True"
+      },
+      "hooks": {
+        "absent": [
+          "overlay_allocate",
+          "backlight"
+        ],
+        "found": {
+          "dpms": {
+            "decision_text": "case B_SET_DPMS_MODE:\t\t\treturn (void*)(gInfo.SetDPMSMode);",
+            "file": "src/add-ons/accelerants/s3/hooks.cpp",
+            "line": 48,
+            "return": "case B_SET_DPMS_MODE:\t\t\treturn (void*)(gInfo.SetDPMSMode);",
+            "status": "direct"
+          },
+          "edid": {
+            "decision_text": "case B_GET_EDID_INFO:\t\t\treturn (void*)GetEdidInfo;",
+            "file": "src/add-ons/accelerants/s3/hooks.cpp",
+            "line": 37,
+            "return": "case B_GET_EDID_INFO:\t\t\treturn (void*)GetEdidInfo;",
+            "status": "direct"
+          },
+          "engine_count": {
+            "decision_text": "case B_ACCELERANT_ENGINE_COUNT:\treturn (void*)AccelerantEngineCount;",
+            "file": "src/add-ons/accelerants/s3/hooks.cpp",
+            "line": 59,
+            "return": "case B_ACCELERANT_ENGINE_COUNT:\treturn (void*)AccelerantEngineCount;",
+            "status": "direct"
+          },
+          "fill_rectangle": {
+            "decision_text": "return (void*)(si.bDisableAccelDraw ? NULL : gInfo.FillRectangle);",
+            "file": "src/add-ons/accelerants/s3/hooks.cpp",
+            "line": 69,
+            "return": "return (void*)(si.bDisableAccelDraw ? NULL : gInfo.FillRectangle);",
+            "returns_at_line": 70,
+            "status": "direct"
+          },
+          "fill_span": {
+            "decision_text": "return (void*)(si.bDisableAccelDraw ? NULL : gInfo.FillSpan);",
+            "file": "src/add-ons/accelerants/s3/hooks.cpp",
+            "line": 73,
+            "return": "return (void*)(si.bDisableAccelDraw ? NULL : gInfo.FillSpan);",
+            "returns_at_line": 74,
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "decision_text": "case B_GET_FRAME_BUFFER_CONFIG:\treturn (void*)GetFrameBufferConfig;",
+            "file": "src/add-ons/accelerants/s3/hooks.cpp",
+            "line": 39,
+            "return": "case B_GET_FRAME_BUFFER_CONFIG:\treturn (void*)GetFrameBufferConfig;",
+            "status": "direct"
+          },
+          "hardware_cursor_move": {
+            "decision_text": "return (void*)(si.bDisableHdwCursor ? NULL : MoveCursor);",
+            "file": "src/add-ons/accelerants/s3/hooks.cpp",
+            "line": 53,
+            "return": "return (void*)(si.bDisableHdwCursor ? NULL : MoveCursor);",
+            "returns_at_line": 54,
+            "status": "direct"
+          },
+          "hardware_cursor_shape": {
+            "decision_text": "return (void*)(si.bDisableHdwCursor ? NULL : SetCursorShape);",
+            "file": "src/add-ons/accelerants/s3/hooks.cpp",
+            "line": 51,
+            "return": "return (void*)(si.bDisableHdwCursor ? NULL : SetCursorShape);",
+            "returns_at_line": 52,
+            "status": "direct"
+          },
+          "pan_display": {
+            "decision_text": "case B_MOVE_DISPLAY:\t\t\treturn (void*)MoveDisplay;",
+            "file": "src/add-ons/accelerants/s3/hooks.cpp",
+            "line": 41,
+            "return": "case B_MOVE_DISPLAY:\t\t\treturn (void*)MoveDisplay;",
+            "status": "direct"
+          },
+          "screen_to_screen_blit": {
+            "decision_text": "return (void*)(si.bDisableAccelDraw ? NULL : gInfo.ScreenToScreenBlit);",
+            "file": "src/add-ons/accelerants/s3/hooks.cpp",
+            "line": 67,
+            "return": "return (void*)(si.bDisableAccelDraw ? NULL : gInfo.ScreenToScreenBlit);",
+            "returns_at_line": 68,
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "decision_text": "case B_SET_DISPLAY_MODE:\t\treturn (void*)SetDisplayMode;",
+            "file": "src/add-ons/accelerants/s3/hooks.cpp",
+            "line": 33,
+            "return": "case B_SET_DISPLAY_MODE:\t\treturn (void*)SetDisplayMode;",
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "decision_text": "case B_ACCELERANT_RETRACE_SEMAPHORE: return (void*)AccelerantRetraceSemaphore;",
+            "file": "src/add-ons/accelerants/s3/hooks.cpp",
+            "line": 27,
+            "return": "case B_ACCELERANT_RETRACE_SEMAPHORE: return (void*)AccelerantRetraceSemaphore;",
+            "status": "direct"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "vesa": {
+      "closure_files": 19,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 0,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 0,
+          "distinct_ids": 0,
+          "files": [],
+          "newest_row": null,
+          "oldest_row": null,
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": null,
+      "hooks": {
+        "absent": [
+          "fill_rectangle",
+          "screen_to_screen_blit",
+          "fill_span",
+          "backlight",
+          "engine_count"
+        ],
+        "found": {
+          "dpms": {
+            "decision_text": "return (void*)vesa_set_dpms_mode;",
+            "file": "src/add-ons/accelerants/vesa/hooks.cpp",
+            "line": 244,
+            "return": "return (void*)vesa_set_dpms_mode;",
+            "returns_at_line": 245,
+            "status": "direct"
+          },
+          "edid": {
+            "decision_text": "return (void*)vesa_get_edid_info;",
+            "file": "src/add-ons/accelerants/vesa/hooks.cpp",
+            "line": 226,
+            "return": "return (void*)vesa_get_edid_info;",
+            "returns_at_line": 227,
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "decision_text": "return (void*)vesa_get_frame_buffer_config;",
+            "file": "src/add-ons/accelerants/vesa/hooks.cpp",
+            "line": 228,
+            "return": "return (void*)vesa_get_frame_buffer_config;",
+            "returns_at_line": 229,
+            "status": "direct"
+          },
+          "hardware_cursor_move": {
+            "decision_text": "return (void*)vesa_move_cursor;",
+            "file": "src/add-ons/accelerants/vesa/hooks.cpp",
+            "line": 251,
+            "return": "return (void*)vesa_move_cursor;",
+            "returns_at_line": 252,
+            "status": "direct"
+          },
+          "hardware_cursor_shape": {
+            "decision_text": "return (void*)vesa_set_cursor_shape;",
+            "file": "src/add-ons/accelerants/vesa/hooks.cpp",
+            "line": 249,
+            "return": "return (void*)vesa_set_cursor_shape;",
+            "returns_at_line": 250,
+            "status": "direct"
+          },
+          "overlay_allocate": {
+            "decision_text": "return (void*)vesa_allocate_overlay_buffer;",
+            "file": "src/add-ons/accelerants/vesa/hooks.cpp",
+            "line": 267,
+            "return": "return (void*)vesa_allocate_overlay_buffer;",
+            "returns_at_line": 268,
+            "status": "direct"
+          },
+          "pan_display": {
+            "decision_text": "return (void*)vesa_move_display;",
+            "file": "src/add-ons/accelerants/vesa/hooks.cpp",
+            "line": 232,
+            "return": "return (void*)vesa_move_display;",
+            "returns_at_line": 233,
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "decision_text": "return (void*)vesa_set_display_mode;",
+            "file": "src/add-ons/accelerants/vesa/hooks.cpp",
+            "line": 222,
+            "return": "return (void*)vesa_set_display_mode;",
+            "returns_at_line": 223,
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "decision_text": "return (void*)vesa_accelerant_retrace_semaphore;",
+            "file": "src/add-ons/accelerants/vesa/hooks.cpp",
+            "line": 212,
+            "return": "return (void*)vesa_accelerant_retrace_semaphore;",
+            "returns_at_line": 213,
+            "status": "direct"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "via": {
+      "closure_files": 32,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 6,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 0,
+          "distinct_ids": 0,
+          "files": [],
+          "newest_row": null,
+          "oldest_row": null,
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": {
+        "advertises_2d": true,
+        "declaration": "engine_token eng_engine_token = { 1, B_2D_ACCELERATION, NULL }",
+        "file": "src/add-ons/accelerants/via/EngineManagement.c",
+        "line": 15,
+        "note": "advertises_2d is read from the initializer after removing /* */ comments, so `{1, 0 /*B_2D_ACCELERATION*/}` reports False and `{1, B_2D_ACCELERATION, NULL}` True"
+      },
+      "hooks": {
+        "absent": [
+          "backlight",
+          "edid"
+        ],
+        "found": {
+          "dpms": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/via/GetAccelerantHook.c",
+            "line": 70,
+            "macro_line": 31,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "engine_count": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/via/GetAccelerantHook.c",
+            "line": 78,
+            "macro_line": 31,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "fill_rectangle": {
+            "dispatch_macro": "CHKA",
+            "file": "src/add-ons/accelerants/via/GetAccelerantHook.c",
+            "line": 116,
+            "macro_line": 29,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "fill_span": {
+            "dispatch_macro": "CHKA",
+            "file": "src/add-ons/accelerants/via/GetAccelerantHook.c",
+            "line": 118,
+            "macro_line": 29,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/via/GetAccelerantHook.c",
+            "line": 62,
+            "macro_line": 31,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "hardware_cursor_move": {
+            "dispatch_macro": "HRDC",
+            "file": "src/add-ons/accelerants/via/GetAccelerantHook.c",
+            "line": 74,
+            "macro_line": 33,
+            "return": "case B_##x: return si->settings.hardcursor? (void *)x: (void *)0; // apsed",
+            "status": "conditional"
+          },
+          "hardware_cursor_shape": {
+            "dispatch_macro": "HRDC",
+            "file": "src/add-ons/accelerants/via/GetAccelerantHook.c",
+            "line": 73,
+            "macro_line": 33,
+            "return": "case B_##x: return si->settings.hardcursor? (void *)x: (void *)0; // apsed",
+            "status": "conditional"
+          },
+          "overlay_allocate": {
+            "dispatch_macro": "CHKO",
+            "file": "src/add-ons/accelerants/via/GetAccelerantHook.c",
+            "line": 96,
+            "macro_line": 27,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "pan_display": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/via/GetAccelerantHook.c",
+            "line": 64,
+            "macro_line": 31,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "screen_to_screen_blit": {
+            "dispatch_macro": "CHKA",
+            "file": "src/add-ons/accelerants/via/GetAccelerantHook.c",
+            "line": 115,
+            "macro_line": 29,
+            "return": "case B_##x: \\",
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/via/GetAccelerantHook.c",
+            "line": 60,
+            "macro_line": 31,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "dispatch_macro": "HOOK",
+            "file": "src/add-ons/accelerants/via/GetAccelerantHook.c",
+            "line": 54,
+            "macro_line": 31,
+            "return": "case B_##x: return (void *)x",
+            "status": "direct"
+          }
+        }
+      },
+      "kernel_signals": {}
+    },
+    "virtio": {
+      "closure_files": 8,
+      "device_table": {
+        "raw_id_form": {
+          "distinct_device_id_literals": 0,
+          "note": "distinct 0xNNNN device literals in device-list arrays and DEVICE_ID macros; not a chip-name count"
+        },
+        "row_form": {
+          "binding_rows": 0,
+          "distinct_ids": 0,
+          "files": [],
+          "newest_row": null,
+          "oldest_row": null,
+          "rows_inside_if0": 0
+        }
+      },
+      "engine_token": null,
+      "hooks": {
+        "absent": [
+          "pan_display",
+          "hardware_cursor_shape",
+          "hardware_cursor_move",
+          "overlay_allocate",
+          "fill_rectangle",
+          "screen_to_screen_blit",
+          "fill_span",
+          "dpms",
+          "backlight",
+          "engine_count"
+        ],
+        "found": {
+          "edid": {
+            "decision_text": "return (void*)virtio_gpu_get_edid_info;",
+            "file": "src/add-ons/accelerants/virtio/hooks.cpp",
+            "line": 45,
+            "return": "return (void*)virtio_gpu_get_edid_info;",
+            "returns_at_line": 46,
+            "status": "direct"
+          },
+          "frame_buffer_config": {
+            "decision_text": "return (void*)virtio_gpu_get_frame_buffer_config;",
+            "file": "src/add-ons/accelerants/virtio/hooks.cpp",
+            "line": 47,
+            "return": "return (void*)virtio_gpu_get_frame_buffer_config;",
+            "returns_at_line": 48,
+            "status": "direct"
+          },
+          "set_display_mode": {
+            "decision_text": "return (void*)virtio_gpu_set_display_mode;",
+            "file": "src/add-ons/accelerants/virtio/hooks.cpp",
+            "line": 41,
+            "return": "return (void*)virtio_gpu_set_display_mode;",
+            "returns_at_line": 42,
+            "status": "direct"
+          },
+          "vsync_retrace": {
+            "decision_text": "return (void*)virtio_gpu_accelerant_retrace_semaphore;",
+            "file": "src/add-ons/accelerants/virtio/hooks.cpp",
+            "line": 31,
+            "return": "return (void*)virtio_gpu_accelerant_retrace_semaphore;",
+            "returns_at_line": 32,
+            "status": "direct"
+          }
+        }
+      },
+      "kernel_signals": {}
+    }
+  },
+  "head": "7be0fef07df0ecbe6f40a4cf2a7687775f1f28a0",
+  "kind": "haiku-display-feature-probe",
+  "method": "device-binding tables counted with #if 0 regions tracked; accelerant hook tables read as text (a hook whose return line is commented out or NULL is reported as such, not inferred); kernel-side signals matched by pattern",
+  "pinned_commit": "7be0fef07df0ecbe6f40a4cf2a7687775f1f28a0",
+  "reproduce": "python3 tools/research/probe_haiku_display_features.py --haiku DIR",
+  "status": "source review only; no build, no ABI check, no hardware test"
+}

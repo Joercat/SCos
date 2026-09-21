@@ -284,7 +284,7 @@ static void run_command(struct term *t, const char *command)
     if (!nargs) return;
 
     const char *cmd = args[0];
-    char response[1536];
+    char response[2560];   /* holds the GPU detection report, which lists every adapter */
     response[0] = 0;
     int typed = 1;
 

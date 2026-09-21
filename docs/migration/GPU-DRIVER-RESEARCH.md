@@ -3,6 +3,13 @@
 Research date: 2026-09-20. **Research only: no driver has been ported, built for
 SCos, or verified running on SCos in this work.** The shipped renderer is still CPU.
 
+> **2026-09-20 scope narrowing.** The target moved to the *basic* tier: native display
+> ownership plus GPU copy/fill, with no GL/Vulkan. That tier is researched and measured
+> separately in [GPU-BASIC-2D-RESEARCH.md](GPU-BASIC-2D-RESEARCH.md), which revises two
+> statements below: the light per-family engines carry no firmware, so they do not wait
+> on the 16 MiB boot reader or disk streaming; and Genode's "Intel framebuffer" is not a
+> small standalone driver but a build of 932 Linux i915/DRM source files under GPL-2.0.
+
 ## Corrected scope
 
 The requested approach is multiple existing drivers, each matched to its actual

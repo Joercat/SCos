@@ -11,6 +11,11 @@ DESKTOP_SOURCES := $(wildcard kernel/desktop/*.c)
 DESKTOP_OBJECTS := $(patsubst kernel/desktop/%.c,$(BUILD)/desktop-%.o,$(DESKTOP_SOURCES))
 DRIVER_SOURCES := $(wildcard kernel/drivers/*.c)
 DRIVER_OBJECTS := $(patsubst kernel/drivers/%.c,$(BUILD)/driver-%.o,$(DRIVER_SOURCES))
+# Per-family GPU modules live in their own directory so a family's table, port state
+# and (later) engine code are separate units: detection names a chip without any of the
+# engine code running, and a ported family is added per file rather than in one blob.
+GPU_SOURCES := $(wildcard kernel/drivers/gpu/*.c)
+GPU_OBJECTS := $(patsubst kernel/drivers/gpu/%.c,$(BUILD)/gpu-%.o,$(GPU_SOURCES))
 .PHONY: all clean milestone-check
 all: milestone-check $(BUILD)/scos.img
 milestone-check:
@@ -25,8 +30,8 @@ $(BUILD)/vectors.S: tools/gen_vectors.py | $(BUILD)
 	python3 $< > $@
 $(BUILD)/vectors.o: $(BUILD)/vectors.S
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
-$(BUILD)/kernel.elf: $(DRIVER_OBJECTS) $(DESKTOP_OBJECTS) $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o kernel/x86_64/linker.ld Makefile
-	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -Bsymbolic --build-id=none -z noexecstack -z max-page-size=0x1000 -T kernel/x86_64/linker.ld -o $@ $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o $(DESKTOP_OBJECTS) $(DRIVER_OBJECTS) $(BUILD)/lua-runtime.o
+$(BUILD)/kernel.elf: $(GPU_OBJECTS) $(DRIVER_OBJECTS) $(DESKTOP_OBJECTS) $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o kernel/x86_64/linker.ld Makefile
+	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -Bsymbolic --build-id=none -z noexecstack -z max-page-size=0x1000 -T kernel/x86_64/linker.ld -o $@ $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o $(DESKTOP_OBJECTS) $(DRIVER_OBJECTS) $(GPU_OBJECTS) $(BUILD)/lua-runtime.o
 $(BUILD)/efi-main.o: boot/uefi/main.c boot/uefi/efi.h kernel/include/boot.h Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
 $(BUILD)/efi-font.o: kernel/src/font.c Makefile | $(BUILD)
@@ -44,6 +49,8 @@ $(BUILD)/desktop-%.o: kernel/desktop/%.c kernel/include/scos.h kernel/include/ke
 # Every callback reachable from a hardware IRQ remains general-register-only.
 $(BUILD)/desktop-kbd.o $(BUILD)/desktop-mouse.o $(BUILD)/desktop-cpumeter.o $(BUILD)/desktop-klog.o $(BUILD)/desktop-platform.o: APP_CFLAGS = $(CFLAGS) -fno-strict-aliasing
 $(BUILD)/driver-%.o: kernel/drivers/%.c kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD)
+	$(CC) $(CFLAGS) -fno-strict-aliasing -c $< -o $@
+$(BUILD)/gpu-%.o: kernel/drivers/gpu/%.c kernel/drivers/gpu/gpu_ids.h kernel/include/gpu.h kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD)
 	$(CC) $(CFLAGS) -fno-strict-aliasing -c $< -o $@
 
 include kernel/lua/runtime.mk

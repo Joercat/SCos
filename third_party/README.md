@@ -50,6 +50,30 @@ including the pre-modification versions of adapted files. Local modifications
 are described above and kept in normal Git history. The application image
 includes the license texts and math-file notices at `/system/licenses.txt`.
 
+## GPU device tables — data extracted from Haiku, not vendored code
+
+- Upstream: https://github.com/haiku/haiku, commit
+  `7be0fef07df0ecbe6f40a4cf2a7687775f1f28a0` (the pinned commit used by the GPU
+  survey in `docs/migration/`).
+- `kernel/drivers/gpu/gpu_ids.h` is **generated**, not copied: `tools/research/`
+  `gen_gpu_tables.py` reads the twelve upstream drivers' own PCI binding arrays
+  (`radeon/detect.c`, `nvidia/driver.c`, `ati/driver.cpp`, `s3/driver.cpp`,
+  `3dfx/driver.cpp`, `intel_810/driver.cpp`, `matrox/driver.c`, `via/driver.c`,
+  `neomagic/driver.c`, `et6x00/driver.c`, `intel_extreme/driver.cpp`,
+  `radeon_hd/driver.cpp`), resolves their `#define` and `static char[]`
+  indirections, drops rows excluded by a line comment or `#if 0`, and emits the
+  resulting 1,019 `(vendor, device, chip name)` rules. `tools/tests/`
+  `test_gpu_detect.py` re-runs the extraction and fails if the header drifts.
+- Content is device identifiers and chip-name strings used for matching, with the
+  licence of each source file retained in the survey: MIT (`radeon/detect.c`,
+  `ati/driver.cpp`, `intel_extreme/driver.cpp`, `radeon_hd/driver.cpp` and the
+  `intel_810`/`s3`/`3dfx` driver files), the Be Sample Code License (`nvidia/driver.c`, `matrox/driver.c`,
+  `via/driver.c`, `neomagic/driver.c`) and the MIT-style grant in
+  `et6x00/license`. No accelerator, kernel driver, header or build file was
+  copied, and **no hardware driver is imported**: `docs/migration/`
+  `GPU-AUTO-DETECT.md` records that every family's engine ops remain null, so all
+  drawing still happens in SCos' own CPU compositor.
+
 ## Build boundary
 
 The existing Linux x86-64 GCC toolchain supplies C type/prototype headers; no

@@ -20,6 +20,9 @@ def main():
                     help="boot via emulated USB storage, with xHCI keyboard/mouse; native saves remain unsupported on USB")
     ap.add_argument("--xhci", action="store_true", help="add emulated USB keyboard/mouse")
     ap.add_argument("--vnc", action="store_true", help="VNC on a private Unix socket, never a TCP listener")
+    ap.add_argument("--device", action="append", default=[], metavar="SPEC",
+                    help="extra -device argument, repeatable; used by the GPU detection "
+                         "test to attach emulated PCI display functions next to the boot one")
     ap.add_argument("--dry-run", action="store_true", help="print the command without starting QEMU")
     args = ap.parse_args()
     image = args.image.resolve()
@@ -59,6 +62,15 @@ def main():
                     "-device", "usb-mouse,bus=xhci.0"]
     if args.usb_boot:
         command += ["-device", "usb-storage,drive=bootdisk,bus=xhci.0,bootindex=1"]
+    # Only device specifications, never whole arguments: the caller cannot inject a
+    # host path, a snapshot-off flag or a passthrough this way.
+    for spec in args.device:
+        if not spec or spec.startswith("-") or any(c.isspace() for c in spec):
+            ap.error(f"--device must be a single device spec with no whitespace: {spec!r}")
+        # Commas are QEMU's own argument separator, and doubled commas are its escape,
+        # exactly as the disk paths above are handled; nothing here can start a new
+        # command-line argument or name a host path.
+        command += ["-device", spec.replace(",", ",,")]
     if args.vnc:
         command += ["-vnc", f"unix:{run / 'vnc.sock'}"]
     print(f"QMP / serial log directory: {run}", flush=True)

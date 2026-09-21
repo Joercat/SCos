@@ -1,0 +1,373 @@
+/* GPU auto-detection: name the display adapter, then decide what SCos may do.
+ *
+ * The algorithm is deliberately the same shape as the upstream drivers' own
+ * enumeration loops, because that is what "exact device matching" means: for a
+ * function in class 0x03, require the family's vendor, its class predicate where it
+ * has one, and a device ID present in that family's table.  A family with no ID table
+ * (VESA, the firmware framebuffer, virtio) cannot be matched by ID at all and is only
+ * ever reported as the fallback path.
+ *
+ * Nothing in this file writes to a device.  Identification must be safe to run on the
+ * adapter that is currently producing the only visible console, so BARs are read but
+ * never sized, no reset or power transition is issued, and the display remains under
+ * firmware control until a family's engine code is ported and bound (see
+ * `gpu_ports.c`).  Every log line states the consequence, not just the match, so a
+ * boot log is readable with no keyboard attached.
+ */
+#include "scos.h"
+#include "gpu.h"
+
+#define SCAN_SUBLASSES 4
+#define REPORT_DEVICE_LIMIT 4
+
+static struct gpu_device devices[GPU_MAX_DEVICES];
+static int device_count;
+static int scanout_index = -1;
+static int config_writes_before, config_writes_after;
+static const struct gpu_driver *bound;
+static struct boot_framebuffer output;
+static int families_without_port_record;
+
+static void hex4(char *out, uint16_t value)
+{
+    const char *digits = "0123456789abcdef";
+    for (int i = 0; i < 4; i++) out[i] = digits[(value >> (12 - i * 4)) & 15];
+    out[4] = 0;
+}
+
+const char *gpu_vendor_name(uint16_t vendor)
+{
+    switch (vendor) {
+    case 0x8086: return "Intel";
+    case 0x1002: return "ATI/AMD";
+    case 0x10de: return "NVIDIA";
+    case 0x102b: return "Matrox";
+    case 0x1106: return "VIA";
+    case 0x10c8: return "NeoMagic";
+    case 0x5333: return "S3";
+    case 0x121a: return "3dfx";
+    case 0x100c: return "Tseng";
+    case 0x1048: return "ELSA (NVIDIA)";
+    case 0x12d2: return "STB/SGS-Thompson (NVIDIA)";
+    case 0x1888: return "Varisys (NVIDIA)";
+    case 0x1af4: return "Virtio";
+    case 0x1234: return "QEMU";
+    case 0x15ad: return "VMware";
+    default: return "Unknown vendor";
+    }
+}
+
+/* The family's own class-code predicate, as generated from its source. */
+static int class_matches(const struct gpu_match *match, uint8_t subclass)
+{
+    if (match->class_base != 0xff && match->class_base != 3) return 0;
+    if (match->class_sub_a == 0xff) return 1;
+    if (match->class_sub_a == subclass) return 1;
+    if (match->class_sub_b != 0xff && match->class_sub_b == subclass) return 1;
+    return 0;
+}
+
+/* Vendor lives in the row, not the family record: nvidia's driver pairs four vendors
+ * with four lists (0x10de plus the ELSA, STB/SGS-Thompson and Varisys rebrands), so a
+ * single vendor per family would drop the rebranded cards that upstream does bind. */
+static const struct gpu_pci_id *match_id(const struct gpu_match *match, uint16_t vendor,
+                                         uint16_t device)
+{
+    if (!match->ids || !match->id_count) return 0;
+    for (unsigned i = 0; i < match->id_count; i++)
+        if (match->ids[i].vendor == vendor && match->ids[i].device == device)
+            return &match->ids[i];
+    return 0;
+}
+
+/* Raw BAR register values only.  Sizing a BAR means writing all-ones into it first,
+ * and that is precisely the kind of operation that can take away the running console,
+ * so this subsystem never does it; a ported driver that needs the size asks for it in
+ * its own `prepare()`, once it has a restoration path to fall back on. */
+static void read_bars(struct gpu_device *g)
+{
+    for (int i = 0; i < 6; i++) {
+        uint32_t low = pci_read32(g->bus, g->slot, g->function, (uint8_t)(0x10 + i * 4));
+        g->bar[i] = low & ~0xfu;
+        if ((low & 6) == 4 && i < 5) {
+            uint32_t high = pci_read32(g->bus, g->slot, g->function,
+                                       (uint8_t)(0x14 + i * 4));
+            g->bar[i] |= ((uint64_t)high << 32);
+            i++;                            /* consumed as the upper half */
+        }
+    }
+}
+
+static void record(struct gpu_device *g, uint8_t bus, uint8_t slot, uint8_t function,
+                   uint8_t subclass)
+{
+    uint32_t vendev = pci_read32(bus, slot, function, 0);
+    uint32_t ccrev = pci_read32(bus, slot, function, 8);
+    *g = (struct gpu_device){
+        .bus = bus, .slot = slot, .function = function, .subclass = subclass,
+        .vendor = (uint16_t)vendev, .device = (uint16_t)(vendev >> 16),
+        .revision = (uint8_t)(ccrev >> 8),
+    };
+    g->command = pci_read32(bus, slot, function, 4);
+    g->header_type = (pci_read32(bus, slot, function, 0xc) >> 16) & 0x7f;
+    read_bars(g);
+}
+
+static void identify(struct gpu_device *g)
+{
+    int families = gpu_match_family_count();
+    for (int f = 0; f < families; f++) {
+        const struct gpu_match *match = gpu_match_family(f);
+        if (!match || !match->id_count) continue;      /* no ID table to match against */
+        if (!class_matches(match, g->subclass)) continue;
+        const struct gpu_pci_id *id = match_id(match, g->vendor, g->device);
+        if (!id) continue;
+        g->match = match;
+        g->chip = id->name;
+        const struct gpu_driver *port = gpu_port_for(match->family);
+        if (!port) {
+            families_without_port_record++;
+            klog("gpu: family %s has no port record; reporting as unbound", match->family);
+            return;
+        }
+        if (port->state != GPU_PORT_NONE && port->ops) {
+            g->bound = 1;
+            bound = port;
+        }
+        return;
+    }
+}
+
+void gpu_init(const struct boot_framebuffer *fb)
+{
+    static const uint8_t subclasses[SCAN_SUBLASSES] = {0, 1, 2, 0x80};
+    uint8_t bus[8], slot[8], function[8];
+
+    output = *fb;
+    config_writes_before = (int)pci_config_writes;
+    device_count = 0;
+    scanout_index = -1;
+    bound = 0;
+    families_without_port_record = 0;
+
+    for (int s = 0; s < SCAN_SUBLASSES && device_count < GPU_MAX_DEVICES; s++) {
+        int found = pci_find_class(3, subclasses[s], 0xff, bus, slot, function, 8);
+        for (int i = 0; i < found && device_count < GPU_MAX_DEVICES; i++) {
+            struct gpu_device *g = &devices[device_count];
+            record(g, bus[i], slot[i], function[i], subclasses[s]);
+            identify(g);
+            /* Split into two lines on purpose: the serial logger truncates long
+             * records, and the family and chip name are the parts a reader needs. */
+            klog("gpu: PCI %u:%u.%u %x:%x sub=%x matched=%s",
+                 g->bus, g->slot, g->function, g->vendor, g->device, g->subclass,
+                 g->match ? g->match->family : "none");
+            klog("gpu:   chip=%s engine=%s",
+                 g->chip && g->chip[0] ? g->chip : "(no ID table match)",
+                 g->bound ? "bound" : "none, CPU compositor");
+            device_count++;
+        }
+    }
+
+    /* The scanning adapter is the one whose BAR already points at the framebuffer the
+     * firmware validated.  Matching addresses is enough to know which device owns the
+     * console, and unlike sizing a BAR it cannot disturb it. */
+    for (int i = 0; i < device_count; i++) {
+        for (int b = 0; b < 6; b++) {
+            if (devices[i].bar[b] && devices[i].bar[b] == output.base) {
+                devices[i].is_scanout = 1;
+                scanout_index = i;
+            }
+        }
+    }
+    config_writes_after = (int)pci_config_writes;
+    if (config_writes_after != config_writes_before)
+        klog("gpu: BUG: detection issued %u PCI config write(s); it must read only",
+             (unsigned)(config_writes_after - config_writes_before));
+    klog("gpu: %u display function(s), %u ID rule(s) in %u family record(s), "
+         "%u without a port record",
+         device_count, (unsigned)gpu_match_id_total(), gpu_match_family_count(),
+         (unsigned)families_without_port_record);
+    klog("gpu: scanout owner %s, %u PCI config write(s) issued",
+         scanout_index >= 0 ? "identified by BAR address" : "not identified by address",
+         (unsigned)(config_writes_after - config_writes_before));
+    if (!bound)
+        klog("gpu: no engine bound, rendering stays on the CPU compositor");
+}
+
+int gpu_device_count(void) { return device_count; }
+
+int gpu_config_writes_during_detect(void)
+{
+    return config_writes_after - config_writes_before;
+}
+
+const struct gpu_device *gpu_device(int index)
+{
+    if (index < 0 || index >= device_count) return 0;
+    return &devices[index];
+}
+
+const struct gpu_device *gpu_scanout_device(void)
+{
+    return scanout_index >= 0 ? &devices[scanout_index] : 0;
+}
+
+const struct gpu_driver *gpu_bound_driver(void) { return bound; }
+
+static int engine_call_fill(int x, int y, int w, int h, uint32_t color)
+{
+    if (!bound || !bound->ops || !bound->ops->fill_rectangle) return -1;
+    return bound->ops->fill_rectangle(x, y, w, h, color);
+}
+
+int gpu_engine_fill_rectangle(int x, int y, int width, int height, uint32_t color)
+{
+    return engine_call_fill(x, y, width, height, color);
+}
+
+int gpu_engine_screen_to_screen_blit(int dst_x, int dst_y, int width, int height,
+                                     int src_x, int src_y)
+{
+    if (!bound || !bound->ops || !bound->ops->screen_to_screen_blit) return -1;
+    return bound->ops->screen_to_screen_blit(dst_x, dst_y, width, height, src_x, src_y);
+}
+
+int gpu_engine_wait_idle(void)
+{
+    if (!bound || !bound->ops || !bound->ops->wait_idle) return -1;
+    return bound->ops->wait_idle();
+}
+
+int gpu_engine_retrace_wait(void)
+{
+    if (!bound || !bound->ops || !bound->ops->retrace_wait) return -1;
+    return bound->ops->retrace_wait();
+}
+
+int gpu_engine_move_display(int x, int y)
+{
+    if (!bound || !bound->ops || !bound->ops->move_display) return -1;
+    return bound->ops->move_display(x, y);
+}
+
+int gpu_engine_available(void)
+{
+    return bound && bound->ops ? 1 : 0;
+}
+
+/* ------------------------------------------------------------ reporting ---- */
+
+struct writer {
+    char *at;
+    size_t left;
+};
+
+static void put(struct writer *w, const char *text)
+{
+    while (*text && w->left > 1) { *w->at++ = *text++; w->left--; }
+    *w->at = 0;
+}
+
+static void put_number(struct writer *w, unsigned value)
+{
+    char digits[12];
+    int i = 0;
+    do { digits[i++] = (char)('0' + value % 10); value /= 10; } while (value);
+    char out[12];
+    int n = 0;
+    while (i) out[n++] = digits[--i];
+    out[n] = 0;
+    put(w, out);
+}
+
+static void put_hex(struct writer *w, uint16_t value)
+{
+    char text[5];
+    hex4(text, value);
+    put(w, text);
+}
+
+static void put_line(struct writer *w, const char *text)
+{
+    put(w, text);
+    put(w, "\n");
+}
+
+void gpu_report(char *out, size_t capacity)
+{
+    struct writer w = {out, capacity};
+    char number[24];
+
+    put_line(&w, "GPU detection (exact device matching; no BAR sizing, no modeset)");
+    put(&w, "Families named from upstream tables: ");
+    put_number(&w, (unsigned)gpu_match_family_count());
+    put(&w, ", device ID rules: ");
+    put_number(&w, (unsigned)gpu_match_id_total());
+    put_line(&w, "");
+    if (!device_count) {
+        put_line(&w, "No PCI display function found; firmware scanout retained.");
+        return;
+    }
+    for (int i = 0; i < device_count && i < REPORT_DEVICE_LIMIT; i++) {
+        const struct gpu_device *g = &devices[i];
+        put(&w, "- ");
+        put(&w, gpu_vendor_name(g->vendor));
+        put(&w, " ");
+        put_hex(&w, g->vendor);
+        put(&w, ":");
+        put_hex(&w, g->device);
+        number[0] = 0;
+        put(&w, " at ");
+        fmt_u32(number, g->bus);
+        put(&w, number);
+        put(&w, ":");
+        fmt_u32(number, g->slot);
+        put(&w, number);
+        put(&w, ".");
+        fmt_u32(number, g->function);
+        put(&w, number);
+        if (g->is_scanout) put(&w, " (scanout)");
+        put(&w, "\n");
+        if (!g->match) {
+            put(&w, "  match: none - no upstream table binds ");
+            put_hex(&w, g->vendor);
+            put(&w, ":");
+            put_hex(&w, g->device);
+            put_line(&w, "; treated as an unmatched display adapter");
+            continue;
+        }
+        put(&w, "  family: ");
+        put(&w, g->match->family);
+        put(&w, ", chip: ");
+        put(&w, g->chip ? g->chip : "(unnamed row in upstream table)");
+        put(&w, ", source: ");
+        put(&w, g->match->source);
+        put_line(&w, "");
+        if (g->match->note) {
+            put(&w, "  table note: ");
+            put(&w, g->match->note);
+            put_line(&w, "");
+        }
+        put(&w, "  upstream entry points: ");
+        put(&w, g->match->features);
+        put_line(&w, "");
+        const struct gpu_driver *port = gpu_port_for(g->match->family);
+        put(&w, "  SCos port: ");
+        put_line(&w, port && port->state != GPU_PORT_NONE ? "bound" : "not ported yet");
+        if (port && port->gap) {
+            put(&w, "  before GPU work is possible: ");
+            put(&w, port->gap);
+            put_line(&w, "");
+        }
+        put_line(&w, g->bound ? "  path in use: bound engine for supported operations"
+                             : "  path in use: CPU compositor into the firmware scanout");
+    }
+    if (device_count > REPORT_DEVICE_LIMIT) {
+        put(&w, "  (");
+        put_number(&w, (unsigned)(device_count - REPORT_DEVICE_LIMIT));
+        put_line(&w, " further display function(s) reported in the boot log only)");
+    }
+    put(&w, "  detection issued ");
+    put_number(&w, (unsigned)gpu_config_writes_during_detect());
+    put_line(&w, " PCI config-space write(s); 0 means nothing was reprogrammed");
+}

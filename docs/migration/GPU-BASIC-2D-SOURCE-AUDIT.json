@@ -1,0 +1,691 @@
+{
+  "checkout_methods": {
+    "coreboot": "existing pinned checkout",
+    "genode": "existing pinned checkout",
+    "haiku": "existing pinned checkout",
+    "libgfxinit": "existing pinned checkout",
+    "linux": "existing pinned checkout"
+  },
+  "coreboot": {
+    "commit": "1879b6a34a6e93a93d691a0d9f2457d6251a17c1",
+    "measured": {
+      "bytes": 62986,
+      "files": 15,
+      "lines": 2087
+    },
+    "measured_paths": [
+      "src/soc/intel/alderlake/graphics.c",
+      "src/soc/intel/alderlake/romstage/graphics.c",
+      "src/soc/intel/apollolake/graphics.c",
+      "src/soc/intel/baytrail/gfx.c",
+      "src/soc/intel/baytrail/include/soc/gfx.h",
+      "src/soc/intel/baytrail/romstage/gfx.c",
+      "src/soc/intel/braswell/gfx.c",
+      "src/soc/intel/braswell/include/soc/gfx.h",
+      "src/soc/intel/broadwell/gma.c",
+      "src/soc/intel/cannonlake/graphics.c",
+      "src/soc/intel/common/block/graphics/graphics.c",
+      "src/soc/intel/common/block/include/intelblocks/graphics.h",
+      "src/soc/intel/jasperlake/graphics.c",
+      "src/soc/intel/skylake/graphics.c",
+      "src/soc/intel/tigerlake/graphics.c"
+    ],
+    "note": "Files named gma/graphics/display/gfx under src/soc/intel. Small per SoC because this is boot-display hand-off only; newer Intel SoCs carry near-nothing here and rely on firmware/GOP, which is the same situation SCos is in now.",
+    "pattern": "(^/)(gma|graphics|display|gfx)[^/]*\\.(c|h)$"
+  },
+  "genode": {
+    "commit": "0f275e7afaab44e9a45cecd0eac0b88691278477",
+    "components": {
+      "repos/os/src/driver/framebuffer/boot": {
+        "bytes": 6911,
+        "files": 1,
+        "lines": 252
+      },
+      "repos/os/src/driver/framebuffer/virtio": {
+        "bytes": 15180,
+        "files": 2,
+        "lines": 595
+      },
+      "repos/os/src/driver/gpu/intel": {
+        "bytes": 255256,
+        "files": 17,
+        "lines": 9513
+      },
+      "repos/pc/src/driver/framebuffer/intel": {
+        "bytes": 159834,
+        "files": 13,
+        "lines": 6754
+      }
+    },
+    "linux_port_source_lists": {
+      "agp_or_gtt_files": 17,
+      "drm_core_files": 50,
+      "files": [
+        "repos/pc/src/driver/framebuffer/intel/pc/dep.list",
+        "repos/pc/src/driver/framebuffer/intel/pc/spec/x86_32/source.list",
+        "repos/pc/src/driver/framebuffer/intel/pc/spec/x86_64/source.list"
+      ],
+      "i915_display_files": 304,
+      "i915_files": 531,
+      "listed_upstream_files": 932,
+      "sample": [
+        "arch/x86/include/asm/agp.h",
+        "arch/x86/include/asm/atomic64_64.h",
+        "arch/x86/include/asm/checksum_32.h",
+        "arch/x86/include/asm/checksum_64.h",
+        "arch/x86/include/asm/cmpxchg_64.h",
+        "arch/x86/include/asm/hypervisor.h"
+      ]
+    },
+    "note": "repos/pc/src/driver/framebuffer/intel is the ported Linux i915 DRM driver plus Genode Linux-emulation glue (GPL-2.0 kernel COPYING), not a small standalone driver; repos/os/src/driver/gpu/intel is the Genode GPU session used with Mesa and contains no desktop copy/fill engine in this tree.",
+    "pc_intel_fb_content_mk": "MIRROR_FROM_REP_DIR := src/driver/framebuffer/intel/pc \\\n                       src/lib/pc/lx_emul \\\n                       src/include\n\ncontent: $(MIRROR_FROM_REP_DIR)\n\nPORT_DIR := $(call port_dir,$(GENODE_DIR)/repos/dde_linux/ports/linux)\n\n$(MIRROR_FROM_REP_DIR):\n\t$(mirror_from_rep_dir)\n\ncontent: LICENSE\nLICENSE:\n\tcp $(PORT_DIR)/src/linux/COPYING $@"
+  },
+  "haiku": {
+    "commit": "7be0fef07df0ecbe6f40a4cf2a7687775f1f28a0",
+    "families": {
+      "3dfx": {
+        "components": {
+          "accelerants": {
+            "bytes": 61521,
+            "files": 15,
+            "lines": 2467
+          },
+          "kernel_driver": {
+            "bytes": 13220,
+            "files": 1,
+            "lines": 572
+          },
+          "private_headers": {
+            "bytes": 3908,
+            "files": 1,
+            "lines": 150
+          }
+        },
+        "engine_token": "engineToken = { 1, B_2D_ACCELERATION, NULL }",
+        "gpu_2d_core_files": {
+          "bytes": 3448,
+          "files": 1,
+          "lines": 153,
+          "paths": [
+            "src/add-ons/accelerants/3dfx/3dfx_draw.cpp"
+          ]
+        },
+        "totals": {
+          "bytes": 78649,
+          "files": 17,
+          "lines": 3189
+        }
+      },
+      "ati": {
+        "components": {
+          "accelerants": {
+            "bytes": 136220,
+            "files": 22,
+            "lines": 5081
+          },
+          "kernel_driver": {
+            "bytes": 32940,
+            "files": 1,
+            "lines": 1230
+          },
+          "private_headers": {
+            "bytes": 6428,
+            "files": 1,
+            "lines": 245
+          }
+        },
+        "engine_token": "engineToken = { 1, B_2D_ACCELERATION, NULL }",
+        "gpu_2d_core_files": {
+          "bytes": 11987,
+          "files": 2,
+          "lines": 496,
+          "paths": [
+            "src/add-ons/accelerants/ati/mach64_draw.cpp",
+            "src/add-ons/accelerants/ati/rage128_draw.cpp"
+          ]
+        },
+        "totals": {
+          "bytes": 175588,
+          "files": 24,
+          "lines": 6556
+        }
+      },
+      "common": {
+        "components": {
+          "accelerants": {
+            "bytes": 87177,
+            "files": 10,
+            "lines": 2890
+          },
+          "kernel_driver": {
+            "bytes": 5939,
+            "files": 1,
+            "lines": 317
+          },
+          "private_headers": {
+            "bytes": 41775,
+            "files": 15,
+            "lines": 1631
+          }
+        },
+        "engine_token": null,
+        "gpu_2d_core_files": null,
+        "totals": {
+          "bytes": 134891,
+          "files": 26,
+          "lines": 4838
+        }
+      },
+      "et6x00": {
+        "components": {
+          "accelerants": {
+            "bytes": 36055,
+            "files": 10,
+            "lines": 971
+          },
+          "kernel_driver": {
+            "bytes": 49355,
+            "files": 7,
+            "lines": 1351
+          },
+          "private_headers": {
+            "bytes": 5271,
+            "files": 1,
+            "lines": 124
+          }
+        },
+        "engine_token": "et6000EngineToken = {1, B_2D_ACCELERATION, NULL}",
+        "gpu_2d_core_files": {
+          "bytes": 8717,
+          "files": 1,
+          "lines": 258,
+          "paths": [
+            "src/add-ons/accelerants/et6x00/Acceleration.c"
+          ]
+        },
+        "totals": {
+          "bytes": 90681,
+          "files": 18,
+          "lines": 2446
+        }
+      },
+      "framebuffer": {
+        "components": {
+          "accelerants": {
+            "bytes": 11702,
+            "files": 5,
+            "lines": 510
+          },
+          "kernel_driver": {
+            "bytes": 10585,
+            "files": 6,
+            "lines": 515
+          }
+        },
+        "engine_token": null,
+        "gpu_2d_core_files": null,
+        "totals": {
+          "bytes": 22287,
+          "files": 11,
+          "lines": 1025
+        }
+      },
+      "intel_810": {
+        "components": {
+          "accelerants": {
+            "bytes": 39656,
+            "files": 10,
+            "lines": 1633
+          },
+          "kernel_driver": {
+            "bytes": 16571,
+            "files": 1,
+            "lines": 685
+          },
+          "private_headers": {
+            "bytes": 2538,
+            "files": 1,
+            "lines": 107
+          }
+        },
+        "engine_token": "sEngineToken = { 1, B_2D_ACCELERATION, NULL }",
+        "gpu_2d_core_files": {
+          "bytes": 1362,
+          "files": 1,
+          "lines": 83,
+          "paths": [
+            "src/add-ons/accelerants/intel_810/engine.cpp"
+          ]
+        },
+        "totals": {
+          "bytes": 58765,
+          "files": 12,
+          "lines": 2425
+        }
+      },
+      "intel_extreme": {
+        "components": {
+          "accelerants": {
+            "bytes": 263676,
+            "files": 23,
+            "lines": 9723
+          },
+          "kernel_driver": {
+            "bytes": 88973,
+            "files": 9,
+            "lines": 3020
+          },
+          "private_headers": {
+            "bytes": 73556,
+            "files": 3,
+            "lines": 2050
+          }
+        },
+        "engine_token": "sEngineToken = {1, 0 /*B_2D_ACCELERATION*/, NULL}",
+        "gpu_2d_core_files": {
+          "bytes": 7900,
+          "files": 1,
+          "lines": 377,
+          "paths": [
+            "src/add-ons/accelerants/intel_extreme/engine.cpp"
+          ]
+        },
+        "totals": {
+          "bytes": 426205,
+          "files": 35,
+          "lines": 14793
+        }
+      },
+      "matrox": {
+        "components": {
+          "accelerants": {
+            "bytes": 355562,
+            "files": 29,
+            "lines": 11704
+          },
+          "kernel_driver": {
+            "bytes": 28366,
+            "files": 1,
+            "lines": 1020
+          },
+          "private_headers": {
+            "bytes": 23455,
+            "files": 2,
+            "lines": 663
+          }
+        },
+        "engine_token": "gx00_engine_token = { 1, B_2D_ACCELERATION, NULL }",
+        "gpu_2d_core_files": {
+          "bytes": 13295,
+          "files": 1,
+          "lines": 496,
+          "paths": [
+            "src/add-ons/accelerants/matrox/engine/mga_acc.c"
+          ]
+        },
+        "totals": {
+          "bytes": 407383,
+          "files": 32,
+          "lines": 13387
+        }
+      },
+      "neomagic": {
+        "components": {
+          "accelerants": {
+            "bytes": 178995,
+            "files": 24,
+            "lines": 6086
+          },
+          "kernel_driver": {
+            "bytes": 30517,
+            "files": 1,
+            "lines": 1070
+          },
+          "private_headers": {
+            "bytes": 23063,
+            "files": 2,
+            "lines": 655
+          }
+        },
+        "engine_token": "nm_engine_token = { 1, B_2D_ACCELERATION, NULL }",
+        "gpu_2d_core_files": {
+          "bytes": 13434,
+          "files": 1,
+          "lines": 455,
+          "paths": [
+            "src/add-ons/accelerants/neomagic/engine/nm_acc.c"
+          ]
+        },
+        "totals": {
+          "bytes": 232575,
+          "files": 27,
+          "lines": 7811
+        }
+      },
+      "nvidia": {
+        "components": {
+          "accelerants": {
+            "bytes": 664261,
+            "files": 30,
+            "lines": 20321
+          },
+          "kernel_driver": {
+            "bytes": 48013,
+            "files": 1,
+            "lines": 1604
+          },
+          "private_headers": {
+            "bytes": 64304,
+            "files": 3,
+            "lines": 1765
+          }
+        },
+        "engine_token": "nv_engine_token = { 1, B_2D_ACCELERATION, NULL }",
+        "gpu_2d_core_files": {
+          "bytes": 144547,
+          "files": 3,
+          "lines": 3949,
+          "paths": [
+            "src/add-ons/accelerants/nvidia/Acceleration.c",
+            "src/add-ons/accelerants/nvidia/engine/nv_acc.c",
+            "src/add-ons/accelerants/nvidia/engine/nv_acc_dma.c"
+          ]
+        },
+        "totals": {
+          "bytes": 776578,
+          "files": 34,
+          "lines": 23690
+        }
+      },
+      "radeon": {
+        "components": {
+          "accelerants": {
+            "bytes": 335364,
+            "files": 31,
+            "lines": 10790
+          },
+          "kernel_driver": {
+            "bytes": 194810,
+            "files": 16,
+            "lines": 6651
+          },
+          "private_headers": {
+            "bytes": 147806,
+            "files": 31,
+            "lines": 3651
+          }
+        },
+        "engine_token": "radeon_engine_token = { 1, B_2D_ACCELERATION, NULL }",
+        "gpu_2d_core_files": {
+          "bytes": 32356,
+          "files": 3,
+          "lines": 1173,
+          "paths": [
+            "src/add-ons/accelerants/radeon/Acceleration.c",
+            "src/add-ons/accelerants/radeon/CP.c",
+            "src/add-ons/accelerants/radeon/EngineManagment.c"
+          ]
+        },
+        "totals": {
+          "bytes": 677980,
+          "files": 78,
+          "lines": 21092
+        }
+      },
+      "radeon_hd": {
+        "components": {
+          "accelerants": {
+            "bytes": 378604,
+            "files": 29,
+            "lines": 12765
+          },
+          "kernel_driver": {
+            "bytes": 77774,
+            "files": 8,
+            "lines": 2268
+          },
+          "private_headers": {
+            "bytes": 804970,
+            "files": 18,
+            "lines": 17027
+          }
+        },
+        "engine_token": "sEngineToken = {1, 0 /*B_2D_ACCELERATION*/, NULL}",
+        "gpu_2d_core_files": null,
+        "totals": {
+          "bytes": 1261348,
+          "files": 55,
+          "lines": 32060
+        }
+      },
+      "s3": {
+        "components": {
+          "accelerants": {
+            "bytes": 147057,
+            "files": 28,
+            "lines": 5889
+          },
+          "kernel_driver": {
+            "bytes": 23460,
+            "files": 1,
+            "lines": 927
+          },
+          "private_headers": {
+            "bytes": 5990,
+            "files": 1,
+            "lines": 223
+          }
+        },
+        "engine_token": "engineToken = { 1, B_2D_ACCELERATION, NULL }",
+        "gpu_2d_core_files": {
+          "bytes": 15766,
+          "files": 4,
+          "lines": 710,
+          "paths": [
+            "src/add-ons/accelerants/s3/accel.cpp",
+            "src/add-ons/accelerants/s3/savage_draw.cpp",
+            "src/add-ons/accelerants/s3/trio64_draw.cpp",
+            "src/add-ons/accelerants/s3/virge_draw.cpp"
+          ]
+        },
+        "totals": {
+          "bytes": 176507,
+          "files": 30,
+          "lines": 7039
+        }
+      },
+      "skeleton": {
+        "components": {
+          "accelerants": {
+            "bytes": 383686,
+            "files": 29,
+            "lines": 12821
+          },
+          "kernel_driver": {
+            "bytes": 28026,
+            "files": 1,
+            "lines": 988
+          },
+          "private_headers": {
+            "bytes": 40948,
+            "files": 2,
+            "lines": 1172
+          }
+        },
+        "engine_token": "eng_engine_token = { 1, B_2D_ACCELERATION, NULL }",
+        "gpu_2d_core_files": null,
+        "totals": {
+          "bytes": 452660,
+          "files": 32,
+          "lines": 14981
+        }
+      },
+      "vesa": {
+        "components": {
+          "accelerants": {
+            "bytes": 24729,
+            "files": 6,
+            "lines": 1030
+          },
+          "kernel_driver": {
+            "bytes": 46910,
+            "files": 9,
+            "lines": 1780
+          },
+          "private_headers": {
+            "bytes": 6737,
+            "files": 4,
+            "lines": 315
+          }
+        },
+        "engine_token": null,
+        "gpu_2d_core_files": null,
+        "totals": {
+          "bytes": 78376,
+          "files": 19,
+          "lines": 3125
+        }
+      },
+      "via": {
+        "components": {
+          "accelerants": {
+            "bytes": 333226,
+            "files": 29,
+            "lines": 10888
+          },
+          "kernel_driver": {
+            "bytes": 27503,
+            "files": 1,
+            "lines": 976
+          },
+          "private_headers": {
+            "bytes": 42888,
+            "files": 2,
+            "lines": 1252
+          }
+        },
+        "engine_token": "eng_engine_token = { 1, B_2D_ACCELERATION, NULL }",
+        "gpu_2d_core_files": {
+          "bytes": 7362,
+          "files": 1,
+          "lines": 270,
+          "paths": [
+            "src/add-ons/accelerants/via/engine/acc.c"
+          ]
+        },
+        "totals": {
+          "bytes": 403617,
+          "files": 32,
+          "lines": 13116
+        }
+      },
+      "virtio": {
+        "components": {
+          "accelerants": {
+            "bytes": 12433,
+            "files": 5,
+            "lines": 524
+          },
+          "kernel_driver": {
+            "bytes": 33677,
+            "files": 2,
+            "lines": 1352
+          },
+          "private_headers": {
+            "bytes": 877,
+            "files": 1,
+            "lines": 44
+          }
+        },
+        "engine_token": null,
+        "gpu_2d_core_files": null,
+        "totals": {
+          "bytes": 46987,
+          "files": 8,
+          "lines": 1920
+        }
+      }
+    },
+    "note": "Each family = Haiku kernel driver + accelerant + private headers: the closure a real port needs. gpu_2d_core_files = only the files that program the GPU copy/fill/ring path (manually verified at this commit). engine_token is the capability the driver advertises today; \"0 /*B_2D_ACCELERATION*/\" means Haiku does not enable 2D for that chip."
+  },
+  "kind": "lightweight-display-and-2d-source-inventory",
+  "libgfxinit": {
+    "commit": "d49b56baf97136e1b65f032a985291bf40a73260",
+    "measured": {
+      "bytes": 677237,
+      "configs": [
+        "broxton",
+        "g45",
+        "haswell",
+        "ironlake",
+        "ironlake_edp",
+        "skylake"
+      ],
+      "files": 118,
+      "lines": 18814
+    },
+    "note": "Ada/SPARK Intel modesetting library: sets PLLs, pipes, planes and connectors for a boot display. No 2D drawing engine, so it cannot replace CPU pixel writes by itself."
+  },
+  "linux_drm_size_reference": {
+    "commit": "93f51579e7df248780214094418f205253383cc5",
+    "paths": {
+      "drivers/gpu/drm/amd": {
+        "bytes": 566746089,
+        "files": 2909,
+        "lines": 6513491
+      },
+      "drivers/gpu/drm/drm_crtc.c": {
+        "bytes": 27469,
+        "files": 1,
+        "lines": 994
+      },
+      "drivers/gpu/drm/i915": {
+        "bytes": 12187101,
+        "files": 903,
+        "lines": 424291
+      },
+      "drivers/gpu/drm/nouveau": {
+        "bytes": 6875987,
+        "files": 1212,
+        "lines": 227337
+      },
+      "drivers/gpu/drm/radeon": {
+        "bytes": 6526750,
+        "files": 200,
+        "lines": 195372
+      },
+      "drivers/gpu/drm/sysfb": {
+        "bytes": 128449,
+        "files": 9,
+        "lines": 4676
+      },
+      "drivers/gpu/drm/tiny": {
+        "bytes": 272379,
+        "files": 15,
+        "lines": 9549
+      },
+      "drivers/video/fbdev/efifb.c": {
+        "bytes": 16862,
+        "files": 1,
+        "lines": 609
+      }
+    }
+  },
+  "method": "pinned sparse git checkouts measured locally; one clone per repository",
+  "not_verified": [
+    "any driver compiles against SCos kernel interfaces",
+    "any driver binds the exact PCI device present in the target machine",
+    "any GPU operation completes with correct pixels",
+    "compositor integration, failure recovery and memory accounting",
+    "browser or application rendering correctness"
+  ],
+  "pinned_commits": {
+    "coreboot": "1879b6a34a6e93a93d691a0d9f2457d6251a17c1",
+    "genode": "0f275e7afaab44e9a45cecd0eac0b88691278477",
+    "haiku": "7be0fef07df0ecbe6f40a4cf2a7687775f1f28a0",
+    "libgfxinit": "d49b56baf97136e1b65f032a985291bf40a73260",
+    "linux": "93f51579e7df248780214094418f205253383cc5"
+  },
+  "reproduce": "python3 tools/research/audit_basic_2d_sources.py --cache DIR --fetch",
+  "status": "source review only; no build, no ABI check, no compatibility claim, no hardware test"
+}

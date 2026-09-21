@@ -114,7 +114,10 @@ completed or approved integrations.
    HTTPS, images/forms/downloads. Invalid certificates must fail closed.
 7. **Hardware graphics, only after device selection.** Retain software rendering
    as the working fallback. Browser usefulness must not depend on first porting
-   a complete modern GPU stack.
+   a complete modern GPU stack. Reusable *light* drivers per family are surveyed in
+   `GPU-BASIC-2D-RESEARCH.md`; SCos' exact auto-detection and driver-registry layer is
+   implemented and verified in `GPU-AUTO-DETECT.md`, which also states that no engine is
+   bound yet, so all drawing is still the CPU compositor.
 
 For each milestone record real resource use, boot behavior and acceptance
 results. No invented RAM/CPU/compatibility estimates. Retiring the old tools is
@@ -125,7 +128,10 @@ history, not in the current release tree.
 
 * Dedicated GPU vendor/device/subsystem IDs and model; wired/wireless NIC PCI
   IDs or USB VID/PIDs, plus the display connector and enabled iGPU/dGPU setup.
-  The i5-11400 CPU does not identify the installed dedicated GPU or NIC.
+  The i5-11400 CPU does not identify the installed dedicated GPU or NIC. Running
+  `graphics` in SCos Terminal now prints each display adapter's `vendor:device`, the
+  family whose upstream table binds it (or that none does), and the port state, which is
+  the shortest path to the numbers needed here.
 * Storage controller and intended persistent boot medium. The boot decision is
   already resolved: x64 UEFI only. Do not assume legacy ATA reaches USB storage.
 * Which websites/browser features define success. A small browser for documents

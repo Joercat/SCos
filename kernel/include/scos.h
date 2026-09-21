@@ -4,6 +4,7 @@
 #define SCOS_H
 
 #include "kernel.h"
+#include "gpu.h"      /* display adapter registry: detection, matching, engine boundary */
 #define SCOS_BUILD_TAG "x64-dev"
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -61,6 +62,7 @@ void pci_write32(u8 bus, u8 dev, u8 fn, u8 off, u32 v);
 int  pci_find_class(u8 class, u8 subclass, u8 progif,
                     u8 *bus, u8 *dev, u8 *fn, int max);
 u16 pci_read16(u8,u8,u8,u8);
+extern unsigned pci_config_writes;  /* total config-space writes; 0 is the display-safe state */
 void pci_write16(u8,u8,u8,u8,u16);
 int pci_scan_dump(void);
 int pci_memory_bar(u8,u8,u8,u8,u64 *,u64 *);
@@ -484,6 +486,8 @@ int wm_taskbar_pinned(const char *id);
 int wm_taskbar_capacity(void);
 void wm_notify(const char *title,const char *text,int warning);
 void graphics_init(const struct boot_framebuffer *fb);
+#include "gpu.h"
+void gpu_init(const struct boot_framebuffer *fb);
 void graphics_report(char *out,size_t capacity);
 
 #endif /* SCOS_H */

@@ -1,14 +1,20 @@
 /* Original SCos mechanism-1 PCI access, made atomic and bridge-loop safe.
  * BARs retain firmware placement; no speculative relocation or status W1C RMW. */
 #include "scos.h"
+/* Every PCI configuration-space write in the kernel goes through the two functions
+ * below, so this counter is a complete record.  Display discovery asserts that the
+ * count does not move while it enumerates: naming a GPU must not be able to change
+ * its BAR placement, power state or command bits, and a log line proves it instead of
+ * relying on a reader trusting the code. */
+unsigned pci_config_writes;
 static u64 lock(void){u64 f;__asm__ volatile("pushfq;popq %0;cli":"=r"(f)::"memory");return f;}
 static void unlock(u64 f){if(f&512)__asm__ volatile("sti":::"memory");}
 static u32 address(u8 b,u8 d,u8 f,u8 o){return 0x80000000u|((u32)b<<16)|((u32)d<<11)|((u32)f<<8)|(o&0xfc);}
 u32 pci_read32(u8 b,u8 d,u8 f,u8 o){u64 flags=lock();outl(0xcf8,address(b,d,f,o));u32 v=inl(0xcfc);unlock(flags);return v;}
-void pci_write32(u8 b,u8 d,u8 f,u8 o,u32 v){u64 flags=lock();outl(0xcf8,address(b,d,f,o));outl(0xcfc,v);unlock(flags);}
+void pci_write32(u8 b,u8 d,u8 f,u8 o,u32 v){pci_config_writes++;u64 flags=lock();outl(0xcf8,address(b,d,f,o));outl(0xcfc,v);unlock(flags);}
 u16 pci_read16(u8 b,u8 d,u8 f,u8 o){return (u16)(pci_read32(b,d,f,o)>>((o&2)*8));}
 u8 pci_read8(u8 b,u8 d,u8 f,u8 o){return (u8)(pci_read32(b,d,f,o)>>((o&3)*8));}
-void pci_write16(u8 b,u8 d,u8 f,u8 o,u16 v){u64 flags=lock();outl(0xcf8,address(b,d,f,o));outw(0xcfc+(o&2),v);unlock(flags);}
+void pci_write16(u8 b,u8 d,u8 f,u8 o,u16 v){pci_config_writes++;u64 flags=lock();outl(0xcf8,address(b,d,f,o));outw(0xcfc+(o&2),v);unlock(flags);}
 static int scan(u8 bus,u8 *visited,u8 cls,u8 sub,u8 pi,u8 *b,u8 *d,u8 *f,int max){
  if(visited[bus]||max<=0)return 0;
  visited[bus]=1;int n=0;

@@ -11,7 +11,9 @@ corrected in r43 before its final image was frozen.
 
 **2026-09-20 clarification:** use separate reused drivers for different GPU
 families, loaded selectively; do not restrict SCos to one PC or write new hardware
-drivers. See the [pinned-source driver and loading audit](GPU-DRIVER-RESEARCH.md)
+drivers. See the
+[lightweight 2D/scanout survey](GPU-BASIC-2D-RESEARCH.md) and the wider
+[pinned-source driver and loading audit](GPU-DRIVER-RESEARCH.md)
 for smaller candidates, measured scope, licensing gates and verification status.
 
 Proposed policy:
