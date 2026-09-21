@@ -1,0 +1,278 @@
+{
+  "date": "2026-09-20",
+  "kind": "source audit, NOT working SCos drivers",
+  "measurement": "Git tree blob sizes; includes data/generated files/symlinks; excludes submodule contents and external dependencies. Not executable size or resident RAM.",
+  "repositories": {
+    "NVIDIA/open-gpu-kernel-modules": {
+      "commit": "61dcc93722ecb418bb5f2e00923f05b4b8051dd1",
+      "firmware_bin_files": {},
+      "reviewed_files": {
+        "COPYING": {
+          "bytes": 19391,
+          "lines": 369,
+          "sha256": "d8e96d29bc323000e7ba56102d77c88226a7a3d0d94e2081cb4b071ae9de4a06"
+        },
+        "README.md": {
+          "bytes": 71208,
+          "lines": 1032,
+          "sha256": "c2ce63aedef8c6779e59fdc46596eaa4c4b97767dce888d85d99ce2790bfbb77"
+        }
+      },
+      "scos_build_test": "not performed",
+      "scos_hardware_test": "not performed",
+      "submodules_excluded_from_totals": {},
+      "tree_blob_bytes": 115934026,
+      "tree_blob_count": 4005
+    },
+    "X547/RadeonGfx": {
+      "commit": "797e94775d274f243d8e0fe18b434b672bdeb768",
+      "firmware_bin_files": {
+        "firmware/polaris12_32_mc.bin": 32876,
+        "firmware/polaris12_ce.bin": 8852,
+        "firmware/polaris12_ce_2.bin": 8852,
+        "firmware/polaris12_k_mc.bin": 32832,
+        "firmware/polaris12_k_smc.bin": 130388,
+        "firmware/polaris12_mc.bin": 32608,
+        "firmware/polaris12_me.bin": 17044,
+        "firmware/polaris12_me_2.bin": 17044,
+        "firmware/polaris12_mec.bin": 262824,
+        "firmware/polaris12_mec2.bin": 262824,
+        "firmware/polaris12_mec2_2.bin": 262824,
+        "firmware/polaris12_mec_2.bin": 262824,
+        "firmware/polaris12_pfp.bin": 17044,
+        "firmware/polaris12_pfp_2.bin": 17044,
+        "firmware/polaris12_rlc.bin": 16660,
+        "firmware/polaris12_sdma.bin": 12692,
+        "firmware/polaris12_sdma1.bin": 12692,
+        "firmware/polaris12_smc.bin": 130388,
+        "firmware/polaris12_uvd.bin": 375424,
+        "firmware/polaris12_vce.bin": 166816,
+        "firmware/tahiti_ce.bin": 8832,
+        "firmware/tahiti_k_smc.bin": 64364,
+        "firmware/tahiti_mc.bin": 31776,
+        "firmware/tahiti_me.bin": 8832,
+        "firmware/tahiti_pfp.bin": 8832,
+        "firmware/tahiti_rlc.bin": 8448,
+        "firmware/tahiti_smc.bin": 63932,
+        "firmware/tahiti_uvd.bin": 219928,
+        "firmware/verde_ce.bin": 8832,
+        "firmware/verde_k_smc.bin": 63804,
+        "firmware/verde_mc.bin": 32044,
+        "firmware/verde_me.bin": 8832,
+        "firmware/verde_pfp.bin": 8832,
+        "firmware/verde_rlc.bin": 8448,
+        "firmware/verde_smc.bin": 61776,
+        "firmware/verde_uvd.bin": 219928
+      },
+      "reviewed_files": {
+        "RadeonDevice.cpp": {
+          "bytes": 6055,
+          "lines": 225,
+          "sha256": "8312da13fac8fdab4fa212d89f5bcf72ee4f1eeb018dd0eadfaf47cf8608d9a8"
+        },
+        "RadeonFirmware.cpp": {
+          "bytes": 8219,
+          "lines": 219,
+          "sha256": "e4768a4673425ddbba3f2e7e0b41d53ac11e972688535f4e3582f0ebd0fbfe9b"
+        },
+        "Units/InstantiateUnits.cpp": {
+          "bytes": 481,
+          "lines": 20,
+          "sha256": "9a37b9e3eeb8544d33751e58250e846ac1b4239377721d421b3f23e9cb7ba0d3"
+        },
+        "meson.build": {
+          "bytes": 2329,
+          "lines": 93,
+          "sha256": "b612231f3433d1b0702d178556c2711e93d3bedf8c8ed34bb85bb54097d08f1e"
+        }
+      },
+      "scos_build_test": "not performed",
+      "scos_hardware_test": "not performed",
+      "submodules_excluded_from_totals": {},
+      "tree_blob_bytes": 7248693,
+      "tree_blob_count": 181
+    },
+    "X547/nvidia-haiku": {
+      "commit": "cc1849cb2c5c327af4f7eccf993b8616855ad7c5",
+      "firmware_bin_files": {
+        "firmware/570.86.16/gsp_ga10x.bin": 63330032,
+        "firmware/570.86.16/gsp_tu10x.bin": 28345432
+      },
+      "reviewed_files": {
+        ".gitmodules": {
+          "bytes": 490,
+          "lines": 16,
+          "sha256": "f9dda5b5a2d25833a5f2686ea90219851b30a5e18f3c8f7f399204f98257c4db"
+        },
+        "Build.sh": {
+          "bytes": 1425,
+          "lines": 50,
+          "sha256": "4c727ed66b58f2e6931524e8278d42e18853c91457aa56d0ee447b2c80c30a9d"
+        },
+        "LICENSE": {
+          "bytes": 1153,
+          "lines": 23,
+          "sha256": "68571a9f19bfb90f37abb187e65e954bc83eb3b75acd3a5b79a825898d229668"
+        },
+        "nvidia_gsp/nvidia/os-haiku.cpp": {
+          "bytes": 40709,
+          "lines": 1904,
+          "sha256": "70573ac35ea5c86b9d4508779fa2a6ef296526437a8c4ed11327bff91eaaa2bb"
+        }
+      },
+      "scos_build_test": "not performed",
+      "scos_hardware_test": "not performed",
+      "submodules_excluded_from_totals": {
+        "VideoStreamsWsi": "29e87887ac1ffc5dad04f68eacef253eea051f94",
+        "mesa-nvk": "b28d7c6866821b2a70abc0fa0e67b70461bd9da4",
+        "mesa-zink": "b7b399ff70de63069545206f06cbe6c01d925d1d",
+        "open-gpu-kernel-modules": "2badeb8166550238ff2f3f57de61adb89a14642c"
+      },
+      "tree_blob_bytes": 91960458,
+      "tree_blob_count": 76
+    },
+    "freebsd/drm-kmod": {
+      "commit": "f252a30f27d157d9c763cd408850775096a6263f",
+      "firmware_bin_files": {},
+      "reviewed_files": {
+        "README.md": {
+          "bytes": 2729,
+          "lines": 92,
+          "sha256": "8eea5f93f8d4169b609cf75c59444cdaa1511a11080913ab99c186fb0bd264f0"
+        }
+      },
+      "scos_build_test": "not performed",
+      "scos_hardware_test": "not performed",
+      "submodules_excluded_from_totals": {},
+      "tree_blob_bytes": 529123437,
+      "tree_blob_count": 3660
+    },
+    "genodelabs/genode": {
+      "commit": "0f275e7afaab44e9a45cecd0eac0b88691278477",
+      "firmware_bin_files": {},
+      "intel_driver_directory_only": {
+        "bytes": 255391,
+        "excludes": "Genode base/platform, Mesa, framebuffer driver, other dependencies",
+        "files": 18,
+        "lines": 9505
+      },
+      "reviewed_files": {
+        "LICENSE": {
+          "bytes": 36177,
+          "lines": 701,
+          "sha256": "232a468bf368830f53bdf5b1cdd3f8b954dc14dfff207028ed303cb42c3049db"
+        },
+        "repos/gems/sculpt/gpu/intel": {
+          "bytes": 1615,
+          "lines": 14,
+          "sha256": "7a76b9ffd508c87fce939714e64d0fc40da5720c822a0f0ce7dba1226642a385"
+        },
+        "repos/libports/recipes/pkg/mesa_gpu-intel/README": {
+          "bytes": 412,
+          "lines": 16,
+          "sha256": "1be83eb9bd31ee735f64bf8e80e9356c5f935f430d05b9eac760a09ddb031fb9"
+        },
+        "repos/os/src/driver/gpu/intel/commands.h": {
+          "bytes": 5947,
+          "lines": 279,
+          "sha256": "244a9c366b49726d731ed6aaa1de0afb31b892b8638664d4a8fb961e3cf4c388"
+        },
+        "repos/os/src/driver/gpu/intel/context.h": {
+          "bytes": 26942,
+          "lines": 971,
+          "sha256": "600d631569d1cb976a431f3d774742ac479eb6ce90505dade98887d4fa9fa9d9"
+        },
+        "repos/os/src/driver/gpu/intel/context_descriptor.h": {
+          "bytes": 2842,
+          "lines": 117,
+          "sha256": "ef4da78c1ab1efab9ff1fbfcd6b480911e0099e70f31f405b7164a48ad1ecb3f"
+        },
+        "repos/os/src/driver/gpu/intel/device_info.h": {
+          "bytes": 706,
+          "lines": 35,
+          "sha256": "560cf08b00c08c45ac58ed2e08e94b33352c2237ad7cb2a4efe3edbd6c6fca9e"
+        },
+        "repos/os/src/driver/gpu/intel/ggtt.h": {
+          "bytes": 7921,
+          "lines": 323,
+          "sha256": "570d89493b5e3a12340b13d4c42d2b7ef42d7551cee21adbbee650caa4e6c614"
+        },
+        "repos/os/src/driver/gpu/intel/main.cc": {
+          "bytes": 67038,
+          "lines": 2638,
+          "sha256": "29a75e705936975d8d08030230465dfb7f4cf8814268335133c55c0dc249f23e"
+        },
+        "repos/os/src/driver/gpu/intel/mmio.h": {
+          "bytes": 59204,
+          "lines": 2167,
+          "sha256": "d2bc43a1ee909fdce8507c9240f9f1697c5369865016aa55721073b2d37787e2"
+        },
+        "repos/os/src/driver/gpu/intel/mmio_dump.cc": {
+          "bytes": 19738,
+          "lines": 372,
+          "sha256": "e37420c5b55c479c834b7ef4ec285a84f0136270cb7064d68e59e81dd45a303f"
+        },
+        "repos/os/src/driver/gpu/intel/platform_session.h": {
+          "bytes": 19812,
+          "lines": 806,
+          "sha256": "301983ec108abaa3649794d79b2cd4b4ab29fb99b9c6cd05e0b140158c5d750e"
+        },
+        "repos/os/src/driver/gpu/intel/ppgtt.h": {
+          "bytes": 22985,
+          "lines": 814,
+          "sha256": "49d641aa806a378601ce53df6820d623630324a93e1b14c582520641fd6a8446"
+        },
+        "repos/os/src/driver/gpu/intel/ppgtt_allocator.h": {
+          "bytes": 3828,
+          "lines": 161,
+          "sha256": "40e2c1a49a5d460012da226a31f379012c92557065e157b194c4696ffe0215d1"
+        },
+        "repos/os/src/driver/gpu/intel/rc6.h": {
+          "bytes": 4787,
+          "lines": 203,
+          "sha256": "75873c07643cb9ec5a56de43fa0e9e7abcbdde67fbefd32cf857e8c1664f1cca"
+        },
+        "repos/os/src/driver/gpu/intel/reset.h": {
+          "bytes": 4503,
+          "lines": 171,
+          "sha256": "1678411c216426f5e50b040c3d49b1dd82aad845d5903a7b1c1d268405cfd877"
+        },
+        "repos/os/src/driver/gpu/intel/ring_buffer.h": {
+          "bytes": 4317,
+          "lines": 214,
+          "sha256": "ec8ba004c9ca34c7974d99c4fbce3d2ecc4f02f56572da843219e14f027d1fa6"
+        },
+        "repos/os/src/driver/gpu/intel/target.mk": {
+          "bytes": 135,
+          "lines": 9,
+          "sha256": "b63082a3e487f85c4ad1a53ce8591b0c5ea7d65c2d3e9a7635b6a4f4bd5cef82"
+        },
+        "repos/os/src/driver/gpu/intel/types.h": {
+          "bytes": 774,
+          "lines": 38,
+          "sha256": "063b2b073fefc01e77c990825b69d42a6e2e7e93dcbfeeaa017de44eaf3045d8"
+        },
+        "repos/os/src/driver/gpu/intel/utils.h": {
+          "bytes": 3145,
+          "lines": 157,
+          "sha256": "d04cc94e6c4df4ac2abf0cbad37f37a7f786f993b67806656b284b85f5b787e7"
+        },
+        "repos/os/src/driver/gpu/intel/workarounds.h": {
+          "bytes": 767,
+          "lines": 30,
+          "sha256": "4e834c55009a15b477f9230768c5b61f57b1c05724fbdc8b26f4fe316376b5e6"
+        },
+        "repos/pc/recipes/src/pc_intel_fb/content.mk": {
+          "bytes": 354,
+          "lines": 14,
+          "sha256": "1b7e24d314ef0906bcdc5d51e68387bb1bb3ed16d657d9d47febc6ff92fe96c7"
+        }
+      },
+      "scos_build_test": "not performed",
+      "scos_hardware_test": "not performed",
+      "submodules_excluded_from_totals": {},
+      "tree_blob_bytes": 26866726,
+      "tree_blob_count": 8529
+    }
+  }
+}

@@ -9,6 +9,11 @@ corrected in r43 before its final image was frozen.
 
 ## Graphics: automatic selection without losing the screen
 
+**2026-09-20 clarification:** use separate reused drivers for different GPU
+families, loaded selectively; do not restrict SCos to one PC or write new hardware
+drivers. See the [pinned-source driver and loading audit](GPU-DRIVER-RESEARCH.md)
+for smaller candidates, measured scope, licensing gates and verification status.
+
 Proposed policy:
 
 1. Enumerate all PCI display-class functions, including render-only devices.
@@ -52,7 +57,7 @@ Proposed policy:
 | CPU fallback | Existing software compositor; later evaluate the minimum software API renderer needed by apps | Keep this independent of physical GPU acceleration. LLVMpipe carries LLVM/JIT costs; Zink is not a CPU renderer by itself. |
 
 **Recommendation:** design the selection/failure interface first, retain software
-rendering, then authorize one exact physical GPU family at a time. A broad
+rendering, then port and verify the separate existing drivers in bounded stages. A broad
 Linux DRM/Mesa compatibility port can greatly exceed the earlier roughly
 10,000-line feature budget, even if most source is reused. Do not quietly import
 it as a supposedly tiny driver. There is no verified lightweight package that
