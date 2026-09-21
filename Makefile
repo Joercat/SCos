@@ -16,7 +16,7 @@ DRIVER_OBJECTS := $(patsubst kernel/drivers/%.c,$(BUILD)/driver-%.o,$(DRIVER_SOU
 # engine code running, and a ported family is added per file rather than in one blob.
 GPU_SOURCES := $(wildcard kernel/drivers/gpu/*.c)
 GPU_OBJECTS := $(patsubst kernel/drivers/gpu/%.c,$(BUILD)/gpu-%.o,$(GPU_SOURCES))
-.PHONY: all clean milestone-check
+.PHONY: all clean milestone-check gpu-modules
 all: milestone-check $(BUILD)/scos.img
 milestone-check:
 	python3 tools/check_milestone.py
@@ -36,10 +36,42 @@ $(BUILD)/efi-main.o: boot/uefi/main.c boot/uefi/efi.h kernel/include/boot.h Make
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
 $(BUILD)/efi-font.o: kernel/src/font.c Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
-$(BUILD)/BOOTX64.EFI: $(BUILD)/efi-main.o $(BUILD)/efi-font.o
-	$(LD) -mi386pep --subsystem 10 --entry efi_main --image-base 0 --no-insert-timestamp --enable-reloc-section -o $@ $(BUILD)/efi-main.o $(BUILD)/efi-font.o
-$(BUILD)/scos.img: $(BUILD)/BOOTX64.EFI $(BUILD)/kernel.elf tools/makedisk.py
+# The boot stub names a GPU family to decide which single module file to read, so it shares the
+# matcher and the generated tables with the kernel instead of carrying its own copy of the rules.
+$(BUILD)/efi-gpu_match.o: kernel/drivers/gpu/gpu_match.c kernel/drivers/gpu/gpu_ids.h \
+                          kernel/include/gpu_match.h kernel/include/boot.h Makefile | $(BUILD)
+	$(CC) $(EFI_CFLAGS) -c $< -o $@
+$(BUILD)/BOOTX64.EFI: $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o
+	$(LD) -mi386pep --subsystem 10 --entry efi_main --image-base 0 --no-insert-timestamp --enable-reloc-section -o $@ $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o
+$(BUILD)/scos.img: $(BUILD)/BOOTX64.EFI $(BUILD)/kernel.elf tools/makedisk.py $(GPU_MODULE_FILES)
 	python3 tools/makedisk.py $(BUILD)
+
+# ---------------------------------------------------------- GPU driver modules ----
+# One loadable display module per GPU family, from drivers/gpu/<family>/.  These are separate
+# files on the boot disk, and the boot stub opens only the module whose family the shared matcher
+# names for the detected chip: an unneeded family costs no RAM, no page tables and no CPU time,
+# and each port stays independently editable.
+MODULE_DIR := $(BUILD)/gpu
+MODULE_FAMILIES := $(notdir $(wildcard drivers/gpu/*))
+MODULE_CFLAGS := $(COMMON) -fno-pie -mcmodel=small -fno-strict-aliasing
+define MODULE_rules
+MODULE_SRCS_$1 := $$(wildcard drivers/gpu/$1/*.c)
+MODULE_OBJS_$1 := $$(patsubst drivers/gpu/$1/%.c,$$(BUILD)/gmod-$1-%.o,$$(MODULE_SRCS_$1))
+$$(BUILD)/gmod-$1-%.o: drivers/gpu/$1/%.c $$(wildcard drivers/gpu/$1/*.h drivers/gpu/$1/*.inc) \
+                       kernel/include/gpu_abi.h Makefile | $$(BUILD)
+	$$(CC) $$(MODULE_CFLAGS) -Idrivers/gpu/$1 -c $$< -o $$@
+$$(MODULE_DIR)/$1.o: $$(MODULE_OBJS_$1) | $$(MODULE_DIR)
+	$$(LD) -r -m elf_x86_64 -o $$@ $$^
+$$(MODULE_DIR)/$1.mod: $$(MODULE_DIR)/$1.o tools/build_gpu_module.py
+	python3 tools/build_gpu_module.py --input $$< --family $1 --out $$@ --report
+GPU_MODULE_FILES += $$(MODULE_DIR)/$1.mod
+endef
+$(foreach family,$(MODULE_FAMILIES),$(eval $(call MODULE_rules,$(family))))
+
+$(MODULE_DIR):
+	mkdir -p $@
+gpu-modules: $(GPU_MODULE_FILES)
+	python3 tools/build_gpu_module.py --verify
 clean:
 	rm -rf $(BUILD)
 

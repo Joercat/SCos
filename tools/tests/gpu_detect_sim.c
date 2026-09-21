@@ -192,6 +192,30 @@ static const struct gpu_device *device_for(uint16_t vendor, uint16_t device)
     return NULL;
 }
 
+/* The module loader itself is not linked into this harness: it needs the page allocator, the
+ * device mapper and BAR sizing, none of which exist outside a booted kernel.  Those predicates are
+ * covered by the packer's --verify and by the QEMU layer, which boots a real image; here they are
+ * stubbed so gpu_detect.c can still be exercised for detection. */
+static struct boot_handoff sim_handoff;
+const struct boot_handoff *kernel_boot_handoff(void)
+{
+    sim_handoff.module_state = 0;      /* no module on the host: detection only, as designed */
+    sim_handoff.module_bytes = 0;
+    return &sim_handoff;
+}
+
+int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handoff)
+{
+    (void)device; (void)handoff;
+    return -1;
+}
+const struct scos_gpu_engine_ops *gpu_module_ops(void) { return 0; }
+void gpu_module_report(char *out, size_t capacity, const struct boot_handoff *handoff)
+{
+    (void)handoff;
+    if (capacity) out[0] = 0;
+}
+
 int main(void)
 {
     const int families = gpu_match_family_count();

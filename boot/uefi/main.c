@@ -1,5 +1,6 @@
 #include "efi.h"
 #include "boot.h"
+#include "gpu_match.h"
 static struct system_table *system;
 static struct boot_services *bs;
 static struct boot_framebuffer fatal_framebuffer;
@@ -38,6 +39,73 @@ static _Noreturn void stopped(const char *p){
   }
  }
  for(;;)__asm__ volatile("hlt");
+}
+/* PCI configuration access, read-only. The stub must name the GPU family to choose which single
+ * module file to open, and it may not write a BAR, reset the device or touch a clock to find out
+ * what the chip is - sizing a BAR writes 0xffffffff first, which is exactly how a boot loader
+ * destroys the console it still needs. Configuration reads are harmless. */
+static uint32_t in32(uint16_t port){uint32_t value;__asm__ volatile("inl %w1,%0":"=a"(value):"Nd"(port));return value;}
+static void out32(uint16_t port,uint32_t value){__asm__ volatile("outl %0,%w1"::"a"(value),"Nd"(port));}
+static uint32_t config_read(uint8_t bus,uint8_t slot,uint8_t function,uint8_t offset){
+ if(slot>31||function>7)return 0;
+ out32(0xcf8,0x80000000u|((uint32_t)bus<<16)|((uint32_t)slot<<11)|((uint32_t)function<<8)|(offset&0xfc));
+ return in32(0xcfc);
+}
+/* First display function whose id the shared matcher binds.  Bus numbers are followed through
+ * bridges because a discrete GPU normally sits behind a PCIe port, and a scan of bus 0 alone would
+ * miss it; the walk is bounded and each secondary bus is visited once. */
+static int scan_display(uint8_t bus,uint8_t depth,uint8_t *seen,unsigned *visited,
+                        uint8_t *found_bus,uint8_t *found_slot,uint8_t *found_fn,
+                        uint16_t *found_vendor,uint16_t *found_device,uint8_t *found_subclass,
+                        const struct gpu_match **found_match){
+ if(depth>8)return 0;
+ for(uint8_t slot=0;slot<32;slot++){
+  uint32_t vendev=config_read(bus,slot,0,0);
+  if(vendev==0xffffffffu||!vendev)continue;
+  uint32_t header=config_read(bus,slot,0,0xc);
+  uint32_t ccrev=config_read(bus,slot,0,8);
+  uint8_t subclass=(uint8_t)(ccrev>>16);
+  for(uint8_t function=0;function<8;function++){
+   if(function){
+    uint32_t other=config_read(bus,slot,function,0);
+    if(other==0xffffffffu||!other)continue;
+    ccrev=config_read(bus,slot,function,8);subclass=(uint8_t)(ccrev>>16);
+   }
+   uint32_t cls=ccrev>>16;
+   if(((cls>>8)&0xff)==3){
+    uint16_t vendor=(uint16_t)vendev,device=(uint16_t)(vendev>>16);
+    const struct gpu_match *match=gpu_match_device(vendor,device,subclass,0);
+    if(match&&!*found_match){
+     *found_match=match;*found_bus=bus;*found_slot=slot;*found_fn=function;
+     *found_vendor=vendor;*found_device=device;*found_subclass=subclass;
+    }
+    if(function)break;
+   }
+  }
+  if((header&0x7f)==1){
+   uint32_t busnumbers=config_read(bus,slot,0,0x18);
+   uint8_t secondary=(uint8_t)(busnumbers>>8),subordinate=(uint8_t)(busnumbers>>16);
+   for(uint8_t next=secondary+1;next<=subordinate;next++){
+    if(next==0||next>=255||seen[next])continue;
+    seen[next]=1;if(*visited>=64)break;(*visited)++;
+    if(scan_display(next,depth+1,seen,visited,found_bus,found_slot,found_fn,found_vendor,
+                    found_device,found_subclass,found_match)&&*found_match)return 1;
+   }
+  }
+ }
+ return *found_match!=0;
+}
+static void family_file_name(const char *family,char16 *out){
+ /* 8.3 stem derived from the family: first eight characters, uppercase, extension ".MOD".  The same
+  * rule lives in tools/makedisk.py, and the module header carries the full family name, which the
+  * kernel compares against its own detection before running a single instruction of it. */
+ char stem[10];unsigned n=0;
+ while(n<8&&family&&family[n]){stem[n]=(char)((family[n]>='a'&&family[n]<='z')?family[n]-32:family[n]);n++;}
+ stem[n]=0;
+ unsigned i=0;
+ out[i++]=u'\\';out[i++]=u'S';out[i++]=u'C';out[i++]=u'O';out[i++]=u'S';out[i++]=u'\\';
+ for(unsigned k=0;k<n;k++)out[i++]=(char16)stem[k];
+ out[i++]=u'.';out[i++]=u'M';out[i++]=u'O';out[i++]=u'D';out[i]=0;
 }
 static uint64_t ticks(void){uint32_t a,d;__asm__ volatile("lfence; rdtsc":"=a"(a),"=d"(d)::"memory");return ((uint64_t)d<<32)|a;}
 static uint32_t crc32(const uint8_t *p,size_t n){uint32_t c=~0u;while(n--){c^=*p++;for(unsigned i=0;i<8;i++)c=(c>>1)^(0xedb88320u&-(c&1));}return ~c;}
@@ -176,6 +244,56 @@ status EFIAPI efi_main(handle image,struct system_table *table){
  if(FAILED(s)||elapsed<10000||elapsed>UINT64_C(1000000000)){s=ERROR(3);goto fail;}
  h->tsc_hz=elapsed*100;
  h->map_address=arena+4096;
+ /* Choose the one GPU driver module this machine needs. */
+ {
+  uint8_t seen[256];memset(seen,0,sizeof(seen));unsigned visited=0;
+  uint8_t gbus=0,gslot=0,gfn=0,gsub=0;uint16_t gvendor=0,gdevice=0;
+  const struct gpu_match *match=0;
+  scan_display(0,0,seen,&visited,&gbus,&gslot,&gfn,&gvendor,&gdevice,&gsub,&match);
+  const char *family=match?gpu_family_name(match):"";
+  if(match){
+   char16 path[32];family_file_name(family,path);
+   struct file *volume=0;
+   status opened=root?root->open(root,&volume,path,1,0):ERROR(2);
+   if(!FAILED(opened)){
+    uint64_t size=0;
+    if(!FAILED(volume->get_position(volume,&size))&&size&&size<=(uint64_t)GPU_MODULE_REGION){
+     uint64_t module_area=GPU_MODULE_AREA(arena);
+     size_t done=0;
+     memset((void*)(uintptr_t)module_area,0,GPU_MODULE_REGION);
+     while(done<size){
+      size_t part=(size_t)size-done;
+      status r=volume->read(volume,&part,(uint8_t*)(uintptr_t)(module_area+done));
+      if(FAILED(r)||!part||done+part>size){done=0;break;}
+      done+=part;
+     }
+     if(done==size){
+      h->module_address=module_area;h->module_bytes=done;h->module_state=1;
+      h->module_crc=crc32((const uint8_t*)(uintptr_t)module_area,(size_t)done);
+      unsigned n=0;while(n<15&&family[n]){h->module_name[n]=family[n];n++;}h->module_name[n]=0;
+      log("GPU driver module selected for this chip\r\n");
+     }else h->module_state=3;
+    }else h->module_state=2;
+    volume->close(volume);
+   }else h->module_state=2;
+   if(h->module_state!=1)log("No driver module on disk for the detected GPU family; CPU compositor\r\n");
+   /* The directory index is a small fixed table: it lets the kernel say how many modules exist
+    * without the firmware having opened any of them. */
+   {void *index=0;size_t index_size=0;
+    if(!FAILED(read_file(root,(const char16*)u"\\SCOS\\DRVLIST.IDX",&index,&index_size))&&index){
+     if(index_size>BOOT_INDEX_MAX)index_size=BOOT_INDEX_MAX;
+     memcpy((void*)(uintptr_t)BOOT_INDEX_ADDRESS(arena),index,index_size);
+     h->index_address=BOOT_INDEX_ADDRESS(arena);h->module_index_size=(uint32_t)index_size;
+     h->module_store_count=*(uint32_t*)index;
+     bs->free_pool(index);
+    }}
+   char detail[96];
+   detail[0]='g';detail[1]='p';detail[2]='u';detail[3]=':';detail[4]=' ';detail[5]='f';
+   detail[6]='a';detail[7]='m';detail[8]='i';detail[9]='l';detail[10]='y';detail[11]=' ';
+   unsigned d=12;const char *f=family;while(*f&&d<80)detail[d++]=*f++;
+   detail[d++]=0;log(detail);
+  }else log("No GPU family matched by the generated tables; no module read\r\n");
+ }
  log("ELF64 and GOP ready; leaving firmware services\r\n");
  /* Nothing allocating, printing through firmware or closing files may occur
   * between GetMemoryMap and ExitBootServices. Retry only with fresh map/key.

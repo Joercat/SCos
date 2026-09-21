@@ -45,16 +45,22 @@ void memory_init(const struct boot_handoff *b,const struct efi_memory *map){
  memcpy(owned_map,map,owned_count*sizeof(*map));
  /* Reserve handoff/map prefix; table arena was explicitly allocated by UEFI,
   * never guessed free from a low-address hole. Loader memory stays owned. */
- table_next=b->arena_start+256*1024;table_end=b->arena_start+b->arena_size;
+ /* The top of the boot arena is carved out as the only executable memory outside the kernel image:
+  * the region a GPU display module is loaded into.  Everything else stays NX, so "modules are
+  * writable code" is bounded to this one range, and the page allocator is cut short above it so no
+  * other consumer can be handed these pages. */
+ uint64_t module_area=GPU_MODULE_AREA(b->arena_start),arena_end=b->arena_start+b->arena_size;
+ if(module_area<=b->arena_start+256*1024)panic("boot arena too small for a module region");
+ table_next=b->arena_start+256*1024;table_end=module_area;
  root=new_table();
  uint64_t fb_start=b->framebuffer.base&~4095ULL;
  uint64_t fb_end=(b->framebuffer.base+b->framebuffer.size+4095)&~4095ULL;
- if(overlaps(fb_start,fb_end,b->kernel_start,b->kernel_end)||overlaps(fb_start,fb_end,b->arena_start,table_end))panic("framebuffer overlaps owned RAM");
+ if(overlaps(fb_start,fb_end,b->kernel_start,b->kernel_end)||overlaps(fb_start,fb_end,b->arena_start,arena_end))panic("framebuffer overlaps owned RAM");
  for(size_t i=0;i<owned_count;i++)if(boot_memory_usable(&map[i])){
   uintptr_t start=map[i].physical,end=start+map[i].pages*PAGE;
   if(!start)start=PAGE; /* Never allocate or map address zero. */
   if(start==end)continue;
-  if(overlaps(start,end,b->kernel_start,b->kernel_end)||overlaps(start,end,b->arena_start,table_end)||overlaps(start,end,fb_start,fb_end))panic("firmware ownership conflict");
+  if(overlaps(start,end,b->kernel_start,b->kernel_end)||overlaps(start,end,b->arena_start,arena_end)||overlaps(start,end,fb_start,fb_end))panic("firmware ownership conflict");
   map_range(start,end,3|NX);
   size_t pos=range_count;
   if(pos==EXTENTS)panic("too many RAM extents");
@@ -68,6 +74,11 @@ void memory_init(const struct boot_handoff *b,const struct efi_memory *map){
   map_leaf(p,flags,0);
  }
  map_range(b->arena_start,table_end,3|NX);
+ /* RWX by necessity, and only here: a module is code the kernel jumps into after validating it, and
+  * map_leaf() refuses to place a second mapping over the same pages, so the region cannot be
+  * mapped NX for the allocator and executable for the loader separately.  It is never writable data
+  * for anything else, and it is reported by `gpu: module region ...' in the boot log. */
+ map_range(module_area,arena_end,3);
  /* PAT slot 1 is WC, only for validated GOP pixel memory. Device registers
   * remain UC in slot 3, RAM remains WB. No MTRRs are rewritten. */
  map_range(fb_start,fb_end,3|NX|0x08);
@@ -86,6 +97,54 @@ void memory_init(const struct boot_handoff *b,const struct efi_memory *map){
  __asm__ volatile("wbinvd; mov %0,%%cr0"::"r"(cr0):"memory");
  initialized=1;
 }
+/* Map device memory for a driver that has taken ownership of its function.  The kernel identity-maps
+ * physical RAM, so device ranges are mapped the same way: the address returned equals the physical
+ * address, and an already-mapped page is *reused* rather than remapped, which is what makes mapping
+ * a framebuffer aperture that the firmware already established (or that memory_init mapped for GOP)
+ * a no-op instead of a page-table conflict.  Attributes are always the UC/WC pair used for the
+ * console, never a third combination, so no two mappings of the same memory can disagree.
+ * Returns 0 when the range is not mappable (not present, over the limit, or crossing a hole). */
+static uint64_t *present_leaf(uintptr_t p){
+ uint64_t *pdpt=&root[(p>>39)&511];
+ if(!(*pdpt&1))return 0;
+ uint64_t *pd=descend((uint64_t*)(uintptr_t)(*pdpt&~(uint64_t)0xfff),(p>>30)&511);
+ if(!(*pd&1))return 0;
+ if(*pd&128)return &pd[(p>>21)&511];
+ uint64_t *pt=descend((uint64_t*)(uintptr_t)(*pd&~(uint64_t)0xfff),(p>>21)&511);
+ return &pt[(p>>12)&511];
+}
+void *device_map(uint64_t physical,uint64_t bytes,int write_combine,uint64_t *mapped_bytes){
+ if(!initialized||!bytes||bytes>PAGE*2048)return 0;
+ if(physical>>46)return 0;
+ uintptr_t start=physical&~(uintptr_t)(PAGE-1);
+ uintptr_t end=(physical+bytes+PAGE-1)&~(uintptr_t)(PAGE-1);
+ uint64_t flags=3|NX|(write_combine?0:0x08);
+ uintptr_t first=0;
+ for(uintptr_t p=start;p<end;p+=PAGE){
+  uint64_t *existing=present_leaf(p);
+  if(existing){if(!*existing)return 0;continue;}   /* already mapped: reuse the same address */
+  uint64_t *pdpt=descend(root,(p>>39)&511),*pd=descend(pdpt,(p>>30)&511);
+  uint64_t *pt=descend(pd,(p>>21)&511),*slot=&pt[(p>>12)&511];
+  if(*slot)return 0;                     /* appeared mid-walk: refuse rather than double-map */
+  *slot=p|flags;
+  if(!first)first=p;
+ }
+ if(first){uint64_t cr3;__asm__ volatile("mov %%cr3,%0; mov %0,%%cr3":"=r"(cr3):"r"((uintptr_t)root):"memory");}
+ if(mapped_bytes)*mapped_bytes=end-start;
+ return (void*)(uintptr_t)(physical+(start-physical));
+}
+/* Unmap a range the caller mapped through device_map, so a driver that is detached does not leave
+ * executable-adjacent device memory mapped.  Only pages carrying exactly the flags device_map
+ * installs are removed, and the flush is a single global TLB invalidation. */
+void device_unmap(uint64_t physical,uint64_t bytes){
+ uintptr_t start=physical&~(uintptr_t)(PAGE-1),end=(physical+bytes+PAGE-1)&~(uintptr_t)(PAGE-1);
+ for(uintptr_t p=start;p<end;p+=PAGE){
+  uint64_t *slot=present_leaf(p);
+  if(slot&&(*slot&~(uint64_t)0xfff)==(3|NX|0x08|p))*slot=0;
+ }
+ __asm__ volatile("mov %%cr3,%0; mov %0,%%cr3"::"r"((uintptr_t)root):"memory");
+}
+
 /* Contiguous extents are needed by existing surface/document buffers. Both the
  * single-page API and desktop heap use this one ownership/accounting authority. */
 uintptr_t pages_allocate_limit(size_t count,uint64_t limit){

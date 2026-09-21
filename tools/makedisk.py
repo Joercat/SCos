@@ -18,7 +18,7 @@ DATA_FIRST, DATA_SECTORS = 129024, 256
 FIRST, LAST = 2048, DATA_FIRST - 1
 
 
-def validate(efi, elf):
+def validate(efi, elf, build=Path('build')):
     if len(efi) < 64 or efi[:2] != b'MZ':
         raise ValueError('missing PE image')
     pe = struct.unpack_from('<I', efi, 60)[0]
@@ -185,10 +185,31 @@ def main(directory):
         a = entry('DOT', own, directory=True);a[:11] = b'.          '
         b = entry('DOT', parent, directory=True);b[:11] = b'..         '
         return a+b
+    # GPU display driver modules: one file per family, kept apart so the boot stub reads only the
+    # module this machine's chip names.  The index is a fixed-size table, not a directory walk, so
+    # the firmware can report how many modules exist without opening any of them.
+    module_dir = Path(directory, 'gpu')
+    modules = []
+    for path in sorted(module_dir.glob('*.mod')) if module_dir.is_dir() else []:
+        blob = path.read_bytes()
+        if len(blob) > 256*1024:
+            raise ValueError('GPU module %s exceeds the module region' % path.name)
+        modules.append((path.stem.upper()[:8], blob))
+    index = struct.pack('<II', len(modules), sum(len(blob) for _n, blob in modules))
+    for stem, blob in modules:
+        index += struct.pack('<8sII', stem.encode()[:8].ljust(8, b'\0'), len(blob),
+                             zlib.crc32(blob) & 0xffffffff)
+    if len(index) > 4096:
+        raise ValueError('driver index too large')
+    ic = allocate(index)
+    scos = (dot(0, dirs[3]) + entry('KERNEL.ELF', kc, len(elf)) + entry('KERNEL.CRC', cc, 4)
+            + entry('DRVLIST.IDX', ic, len(index)))
+    for stem, blob in modules:
+        scos += entry(stem + '.MOD', allocate(blob), len(blob))
     directory_data = [entry('EFI', dirs[1], directory=True)+entry('SCOS', dirs[3], directory=True),
                       dot(0, dirs[1])+entry('BOOT', dirs[2], directory=True),
                       dot(dirs[1], dirs[2])+entry('BOOTX64.EFI', ec, len(efi)),
-                      dot(0, dirs[3])+entry('KERNEL.ELF', kc, len(elf))+entry('KERNEL.CRC', cc, 4)]
+                      scos]
     for c, data in zip(dirs, directory_data):
         offset = (data_sector+c-2)*512;image[offset:offset+len(data)] = data
     for i in range(2):

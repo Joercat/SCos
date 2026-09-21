@@ -57,29 +57,6 @@ const char *gpu_vendor_name(uint16_t vendor)
     }
 }
 
-/* The family's own class-code predicate, as generated from its source. */
-static int class_matches(const struct gpu_match *match, uint8_t subclass)
-{
-    if (match->class_base != 0xff && match->class_base != 3) return 0;
-    if (match->class_sub_a == 0xff) return 1;
-    if (match->class_sub_a == subclass) return 1;
-    if (match->class_sub_b != 0xff && match->class_sub_b == subclass) return 1;
-    return 0;
-}
-
-/* Vendor lives in the row, not the family record: nvidia's driver pairs four vendors
- * with four lists (0x10de plus the ELSA, STB/SGS-Thompson and Varisys rebrands), so a
- * single vendor per family would drop the rebranded cards that upstream does bind. */
-static const struct gpu_pci_id *match_id(const struct gpu_match *match, uint16_t vendor,
-                                         uint16_t device)
-{
-    if (!match->ids || !match->id_count) return 0;
-    for (unsigned i = 0; i < match->id_count; i++)
-        if (match->ids[i].vendor == vendor && match->ids[i].device == device)
-            return &match->ids[i];
-    return 0;
-}
-
 /* Raw BAR register values only.  Sizing a BAR means writing all-ones into it first,
  * and that is precisely the kind of operation that can take away the running console,
  * so this subsystem never does it; a ported driver that needs the size asks for it in
@@ -115,31 +92,27 @@ static void record(struct gpu_device *g, uint8_t bus, uint8_t slot, uint8_t func
 
 static void identify(struct gpu_device *g)
 {
-    int families = gpu_match_family_count();
-    for (int f = 0; f < families; f++) {
-        const struct gpu_match *match = gpu_match_family(f);
-        if (!match || !match->id_count) continue;      /* no ID table to match against */
-        if (!class_matches(match, g->subclass)) continue;
-        const struct gpu_pci_id *id = match_id(match, g->vendor, g->device);
-        if (!id) continue;
-        g->match = match;
-        g->chip = id->name;
-        const struct gpu_driver *port = gpu_port_for(match->family);
-        if (!port) {
-            families_without_port_record++;
-            klog("gpu: family %s has no port record; reporting as unbound", match->family);
-            return;
-        }
-        if (port->state != GPU_PORT_NONE && port->ops) {
-            g->bound = 1;
-            bound = port;
-        }
+    const struct gpu_pci_id *row = 0;
+    const struct gpu_match *match = gpu_match_device(g->vendor, g->device, g->subclass, &row);
+    if (!match) return;
+    g->match = match;
+    g->chip = row ? row->name : 0;
+    const struct gpu_driver *port = gpu_port_for(match->family);
+    if (!port) {
+        families_without_port_record++;
+        klog("gpu: family %s has no port record; reporting as unbound", match->family);
         return;
+    }
+    if (port->state != GPU_PORT_NONE && port->ops) {
+        g->bound = 1;
+        bound = port;
     }
 }
 
 void gpu_init(const struct boot_framebuffer *fb)
 {
+    const struct boot_handoff *handoff = kernel_boot_handoff();
+    int module_bound = 0;
     static const uint8_t subclasses[SCAN_SUBLASSES] = {0, 1, 2, 0x80};
     uint8_t bus[8], slot[8], function[8];
 
@@ -190,7 +163,18 @@ void gpu_init(const struct boot_framebuffer *fb)
     klog("gpu: scanout owner %s, %u PCI config write(s) issued",
          scanout_index >= 0 ? "identified by BAR address" : "not identified by address",
          (unsigned)(config_writes_after - config_writes_before));
-    if (!bound)
+    /* A family being *named* is not a driver.  The one module the firmware read for this machine's
+     * chip is validated and exercised here; every other family's file stays on the disk. */
+    if (!bound && handoff && handoff->module_state) {
+        for (int i = 0; i < device_count; i++) {
+            struct gpu_device *g = &devices[i];
+            if (!g->match || g->bound) continue;
+            if (strncmp(handoff->module_name, g->match->family,
+                        strlen(g->match->family)) != 0) continue;
+            if (gpu_module_bind(g, handoff) == 0) { module_bound = 1; break; }
+        }
+    }
+    if (!bound && !module_bound)
         klog("gpu: no engine bound, rendering stays on the CPU compositor");
 }
 
@@ -214,40 +198,49 @@ const struct gpu_device *gpu_scanout_device(void)
 
 const struct gpu_driver *gpu_bound_driver(void) { return bound; }
 
-static int engine_call_fill(int x, int y, int w, int h, uint32_t color)
-{
-    if (!bound || !bound->ops || !bound->ops->fill_rectangle) return -1;
-    return bound->ops->fill_rectangle(x, y, w, h, color);
-}
-
+/* The compositor boundary.  A statically linked port would answer first; today every family's
+ * engine arrives as a module loaded from the boot disk, so the module's own table is what these
+ * calls reach.  A negative return means "not available", which is the caller's cue to run its CPU
+ * path - an engine is never required for correctness, only for speed. */
 int gpu_engine_fill_rectangle(int x, int y, int width, int height, uint32_t color)
 {
-    return engine_call_fill(x, y, width, height, color);
+    if (bound && bound->ops && bound->ops->fill_rectangle)
+        return bound->ops->fill_rectangle(x, y, width, height, color);
+    const struct scos_gpu_engine_ops *ops = gpu_module_ops();
+    if (!ops || !ops->fill) return -1;
+    return ops->fill(ops->context, SCOS_GPU_SURFACE_FRONT, x, y, width, height, color);
 }
 
 int gpu_engine_screen_to_screen_blit(int dst_x, int dst_y, int width, int height,
                                      int src_x, int src_y)
 {
-    if (!bound || !bound->ops || !bound->ops->screen_to_screen_blit) return -1;
-    return bound->ops->screen_to_screen_blit(dst_x, dst_y, width, height, src_x, src_y);
+    if (bound && bound->ops && bound->ops->screen_to_screen_blit)
+        return bound->ops->screen_to_screen_blit(dst_x, dst_y, width, height, src_x, src_y);
+    const struct scos_gpu_engine_ops *ops = gpu_module_ops();
+    if (!ops || !ops->copy) return -1;
+    return ops->copy(ops->context, SCOS_GPU_SURFACE_FRONT, dst_x, dst_y, SCOS_GPU_SURFACE_FRONT,
+                     src_x, src_y, width, height);
 }
 
 int gpu_engine_wait_idle(void)
 {
-    if (!bound || !bound->ops || !bound->ops->wait_idle) return -1;
-    return bound->ops->wait_idle();
+    if (bound && bound->ops && bound->ops->wait_idle) return bound->ops->wait_idle();
+    const struct scos_gpu_engine_ops *ops = gpu_module_ops();
+    if (!ops || !ops->wait_idle) return -1;
+    return ops->wait_idle(ops->context);
 }
 
 int gpu_engine_retrace_wait(void)
 {
-    if (!bound || !bound->ops || !bound->ops->retrace_wait) return -1;
-    return bound->ops->retrace_wait();
+    if (bound && bound->ops && bound->ops->retrace_wait) return bound->ops->retrace_wait();
+    return -1;      /* no engine in this tree delivers a retrace; see the caps in gpu_ids.h */
 }
 
 int gpu_engine_move_display(int x, int y)
 {
-    if (!bound || !bound->ops || !bound->ops->move_display) return -1;
-    return bound->ops->move_display(x, y);
+    if (bound && bound->ops && bound->ops->move_display) return bound->ops->move_display(x, y);
+    (void)x; (void)y;
+    return -1;      /* scanout ownership is not a 2D module capability */
 }
 
 int gpu_engine_available(void)

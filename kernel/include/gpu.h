@@ -22,45 +22,8 @@
 #define SCOS_GPU_H
 
 #include "kernel.h"
-
-struct gpu_pci_id {
-    uint16_t vendor;
-    uint16_t device;
-    const char *name;      /* chip name from the upstream row, NULL if it had none */
-};
-
-/* What the upstream family's own hook table hands out.  This is an inventory of
- * the source we would port from, not a promise about SCos: `gpu_engine_*()` below
- * only succeeds once a family's code is actually linked and bound.  */
-struct gpu_upstream_caps {
-    unsigned engine2d : 1;    /* engine_token advertises B_2D_ACCELERATION */
-    unsigned vsync : 1;       /* retrace semaphore hook returned directly */
-    unsigned pan : 1;         /* MOVE_DISPLAY (CRTC start address) */
-    unsigned cursor : 1;      /* SET_CURSOR_SHAPE */
-    unsigned overlay : 1;     /* ALLOCATE_OVERLAY_BUFFER */
-    unsigned fill : 1;        /* FILL_RECTANGLE */
-    unsigned blit : 1;        /* SCREEN_TO_SCREEN_BLIT */
-    unsigned span : 1;        /* FILL_SPAN */
-    unsigned modeset : 1;     /* SET_DISPLAY_MODE */
-    unsigned dpms : 1;        /* SET_DPMS_MODE */
-};
-
-struct gpu_match {
-    const char *family;
-    uint16_t primary_vendor;       /* first vendor in the table; 0 = no ID table.
-                                    * Matching uses each row's own vendor instead, so a
-                                    * family that pairs several rebranded vendors (nvidia)
-                                    * still binds all of them. */
-    uint8_t class_base;            /* 0xff = upstream does not test the class */
-    uint8_t class_sub_a;
-    uint8_t class_sub_b;           /* 0xff = unused */
-    const struct gpu_pci_id *ids;
-    uint16_t id_count;
-    struct gpu_upstream_caps upstream;
-    const char *features;          /* per-entry-point status, as measured */
-    const char *source;            /* upstream file the table came from */
-    const char *note;
-};
+#include "gpu_match.h"
+#include "gpu_abi.h"
 
 /* Engine entry points, one per operation the compositor actually issues.  The
  * signatures mirror the accelerant engine ABI (fill rectangle, screen blit,
@@ -97,6 +60,7 @@ struct gpu_device {
     const struct gpu_match *match;   /* family whose table matched, else NULL */
     const char *chip;                /* name from the matching row, may be NULL */
     int bound;                       /* a ported engine is attached to this device */
+    const struct scos_gpu_engine_ops *module_ops;   /* loaded module's engine table, else NULL */
     int is_scanout;                  /* this function feeds the visible console */
     uint64_t bar[6];                 /* raw BAR register values, never sized */
     int command, header_type;        /* read-only copies for the report */
@@ -120,11 +84,35 @@ int gpu_config_writes_during_detect(void);
 /* The generated family table (kernel/drivers/gpu/gpu_ids.h), one record per family
  * SCos can name.  `gpu_match_id_total()` is the number of exact IDs across them. */
 int gpu_match_family_count(void);
-const struct gpu_match *gpu_match_family(int index);
-int gpu_match_id_total(void);
 /* Port state for a family name, or NULL when SCos has no record for it. */
 const struct gpu_driver *gpu_port_for(const char *family);
 int gpu_port_record_count(void);
+
+/* A GPU display module is a separate file on the boot disk; the firmware reads only the one whose
+ * family the shared matcher names for this machine's chip.  The state below is what this boot
+ * actually loaded and verified, so a report can distinguish "matched a family" from "a driver is
+ * resident and proved to move pixels". */
+struct gpu_module_state {
+    int present;                     /* header validated, relocations applied */
+    int bound;                       /* init succeeded and the self-test passed */
+    char name[24];
+    char family[16];
+    char describe[160];
+    uint64_t resident_bytes;         /* image in the executable boot-arena region */
+    uint64_t file_bytes;             /* bytes read off the disk */
+    uint32_t store_count;            /* modules on the disk, including those never opened */
+    uint32_t store_bytes;
+    uint32_t reloc_count, id_count;
+    int refusal;                     /* nonzero predicate code when present == 0 */
+    int self_test_pixels, self_test_matches;
+};
+const struct gpu_module_state *gpu_module_state(void);
+const struct scos_gpu_engine_ops *gpu_module_ops(void);
+int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handoff);
+int gpu_module_fill(int x, int y, int width, int height, uint32_t color);
+int gpu_module_copy(int dst_x, int dst_y, int src_x, int src_y, int width, int height);
+int gpu_module_wait_idle(void);
+void gpu_module_report(char *out, size_t capacity, const struct boot_handoff *handoff);
 
 /* Engine boundary used by the compositor.  Each returns 0 on success and a
  * negative value when no engine is bound or the bound driver declines the

@@ -66,6 +66,12 @@ extern unsigned pci_config_writes;  /* total config-space writes; 0 is the displ
 void pci_write16(u8,u8,u8,u8,u16);
 int pci_scan_dump(void);
 int pci_memory_bar(u8,u8,u8,u8,u64 *,u64 *);
+/* Identity-map device memory for a driver that owns its function; already-mapped pages are
+ * reused, so mapping a firmware framebuffer is a no-op rather than a page-table conflict.
+ * device_unmap releases only pages that carry exactly these attributes. */
+void *device_map(u64 physical,u64 bytes,int write_combine,u64 *mapped_bytes);
+void device_unmap(u64 physical,u64 bytes);
+const struct boot_handoff *kernel_boot_handoff(void);
 u64 usb_dma_bytes(void);
 void usb_init(void);
 void usb_poll(void);

@@ -27,7 +27,10 @@ ROOT = Path(__file__).resolve().parents[2]
 HAIKU = Path(os.environ.get('SCOS_HAIKU', '/home/user/gpu-2d/sources/haiku'))
 FLAGS = ['-m64', '-O1', '-std=c11', '-Wall', '-Wextra',
          '-Wno-builtin-declaration-mismatch', '-Ikernel/include']
-KERNEL_UNITS = ['gpu_detect', 'gpu_ports', 'gpu_tables']
+# gpu_module is deliberately not in the host harness: the loader calls the page allocator, the device mapper and
+# BAR sizing, which only exist in a booted kernel.  Its predicates are covered by the packer's own
+# --verify (same checks, same order) and by the QEMU layer below, which boots a real image.
+KERNEL_UNITS = ['gpu_detect', 'gpu_match', 'gpu_ports']
 
 # QEMU's `-device ati-vga` presents the Rage 128 PCI function whose ID Haiku's `ati`
 # driver binds.  `bochs-display` is deliberately absent: with a second framebuffer of

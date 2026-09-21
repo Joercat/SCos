@@ -1,8 +1,10 @@
 #include "kernel.h"
+#include "gpu_abi.h"
 extern uint64_t cpu_tsc_hz;
 extern void desktop_start(const struct boot_framebuffer *);
 uint64_t platform_rsdp;
 static struct boot_handoff boot;
+const struct boot_handoff *kernel_boot_handoff(void){return &boot;}
 static struct efi_memory memory_map[BOOT_MAP_MAX];
 static uint64_t ticks(void){uint32_t a,d;__asm__ volatile("lfence; rdtsc":"=a"(a),"=d"(d)::"memory");return ((uint64_t)d<<32)|a;}
 static int channel(uint32_t m){if(!m)return 0;while(!(m&1))m>>=1;return !(m&(m+1))&&m<=1023;}
@@ -27,7 +29,7 @@ void kernel_main(const struct boot_handoff *incoming){
   * No physical fixed address, firmware pointer narrowing or BIOS data remains. */
  if(!incoming||(uintptr_t)incoming>=PHYSICAL_LIMIT||((uintptr_t)incoming&4095))panic("invalid UEFI handoff pointer");
  memcpy(&boot,incoming,sizeof(boot));
- if(boot.magic!=BOOT_MAGIC||boot.version!=BOOT_VERSION||boot.size!=sizeof(boot)||boot.reserved||boot.arena_start!=(uintptr_t)incoming||boot.arena_size!=BOOT_ARENA_SIZE||boot.arena_start>PHYSICAL_LIMIT-boot.arena_size||boot.kernel_start!=(uintptr_t)_kernel_start||boot.kernel_end!=(uintptr_t)_kernel_end||boot.kernel_end<boot.kernel_start||boot.kernel_end-boot.kernel_start>KERNEL_SPAN_LIMIT||boot.map_address!=boot.arena_start+4096||boot.map_stride<40||boot.map_stride>4096||!boot.map_size||boot.map_size>128*1024||boot.map_size%boot.map_stride||boot.map_size/boot.map_stride>BOOT_MAP_MAX||boot.map_version!=1||boot.tsc_hz<1000000||boot.tsc_hz>UINT64_C(100000000000))panic("incompatible UEFI handoff");
+ if(boot.magic!=BOOT_MAGIC||boot.version!=BOOT_VERSION||boot.size!=sizeof(boot)||boot.reserved||boot.arena_start!=(uintptr_t)incoming||boot.arena_size!=BOOT_ARENA_SIZE||boot.arena_start>PHYSICAL_LIMIT-boot.arena_size||boot.kernel_start!=(uintptr_t)_kernel_start||boot.kernel_end!=(uintptr_t)_kernel_end||boot.kernel_end<boot.kernel_start||boot.kernel_end-boot.kernel_start>KERNEL_SPAN_LIMIT||boot.map_address!=boot.arena_start+4096||boot.map_stride<40||boot.map_stride>4096||!boot.map_size||boot.map_size>128*1024||boot.map_size%boot.map_stride||boot.map_size/boot.map_stride>BOOT_MAP_MAX||boot.map_version!=1||(boot.module_state>3)||boot.module_name[15]||((boot.module_state==1)&&(!boot.module_bytes||boot.module_bytes>GPU_MODULE_REGION||boot.module_address!=GPU_MODULE_AREA(boot.arena_start)||boot.module_bytes<SCOS_GPU_MODULE_HEADER_SIZE))||(boot.module_index_size>BOOT_INDEX_MAX)||((boot.module_state==1)&&(boot.index_address!=BOOT_INDEX_ADDRESS(boot.arena_start)||!boot.module_index_size))||boot.tsc_hz<1000000||boot.tsc_hz>UINT64_C(100000000000))panic("incompatible UEFI handoff");
  size_t count=boot.map_size/boot.map_stride;
  for(size_t i=0;i<count;i++)memcpy(&memory_map[i],(void*)(uintptr_t)(boot.map_address+i*boot.map_stride),sizeof(memory_map[i]));
  if(!boot_map_valid(memory_map,count)||!owned(boot.kernel_start,boot.kernel_end,1,count)||!owned(boot.arena_start,boot.arena_start+boot.arena_size,2,count))panic("invalid UEFI memory ownership");
