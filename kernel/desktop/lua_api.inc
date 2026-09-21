@@ -60,3 +60,11 @@ static int api_text_wrap(lua_State *L){
 }
 static int api_focused(lua_State *L){lua_pushboolean(L,wm_focused()==context(L)->w);return 1;}
 static int api_minimize(lua_State *L){struct lua_window *d=context(L);if(d->painting)return luaL_error(L,"minimize is not allowed in paint");wm_minimize_window(d->w);return 0;}
+
+static int api_notify(lua_State *L){
+    struct lua_window *d=context(L);const char *text=label(L,1);
+    if(strlen(text)>192)return luaL_error(L,"notification exceeds 192 bytes");
+    if(d->painting)return luaL_error(L,"notifications cannot be requested in paint");
+    if(d->message_used&&(u32)(tick_count-d->message_at)<500){lua_pushboolean(L,0);return 1;}
+    d->message_used=1;d->message_at=tick_count;wm_notify(d->w->app->id,text,0);lua_pushboolean(L,1);return 1;
+}

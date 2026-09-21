@@ -109,6 +109,59 @@ static __attribute__((noinline)) void picker_open(void){
     menu.w=320;if(menu.w>screen_w-4)menu.w=screen_w-4;
 }
 
+#define PIN_MAX 8
+static char task_pins[PIN_MAX][32];
+static int pin_count;
+int wm_taskbar_capacity(void){int n=(screen_w-TB_CLOCK_W-TB_POWER_W-16-168-screen_w/4)/40;if(n<0)n=0;if(n>PIN_MAX)n=PIN_MAX;return n;}
+int wm_taskbar_pinned(const char *id){for(int i=0;i<pin_count;i++)if(!strcmp(task_pins[i],id))return 1;return 0;}
+static void pins_save(void){char data[PIN_MAX*33+1];data[0]=0;for(int i=0;i<pin_count;i++){strcat(data,task_pins[i]);strcat(data,"\n");}vfs_write("home/taskbar.txt",data,strlen(data));}
+static void pin_remove(const char *id){for(int i=0;i<pin_count;i++)if(!strcmp(task_pins[i],id)){for(int j=i;j<pin_count-1;j++)strcpy(task_pins[j],task_pins[j+1]);pin_count--;pins_save();wm_full();return;}}
+int wm_taskbar_pin(const char *id){
+    if(wm_taskbar_pinned(id)){pin_remove(id);return 1;}
+    struct app *a=app_find(id);if(!a||id[0]=='_'||strlen(id)>30)return 0;
+    if(pin_count>=wm_taskbar_capacity())return 0;
+    strcpy(task_pins[pin_count++],id);pins_save();wm_full();return 1;
+}
+static void pins_load(void){
+    pin_count=0;u32 size=0;char *p=vfs_read("home/taskbar.txt",&size);
+    if(!p){const char *defaults[]={"files","terminal","studio","applications"};for(unsigned i=0;i<4&&pin_count<wm_taskbar_capacity();i++)if(app_find(defaults[i]))strcpy(task_pins[pin_count++],defaults[i]);return;}
+    if(size>PIN_MAX*33)return;
+    u32 start=0;for(u32 i=0;i<=size&&pin_count<PIN_MAX;i++)if(i==size||p[i]=='\n'){
+        u32 n=i-start;char id[32];if(n&&n<=30){memcpy(id,p+start,n);id[n]=0;int valid=1;for(u32 j=0;j<n;j++)if(!((id[j]>='a'&&id[j]<='z')||(id[j]>='0'&&id[j]<='9')||id[j]=='-'))valid=0;struct app *a=valid?app_find(id):NULL;if(a&&id[0]!='_'&&!wm_taskbar_pinned(id))strcpy(task_pins[pin_count++],id);}start=i+1;
+    }
+}
+static char pin_menu_id[32];
+static void pin_menu_answer(int item,void *ud){(void)ud;if(item==0)wm_open_app(pin_menu_id,NULL);else if(item==1)pin_remove(pin_menu_id);}
+
+#define NOTICE_MAX 3
+struct notice {char title[48],text[192];u32 until;int warning;};
+static struct notice notices[NOTICE_MAX];
+static int notice_count;
+void wm_notify(const char *title,const char *text,int warning){
+    if(notice_count==NOTICE_MAX){for(int i=1;i<NOTICE_MAX;i++)notices[i-1]=notices[i];notice_count--;}
+    struct notice *n=&notices[notice_count++];memset(n,0,sizeof(*n));strncpy(n->title,title,47);strncpy(n->text,text,191);n->warning=!!warning;n->until=warning?0:(u32)tick_count+1000;wm_full();
+    klog("notification: %s: %s",n->title,n->text);
+}
+static void notice_remove(int i){if(i<0||i>=notice_count)return;for(int j=i;j<notice_count-1;j++)notices[j]=notices[j+1];notice_count--;wm_full();}
+static int notice_at(int x,int y){if(x<screen_w-330||x>=screen_w-10||y<10)return -1;int i=(y-10)/114;return i<notice_count&&(y-10)%114<108?i:-1;}
+static void paint_notices(void){
+    const struct theme *t=theme_current();int x=screen_w-330;
+    for(int i=0;i<notice_count;i++){
+        int y=10+i*114;struct notice *n=&notices[i];u32 accent=n->warning?0xffbb55:t->main;
+        s_fill(&screen,x,y,320,108,t->win_bg);s_frame_rect(&screen,x,y,320,108,accent);s_clip_text(&screen,x+10,y+6,n->title,accent,296);
+        const char *p=n->text;
+        for(int row=0;row<4&&*p;row++){
+            char line[38];int len=0,space=-1;
+            while(p[len]&&p[len]!='\n'&&len<37){if(p[len]==' ')space=len;len++;}
+            if(len==37&&p[len]&&p[len]!='\n'&&p[len]!=' '&&space>0)len=space;
+            memcpy(line,p,len);p+=len;while(*p==' ')p++;if(*p=='\n')p++;
+            if(row==3&&*p){if(len>34)len=34;memcpy(line+len,"...",3);len+=3;}
+            line[len]=0;s_text(&screen,x+10,y+26+row*16,line,t->text);
+        }
+        s_text(&screen,x+10,y+90,"Click to dismiss",t->main);
+    }
+}
+
 static void tb_power_rect(int *x, int *y, int *w, int *h)
 {
     *x = screen_w - TB_CLOCK_W - TB_POWER_W - 16;
@@ -393,7 +446,7 @@ void wm_init(void)
     modal_w = NULL;
     mx = screen_w / 2;
     my = screen_h / 2;
-    desktop_load();
+    desktop_load();pins_load();
     wm_full();
 }
 
@@ -529,7 +582,8 @@ static void desktop_load(void)
 {
     nitems = 0; desk_sel = 0;
     u32 len = 0;
-    char *data = vfs_read("system/desktop.json", &len);
+    char *stored=vfs_read("system/desktop.json",&len),*data=NULL;
+    if(stored&&len<=16384){data=palloc(len+1);if(data){memcpy(data,stored,len);data[len]=0;}}
     if (data && len > 10 && !memcmp(data, "SCOSDESK1", 9)) {
         char *p = data + 10;
         while (*p && nitems < DESK_MAX) {
@@ -548,6 +602,7 @@ static void desktop_load(void)
             nitems++;
         }
     }
+    if(data)pfree(data,len+1);
     if (!nitems) {
         for (int i = 0; i < app_count() && nitems < DESK_MAX; i++) {
             const struct app *a = app_at(i);
@@ -654,6 +709,11 @@ void wm_desktop_install(const char *id)
     for(int y=0;y<DESK_ROWS;y++)for(int x=0;x<DESK_COLS;x++)if(!cell_taken(x,y,-1)){
         struct ditem *d=&items[nitems++];memset(d,0,sizeof(*d));strcpy(d->app,id);strncpy(d->label,a->desktop_label?a->desktop_label:a->title,39);d->gx=x;d->gy=y;desktop_save();wm_full();return;
     }
+}
+
+void wm_desktop_remove_app(const char *id){
+    for(int i=nitems-1;i>=0;i--)if(items[i].kind==0&&!strcmp(items[i].app,id)){for(int j=i;j<nitems-1;j++)items[j]=items[j+1];nitems--;}
+    desk_sel=0;desk_drag=-1;pin_remove(id);desktop_save();wm_full();
 }
 
 int wm_desk_vis_count(void)
@@ -853,7 +913,7 @@ static __attribute__((noinline)) void paint_partial(void)
             drawn[k]=1;struct window *w=wins[k];
             if(w->x<d->x+d->w&&w->x+w->w+4>d->x&&w->y<d->y+d->h&&w->y+w->h+4>d->y)paint_window(w);
         }
-        paint_taskbar();paint_menu();if(launch.active)paint_launcher();
+        paint_taskbar();paint_menu();if(launch.active)paint_launcher();paint_notices();
         fb_scene_unclip();
     }
     cur_draw();
@@ -895,6 +955,8 @@ static void paint_taskbar(void)
     char label[24],count[12];strcpy(label,"Windows ");fmt_u32(count,win_count);strcat(label,count);
     s_clip_text(&screen,56,y+12,label,t->text,94);
 
+    int visible=pin_count,cap=wm_taskbar_capacity();if(visible>cap)visible=cap;
+    for(int i=0;i<visible;i++){int x=168+i*40;struct app *a=app_find(task_pins[i]);if(!a)continue;s_fill(&screen,x,y+6,34,TASKBAR_H-12,blend(t->taskbar_bg,t->main,20));s_frame_rect(&screen,x,y+6,34,TASKBAR_H-12,t->main);s_icon(&screen,a->icon,x+5,y+8,t->text);}
     /* power button */
     int px, py, pw, ph;
     tb_power_rect(&px, &py, &pw, &ph);
@@ -1026,6 +1088,7 @@ static __attribute__((noinline)) void paint_all(void)
     paint_taskbar();
     paint_menu();
     if (launch.active) paint_launcher();
+    paint_notices();
     tb_dirty = 0; icons_dirty = 0; menu_dirty = 0; launch_dirty = 0; ndmg = 0;
     for (int i = 0; i < win_count; i++) wins[i]->chrome_dirty = 0;
     cur_have = 0;                 /* scene was fully redrawn under cursor */
@@ -1282,6 +1345,7 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
         if(app_capture&&(!modal_w||modal_w==app_capture)){
             struct window *c=app_capture;if(c->app&&c->app->mouse){APP_T0(c);c->app->mouse(c,e,mx-c->x-1,my-c->y-WIN_TITLEBAR);APP_T1(c);}cur_move();return;
         }
+        if(notice_at(mx,my)>=0){cur_move();return;}
         struct window *hw = NULL;
         int zone = move_needs_composite(&hw);
         /* hover signature: composite only when the hover TARGET changes,
@@ -1325,6 +1389,7 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
         (void)zone;
         return;
     }
+    if(e->type==MEV_WHEEL&&notice_at(mx,my)>=0)return;
     if (e->type == MEV_WHEEL && launch.active &&
         in_rect(mx,my,8,screen_h-TASKBAR_H-308,300,308)) {
         int count=0;
@@ -1345,6 +1410,7 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
         return;
     }
     /* buttons */
+    if(e->down&&!app_capture&&!drag_win&&!resize_win){int notice=notice_at(mx,my);if(notice>=0){if(e->button==MBTN_LEFT)notice_remove(notice);return;}}
     mbuttons = e->buttons;
     if (e->down) {
         static u64 last_down_tick;
@@ -1542,6 +1608,12 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
             dirty = 1;
             return;
         }
+        int visible=pin_count,cap=wm_taskbar_capacity();if(visible>cap)visible=cap;
+        for(int i=0;i<visible;i++)if(in_rect(mx,my,168+i*40,screen_h-TASKBAR_H+6,34,TASKBAR_H-12)){
+            if(e->button==MBTN_RIGHT){static const char *choices[]={"Open","Unpin from bar"};strcpy(pin_menu_id,task_pins[i]);wm_menu(168+i*40,screen_h-TASKBAR_H-54,choices,2,pin_menu_answer,NULL);}
+            else if(e->button==MBTN_LEFT)wm_open_app(task_pins[i],NULL);
+            wm_full();return;
+        }
         int px, py, pw, ph;
         tb_power_rect(&px, &py, &pw, &ph);
         if (in_rect(mx, my, px, py, pw, ph)) {
@@ -1608,6 +1680,7 @@ static void handle_key(struct key_event *e)
 /* --------------------------------------------------------------- tick ---- */
 static void wm_tick(void)
 {
+    for(int i=notice_count-1;i>=0;i--)if(notices[i].until&&(i32)((u32)tick_count-notices[i].until)>=0)notice_remove(i);
     for (int i = 0; i < win_count; i++)
         if (wins[i]->app && wins[i]->app->tick && wins[i]->state != WIN_STATE_MIN)
             { APP_T0((wins[i])); wins[i]->app->tick(wins[i]); APP_T1((wins[i])); }

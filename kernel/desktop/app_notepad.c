@@ -5,6 +5,7 @@ struct notepad {
     char *text;
     u32 len, cap;
     u32 pos;
+    int colscroll;
     int scroll;             /* first visible line */
     char filepath[256];
     int has_path;
@@ -13,6 +14,7 @@ struct notepad {
 };
 
 #define NP_TOOL_H 34
+static void np_reveal(struct window *w);
 
 static void np_open(struct window *w, void *arg)
 {
@@ -50,7 +52,7 @@ static void np_open(struct window *w, void *arg)
     }
     np->pos = np->len;
     np->win = w;
-    w->data = np;
+    w->data = np;np_reveal(w);
     wm_track_mem(w, (int)(sizeof(*np) + np->cap));
     {   /* real launch-console events (visible when started via appstrt) */
         char lg[300];
@@ -113,6 +115,16 @@ static u32 line_start(struct notepad *np, u32 pos)
 {
     while (pos > 0 && np->text[pos - 1] != '\n') pos--;
     return pos;
+}
+
+static void np_reveal(struct window *w){
+    struct notepad *np=w->data;u32 ls=line_start(np,np->pos);int line=0;for(u32 i=0;i<ls;i++)if(np->text[i]=='\n')line++;
+    int rows=(w->surf.h-NP_TOOL_H-8)/(FONT_H+2);if(rows<1)rows=1;
+    if(line<np->scroll)np->scroll=line;
+    if(line>=np->scroll+rows)np->scroll=line-rows+1;
+    int cols=(w->surf.w-12)/FONT_W;if(cols<1)cols=1;int col=np->pos-ls;
+    if(col<np->colscroll)np->colscroll=col;
+    if(col>=np->colscroll+cols)np->colscroll=col-cols+1;
 }
 
 static void np_move_line(struct notepad *np, int dir)
@@ -213,6 +225,8 @@ static void np_paint(struct window *w)
 
     /* text */
     int rows = (s->h - NP_TOOL_H - 8) / (FONT_H + 2);
+    int total=1;for(u32 i=0;i<np->len;i++)if(np->text[i]=='\n')total++;
+    int maxscroll=total-rows;if(maxscroll<0)maxscroll=0;if(np->scroll>maxscroll)np->scroll=maxscroll;
     /* find first visible line offset */
     u32 off = 0;
     int line_no = 0;
@@ -223,19 +237,21 @@ static void np_paint(struct window *w)
     }
     int y = NP_TOOL_H + 4;
     u32 p = off;
-    char linebuf[256];
+    char linebuf[512];
     for (int r = 0; r < rows && p <= np->len; r++, y += FONT_H + 2) {
         u32 le = p;
         while (le < np->len && np->text[le] != '\n') le++;
-        int llen = (int)(le - p);
-        if (llen > 250) llen = 250;
-        memcpy(linebuf, np->text + p, llen);
+        u32 start=p+(u32)np->colscroll;if(start>le)start=le;
+        int llen=(int)(le-start),cols=(s->w-12)/FONT_W;
+        if(llen>cols)llen=cols;
+        if(llen>511)llen=511;
+        memcpy(linebuf,np->text+start,llen);
         linebuf[llen] = 0;
         s_text(s, 6, y, linebuf, t->text);
         /* caret */
         if (np->pos >= p && np->pos <= le) {
-            int col = (int)(np->pos - p);
-            if ((tick_count / 50) % 2 == 0)
+            int col = (int)(np->pos - p)-np->colscroll;
+            if (col>=0&&6+col*FONT_W<s->w-6&&(tick_count / 50) % 2 == 0)
                 s_fill(s, 6 + col * FONT_W, y, 2, FONT_H, t->main);
         }
         p = le + 1;
@@ -248,6 +264,7 @@ static void np_key(struct window *w, struct key_event *e)
     struct notepad *np = w->data;
     if (!e->pressed) return;
     if (e->ctrl && (e->keycode == 19 || e->keycode == 's' || e->keycode == 'S')) { np_save(w, 0); return; }
+    if(e->ctrl)return;
     switch (e->keycode) {
     case '\n': np_insert(np, '\n'); break;
     case '\b': np_delete_before(np); break;
@@ -264,13 +281,7 @@ static void np_key(struct window *w, struct key_event *e)
         if (e->keycode >= 32 && e->keycode < 127) np_insert(np, (char)e->keycode);
         break;
     }
-    /* keep caret visible */
-    u32 ls = line_start(np, np->pos);
-    int line_no = 0;
-    for (u32 i = 0; i < ls; i++) if (np->text[i] == '\n') line_no++;
-    int rows = (w->surf.h - NP_TOOL_H - 8) / (FONT_H + 2);
-    if (line_no < np->scroll) np->scroll = line_no;
-    if (line_no >= np->scroll + rows) np->scroll = line_no - rows + 1;
+    np_reveal(w);
     wm_redraw(w);
 }
 
@@ -290,6 +301,10 @@ static void np_mouse(struct window *w, struct mouse_event *e, int x, int y)
     }
     if (e->type == MEV_BUTTON && e->down && e->button == MBTN_LEFT && np->hover_btn >= 0)
         np_save(w, np->hover_btn == 1);
+    else if(e->type==MEV_BUTTON&&e->down&&e->button==MBTN_LEFT&&x>=6&&x<w->surf.w-6&&y>=NP_TOOL_H+4&&y<w->surf.h-4){
+        int row=np->scroll+(y-NP_TOOL_H-4)/(FONT_H+2);u32 p=0;while(row--&&p<np->len){while(p<np->len&&np->text[p]!='\n')p++;if(p<np->len)p++;}
+        u32 end=p;while(end<np->len&&np->text[end]!='\n')end++;u32 pos=p+np->colscroll+(x-6)/FONT_W;np->pos=pos>end?end:pos;wm_redraw(w);
+    }
 }
 
 struct app app_notepad = {

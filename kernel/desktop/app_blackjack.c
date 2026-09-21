@@ -144,7 +144,7 @@ static void bj_paint(struct window *w)
 
     char line[96];
     strcpy(line, "Blackjack - dealer stands on 17");
-    s_text(s, 12, 8, line, t->main);
+    s_clip_text(s,12,8,"Blackjack",t->main,100);
     strcpy(line, "Won: ");
     char n[8];
     fmt_u32(n, (u32)b->wins); strcat(line, n);
@@ -152,27 +152,28 @@ static void bj_paint(struct window *w)
     fmt_u32(n, (u32)b->losses); strcat(line, n);
     strcat(line, "   Push: ");
     fmt_u32(n, (u32)b->pushes); strcat(line, n);
-    s_text(s, s->w - s_text_width(line) - 12, 8, line, t->text);
+    s_clip_text(s,120,8,line,t->text,s->w-132);
 
+    int ds=(s->w-160-CARD_W)/(b->dn>1?b->dn-1:1),ps=(s->w-160-CARD_W)/(b->pn>1?b->pn-1:1);if(ds>CARD_W+10)ds=CARD_W+10;if(ps>CARD_W+10)ps=CARD_W+10;
     s_text(s, 12, 34, "Dealer", t->text);
     for (int i = 0; i < b->dn; i++)
-        card_draw(s, 70 + i * (CARD_W + 10), 28, b->dealer[i],
+        card_draw(s, 70 + i * ds, 28, b->dealer[i],
                   (i == 1 && !b->state), t->main);
     if (b->state || b->dn) {
         strcpy(line, "  = ");
         fmt_u32(n, (u32)((b->state) ? hand_value(b->dealer, b->dn)
                                     : hand_value(b->dealer, 1)));
         strcat(line, n);
-        s_text(s, 70 + b->dn * (CARD_W + 10) + 4, 60, line, t->text);
+        s_text(s, s->w-76, 60, line, t->text);
     }
 
     s_text(s, 12, 140, "You", t->text);
     for (int i = 0; i < b->pn; i++)
-        card_draw(s, 70 + i * (CARD_W + 10), 134, b->player[i], 0, t->main);
+        card_draw(s, 70 + i * ps, 134, b->player[i], 0, t->main);
     strcpy(line, "  = ");
     fmt_u32(n, (u32)hand_value(b->player, b->pn));
     strcat(line, n);
-    s_text(s, 70 + b->pn * (CARD_W + 10) + 4, 166, line, t->text);
+    s_text(s, s->w-76, 166, line, t->text);
 
     if (b->state) {
         const char *msg =
@@ -196,7 +197,7 @@ static void bj_paint(struct window *w)
         s_frame_rect(s, bx, by, 96, 28, fg);
         s_text(s, bx + (96 - s_text_width(BTN_LABELS[i])) / 2, by + 6, BTN_LABELS[i], fg);
     }
-    s_text(s, 340, s->h - 32, "keys: N new, H hit, S stand", ((t->main >> 1) & 0x7F7F7F));
+    s_clip_text(s,340,s->h-32,"N new, H hit, S stand",t->text,s->w-352);
 }
 
 static void bj_action(struct bj *b, int i)
@@ -256,7 +257,7 @@ static void bj_close(struct window *w)
 struct app app_blackjack = {
     .desktop_label = "Blackjack",
     .uses_data = 1, .id = "blackjack", .title = "Blackjack", .icon = ICON_CARDS, .single = 1,
-    .def_w = 640, .def_h = 480,
+    .def_w = 640, .def_h = 480,.min_w=600,.min_h=400,
     .open = bj_open, .paint = bj_paint, .key = bj_key,
     .mouse = bj_mouse, .close = bj_close,
 };

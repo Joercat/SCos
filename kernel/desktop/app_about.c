@@ -20,7 +20,7 @@ static void ab_paint(struct window *w)
     int y = 66;
     char line[120];
     strcpy(line, "SCos x64 development - build " SCOS_BUILD_TAG);
-    s_text(s, cx - s_text_width(line) / 2, y, line, t->main); y += 24;
+    int tw=s_text_width(line);if(tw>s->w-56)tw=s->w-56;s_clip_text(s,cx-tw/2,y,line,t->main,s->w-56); y += 24;
 
     s_line(s, 24, y, s->w - 24, y, t->main); y += 14;
 
@@ -35,7 +35,7 @@ static void ab_paint(struct window *w)
     char n[16];
     fmt_u64(n, tot / 1024); strcat(line, n); strcat(line, " MB managed, ");
     fmt_u64(n, fre / 1024); strcat(line, n); strcat(line, " MB free");
-    s_text(s, 28, y, line, t->text); y += 20;
+    s_clip_text(s,28,y,line,t->text,s->w-56); y += 20;
 
     const char *model = ata_model();
     strcpy(line, "Disk:     ");
@@ -48,18 +48,18 @@ static void ab_paint(struct window *w)
     fmt_u32(v, (u32)screen_h); strcat(line, v); strcat(line, "x");
     fmt_u32(v, fb_bpp()); strcat(line, v);
     strcat(line, " GOP linear framebuffer");
-    s_text(s, 28, y, line, t->text); y += 20;
+    s_clip_text(s,28,y,line,t->text,s->w-56); y += 20;
 
     u32 up = uptime_ms() / 1000;
     strcpy(line, "Uptime:   ");
     fmt_u32(v, up / 3600); strcat(line, v); strcat(line, "h ");
     fmt_u32(v, (up / 60) % 60); strcat(line, v); strcat(line, "m ");
     fmt_u32(v, up % 60); strcat(line, v); strcat(line, "s");
-    s_text(s, 28, y, line, t->text); y += 20;
+    s_clip_text(s,28,y,line,t->text,s->w-56); y += 20;
 
     strcpy(line, "Theme:    ");
     strcat(line, t->name);
-    s_text(s, 28, y, line, t->text); y += 26;
+    s_clip_text(s,28,y,line,t->text,s->w-56); y += 26;
 
     static const char *feats[] = {
         "Native x64 UEFI loader and relocatable 64-bit kernel",
@@ -82,7 +82,7 @@ static void ab_mouse(struct window *w, struct mouse_event *e, int x, int y) { (v
 struct app app_about = {
     .desktop_label = "About",
     .id = "about", .title = "About SCos", .icon = ICON_INFO, .single = 0,
-    .def_w = 520, .def_h = 460,
+    .def_w = 520, .def_h = 460,.min_h=440,
     .paint = ab_paint, .key = ab_key, .mouse = ab_mouse,
 };
 

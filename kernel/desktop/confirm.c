@@ -63,6 +63,18 @@ int confirm_command(struct shell_confirm *c, char *line, unsigned cap,
     else if (!strncmp(normalized,"rm ",3) &&
              (has_option(normalized,"-s") || has_option(normalized,"-f") || has_option(normalized,"-i")))
         action = "Delete this RAM-filesystem path? Unsaved data will be lost.";
+    int removal=0;
+    if(!strncmp(normalized,"appuninstall ",13)){
+        const char *id=normalized+13;int valid=*id&&strlen(id)<=30;
+        for(const char *p=id;*p;p++)if(!((*p>='a'&&*p<='z')||(*p>='0'&&*p<='9')||*p=='-'))valid=0;
+        struct app *a=valid?app_find(id):NULL;removal=a&&a->external;
+    }
+    if(removal){
+        strcpy(storage_action,"Uninstall this app and close its windows? Project/data files stay.");
+        if(fs_image_available()){strcat(storage_action,"\nSaves filesystem to: ");strncat(storage_action,fs_image_target(),36);}
+        else strcat(storage_action,"\nSession RAM only; no disk write.");
+        action=storage_action;
+    }
     if (!action) return 0;
     if (strlen(line) >= sizeof(c->command)) {
         strcpy(message,"Command too long to confirm."); return 1;

@@ -164,6 +164,8 @@ static const char *help_text =
     "edit <f>  - Full-screen editor (nano-like: ^O save, ^X exit)\n"
     "appstrt   - Launch an app; its logs stream into this tab\n"
     "apps      - List installed apps and running instances\n"
+    "appuninstall <id> - Remove a user app (confirmed; keeps data)\n"
+    "graphics  - Detected GPUs and actual renderer status\n"
     "procs     - Process table with real per-task memory\n"
     "kill <pid>- Terminate an app task (see 'procs')\n"
     "tab       - new | close | <n>: terminal tabs (also Ctrl+T)\n"
@@ -666,6 +668,11 @@ static void run_command(struct term *t, const char *command)
             }
         }
     }
+    else if(!strcmp(cmd,"appuninstall")){
+        if(nargs!=2||!strcmp(args[1],"--help"))strcpy(response,"Usage: appuninstall <app-id> (confirmed; projects/data kept)");
+        else app_uninstall(args[1],response,sizeof(response));
+    }
+    else if(!strcmp(cmd,"graphics")){if(nargs!=1)strcpy(response,"Usage: graphics");else graphics_report(response,sizeof(response));}
     else if (!strcmp(cmd, "appstrt")) {
         lua_apps_refresh();
         /* r27: THE way to launch apps from the terminal. Like running a
@@ -1515,8 +1522,9 @@ static void term_paint(struct window *w)
         } else {
             char prompt[160];
             prompt_str(t, prompt);
-            s_text(s, 6, y, prompt, th->main);
-            int px = 6 + s_text_width(prompt);
+            int prompt_width=s_text_width(prompt),limit=((s->w-80)/2/FONT_W)*FONT_W;if(prompt_width>limit)prompt_width=limit;
+            s_clip_text(s,6,y,prompt,th->main,prompt_width);
+            int px=6+prompt_width;
             int cols = (s->w - px - 8) / FONT_W;
             int start = cols > 0 && t->ipos >= cols ? t->ipos - cols + 1 : 0;
             s_clip_text(s, px, y, t->input + start, th->main, s->w - px - 8);

@@ -33,12 +33,12 @@ Counter and Sketch are optional Lua demonstrations in `/home/demos/*.cat`: open
 them in Files and approve installation. They are not preinstalled. Run `appstrt studio` to edit a project, syntax-check it with
 the real Lua 5.4.9 compiler, build a `.cat` package and launch it with F5.
 Studio supports range selection and Ctrl+C/X/V with a 16 KiB clipboard and
-64 KiB source limit. Raw `.lua` launching is removed. API 2 offers 55 functions for drawing, widgets,
+64 KiB source limit. Raw `.lua` launching is removed. API 2 offers 56 functions for drawing, widgets,
 window control, private data, system queries and confirmed global themes.
 Settings selects four presets or up to eight custom palettes/backgrounds.
 
 See the [Studio and API guide](docs/LUA-APPS.md), [CAT format](docs/CAT-FORMAT.md),
-[current verification record](docs/migration/COMPOSITOR-VERIFICATION.md), and
+[current verification record](docs/migration/APP-MANAGEMENT-VERIFICATION.md), and
 [open-source provenance/licenses](third_party/README.md). This remains a
 cooperative kernel, not a ring-3 security sandbox. RAM-versus-ATA persistence
 limitations still apply. The [earlier Lua verification](docs/migration/LUA-VERIFICATION.md)
@@ -47,7 +47,8 @@ is historical, not the current package contract.
 ## Desktop and windows
 
 The bottom bar has **Launcher**, **Windows** (an open/minimized-window picker),
-power and clock controls—not a row of app buttons. Drag with either mouse button
+up to eight width-limited pinned app shortcuts, plus power and clock controls.
+Use Applications to launch, pin/unpin or uninstall external apps. Drag with either mouse button
 on the desktop to select icons; a stationary right click opens the context menu
 on release. Installed CAT apps get a desktop shortcut and a launcher entry.
 
@@ -116,3 +117,20 @@ They are an archive, **not a build target or dependency of the UEFI loader**.
 The integrity guard protects that retention. Previous implementations remain
 in Git history; duplicate legacy source/build trees have been removed.
 See [historical r43 behavior and limitations](docs/RELEASE-r43.md).
+
+## Application management and graphics status
+
+`appstrt applications` opens the native manager. `appuninstall <id>` requests
+default-no confirmation in Terminal or TTY. Built-ins cannot be uninstalled;
+external removal closes instances and removes the registered installed package,
+shortcuts and pins, but keeps projects, app data and original external sources.
+RAM-only installations are explicitly session-only and disappear at reboot.
+Only existing supported ATA persistence is available; no new storage drivers.
+
+Top-right notifications overlay windows, menus and modals. Click to dismiss;
+normal notices expire after ten seconds. Lua apps can use `scos.notify(text)`.
+
+`graphics` reports read-only PCI display-device discovery and the CPU renderer.
+**GPU acceleration and working hardware-driver selection remain unimplemented.**
+The boot warning explicitly reports CPU fallback. GOP/PAT/write combining are
+not GPU rendering. Browser integration remains deferred.

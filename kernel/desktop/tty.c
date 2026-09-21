@@ -216,6 +216,8 @@ static void tty_exec(char *cmd)
             "  procs           system tasks + app windows with pids\n"
             "  kill <pid>      terminate an app process (pid >= 10, needs wm)\n"
             "  appstrt <app>   launch a GUI app (needs wm; binds you back to it)\n"
+            "  appuninstall <id>  confirmed removal of a user app (keeps data)\n"
+            "  graphics        detected GPUs and renderer status\n"
             "  wm              return to the desktop / start the WM\n"
             "  dmesg           kernel log ring (USB, input, fb, mm...)\n"
             "  free            memory pool + allocator counters\n"
@@ -576,6 +578,8 @@ static void tty_exec(char *cmd)
             }
         } else tty_print("kill: no such pid");
     }
+    else if(!strcmp(args[0],"appuninstall")){char result[256];if(nargs!=2||!strcmp(args[1],"--help"))tty_print("Usage: appuninstall <app-id> (keeps projects/data)");else{app_uninstall(args[1],result,sizeof(result));tty_print(result);}}
+    else if(!strcmp(args[0],"graphics")){char result[1024];if(nargs!=1)tty_print("Usage: graphics");else{graphics_report(result,sizeof(result));tty_print(result);}}
     else if (!strcmp(args[0], "appstrt")) {
         if (nargs < 2) {
             tty_print("appstrt <app>: about blackjack browser calendar "

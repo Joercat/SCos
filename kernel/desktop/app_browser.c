@@ -33,7 +33,7 @@ static void br_paint(struct window *w)
     const struct theme *t = theme_current();
     s_fill(s, 0, 0, s->w, s->h, t->win_bg);
     s_frame_rect(s, 8, 8, s->w - 16, 26, t->main);
-    s_text(s, 14, 14, "https://(no network stack)", ((t->main >> 1) & 0x7F7F7F));
+    s_clip_text(s,14,14,"https://(no network stack)",t->text,s->w-28);
 
     static const char *lines[] = {
         "Web Browser is not available on SCos.",
@@ -56,8 +56,8 @@ static void br_paint(struct window *w)
     if (scroll > maxs) scroll = maxs;
     int y = 50 - scroll;
     for (unsigned i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {
-        if (y >= -16 && y < s->h)
-            s_text(s, 16, y, lines[i], i == 0 ? t->main : t->text);
+        if (y >= 42 && y+16 <= s->h)
+            s_clip_text(s,16,y,lines[i],i==0?t->main:t->text,s->w-32);
         y += 20;
     }
 }

@@ -473,4 +473,17 @@ size_t allocation_bytes(const void *p);
 u64 memory_reserved_pages(void);
 uintptr_t pages_allocate(size_t count);
 void pages_release(uintptr_t p,size_t count);
+
+/* Application lifecycle, launch shortcuts and desktop notification services. */
+int app_unregister(struct app *app);
+int app_uninstall(const char *id,char *message,size_t capacity);
+void app_request_uninstall(const char *id);
+void wm_desktop_remove_app(const char *id);
+int wm_taskbar_pin(const char *id);
+int wm_taskbar_pinned(const char *id);
+int wm_taskbar_capacity(void);
+void wm_notify(const char *title,const char *text,int warning);
+void graphics_init(const struct boot_framebuffer *fb);
+void graphics_report(char *out,size_t capacity);
+
 #endif /* SCOS_H */

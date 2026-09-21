@@ -38,7 +38,7 @@ void desktop_start(const struct boot_framebuffer *fb){
     strcpy(line,"mem: ");fmt_u64(number,mm_total_kb());strcat(line,number);strcat(line," KB managed");
     boot_screen_step(line,25);
     strcpy(line,"video: GOP ");fmt_u32(number,fb->width);strcat(line,number);strcat(line,"x");fmt_u32(number,fb->height);strcat(line,number);
-    boot_screen_step(line,32);
+    boot_screen_step(line,32);graphics_init(fb);
     if(!vfs_init_defaults())panic("initial desktop filesystem allocation failed");
     boot_screen_step("vfs: factory file tree built",40);
     acpi_init();int drives=ata_init();
@@ -52,6 +52,7 @@ void desktop_start(const struct boot_framebuffer *fb){
     strcpy(line,"rtc: ");fmt_u32(number,rtc.year);strcat(line,number);strcat(line,"-");fmt_pad2(number,rtc.mon);strcat(line,number);strcat(line,"-");fmt_pad2(number,rtc.day);strcat(line,number);
     boot_screen_step(line,82);
     theme_load_from_settings();apps_register_all();cpu_meter_init();wm_init();
+    wm_notify("GPU acceleration unavailable","Using CPU software rendering. No compatible GPU backend is linked. Run graphics in Terminal for detected hardware.",1);
     boot_screen_step("wm: compositor ready; native and Lua apps registered",94);
     boot_screen_step("Finishing... I think...",100);
     /* Original readable finished log; service input while showing it. */

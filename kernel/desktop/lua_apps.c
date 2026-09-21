@@ -143,7 +143,7 @@ static const luaL_Reg api[]={
     {"app_id",api_app_id},{"memory",api_memory},{"date",api_date},{"uptime",api_clock},
     {"exists",api_exists},{"file_size",api_file_size},{"remove",api_remove},{"rename",api_rename},{"files",api_files},
     {"theme",api_theme},{"themes",api_themes},{"theme_apply",api_theme_apply},{"theme_custom",api_theme_custom},
-    {"icon_size",api_icon_size},{"icons",api_icons},{"set_icon",api_set_icon},{"text_clip",api_text_clip},{"text_wrap",api_text_wrap},{"focused",api_focused},{"minimize",api_minimize},
+    {"notify",api_notify},{"icon_size",api_icon_size},{"icons",api_icons},{"set_icon",api_set_icon},{"text_clip",api_text_clip},{"text_wrap",api_text_wrap},{"focused",api_focused},{"minimize",api_minimize},
     {"theme_status",api_theme_status},{"message",api_message},{"api_info",api_info},{NULL,NULL}
 };
 static int initialize(lua_State *L) {
@@ -244,15 +244,33 @@ struct app *lua_app_install(const char *path) {
         strcpy(scripts[i].title,m.title);scripts[i].app.def_w=m.width;scripts[i].app.def_h=m.height;
         return &scripts[i].app;
     }
-    if(script_count>=LUA_APPS)return NULL;
+    int slot=-1;for(int i=0;i<script_count;i++)if(!scripts[i].id[0]){slot=i;break;}
+    if(slot<0){if(script_count>=LUA_APPS)return NULL;slot=script_count;}
     for(int i=0;i<app_count();i++)if(!strcmp(app_at(i)->id,m.id))return NULL;
-    struct lua_app *a=&scripts[script_count];strcpy(a->id,m.id);strcpy(a->title,m.title);strcpy(a->path,path);
+    struct lua_app *a=&scripts[slot];strcpy(a->id,m.id);strcpy(a->title,m.title);strcpy(a->path,path);
     a->app=(struct app){.id=a->id,.title=a->title,.icon=ICON_NOTEPAD,.def_w=m.width,.def_h=m.height,.uses_data=1,
         .open=script_open,.paint=script_paint,.key=script_key,.mouse=script_mouse,.tick=script_tick,.close=script_close,.failure=script_failure,.external=1};
-    if(!app_register(&a->app))return NULL;
-    script_count++;return &a->app;
+    if(!app_register(&a->app)){memset(a,0,sizeof(*a));return NULL;}
+    if(slot==script_count)script_count++;
+    return &a->app;
 }
 void lua_apps_refresh(void) {
     struct vfs_node *dir=vfs_lookup("home/apps");if(!dir||!dir->is_dir)return;
     for(struct vfs_node *n=dir->child;n;n=n->sibling)if(!n->is_dir){char p[192];strcpy(p,"home/apps/");strcat(p,n->name);lua_app_install(p);}
+}
+
+int app_uninstall(const char *id,char *message,size_t capacity)
+{
+    const char *result="Application is not installed, or is a protected built-in.";int ok=0;
+    for(int i=0;id&&i<script_count;i++)if(scripts[i].id[0]&&!strcmp(id,scripts[i].id)){
+        struct lua_app *a=&scripts[i];
+        /* Never delete a demo, project or explicitly launched external source. */
+        struct vfs_node *installed=vfs_lookup(a->path);
+        if(!strncmp(a->path,"home/apps/",10)&&installed&&(installed->is_dir||!vfs_delete(a->path))){result="Cannot remove installed package; application unchanged.";break;}
+        for(int j=wm_win_count()-1;j>=0;j--){struct window *w=wm_win_at(j);if(w->app==&a->app)wm_close_window(w);}
+        wm_desktop_remove_app(a->id);app_unregister(&a->app);memset(a,0,sizeof(*a));ok=1;
+        result=fs_image_available()?(fs_image_save()?"Uninstalled and saved. Project source and app data kept.":"Uninstalled in RAM, but disk save FAILED. Run save before reboot."):"Uninstalled for this session. No disk written; projects/data kept.";
+        break;
+    }
+    if(capacity){strncpy(message,result,capacity-1);message[capacity-1]=0;}wm_request_full();return ok;
 }

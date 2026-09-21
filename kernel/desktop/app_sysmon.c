@@ -59,7 +59,7 @@ static void sm_paint(struct window *w)
     char cpu[49];
     cpu_brand(cpu, sizeof(cpu));
     strcpy(line, "  model:  "); strcat(line, cpu[0] ? cpu : "x86 processor (no brand leaf)");
-    s_text(s, 12, y, line, t->text); y += 18;
+    s_clip_text(s,12,y,line,t->text,s->w-24); y += 18;
     u32 sig = cpu_signature();
     u32 fam = (sig >> 8) & 0xF;
     if (fam == 0xF) fam += (sig >> 20) & 0xFF;
@@ -69,10 +69,10 @@ static void sm_paint(struct window *w)
     fmt_u32(n, fam); strcat(line, n);
     strcat(line, " model "); fmt_u32(n, mod); strcat(line, n);
     strcat(line, " stepping "); fmt_u32(n, sig & 0xF); strcat(line, n);
-    s_text(s, 12, y, line, t->text); y += 18;
+    s_clip_text(s,12,y,line,t->text,s->w-24); y += 18;
     strcpy(line, "  TSC:    ");
     fmt_u32(n, cpu_mhz()); strcat(line, n); strcat(line, " MHz (startup TSC reference)");
-    s_text(s, 12, y, line, t->text);   /* r31: this row was built but never
+    s_clip_text(s,12,y,line,t->text,s->w-24);   /* r31: this row was built but never
                                         * drawn - the MHz line silently
                                         * vanished from the CPU panel */
     y += 18;
@@ -81,11 +81,11 @@ static void sm_paint(struct window *w)
     strcat(line, "  threads: ");
     fmt_u32(n, cpu_thread_count()); strcat(line, n);
     strcat(line, " (CPUID leaf 1/4)");
-    s_text(s, 12, y, line, t->text); y += 18;
+    s_clip_text(s,12,y,line,t->text,s->w-24); y += 18;
     u32 load = cpu_usage_pct();
     strcpy(line, "  BSP load: ");
     fmt_u32(n, load); strcat(line, n); strcat(line, "% (one active CPU, 1s sample)");
-    s_text(s, 12, y, line, t->text); y += 18;
+    s_clip_text(s,12,y,line,t->text,s->w-24); y += 18;
     int bw = 300;
     s_frame_rect(s, 30, y, bw, 12, t->main);
     s_fill(s, 31, y + 1, (int)((bw - 2) * load) / 100, 10, t->main);
@@ -97,7 +97,7 @@ static void sm_paint(struct window *w)
     strcpy(line, "  used:   ");
     fmt_u64(n, (tot - fre) / 1024); strcat(line, n); strcat(line, " MB of ");
     fmt_u64(n, tot / 1024); strcat(line, n); strcat(line, " MB managed");
-    s_text(s, 12, y, line, t->text); y += 18;
+    s_clip_text(s,12,y,line,t->text,s->w-24); y += 18;
     s_frame_rect(s, 30, y, bw, 12, t->main);
     s_fill(s, 31, y + 1, (int)((u64)(bw - 2) * (tot - fre) / (tot ? tot : 1)), 10, t->main);
     y += 22;
@@ -113,7 +113,7 @@ static void sm_paint(struct window *w)
     strcat(line, "    heap: ");
     fmt_u32(n, aops); strcat(line, n); strcat(line, " allocs / ");
     fmt_u32(n, fops); strcat(line, n); strcat(line, " frees (live)");
-    s_text(s, 12, y, line, t->text); y += 24;
+    s_clip_text(s,12,y,line,t->text,s->w-24); y += 24;
 
     s_text(s, 12, y, "Tasks", t->main); y += 20;
     s_text(s, 16, y, "PID", t->text);
@@ -171,7 +171,7 @@ static void sm_paint(struct window *w)
             struct window *aw = wm_win_at(i - SYS_TASKS);
             fmt_u32(n, (u32)(10 + i - SYS_TASKS));
             s_text(s, 16, y, n, t->text);
-            s_text(s, 60, y, aw->app ? aw->app->id : "?", t->text);
+            s_clip_text(s,60,y,aw->app?aw->app->id:"?",t->text,190);
             s_text(s, 260, y, "app", t->main);
             s_text(s, 360, y, aw->state == WIN_STATE_MIN ? "minimized" : "running", t->text);
             char mb[24];
@@ -196,10 +196,10 @@ static void sm_paint(struct window *w)
     s_fill(s, 12, by, 110, 26, bg);
     s_frame_rect(s, 12, by, 110, 26, fg);
     s_text(s, 26, by + 5, "End Task", fg);
-    s_text(s, 140, by + 6, m->sel >= SYS_TASKS
+    s_clip_text(s, 140, by + 6, m->sel >= SYS_TASKS
              ? "click a task row, then End Task (system tasks cannot be ended)"
              : "select an app task to enable End Task",
-           ((t->main >> 1) & 0x7F7F7F));
+           ((t->main >> 1) & 0x7F7F7F),s->w-152);
 }
 
 static void sm_mouse(struct window *w, struct mouse_event *e, int x, int y)
@@ -268,7 +268,7 @@ static void sm_close(struct window *w)
 struct app app_sysmon = {
     .desktop_label = "SysMon",
     .uses_data = 1, .id = "sysmon", .title = "System Monitor", .icon = ICON_CHART, .single = 1,
-    .def_w = 640, .def_h = 540,
+    .def_w = 640, .def_h = 540,.min_w=600,.min_h=500,
     .open = sm_open, .paint = sm_paint, .key = sm_key,
     .mouse = sm_mouse, .tick = sm_tick, .close = sm_close,
 };

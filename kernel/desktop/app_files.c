@@ -11,6 +11,7 @@ struct files {
     int notice;             /* 1 = show "hidden system dir" notice */
     u64 last_down_tick;     /* double-click detection */
     int last_down_row;
+    char targets[64][192]; /* stable app IDs or pinned paths, never parsed labels */
     int scroll;             /* r36: first visible row (wheel scrolling) */
 };
 
@@ -33,38 +34,28 @@ static u32 fr_mix(u32 a, u32 b, int t)
            (((ab * (255 - t) + bb * t) / 255));
 }
 
-static int path_is_desktop(const char *p)
-{
-    return !strcmp(p, "/home/desktop") || !strcmp(p, "/home/desktop/");
-}
-
 static void files_load(struct files *f)
 {
     for (int i = 0; i < 64; i++) f->synth[i] = 0;
-    f->notice = 0;
+    f->notice = 0;f->last_down_row=-1;f->last_down_tick=0;f->hover_row=-1;
+    memset(f->targets,0,sizeof(f->targets));
     f->scroll = 0;              /* r36: new directory starts at the top */
     /* Keep system files terminal-only, including aliases through ../. */
     struct vfs_node *dir = vfs_lookup(f->path);
     struct vfs_node *system=vfs_lookup("/system");
     for(struct vfs_node *n=dir;n;n=n->parent)if(n==system){f->notice=1;f->n=0;return;}
-    f->n = dir ? vfs_list(dir, f->names, 64) : 0;
+    if(!dir||!dir->is_dir){f->notice=2;f->n=0;return;}
+    f->n = vfs_list(dir, f->names, 64);
     /* the desktop folder mirrors the desktop: app shortcuts + pins */
-    if (path_is_desktop(f->path)) {
+    if (dir == vfs_lookup("home/desktop")) {
         int cnt = wm_desk_vis_count();
         for (int i = 0; i < cnt && f->n < 64; i++) {
             char app[32], path[192], label[40];
             int kind = 0;
             if (!wm_desk_vis_get(i, app, path, label, &kind)) continue;
-            char nm[VFS_NAME];
-            nm[0] = 0;
-            strncpy(nm, label, VFS_NAME - 6);
-            strcat(nm, kind == 0 ? " .app" : " .lnk");
-            int dup = 0;
-            for (int j = 0; j < f->n; j++)
-                if (!strcmp(f->names[j], nm)) dup = 1;
-            if (dup) continue;
-            strncpy(f->names[f->n], nm, VFS_NAME - 1);
-            f->synth[f->n] = (u8)(kind + 1);
+            strncpy(f->names[f->n],label,VFS_NAME-1);f->names[f->n][VFS_NAME-1]=0;
+            strncpy(f->targets[f->n],kind==0?app:path,191);
+            f->synth[f->n]=(u8)(kind+1);
             f->n++;
         }
     }
@@ -115,6 +106,14 @@ static int files_full_path(struct files *f, int row, char *out)
     return 1;
 }
 
+static void files_open_row(struct window *w,int row){
+    struct files *f=w->data;if(row<0||row>=f->n)return;
+    if(f->synth[row]==1){if(!wm_open_app(f->targets[row],NULL))wm_notify("Application unavailable","This shortcut no longer resolves to an installed application.",1);return;}
+    if(f->synth[row]==2){struct vfs_node *n=vfs_lookup(f->targets[row]);if(n&&n->is_dir)wm_open_app("files",f->targets[row]);else if(n)app_open_document(f->targets[row]);else wm_notify("Missing file","The pinned file no longer exists.",1);return;}
+    char full[256];if(!files_full_path(f,row,full)){wm_notify("Files","Path too long.",1);return;}
+    if(files_is_dir_row(f,row)){strcpy(f->path,full);files_load(f);wm_redraw(w);}else app_open_document(full);
+}
+
 /* ------------------------------------------------------- context menus --- */
 static const char *menu_file_items[] = { "Open", "Delete", "Pin to Desktop" };
 static const char *menu_bg_items[] = { "New Folder", "Refresh" };
@@ -153,17 +152,7 @@ static void file_menu_cb(int item, void *ud)
     if(item<0||w->id!=ctx->id||!w->data){pfree(ctx,sizeof(*ctx));return;}
     struct files *f = w->data;
     if (item == 0) {
-        if (files_is_dir_row(f, ctx->row)) {
-            char full[300];
-            if(!files_full_path(f,ctx->row,full)){pfree(ctx,sizeof(*ctx));wm_error_popup("Path too long.");return;}
-            strncpy(f->path, full, sizeof(f->path) - 1);
-
-            files_load(f);
-        } else {
-            char full[300];
-            if(!files_full_path(f,ctx->row,full)){pfree(ctx,sizeof(*ctx));wm_error_popup("Path too long.");return;}
-            app_open_document(full);
-        }
+        files_open_row(w,ctx->row);
         pfree(ctx, sizeof(*ctx));
     } else if (item == 2) {
         char full[300];
@@ -202,7 +191,7 @@ static void files_paint(struct window *w)
     const struct theme *t = theme_current();
     s_fill(s, 0, 0, s->w, s->h, t->win_bg);
 
-    if(f->notice)s_clip_text(s,8,LIST_Y+6,"/system is terminal-only.",t->text,s->w-16);
+
     /* toolbar buttons: back, up, refresh, new folder */
     for (int b = 0; b < 4; b++) {
         int bx = 8 + b * 34;
@@ -233,6 +222,7 @@ static void files_paint(struct window *w)
     s_frame_rect(s, px, TB_Y, s->w - px - 8, TB_H, t->main);
     s_clip_text(s, px + 6, TB_Y + 5, f->path, t->main, s->w - px - 20);
 
+    if(f->notice){s_clip_text(s,12,LIST_Y+10,f->notice==1?"/system is terminal-only.":"Directory unavailable. Go up or refresh.",t->text,s->w-24);return;}
     /* entries (r36: scrollable - rows past the clip used to be
      * unreachable: no wheel handler, no offset, silently invisible) */
     int rows = (s->h - LIST_Y - 6) / ROW_H;
@@ -254,7 +244,8 @@ static void files_paint(struct window *w)
         }
         if (f->synth[i])                     /* shortcut badge */
             s_fill(s, 21, y + 15, 5, 5, t->main);
-        s_clip_text(s, 34, y + 4, f->names[i], t->text, s->w - 44);
+        s_clip_text(s,34,y+4,f->names[i],t->text,s->w-126);
+        s_clip_text(s,s->w-84,y+4,f->synth[i]==1?"App":f->synth[i]==2?"Shortcut":files_is_dir_row(f,i)?"Folder":"File",t->main,76);
     }
     if (!f->n)
         s_text(s, 12, LIST_Y + 10, "(empty directory)", t->text);
@@ -281,7 +272,7 @@ static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
     if (y < LIST_Y) {
         for (int b = 0; b < 4; b++)
             if (fr_in(x, y, 8 + b * 34, TB_Y, 30, TB_H)) f->hover_btn = b;
-    } else {
+    } else if(x>=4&&x<w->surf.w-4&&y>=LIST_Y+4&&!f->notice) {
         int rows = (w->surf.h - LIST_Y - 6) / ROW_H;
         int row = f->scroll + (y - LIST_Y - 4) / ROW_H;
         /* r36: hover must ignore rows below the visible clip (the old
@@ -294,13 +285,13 @@ static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
     if (e->type != MEV_BUTTON || !e->down) return;
 
     if (e->button == MBTN_RIGHT) {
-        if (f->hover_row >= 0 && f->synth[f->hover_row]) return;
+
         struct fm_ctx *ctx = palloc(sizeof(*ctx));
         if(!ctx){err_notify("files","Not enough memory for menu.",NULL,0);return;}
         ctx->id=w->id;ctx->w = w;
         ctx->row = f->hover_row;
         if (f->hover_row >= 0)
-            wm_menu(mx_abs(w, x), my_abs(w, y), menu_file_items, 3, file_menu_cb, ctx);
+            wm_menu(mx_abs(w, x), my_abs(w, y), menu_file_items, f->synth[f->hover_row]?1:3, file_menu_cb, ctx);
         else
             wm_menu(mx_abs(w, x), my_abs(w, y), menu_bg_items, 2, bg_menu_cb, ctx);
         return;
@@ -341,42 +332,14 @@ static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
         f->last_down_tick = now;
         f->last_down_row = row;
         if (!dbl) { wm_redraw(w); return; }   /* first click selects */
-        if (f->synth[row]) {
-            int cnt = wm_desk_vis_count();
-            for (int i = 0; i < cnt; i++) {
-                char a2[32], p2[192], l2[40];
-                int k2 = 0;
-                if (!wm_desk_vis_get(i, a2, p2, l2, &k2)) continue;
-                char nm[VFS_NAME];
-                nm[0] = 0;
-                strncpy(nm, l2, VFS_NAME - 6);
-                strcat(nm, k2 == 0 ? " .app" : " .lnk");
-                if (strcmp(f->names[row], nm)) continue;
-                if (k2 == 0) wm_open_app(a2, NULL);
-                else app_open_document(p2);
-                break;
-            }
-            wm_redraw(w);
-            return;
-        }
-        if (files_is_dir_row(f, f->hover_row)) {
-            char full[300];
-            if(!files_full_path(f,f->hover_row,full)){wm_error_popup("Path too long.");return;}
-            strncpy(f->path, full, sizeof(f->path) - 1);
-
-            files_load(f);
-        } else {
-            char full[300];
-            if(!files_full_path(f,f->hover_row,full)){wm_error_popup("Path too long.");return;}
-            app_open_document(full);
-        }
+        files_open_row(w,row);
         wm_redraw(w);
     }
 }
 
 static void files_key(struct window *w, struct key_event *e)
 {
-    (void)w; (void)e;
+    if(e->pressed&&e->keycode==KEY_F5){files_load(w->data);wm_redraw(w);}
 }
 
 struct app app_files = {

@@ -85,12 +85,13 @@ static void cal_paint(struct window *w)
     char yb[8];
     fmt_u32(yb, c->year);
     strcat(title, yb);
-    s_text(s, (s->w - s_text_width(title)) / 2, 13, title, t->text);
+    int tx=144+(s->w-152-s_text_width(title))/2;if(tx<144)tx=144;
+    s_clip_text(s,tx,13,title,t->text,s->w-tx-8);
 
     /* grid */
     int gx = 8, gy = CAL_TOOL_H + 6;
     int cw = (s->w - 16) / 7;
-    int ch = CELL_H;
+    int ch=(s->h-CAL_TOOL_H-36)/6;if(ch<20)ch=20;
     for (int d = 0; d < 7; d++) {
         s_fill(s, gx + d * cw, gy, cw - 2, 20, ((t->main >> 1) & 0x7F7F7F));
         s_text(s, gx + d * cw + (cw - 2 - s_text_width(cal_days[d])) / 2, gy + 2, cal_days[d], t->title_text);
@@ -131,8 +132,9 @@ static void cal_mouse(struct window *w, struct mouse_event *e, int x, int y)
     int cw = (s->w - 16) / 7;
     int fd = first_weekday(c->month, c->year);
     int dim = days_in_month(c->month, c->year);
-    if (y >= gy) {
-        int col = (x - gx) / cw, row = (y - gy) / CELL_H;
+    if (y >= gy && x >= gx && x < gx+7*cw) {
+        int ch=(w->surf.h-CAL_TOOL_H-36)/6;if(ch<20)ch=20;
+        int col = (x - gx) / cw, row = (y - gy) / ch;
         if (col >= 0 && col < 7 && row >= 0) {
             int day = row * 7 + col - fd + 1;
             if (day >= 1 && day <= dim) c->hover_day = day;
@@ -177,7 +179,7 @@ static void cal_key(struct window *w, struct key_event *e) { (void)w; (void)e; }
 struct app app_calendar = {
     .desktop_label = "Calendar",
     .uses_data = 1, .id = "calendar", .title = "Calendar", .icon = ICON_CALENDAR, .single = 0,
-    .def_w = 600, .def_h = 460,
+    .def_w = 600, .def_h = 460, .min_h = 240,
     .open = cal_open, .paint = cal_paint, .key = cal_key,
     .mouse = cal_mouse, .close = cal_close,
 };

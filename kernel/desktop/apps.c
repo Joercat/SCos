@@ -11,6 +11,16 @@ int app_register(struct app *a)
     for(int i=0;i<reg_count;i++)if(!strcmp(registry[i]->id,a->id))return registry[i]==a;
     registry[reg_count++]=a;return 1;
 }
+int app_unregister(struct app *a){for(int i=0;i<reg_count;i++)if(registry[i]==a){for(int j=i;j<reg_count-1;j++)registry[j]=registry[j+1];reg_count--;return 1;}return 0;}
+static char uninstall_id[32];
+static void uninstall_answer(int ok,const char *text,void *ud){(void)text;(void)ud;if(!ok)return;char message[256];int done=app_uninstall(uninstall_id,message,sizeof(message));wm_notify(done?"Application removed":"Uninstall failed",message,!done);}
+void app_request_uninstall(const char *id){
+    if(!id||strlen(id)>30||wm_dialog_active())return;
+    struct app *a=app_find(id);if(!a||!a->external){wm_notify("Cannot uninstall","Built-in system applications cannot be uninstalled.",1);return;}
+    strcpy(uninstall_id,id);char prompt[256];strcpy(prompt,"Uninstall ");strcat(prompt,id);strcat(prompt,"?\nCloses its windows; removes package/shortcuts.\nProject source and app data are kept.");
+    if(fs_image_available()){strcat(prompt,"\nSaves current filesystem to:\n");strncat(prompt,fs_image_target(),40);}else strcat(prompt,"\nSession RAM only; no disk will be written.");
+    wm_dialog("Uninstall application",prompt,NULL,uninstall_answer,NULL);
+}
 void apps_register_all(void)
 {
     reg_count=0;
@@ -43,7 +53,7 @@ static void install_answer(int ok,const char *text,void *ud)
     if(!a){vfs_delete(dest);wm_error_popup("Package registration failed. Install rolled back.");return;}
     wm_desktop_install(a->id);
     int persistent=fs_image_available(),saved=persistent?fs_image_save():0;
-    wm_dialog("Application installed",saved?"Installed and saved to supported disk.\nOpen it from Desktop or the launcher.":persistent?"Installed in RAM, but disk save FAILED.\nUse Terminal save before restarting.":"Installed in RAM: Desktop and launcher.\nNo supported persistence disk.\nReboot will lose this installation.",NULL,NULL,NULL);
+    wm_notify(saved?"Application installed":"Session installation",saved?"Installed and saved to supported disk.\nOpen it from Desktop or the launcher.":persistent?"Installed in RAM, but disk save FAILED.\nUse Terminal save before restarting.":"Installed in RAM: Desktop and launcher.\nNo supported persistence disk.\nReboot will lose this installation.",persistent&&!saved);
 }
 
 struct window *app_open_document(const char *path)
@@ -57,9 +67,9 @@ struct window *app_open_document(const char *path)
             u32 size=0;char *bytes=vfs_read(path,&size),err[256];struct cat_info m;
             if(!cat_validate(bytes,size,&m,err,sizeof(err))){wm_error_popup(err);return NULL;}
             strcpy(install_path,path);
-            char prompt[256];strcpy(prompt,"Install package and desktop shortcut?");
+            char prompt[256];strcpy(prompt,fs_image_available()?"Install package and desktop shortcut?":"Install for this session?");
             if(fs_image_available()){strcat(prompt,"\nSaves current filesystem to:\n");strncat(prompt,fs_image_target(),48);strcat(prompt,"\nMay differ from boot USB.");}
-            else strcat(prompt,"\nRAM only; lost on reboot.");
+            else strcat(prompt,"\nTemporary RAM package and shortcuts.\nNothing is saved to disk; lost on reboot.");
             strcat(prompt,"\nOnly install trusted packages.");
             wm_dialog("Install CAT application",prompt,NULL,install_answer,NULL);
             return NULL;

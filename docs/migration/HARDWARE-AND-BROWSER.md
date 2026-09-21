@@ -2,8 +2,9 @@
 
 Research date: 2026-09-19. **Recommendations, not implemented support.** No guest
 library, firmware or driver is being imported. The user has authorized conversion;
-see the [first startup foundation](BOOT64.md). Separate post-conversion integration
-permission is still mandatory. The [32-bit audit](../AUDIT-32BIT.md) findings were
+see the [first startup foundation](BOOT64.md). GPU integration is now authorized; browser integration remains deferred.
+The current build implements read-only display discovery and CPU-fallback
+notifications only, not accelerated rendering or working-driver selection. The [32-bit audit](../AUDIT-32BIT.md) findings were
 corrected in r43 before its final image was frozen.
 
 ## Graphics: automatic selection without losing the screen

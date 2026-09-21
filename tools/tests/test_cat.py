@@ -16,7 +16,7 @@ def check(g,source,error=None,flags=0):
 def test():
   for ide in [False,True]:
     with Guest('cat-ide' if ide else 'cat-usb',ide=ide) as g:
-      assert g.call('app_count')==13
+      assert g.call('app_count')==14
       # Raw source and project files are never launchable applications.
       g.save('home/apps/raw.lua','return {}');g.debug.write(g.scratch,b'home/apps/raw.lua\0');assert not g.call('lua_app_install',g.scratch)
       good=package('return {}')
@@ -45,6 +45,7 @@ assert(scos.date().year>=2026)
 assert(scos.api_info().version==2)
 local iw,ih=scos.icon_size();assert(iw==24 and ih==24);scos.set_icon(scos.icons().chart)
 assert(type(scos.focused())=='boolean')
+assert(scos.notify('API notification'));assert(not scos.notify('throttled'))
 assert(scos.write('old.txt','hello'));assert(scos.exists('old.txt'))
 assert(scos.file_size('old.txt')==5);assert(scos.rename('old.txt','new.txt'))
 assert(scos.read('new.txt')=='hello');assert(#scos.files()==1)
@@ -103,11 +104,11 @@ end}'''
       g.snapshot('settings-short');g.close(settings)
       # Check all native apps remain C clients and repaint against the custom palette.
       windows=[]
-      for name in ['files','terminal','notepad','browser','calendar','settings','about','blackjack','sysmon','solitaire','studio']:
+      for name in ['files','terminal','notepad','browser','calendar','settings','about','blackjack','sysmon','solitaire','studio','applications']:
         w=g.launch(name);windows.append(w)
-      assert g.call('wm_win_count')==11;g.snapshot('native-apps')
+      assert g.call('wm_win_count')==12;g.snapshot('native-apps')
       for w in windows:g.close(w)
-      print('PASS confirmed persistent custom palette/background and all 11 built-in C app lifecycles',flush=True)
+      print('PASS confirmed persistent custom palette/background and all 12 built-in C app lifecycles',flush=True)
       # Studio: keyboard shortcuts drive its real editor/compiler/save/run path.
       studio=g.launch('studio');g.debug.send('c');g.press('ctrl','s');g.pause()
       assert g.read('home/projects/my-app.project')[:8]==b'SCOSPRJ1'
@@ -142,7 +143,7 @@ end}'''
         g.debug.write(g.scratch,path);g.call('app_open_document',g.scratch);g.type('\n')
         assert g.read('home/apps/'+name+'.cat')==g.read('home/demos/'+name+'.cat')
         assert g.call('wm_desk_vis_count')==icons_before+1
-        assert g.call('wm_dialog_active');g.type('\n');assert g.call('wm_win_count')==0
+        assert not g.call('wm_dialog_active');assert g.call('wm_win_count')==0
         child=g.launch(name);assert g.state(child)==(0,'');g.close(child)
       print('PASS optional CAT demos: not preinstalled, cancel, install and execute',flush=True)
       if ide:

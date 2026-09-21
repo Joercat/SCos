@@ -198,6 +198,13 @@ static void empty_pile(struct surface *s, int x, int y, u32 col, const char *hin
     if (hint) s_text(s, x + CW / 2 - 4, y + CH / 2 - 8, hint, col);
 }
 
+static int tableau_step(struct surface *s,struct sol *g,int col,int index){
+    int step=g->tabup[col][index]?UP_OFF:DOWN_OFF,total=0;
+    for(int i=0;i<g->tabn[col]-1;i++)total+=g->tabup[col][i]?UP_OFF:DOWN_OFF;
+    int room=s->h-78-TAB_Y-CH;if(room<1)room=1;
+    if(total>room){step=step*room/total;if(step<1)step=1;}return step;
+}
+
 static void sl_paint(struct window *w)
 {
     sol_layout(w, &sol_L);
@@ -239,10 +246,10 @@ static void sl_paint(struct window *w)
             int sel = (g->sel_src == c && i >= g->sel_idx);
             card_draw(s, x, y, g->tab[c][i], !g->tabup[c][i], t->main);
             if (sel) s_frame_rect(s, x - 2, y - 2, CW + 4, CH + 4, t->main);
-            y += g->tabup[c][i] ? UP_OFF : DOWN_OFF;
+            y += tableau_step(s,g,c,i);
         }
         if (g->hover == c && g->sel_src >= 0 && g->sel_src != c)
-            s_frame_rect(s, x - 2, y - UP_OFF - 2, CW + 4, CH + 4, t->main);
+            s_frame_rect(s, x - 2, y - tableau_step(s,g,c,g->tabn[c]-1) - 2, CW + 4, CH + 4, t->main);
     }
 
     /* status + button */
@@ -253,7 +260,8 @@ static void sl_paint(struct window *w)
     fmt_u32(n, (u32)(uptime_ms() / 1000) - g->t0); strcat(line, n); strcat(line, "s");
     strcat(line, "   Stock: ");
     fmt_u32(n, (u32)g->stockn); strcat(line, n);
-    s_text(s, s->w - s_text_width(line) - 12, s->h - 30, line, t->text);
+    s_fill(s,0,s->h-66,s->w,66,t->win_bg);
+    s_clip_text(s,12,s->h-60,line,t->text,s->w-24);
 
     int bx = 12, by = s->h - 38;
     u32 bg = g->hover_btn ? t->main : color_blend(t->win_bg,t->main,15);
@@ -261,8 +269,7 @@ static void sl_paint(struct window *w)
     s_fill(s, bx, by, 96, 28, bg);
     s_frame_rect(s, bx, by, 96, 28, fg);
     s_text(s, bx + 14, by + 6, "New Game", fg);
-    s_text(s, bx + 110, by + 6, "draw: stock - move: card, then pile",
-           ((t->main >> 1) & 0x7F7F7F));
+    s_clip_text(s,bx+110,by+6,"draw: stock - move: card, then pile",t->text,s->w-bx-122);
 
     if (g->won) {
         const char *m = "You win! All foundations complete.";
@@ -293,14 +300,14 @@ static void sl_mouse(struct window *w, struct mouse_event *e, int x, int y)
     g->hover_btn = (x >= 12 && x < 108 && y >= s->h - 38 && y < s->h - 10);
 
     int c = col_at(w, x);
-    if (c >= 0) g->hover = c;
+    if (c >= 0&&y<s->h-66) g->hover = c;
 
     if (e->type != MEV_BUTTON || !e->down || e->button != MBTN_LEFT) {
         if (old_sel != g->sel_src || old_hov != g->hover || old_btn != g->hover_btn) wm_redraw(w);
         return;
     }
     if (g->hover_btn) { sl_new(g); wm_redraw(w); return; }
-    if (g->won) return;
+    if (g->won||y>=s->h-66) return;
 
     /* top row */
     if (y >= TOP_Y && y < TOP_Y + CH && c >= 0) {
@@ -321,7 +328,7 @@ static void sl_mouse(struct window *w, struct mouse_event *e, int x, int y)
         /* find clicked card: walk offsets */
         int yy = TAB_Y, idx = -1;
         for (int i = 0; i < g->tabn[c]; i++) {
-            int h = (i == g->tabn[c] - 1) ? CH : (g->tabup[c][i] ? UP_OFF : DOWN_OFF);
+            int h = (i == g->tabn[c] - 1) ? CH : tableau_step(s,g,c,i);
             if (y >= yy && y < yy + h) idx = i;
             yy += h;
         }
@@ -372,7 +379,7 @@ static void sl_close(struct window *w)
 struct app app_solitaire = {
     .desktop_label = "Solitaire",
     .uses_data = 1, .id = "solitaire", .title = "Solitaire", .icon = ICON_SOL, .single = 1,
-    .def_w = 700, .def_h = 500,
+    .def_w = 700, .def_h = 540,.min_w=600,.min_h=500,
     .open = sl_open, .paint = sl_paint, .key = sl_key,
     .mouse = sl_mouse, .close = sl_close,
 };

@@ -1,6 +1,6 @@
 # App Studio, CAT packages and Lua API 2
 
-All **11 preinstalled desktop applications are native C**, including App Studio.
+All **12 preinstalled desktop applications are native C**, including App Studio.
 Counter and Sketch are optional Lua CAT demonstrations, not native built-ins. Themes can change their appearance; editable Lua does not
 replace system applications. Lua 5.4.9's real compiler and VM remain available
 for your own apps, loaded exclusively from **`.cat` packages**. Raw `.lua`
@@ -77,7 +77,7 @@ Older saved sample `.project` files are left alone, not deleted on upgrade.
 - Explicit paths elsewhere can be launched with `appstrt path/to/name.cat`.
 - Package metadata supplies the ID (1–30 lowercase ASCII letters/digits/dashes),
   not its filename. Native IDs and same-ID packages at different paths conflict.
-- Source limit is **64 KiB**; up to **32 external registrations per boot**,
+- Source limit is **64 KiB**; up to **32 simultaneous external registrations (uninstall reuses slots)**,
   within the 64-entry shared registry and 16-window limit. Deleting a package
   does not reclaim its registration until restart; launching it then fails.
 - Header, checksum, source and capability metadata are revalidated on launch.
@@ -107,7 +107,7 @@ not the framebuffer address. There is no user close/finalizer callback: closing
 or killing the window releases the entire runtime arena without executing
 additional app code.
 
-## `scos` API — 55 functions, `scos.version == 2`
+## `scos` API — 56 functions, `scos.version == 2`
 
 Drawing functions are **paint-only**. RGB colors are integers `0xRRGGBB`;
 coordinates are -4096..4096, drawing dimensions 0..4096, text ≤1024 bytes.
@@ -256,3 +256,16 @@ metadata; `file_editor` identifies the fallback document editor; `file_suffix` a
 `document` support native document associations and single-instance opening. The WM handles generic registered clients; its internal dialogs
 remain native WM UI. Adding a C app requires a build; adding a Lua app does not.
 There is no native ELF executable loader in this change.
+
+### Notifications and removal
+
+`scos.notify(text)` returns a boolean. Text is limited to 192 bytes, the title is
+the app ID, and calls share the existing five-second messaging throttle. Calls
+from paint are forbidden. These are normal expiring notifications, not sticky
+system warnings. The three-card desktop queue can evict older notices.
+
+Use native Applications or `appuninstall <id>` to remove a package, with
+default-no confirmation. App data and projects remain. Registered packages
+under `/home/apps` are deleted; original demos/external source packages remain.
+Installing from RAM-only storage is session-only. Supported ATA saves persist
+removal; save failures are explicitly reported rather than called durable.
