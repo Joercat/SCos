@@ -293,3 +293,40 @@ compositor's back buffer stays in RAM until the write-combining policy for a dri
 settled, which is logged rather than hidden. One ported family exists; adding another means porting its
 engine under the same ABI, and nothing about the loader, the disk layout, or the boot stub changes per
 family - which is the property this whole design was built to have.
+
+## 9a. Adding the next family, exactly
+
+The build discovers a family by directory: `drivers/gpu/<family>/module.c` is the only file a new port needs.
+`make gpu-modules` compiles every `.c` in it with `-fno-pie -mcmodel=small`, links them with `ld -r`, runs
+`tools/build_gpu_module.py` to emit `build/gpu/<family>.mod`, and `--verify` then re-packs and compares, so a
+module that is not byte-reproducible fails the build.  `makedisk.py` publishes each `.mod` as a flat file plus
+`DRVLIST.IDX`, and the stub opens *only* the one whose stem equals the family that detection named.  The
+Makefile needs no edit and neither does the loader: `gpu_module.c` knows only the ABI, never a family.  The
+kernel side is complete for a new family the moment `gpu_ids.h` gains its rules, which
+`tools/research/gen_gpu_tables.py` already generates for all fifteen.
+
+Measured state of the candidate ports, from the pinned Haiku tree (engine line counts are the 2D core only):
+
+| family | 2D core | total | what an added `module.c` would have to reproduce |
+|---|---|---|---|
+| `ati` | 496 | 6,556 | **done** - `RBBM_SOFT_RESET` + `RBBM_GUI_WAIT_UNTIL_IDLE` + readback, in `drivers/gpu/ati/` |
+| `neomagic` | 455 | 7,811 | `ACCR(STATUS)` bit 0 idle wait, `engine.control` depth bits 8-9 and pitch bits 10-12, the FIFO wait that only works on NM2090/NM2093 (the driver therefore idles the engine before *every* programming sequence, which removes the unbounded-FIFO risk entirely), and refusal of any depth other than 1/2/3 bytes |
+| `matrox` | 496 | 13,387 | FIFO-space polling on a shared register, plus per-operation context words |
+| `s3` | 710 | 7,039 | a serialised BLT register index pair rather than a MMIO window |
+| `intel_810` | 83 | 2,425 | the smallest 2D core in the set; no device model exists here either, so like NeoMagic it would be committed against hardware that can prove the readback, never against a guess |
+
+`neomagic` is the next one deliberately *not* committed here: QEMU has no NeoMagic device model, no machine in
+reach has one, and a driver whose engine state has never been read back is exactly the "we assume it works"
+claim this whole subsystem exists to prevent.  It lands with a machine that can prove it, or not at all.
+
+## 9b. What is refused by test, not by assertion
+
+`test_gpu_detect.py` has four layers: the generated tables against the pinned source, the detection unit
+compiled for the host against a simulated bus, real emulated PCI functions in a booted guest, and a tamper
+layer.  The last one edits `build/scos.img` in place - one payload byte of `ati.mod` flipped and
+`DRVLIST.IDX`'s crc for that file recomputed, so the boot stub's check passes - and boots it.  The kernel must
+print `gpu: module rejected: payload CRC mismatch (the file is corrupt)`, must not print `validated` or any
+readback figure, must report `unavailable (no driver module loaded for this chip)` while still showing the
+stub's opposite verdict (`module store: staged ... checksum verified`), and the window manager must still
+reach its main loop with the fallback notice on screen.  In other words the trust chain is tested by breaking
+the link the firmware is responsible for, and the image is restored afterwards.

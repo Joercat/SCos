@@ -16,8 +16,12 @@ Three layers, because each catches a different failure:
    actual kernel image, that the ATI device is matched by its real ID through the
    generated table, that unmatched devices stay unmatched, that no PCI configuration
    write happens, and that the console survives being enumerated.
+4. The same image with a tampered driver module: `build/scos.img` is edited in place (a payload byte
+   flipped, and DRVLIST.IDX's crc for that file recomputed so the boot stub's check still passes) and
+   booted, which proves the kernel validates the module on its own terms and that a refused driver
+   cannot take the desktop down with it.
 """
-import os, re, shlex, struct, subprocess, sys
+import os, re, shlex, struct, subprocess, sys, zlib
 from pathlib import Path
 import importlib
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -83,6 +87,66 @@ def pixels(g, name):
     data = path.read_bytes()
     magic, width, height, maxval, body = data.split(None, 4)
     return body[:int(width) * int(height) * 3]
+
+
+def test_tampered_module_is_refused():
+    """The driver on the disk is only as trustworthy as the check that guards it.
+
+    The boot stub verifies the module against `DRVLIST.IDX`, so the tamper below leaves that index
+    consistent with the file: a corrupt card, a bad image write or a deliberate edit can all produce
+    exactly that state.  What must still catch it is the kernel's own payload check, and what must still
+    be true afterwards is a usable machine on the CPU compositor.
+    """
+    image = ROOT / 'build' / 'scos.img'
+    module = ROOT / 'build' / 'gpu' / 'ati.mod'
+    if not image.exists() or not module.exists():
+        raise AssertionError('build/scos.img and build/gpu/ati.mod are required; run make first')
+    original = image.read_bytes()
+    clean = module.read_bytes()
+    at = 192 + 512                       # inside the loaded blocks, clear of the header
+    bad = bytearray(clean)
+    bad[at] ^= 0x01
+    needle = clean[at:at + 64]
+    pos = original.find(needle)
+    assert pos >= 0, 'module payload not found in the image (is the image older than the module?)'
+    assert original.find(needle, pos + 1) < 0, 'module payload appears twice; refusing to guess'
+    img = bytearray(original)
+    img[pos] ^= 0x01
+    # The index header is <II count,total>; the one entry is <8s name, I size, I crc32>.  Rewrite that
+    # crc so the stub accepts the tampered file, leaving only the kernel's check to refuse it.
+    hdr = struct.pack('<II', 1, len(clean))
+    hpos = img.find(hdr)
+    assert hpos >= 0, 'DRVLIST.IDX header not found in the image'
+    entry = bytes(img[hpos + 8:hpos + 8 + 16])
+    size, recorded = struct.unpack('<II', entry[8:16])
+    assert size == len(clean), (size, len(clean))
+    assert recorded == (zlib.crc32(clean) & 0xffffffff), 'the index crc does not match the module on disk'
+    struct.pack_into('<I', img, hpos + 8 + 12, zlib.crc32(bytes(bad)) & 0xffffffff)
+    image.write_bytes(bytes(img))
+    try:
+        with Guest('gpu-tamper', devices=['ati-vga']) as g:
+            log = g.serial()
+            assert 'gpu: module rejected: payload CRC mismatch (the file is corrupt)' in log, log[-2500:]
+            assert 'validated' not in log, log[-2500:]
+            assert 'engine verified in device memory' not in log, log[-2500:]
+            # The machine must still be a machine: the WM main loop, and no panic anywhere.
+            assert 'wm: entering main loop' in log, log[-2500:]
+            # The refusal must also reach the user, not just the log: that notice is the whole reason a
+            # missing or refused driver is a legible state instead of a silently slow machine.
+            assert 'No 2D engine bound' in log and 'No supported 2D engine was matched' in log, log[-2500:]
+            g.call('graphics_report', g.scratch, 4096)
+            report = g.string(g.scratch, 4096)
+            print(report)
+            assert 'unavailable (no driver module loaded for this chip)' in report, report
+            assert 'verified by device readback' not in report, report
+            # The stub's verdict and the kernel's are deliberately shown apart: the media passed the
+            # first and failed the second, which is what this whole layer is demonstrating.
+            assert 'module store: staged from' in report, report
+            print('PASS: a tampered driver module is refused by the kernel while the desktop carries on')
+    finally:
+        image.write_bytes(original)
+        restored = image.read_bytes() == original
+        assert restored, 'could not restore build/scos.img after the tamper test'
 
 
 def test_qemu_emulated_adapters():
@@ -177,6 +241,7 @@ def test():
     if not (ROOT / '.tools' / 'qemu' / 'bin' / 'qemu-system-x86_64').exists():
         raise AssertionError('QEMU bundle missing; run tools/setup_qemu.py before this suite')
     test_qemu_emulated_adapters()
+    test_tampered_module_is_refused()
 
 
 if __name__ == '__main__':

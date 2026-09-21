@@ -38,9 +38,9 @@ static void gpu_boot_notice(void)
                   "stays on the CPU. Run graphics in Terminal for details.", 0);
         return;
     }
-    wm_notify("GPU acceleration unavailable",
-              "Using CPU software rendering. No compatible GPU driver module was loaded. Run graphics "
-              "in Terminal for detected hardware.", 1);
+    wm_notify("No 2D engine bound",
+              "No supported 2D engine was matched on this machine, so the console is drawn by the CPU. "
+              "Run graphics in Terminal for the adapters that were detected and why.", 1);
 }
 
 void kernel_panic(const char *reason){panic(reason);}

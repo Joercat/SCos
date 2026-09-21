@@ -5,3 +5,6 @@ node_modules/
 __pycache__/
 
 .tools/
+
+# suite scratch (guest work dirs and run logs); nothing here is an artifact
+.scratch/
