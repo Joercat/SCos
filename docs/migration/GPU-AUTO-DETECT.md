@@ -160,8 +160,11 @@ contains that ID, and SCos will not pretend otherwise.
   inference, and no attempt to bind a family whose upstream table lacks the ID.
 * No runtime module loading. Each family is its own translation unit, which is what makes
   per-family selection possible at all, but the selective *loading* requirement still
-  waits on the disk-backed file work; the tables are read-only metadata (1,019 rows is
-  about 32 KB of `.rodata`), so boot cost is negligible and there is nothing to stream yet.
+  waits on the disk-backed file work; the tables are read-only metadata, measured as
+  18,743 bytes of `.text`-segment constants plus 17,280 bytes of tables in
+  `build/gpu-gpu_tables.o`, i.e. ~36 KB for all 1,019 rows and 15 family records, and
+  ~49 KB for the whole subsystem - so boot cost is negligible and there is nothing to
+  stream yet.
 
 ## 7. Next unit of work, in order
 
