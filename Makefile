@@ -43,8 +43,15 @@ $(BUILD)/efi-gpu_match.o: kernel/drivers/gpu/gpu_match.c kernel/drivers/gpu/gpu_
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
 $(BUILD)/BOOTX64.EFI: $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o
 	$(LD) -mi386pep --subsystem 10 --entry efi_main --image-base 0 --no-insert-timestamp --enable-reloc-section -o $@ $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o
-$(BUILD)/scos.img: $(BUILD)/BOOTX64.EFI $(BUILD)/kernel.elf tools/makedisk.py $(GPU_MODULE_FILES)
+$(BUILD)/scos.img: $(BUILD)/BOOTX64.EFI $(BUILD)/kernel.elf tools/makedisk.py
 	python3 tools/makedisk.py $(BUILD)
+
+# The module list is completed by the per-family rules below, which is later in this file than the
+# rule above - and make expands a rule's prerequisites as it reads it, so referring to
+# $(GPU_MODULE_FILES) there would silently expand to nothing and a driver edit would leave the
+# previous .mod on the disk while everything looked up to date.  Adding prerequisites to an
+# existing target is cumulative, so this is the same dependency, evaluated at the right time.
+$(BUILD)/scos.img: $(GPU_MODULE_FILES)
 
 # ---------------------------------------------------------- GPU driver modules ----
 # One loadable display module per GPU family, from drivers/gpu/<family>/.  These are separate

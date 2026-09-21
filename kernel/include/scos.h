@@ -458,6 +458,24 @@ struct prefs { int mouse_sens; int dbl_ms; };
 const struct prefs *prefs_get(void);
 void prefs_set_mouse(int sens);
 void prefs_set_dbl(int ms);
+/* ------------------------------------------------------ drag and drop ---- */
+/* Two payloads only, because those are the two things a desktop can carry: an application id or a
+ * path.  The source (Files, the launcher) starts a drag, the WM resolves a drop from what is under the
+ * pointer, and wm_dnd_target() answers "what would this do?" without doing it - so the behaviour is
+ * assertable from a test on a known geometry instead of inferred from a screenshot. */
+#define DND_APP 0
+#define DND_FILE 1
+int wm_dnd_begin(int kind, const char *payload, const char *label);
+int wm_dnd_active(void);
+int wm_dnd_cancel(void);
+int wm_dnd_drop(int px, int py);
+int wm_dnd_target(int px, int py, char *out, int cap);
+/* A desktop icon's own actions, as one table that the right-click menu, the keyboard paths and the
+ * regression suite all drive, so no two of them can describe the desktop differently. */
+int wm_desk_actions(int item, const char **labels, int max);
+int wm_desk_invoke(int item, int action);
+int wm_desk_app_state(const char *app_id);   /* 1 hidden, 0 visible, -1 no desktop entry */
+int wm_desk_show_app(const char *app_id);
 void wm_desktop_restore(void);
 void wm_desktop_install(const char *id);
 int wm_desk_vis_count(void);

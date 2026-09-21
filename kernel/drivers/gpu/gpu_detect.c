@@ -134,9 +134,12 @@ void gpu_init(const struct boot_framebuffer *fb)
             klog("gpu: PCI %u:%u.%u %x:%x sub=%x matched=%s",
                  g->bus, g->slot, g->function, g->vendor, g->device, g->subclass,
                  g->match ? g->match->family : "none");
+            /* Deliberately "at detection", not "none": this line is written before the module pass
+             * below has loaded anything, and a reader who greps one line of a boot log must not be able
+             * to mistake the order of events for the state of the machine. */
             klog("gpu:   chip=%s engine=%s",
                  g->chip && g->chip[0] ? g->chip : "(no ID table match)",
-                 g->bound ? "bound" : "none, CPU compositor");
+                 g->bound ? "bound (in-tree port)" : "none at detection, CPU compositor");
             device_count++;
         }
     }
@@ -171,11 +174,21 @@ void gpu_init(const struct boot_framebuffer *fb)
             if (!g->match || g->bound) continue;
             if (strncmp(handoff->module_name, g->match->family,
                         strlen(g->match->family)) != 0) continue;
-            if (gpu_module_bind(g, handoff) == 0) { module_bound = 1; break; }
+            if (gpu_module_bind(g, handoff) == 0) {
+                klog("gpu: %x:%x.%x %s engine in use from module %s", g->bus, g->slot, g->function,
+                     g->match->family, g->chip ? g->chip : "this family");
+                module_bound = 1;
+                break;
+            }
         }
     }
     if (!bound && !module_bound)
         klog("gpu: no engine bound, rendering stays on the CPU compositor");
+    else if (!gpu_engine_drives_output())
+        klog("gpu: engine drives its own aperture only: another function feeds the console, so output "
+             "stays on the CPU");
+    else
+        klog("gpu: engine drives the console; solid output rectangles go through the GPU");
 }
 
 int gpu_device_count(void) { return device_count; }
@@ -245,7 +258,17 @@ int gpu_engine_move_display(int x, int y)
 
 int gpu_engine_available(void)
 {
-    return bound && bound->ops ? 1 : 0;
+    return (bound && bound->ops) || gpu_module_ops() ? 1 : 0;
+}
+
+int gpu_engine_drives_output(void)
+{
+    /* A statically linked port is compiled for the console device, so it drives the output by
+     * construction.  A module is bound to whichever function matched its family, which is not
+     * necessarily the one feeding the screen. */
+    if (bound && bound->ops) return 1;
+    const struct gpu_device *owner = gpu_scanout_device();
+    return (owner && owner->module_ops) ? 1 : 0;
 }
 
 /* ------------------------------------------------------------ reporting ---- */
@@ -346,14 +369,31 @@ void gpu_report(char *out, size_t capacity)
         put_line(&w, "");
         const struct gpu_driver *port = gpu_port_for(g->match->family);
         put(&w, "  SCos port: ");
-        put_line(&w, port && port->state != GPU_PORT_NONE ? "bound" : "not ported yet");
-        if (port && port->gap) {
+        if (g->module_ops)
+            put_line(&w, "driver module loaded from storage for this family; engine verified by device "
+                         "readback");
+        else
+            put_line(&w, port && port->state != GPU_PORT_NONE ? "bound" : "not ported yet");
+        /* The gap text says what was missing before a driver existed.  Once a module is bound for this
+         * function it would read as a contradiction, so it is left to the families that really are
+         * still waiting. */
+        if (port && port->gap && !g->module_ops) {
             put(&w, "  before GPU work is possible: ");
             put(&w, port->gap);
             put_line(&w, "");
         }
-        put_line(&w, g->bound ? "  path in use: bound engine for supported operations"
-                             : "  path in use: CPU compositor into the firmware scanout");
+        /* Which path this function's pixels actually take.  A module bound on a function that does not
+         * feed the console is real and verified, but it is not what the user sees, so the line says
+         * both halves instead of claiming an acceleration that the display cannot show. */
+        if (g->module_ops)
+            put_line(&w, gpu_engine_drives_output()
+                ? "  path in use: module engine paints this function's scanout; solid rectangles skip "
+                  "the CPU copy"
+                : "  path in use: module engine verified on this function, but another PCI function "
+                  "feeds the console, so the CPU compositor paints it");
+        else
+            put_line(&w, g->bound ? "  path in use: bound engine for supported operations"
+                                 : "  path in use: CPU compositor into the firmware scanout");
     }
     if (device_count > REPORT_DEVICE_LIMIT) {
         put(&w, "  (");

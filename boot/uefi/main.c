@@ -85,8 +85,8 @@ static int scan_display(uint8_t bus,uint8_t depth,uint8_t *seen,unsigned *visite
   if((header&0x7f)==1){
    uint32_t busnumbers=config_read(bus,slot,0,0x18);
    uint8_t secondary=(uint8_t)(busnumbers>>8),subordinate=(uint8_t)(busnumbers>>16);
-   for(uint8_t next=secondary+1;next<=subordinate;next++){
-    if(next==0||next>=255||seen[next])continue;
+   for(unsigned next=(unsigned)secondary+1;next<(unsigned)subordinate&&next<255u;next++){
+    if(!next||seen[next])continue;
     seen[next]=1;if(*visited>=64)break;(*visited)++;
     if(scan_display(next,depth+1,seen,visited,found_bus,found_slot,found_fn,found_vendor,
                     found_device,found_subclass,found_match)&&*found_match)return 1;
@@ -226,6 +226,43 @@ status EFIAPI efi_main(handle image,struct system_table *table){
  phase="open boot volume";s=fs->open_volume(fs,&root);if(FAILED(s))goto fail;
  phase="read kernel ELF";s=read_file(root,(const char16*)u"\\SCOS\\KERNEL.ELF",&elf,&elf_size);
  if(!FAILED(s)){phase="read kernel CRC";s=read_file(root,(const char16*)u"\\SCOS\\KERNEL.CRC",&checksum,&checksum_size);}
+ /* Choose the one GPU driver module this machine needs, while the boot volume handle is still
+  * open: it is closed immediately below and nothing may use it afterwards.  The bytes land in a
+  * pool for now and move into the executable boot-arena region once that region exists. */
+ void *module_data=0;size_t module_size=0;void *index_data=0;size_t index_size=0;
+ uint32_t store_count=0,select_state=0;char selected_family[16];selected_family[0]=0;
+ {
+  uint8_t seen[256];memset(seen,0,sizeof(seen));unsigned visited=0;
+  uint8_t gbus=0,gslot=0,gfn=0,gsub=0;uint16_t gvendor=0,gdevice=0;
+  const struct gpu_match *match=0;
+  scan_display(0,0,seen,&visited,&gbus,&gslot,&gfn,&gvendor,&gdevice,&gsub,&match);
+  const char *family=match?gpu_family_name(match):"";
+  if(match){
+   unsigned n=0;while(n<15&&family[n]){selected_family[n]=family[n];n++;}selected_family[n]=0;
+   char16 path[32];family_file_name(family,path);
+   phase="read gpu driver module";s=read_file(root,path,&module_data,&module_size);
+   if(FAILED(s)||module_size>GPU_MODULE_REGION||!module_size){
+    select_state=2;
+    if(module_data){bs->free_pool(module_data);module_data=0;}
+    module_size=0;
+    /* EFI_NOT_FOUND: the disk simply has no module for this family, which is a normal state.  Any
+     * other failure is an I/O problem and must not be reported as "not present". */
+    if((uint64_t)(uint64_t)(int64_t)s==0x800000000000000Eull)
+     log("No driver module on disk for the detected GPU family; CPU compositor\r\n");
+    else log("GPU driver module could not be read; CPU compositor\r\n");
+   }else{
+    select_state=1;
+    log("GPU driver module read for this chip\r\n");
+   }
+  }else log("No GPU family matched by the generated tables; no module read\r\n");
+  /* The index is a small fixed table, not a directory walk: it lets the kernel report how many
+   * modules exist on the disk without the firmware having opened any of them. */
+  {void *index=0;size_t bytes=0;status found=read_file(root,(const char16*)u"\\SCOS\\DRVLIST.IDX",&index,&bytes);
+   if(!FAILED(found)&&index&&bytes>=8){
+    if(bytes>BOOT_INDEX_MAX)bytes=BOOT_INDEX_MAX;
+    index_data=index;index_size=bytes;store_count=*(uint32_t*)index;
+   }else if(index)bs->free_pool(index);}
+ }
  {status close=root->close(root);root=0;if(!FAILED(s)&&FAILED(close)){phase="close boot volume";s=close;}}
  if(FAILED(s))goto fail;
  if(checksum_size!=4||crc32(elf,elf_size)!=*(uint32_t*)checksum){log("Kernel file CRC mismatch\r\n");s=ERROR(27);goto fail;}
@@ -244,56 +281,23 @@ status EFIAPI efi_main(handle image,struct system_table *table){
  if(FAILED(s)||elapsed<10000||elapsed>UINT64_C(1000000000)){s=ERROR(3);goto fail;}
  h->tsc_hz=elapsed*100;
  h->map_address=arena+4096;
- /* Choose the one GPU driver module this machine needs. */
- {
-  uint8_t seen[256];memset(seen,0,sizeof(seen));unsigned visited=0;
-  uint8_t gbus=0,gslot=0,gfn=0,gsub=0;uint16_t gvendor=0,gdevice=0;
-  const struct gpu_match *match=0;
-  scan_display(0,0,seen,&visited,&gbus,&gslot,&gfn,&gvendor,&gdevice,&gsub,&match);
-  const char *family=match?gpu_family_name(match):"";
-  if(match){
-   char16 path[32];family_file_name(family,path);
-   struct file *volume=0;
-   status opened=root?root->open(root,&volume,path,1,0):ERROR(2);
-   if(!FAILED(opened)){
-    uint64_t size=0;
-    if(!FAILED(volume->get_position(volume,&size))&&size&&size<=(uint64_t)GPU_MODULE_REGION){
-     uint64_t module_area=GPU_MODULE_AREA(arena);
-     size_t done=0;
-     memset((void*)(uintptr_t)module_area,0,GPU_MODULE_REGION);
-     while(done<size){
-      size_t part=(size_t)size-done;
-      status r=volume->read(volume,&part,(uint8_t*)(uintptr_t)(module_area+done));
-      if(FAILED(r)||!part||done+part>size){done=0;break;}
-      done+=part;
-     }
-     if(done==size){
-      h->module_address=module_area;h->module_bytes=done;h->module_state=1;
-      h->module_crc=crc32((const uint8_t*)(uintptr_t)module_area,(size_t)done);
-      unsigned n=0;while(n<15&&family[n]){h->module_name[n]=family[n];n++;}h->module_name[n]=0;
-      log("GPU driver module selected for this chip\r\n");
-     }else h->module_state=3;
-    }else h->module_state=2;
-    volume->close(volume);
-   }else h->module_state=2;
-   if(h->module_state!=1)log("No driver module on disk for the detected GPU family; CPU compositor\r\n");
-   /* The directory index is a small fixed table: it lets the kernel say how many modules exist
-    * without the firmware having opened any of them. */
-   {void *index=0;size_t index_size=0;
-    if(!FAILED(read_file(root,(const char16*)u"\\SCOS\\DRVLIST.IDX",&index,&index_size))&&index){
-     if(index_size>BOOT_INDEX_MAX)index_size=BOOT_INDEX_MAX;
-     memcpy((void*)(uintptr_t)BOOT_INDEX_ADDRESS(arena),index,index_size);
-     h->index_address=BOOT_INDEX_ADDRESS(arena);h->module_index_size=(uint32_t)index_size;
-     h->module_store_count=*(uint32_t*)index;
-     bs->free_pool(index);
-    }}
-   char detail[96];
-   detail[0]='g';detail[1]='p';detail[2]='u';detail[3]=':';detail[4]=' ';detail[5]='f';
-   detail[6]='a';detail[7]='m';detail[8]='i';detail[9]='l';detail[10]='y';detail[11]=' ';
-   unsigned d=12;const char *f=family;while(*f&&d<80)detail[d++]=*f++;
-   detail[d++]=0;log(detail);
-  }else log("No GPU family matched by the generated tables; no module read\r\n");
+ if(select_state==1&&module_data&&module_size){
+  uint64_t module_area=GPU_MODULE_AREA(arena);
+  memset((void*)(uintptr_t)module_area,0,GPU_MODULE_REGION);
+  memcpy((void*)(uintptr_t)module_area,module_data,module_size);
+  h->module_address=module_area;h->module_bytes=module_size;h->module_state=1;
+  h->module_crc=crc32((const uint8_t*)(uintptr_t)module_area,module_size);
+  unsigned n=0;while(n<15&&selected_family[n]){h->module_name[n]=selected_family[n];n++;}
+  h->module_name[n]=0;
+ }else h->module_state=select_state?select_state:0;
+ if(index_data&&index_size){
+  memcpy((void*)(uintptr_t)BOOT_INDEX_ADDRESS(arena),index_data,index_size);
+  h->index_address=BOOT_INDEX_ADDRESS(arena);h->module_index_size=(uint32_t)index_size;
+  h->module_store_count=store_count;
  }
+ if(module_data)bs->free_pool(module_data);
+ if(index_data)bs->free_pool(index_data);
+ log(selected_family[0]?"GPU module staged for the kernel loader\r\n":"no GPU module staged; CPU compositor\r\n");
  log("ELF64 and GOP ready; leaving firmware services\r\n");
  /* Nothing allocating, printing through firmware or closing files may occur
   * between GetMemoryMap and ExitBootServices. Retry only with fresh map/key.

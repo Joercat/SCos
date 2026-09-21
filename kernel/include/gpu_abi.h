@@ -22,7 +22,14 @@
  * bound, may program the device's registers.  The validation below exists to catch a corrupted,
  * truncated, mismatched or ABI-skewed module before it can execute; it is not a defence against a
  * hostile module that someone has deliberately built and written to the boot disk.
- */
+  *
+ * This file is SCos' own work and carries no upstream licence obligation: the format is designed
+ * here so that a driver family can be shipped as a file instead of being linked into the kernel.
+ * A module written against it is free to be derived from anything whose licence permits that - the
+ * ported engine in drivers/gpu/ati/ descends from Haiku's rage128 accelerator (MIT), and this
+ * header neither copies from it nor grants anything on its behalf.  Each module file states its own
+ * provenance; third_party/README.md records the same.
+*/
 
 #include <stdint.h>
 /* Spelled through stdint exactly like the kernel's own headers, so this file can be included on

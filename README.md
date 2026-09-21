@@ -120,7 +120,14 @@ See [historical r43 behavior and limitations](docs/RELEASE-r43.md).
 
 ## Application management and graphics status
 
-`appstrt applications` opens the native manager. `appuninstall <id>` requests
+There is no application-manager window: each function is reached from the surface it acts on. Right-click
+a desktop icon for that icon's own menu (open, pin or unpin, hide, and for a `.cat` app, uninstall),
+right-click empty wallpaper to restore hidden icons or open Files or Terminal, right-click a taskbar
+entry to unpin it or put its icon back, and right-click a row in Files to open it with another
+application, rename it, pin it to the desktop or be sent to `rm -s`. Pressing an entry in the launcher and
+moving drags that application onto the desktop (installing its shortcut) or onto the taskbar (pinning
+it); dragging a row out of Files drops the file onto a window (open it there), a taskbar entry (open it
+with that application) or the desktop (a shortcut). `appuninstall <id>` requests
 default-no confirmation in Terminal or TTY. Built-ins cannot be uninstalled;
 external removal closes instances and removes the registered installed package,
 shortcuts and pins, but keeps projects, app data and original external sources.

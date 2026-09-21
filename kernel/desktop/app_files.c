@@ -13,7 +13,30 @@ struct files {
     int last_down_row;
     char targets[64][192]; /* stable app IDs or pinned paths, never parsed labels */
     int scroll;             /* r36: first visible row (wheel scrolling) */
+
+    /* Everything a test or another component might mirror by offset ends here.  Below this line the
+     * layout is private to this file, so new state is appended, never inserted. */
+    int press_row;          /* row a left button is currently held on, for dragging out */
+    int press_x, press_y;
 };
+
+/* tools/tests/test_management.py reads a live Files window's state out of the guest by mirroring this
+ * struct byte for byte, because that is the only way to drive a real double-click on the row it means
+ * rather than on a row index the widget happens to like.  That makes the field order an interface, and a
+ * field added in the middle would make the test parse nonsense instead of failing; so the contiguity it
+ * assumes is asserted here, at build time, where the compiler knows the layout. */
+#define FILES_OFF(field) __builtin_offsetof(struct files, field)
+#define FILES_SIZE(field) sizeof(((struct files *)0)->field)
+_Static_assert(FILES_OFF(n) == FILES_OFF(path) + FILES_SIZE(path) + FILES_SIZE(names),
+               "files: path and names must stay packed at the head of the struct (test mirror)");
+_Static_assert(FILES_OFF(synth) == FILES_OFF(n) + 3 * 4,
+               "files: no padding before synth (test mirror)");
+_Static_assert(FILES_OFF(notice) == FILES_OFF(synth) + FILES_SIZE(synth),
+               "files: notice must immediately follow synth (test mirror)");
+_Static_assert(FILES_OFF(targets) == FILES_OFF(last_down_row) + 4,
+               "files: targets must immediately follow last_down_row (test mirror)");
+_Static_assert(FILES_OFF(scroll) == FILES_OFF(targets) + FILES_SIZE(targets),
+               "files: scroll must immediately follow targets (test mirror)");
 
 #define TB_Y 8
 #define TB_H 26
@@ -88,6 +111,15 @@ static void files_close(struct window *w)
     w->data = NULL;
 }
 
+/* The last component of a path, for a drag label: the pinned rows carry full paths, and a shadow that
+ * reads "/home/apps/counter.cat" is unreadable next to the cursor. */
+static const char *files_base_name(const char *path)
+{
+    const char *base = path;
+    for (const char *q = path; *q; q++) if (*q == '/') base = q + 1;
+    return base;
+}
+
 static int files_is_dir_row(struct files *f, int row)
 {
     struct vfs_node *dir = vfs_lookup(f->path);
@@ -115,10 +147,14 @@ static void files_open_row(struct window *w,int row){
 }
 
 /* ------------------------------------------------------- context menus --- */
-static const char *menu_file_items[] = { "Open", "Delete", "Pin to Desktop" };
+/* A row's menu is the set of things that can be done to *this* entry, so a directory and a file do not
+ * share one list: nothing opens a folder, and a folder can still be named, pinned and deleted. */
+static const char *menu_file_items[] = { "Open", "Open with...", "Rename...", "Pin to Desktop", "Delete" };
+static const char *menu_dir_items[] = { "Open", "Rename...", "Pin to Desktop", "Delete" };
+static const char *menu_shortcut_items[] = { "Open" };
 static const char *menu_bg_items[] = { "New Folder", "Refresh" };
 
-struct fm_ctx { struct window *w; int row,id; };
+struct fm_ctx { struct window *w; int row,id,dir; };
 
 static struct window *files_dialog_win;
 static int files_dialog_id;
@@ -145,21 +181,121 @@ static void newfolder_cb(int ok, const char *text, void *ud)
     wm_redraw(files_dialog_win);
 }
 
+/* What a row's menu can do is decided by the entry, not by the file manager's mood: a document goes to
+ * another application, a name gets changed in place, and a deletion still belongs to `rm -s` in the
+ * terminal, because an explorer that silently unlinks files is how data is lost.  Each branch reads the
+ * label rather than the index, so the two lists (file, directory) cannot disagree with the code. */
+static char rename_dir[256], rename_old[128], rename_ask[192];
+static char openwith_path[256];
+static int openwith_count;
+static char openwith_ids[16][32];
+static const char *openwith_labels[16];
+static char openwith_text[16][40];
+
+static void files_rename_cb(int ok, const char *text, void *ud)
+{
+    (void)ud;
+    struct window *w = files_dialog_win;
+    if (!ok || !text || !text[0] || !w || !w->data || w->id != files_dialog_id) return;
+    struct files *f = w->data;
+    if (f->notice) { wm_error_popup("/system is terminal-only."); return; }
+    char to[300];
+    if ((int)strlen(text) > 120) { wm_error_popup("That name is too long."); return; }
+    for (const char *q = text; *q; q++)
+        if (*q == '/') { wm_error_popup("Names cannot contain a slash."); return; }
+    strcpy(to, rename_dir);
+    if (to[strlen(to) - 1] != '/') strcat(to, "/");
+    strcat(to, text);
+    char from[300];
+    strcpy(from, rename_dir);
+    if (from[strlen(from) - 1] != '/') strcat(from, "/");
+    strcat(from, rename_old);
+    if (vfs_lookup(to)) { wm_error_popup("That name is already taken here."); return; }
+    if (vfs_rename(from, to)) {
+        char log[340];
+        strcpy(log, "renamed ");
+        strncat(log, from, 150);
+        strncat(log, " to ", 8);
+        strncat(log, to, 150);
+        app_log(w, log);
+    } else wm_error_popup("Rename failed: the name is in use or the entry is protected.");
+    strcpy(f->path, rename_dir);
+    files_load(f);
+    wm_redraw(w);
+}
+
+static void openwith_cb(int item, void *ud)
+{
+    struct fm_ctx *ctx = ud;
+    if (item >= 0) {
+        /* The window is only needed to repaint the list afterwards; a document that opens elsewhere is
+         * not this file manager's business. */
+        struct window *w = ctx && ctx->w && ctx->w->id == ctx->id ? ctx->w : 0;
+        const char *id = openwith_ids[item];
+        if (id && id[0] && !wm_open_app(id, openwith_path) && w)
+            wm_notify("Cannot open it there", "That application did not take the file.", 1);
+        if (w) wm_redraw(w);
+    }
+    pfree(ctx, sizeof(*ctx));
+}
+
 static void file_menu_cb(int item, void *ud)
 {
     struct fm_ctx *ctx = ud;
     struct window *w = ctx->w;
     if(item<0||w->id!=ctx->id||!w->data){pfree(ctx,sizeof(*ctx));return;}
     struct files *f = w->data;
-    if (item == 0) {
-        files_open_row(w,ctx->row);
-        pfree(ctx, sizeof(*ctx));
-    } else if (item == 2) {
-        char full[300];
-        if(!files_full_path(f,ctx->row,full)){pfree(ctx,sizeof(*ctx));wm_error_popup("Path too long.");return;}
+    const char *label = ctx->dir ? menu_dir_items[item] : menu_file_items[item];
+    char full[300];
+    if (strcmp(label, "Open")) {
+        if (!files_full_path(f, ctx->row, full)) {
+            pfree(ctx, sizeof(*ctx));
+            wm_error_popup("Path too long.");
+            return;
+        }
         if (files_is_dir_row(f, ctx->row)) strcat(full, "/");
+    }
+    if (!strcmp(label, "Open")) {
+        files_open_row(w, ctx->row);
+        pfree(ctx, sizeof(*ctx));
+    } else if (!strcmp(label, "Pin to Desktop")) {
         wm_desktop_pin_file(full);
         pfree(ctx, sizeof(*ctx));
+    } else if (!strcmp(label, "Rename...")) {
+        strcpy(rename_dir, f->path);
+        strcpy(rename_old, f->names[ctx->row]);
+        files_dialog_win = w;
+        files_dialog_id = w->id;
+        /* The current name goes in the question, not in the field: this dialog has no text selection, so
+         * pre-filling it would make the user delete the old name by hand before typing the new one. */
+        strcpy(rename_ask, "New name for \"");
+        strncat(rename_ask, f->names[ctx->row], sizeof(rename_ask) - strlen(rename_ask) - 3);
+        strcat(rename_ask, "\":");
+        /* An empty field, not a missing one: wm_dialog only builds the text input when `input` is a real
+         * string, and a NULL there turns this into a yes/no question with nowhere to type. */
+        wm_dialog("Rename", rename_ask, "", files_rename_cb, 0);
+        pfree(ctx, sizeof(*ctx));
+    } else if (!strcmp(label, "Open with...")) {
+        /* One line per application that can take a document.  The list is built here, from the registry,
+         * because which apps accept a path is a property of the app set, not of this row. */
+        openwith_count = 0;
+        for (int i = 0; i < app_count() && openwith_count < 16; i++) {
+            struct app *a = app_at(i);
+            if (!a || a->id[0] == '_' || (!a->document && !a->open)) continue;
+            strcpy(openwith_ids[openwith_count], a->id);
+            strncpy(openwith_text[openwith_count], a->title, sizeof(openwith_text[0]) - 1);
+            openwith_text[openwith_count][sizeof(openwith_text[0]) - 1] = 0;
+            openwith_labels[openwith_count] = openwith_text[openwith_count];
+            openwith_count++;
+        }
+        struct fm_ctx *nc = palloc(sizeof(*nc));
+        if (!nc) { pfree(ctx, sizeof(*ctx)); wm_error_popup("No memory for the menu."); return; }
+        nc->w = w; nc->id = w->id; nc->row = -1; nc->dir = 0;
+        strcpy(openwith_path, full);
+        pfree(ctx, sizeof(*ctx));
+        if (!openwith_count) { wm_notify("Nothing else can open this", "No installed application "
+                                       "accepts documents.", 1); return; }
+        wm_menu(mx_abs(w, 40), 60, openwith_labels, openwith_count, openwith_cb, nc);
     } else {
         pfree(ctx,sizeof(*ctx));
         wm_dialog("Files","Delete files with rm -s in the terminal.",NULL,NULL,NULL);
@@ -282,7 +418,27 @@ static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
     }
     if (f->hover_btn != old_btn || f->hover_row != old_row) wm_redraw(w);
 
-    if (e->type != MEV_BUTTON || !e->down) return;
+    /* Dragging a row out of the list is how a file reaches the desktop, another window, or a taskbar
+     * entry.  The row is remembered on the press and only becomes a drag past six pixels of movement -
+     * the WM uses the same distance for its own icon drags, so a click cannot turn into a pick-up by
+     * accident, and a pick-up cannot lose the click. */
+    if (e->type == MEV_MOVE) {
+        if (f->press_row >= 0 && f->press_row < f->n && (x - f->press_x > 6 || x - f->press_x < -6 ||
+                                                         y - f->press_y > 6 || y - f->press_y < -6)) {
+            int row = f->press_row;
+            char full[300];
+            f->press_row = -1;
+            if (!f->synth[row] && files_full_path(f, row, full))
+                wm_dnd_begin(DND_FILE, full, f->names[row]);
+            else if (f->synth[row] == 2)
+                wm_dnd_begin(DND_FILE, f->targets[row], files_base_name(f->targets[row]));
+        }
+        return;
+    }
+    if (e->type != MEV_BUTTON || !e->down) {
+        if (e->type == MEV_BUTTON) f->press_row = -1;
+        return;
+    }
 
     if (e->button == MBTN_RIGHT) {
 
@@ -290,13 +446,23 @@ static void files_mouse(struct window *w, struct mouse_event *e, int x, int y)
         if(!ctx){err_notify("files","Not enough memory for menu.",NULL,0);return;}
         ctx->id=w->id;ctx->w = w;
         ctx->row = f->hover_row;
-        if (f->hover_row >= 0)
-            wm_menu(mx_abs(w, x), my_abs(w, y), menu_file_items, f->synth[f->hover_row]?1:3, file_menu_cb, ctx);
-        else
+        if (f->hover_row >= 0) {
+            ctx->dir = files_is_dir_row(f, f->hover_row);
+            /* A synthesised row is an application shortcut or a pinned path, and the only thing to do
+             * with it here is open it: it is not a file in this folder, so "rename" would lie. */
+            if (f->synth[f->hover_row])
+                wm_menu(mx_abs(w, x), my_abs(w, y), menu_shortcut_items, 1, file_menu_cb, ctx);
+            else
+                wm_menu(mx_abs(w, x), my_abs(w, y), ctx->dir ? menu_dir_items : menu_file_items,
+                        ctx->dir ? 4 : 5, file_menu_cb, ctx);
+        } else
             wm_menu(mx_abs(w, x), my_abs(w, y), menu_bg_items, 2, bg_menu_cb, ctx);
         return;
     }
     if (e->button != MBTN_LEFT) return;
+    f->press_row = f->hover_row;
+    f->press_x = x;
+    f->press_y = y;
 
     if (f->hover_btn >= 0) {
         switch (f->hover_btn) {

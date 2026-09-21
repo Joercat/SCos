@@ -121,12 +121,45 @@ def test_qemu_emulated_adapters():
         g.call('graphics_report', g.scratch, 4096)
         report = g.string(g.scratch, 4096)
         print(report)
-        assert 'GPU acceleration: unavailable (no hardware backend linked)' in report
         assert 'Detection is not driver support' in report, report
         assert 'config writes during detection: 0' in report, report
         assert 'family: ati' in report and 'chip: RAGE 128 PRO GL' in report, report
-        assert 'SCos port: not ported yet' in report, report
-        assert 'before GPU work is possible:' in report, report
+
+        # The module pipeline, measured in the guest rather than argued: the chip's family must have
+        # been opened from \SCOS\, validated, relocated and *verified by readback* - a module that only
+        # loaded proves nothing.  The accounting line is the point of one file per family, so it is
+        # asserted here too: bytes that exist on the disk and were never touched.
+        assert re.search(r'gpu: module \d+ module\(s\), \d+ B on the boot disk: \d+ B opened '
+                         r'for this chip, \d+ B never read', log), log[-2500:]
+        validated = [l for l in lines if ') validated' in l]
+        assert len(validated) == 1, log[-2500:]
+        bound = [l for l in lines if 'bound: engine verified in device memory' in l]
+        assert len(bound) == 1, log[-3000:]
+        tested = re.search(r'\((-?\d+)/(-?\d+) pixels\)', bound[0])
+        assert tested and int(tested.group(1)) == int(tested.group(2)) > 0, bound[0]
+        assert 'gpu: module rejected' not in log, log[-2500:]
+
+        # In this VM the console belongs to the firmware's primary adapter, so the report must say the
+        # engine was verified on the second function and must NOT claim the desktop is being painted by
+        # it: an honest report is what makes the difference between "the driver works" and "the driver
+        # works and is used" observable from the outside.
+        assert 'GPU acceleration: driver module' in report, report
+        assert 'verified by device readback' in report, report
+        assert 'not used for output: another PCI function feeds this display' in report, report
+        assert 'module engine verified on this function, but another PCI function feeds the console' \
+            in report, report
+        assert 'used for solid output rectangles' not in report, report
+        assert 'driver module loaded from storage for this family' in report, report
+
+        # The compositor boundary itself, not just the log: an engine must be reachable from the code
+        # that decides whether to hand a rectangle to the GPU, and on this machine the answer to
+        # "does the bound engine feed the console?" must be no - which is exactly why the desktop is
+        # still drawn by the CPU here, and why that is the correct result rather than a missing feature.
+        assert g.call('gpu_engine_available') == 1, 'the bound module never reached the engine boundary'
+        assert g.call('gpu_engine_drives_output') == 0, 'the console belongs to the firmware adapter'
+        # A fill the engine accepts must return success on a rectangle inside its own surface.
+        assert g.call('gpu_engine_fill_rectangle', 976, 736, 16, 16, 0x00c0ffee) == 0
+        assert g.call('gpu_engine_wait_idle') == 0
         assert 'match: none' in report, report
         assert 'Scanout owner' in report, report
 

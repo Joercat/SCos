@@ -1,6 +1,8 @@
 # App Studio, CAT packages and Lua API 2
 
-All **12 preinstalled desktop applications are native C**, including App Studio.
+All **11 preinstalled desktop applications are native C**, including App Studio. There is no
+application-manager window: pinning, hiding, uninstalling and installing are per-icon and per-surface
+affordances, not a hub.
 Counter and Sketch are optional Lua CAT demonstrations, not native built-ins. Themes can change their appearance; editable Lua does not
 replace system applications. Lua 5.4.9's real compiler and VM remain available
 for your own apps, loaded exclusively from **`.cat` packages**. Raw `.lua`

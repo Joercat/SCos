@@ -124,14 +124,18 @@ int wm_taskbar_pin(const char *id){
 }
 static void pins_load(void){
     pin_count=0;u32 size=0;char *p=vfs_read("home/taskbar.txt",&size);
-    if(!p){const char *defaults[]={"files","terminal","studio","applications"};for(unsigned i=0;i<4&&pin_count<wm_taskbar_capacity();i++)if(app_find(defaults[i]))strcpy(task_pins[pin_count++],defaults[i]);return;}
+    if(!p){const char *defaults[]={"files","terminal","studio","settings"};for(unsigned i=0;i<4&&pin_count<wm_taskbar_capacity();i++)if(app_find(defaults[i]))strcpy(task_pins[pin_count++],defaults[i]);return;}
     if(size>PIN_MAX*33)return;
     u32 start=0;for(u32 i=0;i<=size&&pin_count<PIN_MAX;i++)if(i==size||p[i]=='\n'){
         u32 n=i-start;char id[32];if(n&&n<=30){memcpy(id,p+start,n);id[n]=0;int valid=1;for(u32 j=0;j<n;j++)if(!((id[j]>='a'&&id[j]<='z')||(id[j]>='0'&&id[j]<='9')||id[j]=='-'))valid=0;struct app *a=valid?app_find(id):NULL;if(a&&id[0]!='_'&&!wm_taskbar_pinned(id))strcpy(task_pins[pin_count++],id);}start=i+1;
     }
 }
 static char pin_menu_id[32];
-static void pin_menu_answer(int item,void *ud){(void)ud;if(item==0)wm_open_app(pin_menu_id,NULL);else if(item==1)pin_remove(pin_menu_id);}
+static void pin_menu_answer(int item,void *ud){(void)ud;
+    if(item==0)wm_open_app(pin_menu_id,NULL);
+    else if(item==1)pin_remove(pin_menu_id);
+    else if(item==2)wm_desk_show_app(pin_menu_id);
+}
 
 #define NOTICE_MAX 3
 struct notice {char title[48],text[192];u32 until;int warning;};
@@ -548,7 +552,24 @@ static int desk_drag = -1, desk_drag_ox, desk_drag_oy, desk_drag_moved;
 static int desk_sx, desk_sy;
 static int band_button;
 static int band_active, band_x0, band_y0, band_x1, band_y1;
+/* ------------------------------------------------------- drag and drop ---- */
+/* A drag carries one of two things, because those are the two things a desktop can hold: the id of an
+ * application, or a path.  Nothing else is invented, so no target has to guess which of the two it is
+ * being offered.  The *source* decides when a drag begins (six pixels of movement, the same threshold
+ * the icon grid uses, so a click never becomes a drop by accident) and the *WM* decides what a drop
+ * means, by what is under the pointer when the button is released - see wm_dnd_target(). */
+static struct { int active; int kind; char payload[256]; char label[48]; } dnd;
+static int dnd_dirty;
+/* The box the shadow actually covered on the last painted frame.  A drag's label is clamped to the far
+ * side of the cursor near a screen edge, so recomputing "where it was" from the previous cursor position
+ * would be a guess; the painter records the truth instead, and the next move repairs exactly that. */
+static int dnd_lx, dnd_ly, dnd_lw, dnd_lh;
+static void dnd_rect(int *x, int *y, int *w, int *h);
 static struct { int active; char q[48]; int qpos; int hover, offset; } launch;
+/* The launcher row a press landed on, and where that press was.  A launcher that opened the window on
+ * the button-down could not also be a place to pick an application up, so the click is decided at
+ * release: same row = launch, moved = drag. */
+static int launch_press = -1, launch_press_x, launch_press_y;
 
 static int ditem_icon(struct ditem *d)
 {
@@ -657,14 +678,127 @@ void wm_desktop_pin_file(const char *path)
     icons_dirty = 1;
     dirty = 1;
 }
+/* Forget one desktop entry entirely (a pinned path the user no longer wants on the desktop).  Hiding is
+ * the common case and reversible; this is not, and it is only ever offered for the file kind, where the
+ * shortcut and the file are different things and the file stays exactly where it was. */
+static void desk_forget(int i)
+{
+    if (i < 0 || i >= nitems) return;
+    for (int k = i; k + 1 < nitems; k++) items[k] = items[k + 1];
+    nitems--;
+    desk_sel = 0;
+    desktop_save();
+    icons_dirty = 1;
+    dirty = 1;
+}
+
+/* Files is the one application that can show a folder, so "where did this come from" is answered by
+ * opening it there rather than by inventing a properties window for a shortcut. */
+static void desk_reveal(const char *path)
+{
+    char dir[256];
+    struct vfs_node *n = vfs_lookup(path);
+    if (n && n->is_dir) { wm_open_app("files", (void *)path); return; }
+    strncpy(dir, path, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = 0;
+    char *slash = 0;
+    for (char *q = dir; *q; q++) if (*q == '/') slash = q;
+    if (slash) slash[1] = 0; else strcpy(dir, "/");
+    if (!dir[0]) strcpy(dir, "/");
+    if (!wm_open_app("files", dir)) wm_notify("Files unavailable", "The folder could not be opened.", 1);
+}
+
+/* ------------------------------------------------- per-item actions ---- */
+/* An icon's menu is what *that icon* is able to do, computed each time: an application can be pinned
+ * and hidden, a shortcut to a file can be followed and forgotten, and a built-in is never offered an
+ * "Uninstall" it would refuse.  The labels come from the same table the actions run, so the menu, the
+ * keyboard paths and the test suite cannot drift into three descriptions of the same desktop. */
+static char desk_labels[4][40];
+int wm_desk_actions(int item, const char **labels, int max)
+{
+    if (item < 0 || item >= nitems || !labels || max < 4) return -1;
+    struct app *a = items[item].kind == 0 ? app_find(items[item].app) : 0;
+    int n = 0;
+/* Each line is written into storage that outlives this call (a menu keeps the pointer until it is
+ * answered) and counted in a separate statement, because `labels[n++] = desk_labels[n - 1]` reads and
+ * writes n without a sequence point in between. */
+#define DESK_LINE(text) do { strcpy(desk_labels[n], (text)); labels[n] = desk_labels[n]; n++; } while (0)
+    DESK_LINE("Open");
+    if (a) DESK_LINE(wm_taskbar_pinned(a->id) ? "Unpin from taskbar" : "Pin to taskbar");
+    else DESK_LINE("Show folder in Files");
+    DESK_LINE(a ? "Hide this icon" : "Remove this shortcut");
+    /* Built-in apps are not removable, so the line is not offered for them at all; the uninstall
+     * request itself still refuses, because a menu is a convenience and not the protection. */
+    if (a && a->external) DESK_LINE("Uninstall app");
+#undef DESK_LINE
+    return n;
+}
+
+int wm_desk_invoke(int item, int action)
+{
+    const char *labels[4];
+    int n = wm_desk_actions(item, labels, 4);
+    if (n < 0 || action < 0 || action >= n) return -1;
+    struct app *a = items[item].kind == 0 ? app_find(items[item].app) : 0;
+    if (action == 0) {
+        desk_sel = (1u << item);
+        desktop_open(&items[item]);
+        return 0;
+    }
+    if (a) {
+        if (!strcmp(labels[action], "Unpin from taskbar")) { pin_remove(a->id); return 0; }
+        if (!strcmp(labels[action], "Pin to taskbar")) {
+            if (!wm_taskbar_pin(a->id))
+                wm_notify("Taskbar full", "Unpin something first - the number of pins follows the "
+                          "width of the screen.", 1);
+            return 0;
+        }
+        if (!strcmp(labels[action], "Hide this icon")) {
+            items[item].hidden = 1;
+            desk_sel = 0;
+            desktop_save();
+            icons_dirty = 1;
+            dirty = 1;
+            return 0;
+        }
+        if (!strcmp(labels[action], "Uninstall app")) { app_request_uninstall(a->id); return 0; }
+        return -1;
+    }
+    if (!strcmp(labels[action], "Show folder in Files")) { desk_reveal(items[item].path); return 0; }
+    if (!strcmp(labels[action], "Remove this shortcut")) { desk_forget(item); return 0; }
+    return -1;
+}
+
+/* 1 = the app's icon is hidden, 0 = it is on the desktop, -1 = it has no desktop entry at all.  The
+ * taskbar needs this because "put that icon back" is only worth offering for an app whose icon was put
+ * away, and the answer belongs to the desktop rather than to whoever is asking. */
+int wm_desk_app_state(const char *app_id)
+{
+    if (!app_id || !app_id[0]) return -1;
+    for (int i = 0; i < nitems; i++)
+        if (items[i].kind == 0 && !strcmp(items[i].app, app_id)) return items[i].hidden ? 1 : 0;
+    return -1;
+}
+
+int wm_desk_show_app(const char *app_id)
+{
+    if (!app_id || !app_id[0]) return -1;
+    for (int i = 0; i < nitems; i++)
+        if (items[i].kind == 0 && !strcmp(items[i].app, app_id) && items[i].hidden) {
+            items[i].hidden = 0;
+            icons_dirty = 1;
+            dirty = 1;
+            desktop_save();
+            return 0;
+        }
+    return -1;
+}
+
 static void desk_item_menu_cb(int item, void *ud)
 {
-    if(item<0)return;
-    (void)ud;
-    if (item == 0) {
-        for (int i = 0; i < nitems; i++)
-            if (desk_sel & (1u << i)) { desktop_open(&items[i]); break; }
-    } else desk_remove_sel();
+    if (item < 0) return;
+    int which = (int)(intptr_t)ud;
+    if (which >= 0) { wm_desk_invoke(which, item); wm_full(); }
 }
 /* bring back every hidden app icon and re-add missing registered apps */
 static void desk_restore(void)
@@ -742,7 +876,9 @@ int wm_desk_vis_get(int idx, char *app, char *path, char *label, int *kind)
 static void desk_empty_menu_cb(int item, void *ud)
 {
     if(item<0)return;
-    (void)item; (void)ud;
+    (void)ud;
+    if (item == 1) { wm_open_app("files", 0); return; }
+    if (item == 2) { wm_open_app("terminal", 0); return; }
     desk_restore();
 }
 
@@ -781,7 +917,7 @@ static void paint_icons(void)
     /* no hover feedback while dragging/resizing/modally busy: the pointer is
      * occupied and highlighting launch buttons underneath is misleading */
     int interactive = !drag_win && !resize_win && desk_drag < 0 &&
-                      !band_active && !menu.active && !launch.active && !modal_w &&
+                      !band_active && !menu.active && !launch.active && !modal_w && !dnd.active &&
                       !win_at_point(mx, my);
     for (int i = 0; i < nitems; i++) {
         if (items[i].hidden) continue;
@@ -860,6 +996,7 @@ static void cur_restore(void);
 static void paint_icons(void);
 static void paint_taskbar(void);
 static void paint_menu(void);
+static void paint_dnd(void);
 static void paint_launcher(void);
 
 
@@ -896,6 +1033,7 @@ static __attribute__((noinline)) void paint_partial(void)
     if(tb_dirty)damage_add(0,screen_h-TASKBAR_H,screen_w,TASKBAR_H);
     if(menu.active&&menu_dirty)damage_add(menu.x,menu.y,menu.w,menu.h);
     if(launch.active&&launch_dirty)damage_add(8,screen_h-TASKBAR_H-308,300,308);
+    if(dnd.active&&dnd_dirty){int dx,dy,dw,dh;dnd_rect(&dx,&dy,&dw,&dh);damage_add(dx,dy,dw,dh);}
     for(int i=0;i<win_count;i++){
         struct window *w=wins[i];if(w->state==WIN_STATE_MIN)continue;
         if(w->dirty&&w->app&&w->app->paint){APP_T0(w);w->app->paint(w);APP_T1(w);damage_add(w->x+1,w->y+WIN_TITLEBAR,w->surf.w,w->surf.h);w->dirty=0;}
@@ -913,12 +1051,12 @@ static __attribute__((noinline)) void paint_partial(void)
             drawn[k]=1;struct window *w=wins[k];
             if(w->x<d->x+d->w&&w->x+w->w+4>d->x&&w->y<d->y+d->h&&w->y+w->h+4>d->y)paint_window(w);
         }
-        paint_taskbar();paint_menu();if(launch.active)paint_launcher();paint_notices();
+        paint_taskbar();paint_menu();if(launch.active)paint_launcher();paint_notices();paint_dnd();
         fb_scene_unclip();
     }
     cur_draw();
     for(int i=0;i<ndmg;i++)fb_flip_rect(dmg[i].x,dmg[i].y,dmg[i].w,dmg[i].h);
-    ndmg=0;icons_dirty=tb_dirty=menu_dirty=launch_dirty=0;
+    ndmg=0;icons_dirty=tb_dirty=menu_dirty=launch_dirty=dnd_dirty=0;
 }
 
 static void paint_menu(void)
@@ -961,7 +1099,7 @@ static void paint_taskbar(void)
     int px, py, pw, ph;
     tb_power_rect(&px, &py, &pw, &ph);
     power_hover = in_rect(mx, my, px, py, pw, ph) && !drag_win && !resize_win &&
-                  desk_drag < 0 && !band_active && !menu.active && !modal_w;
+                  desk_drag < 0 && !band_active && !menu.active && !modal_w && !dnd.active;
     s_fill(&screen, px, py, pw, ph, power_hover ? blend(t->taskbar_bg, t->main, 45) : blend(t->taskbar_bg, t->main, 12));
     s_frame_rect(&screen, px, py, pw, ph, blend(t->taskbar_bg, t->main, 60));
     u32 pc = power_hover ? t->title_text : t->main;
@@ -1089,7 +1227,8 @@ static __attribute__((noinline)) void paint_all(void)
     paint_menu();
     if (launch.active) paint_launcher();
     paint_notices();
-    tb_dirty = 0; icons_dirty = 0; menu_dirty = 0; launch_dirty = 0; ndmg = 0;
+    paint_dnd();                /* the full and the damaged path must agree, or a drag leaves a trail */
+    tb_dirty = 0; icons_dirty = 0; menu_dirty = 0; launch_dirty = 0; dnd_dirty = 0; ndmg = 0;
     for (int i = 0; i < win_count; i++) wins[i]->chrome_dirty = 0;
     cur_have = 0;                 /* scene was fully redrawn under cursor */
     cur_draw();
@@ -1211,6 +1350,164 @@ static void resize_flush(int force)
     interact_repaint(w->x,w->y,(oldw>nw?oldw:nw)+4,(oldh>nh?oldh:nh)+4);
 }
 
+/* Where a drag would end up if the button were released at (px,py), named in out: "app-window:<id>"
+ * for the window under the pointer, "taskbar:<id>" for a pin, "desktop" for the wallpaper, "launcher"
+ * or "menu" for the surfaces a drag dismisses, and "none".  Both wm_dnd_drop() and the tests go
+ * through it, so a suite can assert what a drop *means* on a given geometry instead of trusting that
+ * the pixel under the cursor happened to be the one intended. */
+static int dnd_target_at(int px, int py, char *out, int cap)
+{
+    if (!out || cap < 8) return -1;
+    out[0] = 0;
+    if (menu.active) { strcpy(out, "menu"); return 0; }
+    if (launch.active && in_rect(px, py, 8, screen_h - TASKBAR_H - 308, 300, 308)) {
+        strcpy(out, "launcher"); return 0;
+    }
+    if (py >= screen_h - TASKBAR_H) {
+        int visible = pin_count, c = wm_taskbar_capacity();
+        if (visible > c) visible = c;
+        for (int i = 0; i < visible; i++)
+            if (in_rect(px, py, 168 + i * 40, screen_h - TASKBAR_H + 6, 34, TASKBAR_H - 12)) {
+                strcat(strcpy(out, "taskbar:"), task_pins[i]);
+                return 0;
+            }
+        strcpy(out, "none");
+        return 0;
+    }
+    struct window *w = win_at_point(px, py);
+    if (w && w->app) { strcat(strcpy(out, "app-window:"), w->app->id); return 0; }
+    if (notice_at(px, py) >= 0) { strcpy(out, "none"); return 0; }
+    strcpy(out, "desktop");
+    return 0;
+}
+
+int wm_dnd_target(int px, int py, char *out, int cap)
+{
+    if (!dnd.active) return -1;
+    return dnd_target_at(px, py, out, cap);
+}
+
+int wm_dnd_active(void) { return dnd.active; }
+
+int wm_dnd_begin(int kind, const char *payload, const char *label)
+{
+    if (!payload || !payload[0] || kind < 0 || kind > DND_FILE) return -1;
+    dnd.active = 1;
+    dnd.kind = kind;
+    strncpy(dnd.payload, payload, sizeof dnd.payload - 1);
+    dnd.payload[sizeof dnd.payload - 1] = 0;
+    strncpy(dnd.label, label && label[0] ? label : payload, sizeof dnd.label - 1);
+    dnd.label[sizeof dnd.label - 1] = 0;
+    dnd_dirty = 1;
+    dirty = 1;
+    return 0;
+}
+
+/* The label has to be damaged on its way out as well as on its way in, or the last thing a cancelled
+ * drag said stays burnt into the wallpaper. */
+static void dnd_damage_now(void)
+{
+    if (!dnd.active) return;
+    if (dnd_lw > 0) damage_add(dnd_lx, dnd_ly, dnd_lw, dnd_lh);
+    int x, y, w, h;
+    dnd_rect(&x, &y, &w, &h);
+    damage_add(x, y, w, h);
+    dnd_lw = 0;                   /* released: nothing is painted until the next drag begins */
+}
+
+int wm_dnd_cancel(void)
+{
+    if (!dnd.active) return -1;
+    dnd_damage_now();
+    dnd.active = 0;
+    dnd_dirty = 1;
+    dirty = 1;
+    return 0;
+}
+
+/* A drop either does something or it does nothing, and it never half-does it: the payload is copied out
+ * and the drag state is cleared before any target runs, so an app that opens a window (or a Files
+ * navigation, which repaints) cannot see a drag still in progress and react to its own window. */
+int wm_dnd_drop(int px, int py)
+{
+    if (!dnd.active) return -1;
+    int kind = dnd.kind;
+    char payload[sizeof dnd.payload];
+    memcpy(payload, dnd.payload, sizeof payload);
+    char target[48];
+    /* The target is resolved while the drag still exists - the shadow has to be erased and the state
+     * cleared before any target runs, because the target may open a window and repaint. */
+    int known = dnd_target_at(px, py, target, sizeof target) == 0;
+    dnd_damage_now();
+    dnd.active = 0;
+    dnd_dirty = 1;
+    dirty = 1;
+    if (!known || !strcmp(target, "none") || !strcmp(target, "menu") || !strcmp(target, "launcher"))
+        return -1;
+    if (!strcmp(target, "desktop")) {
+        if (kind == DND_APP) wm_desktop_install(payload);
+        else wm_desktop_pin_file(payload);
+        return 0;
+    }
+    if (!strncmp(target, "taskbar:", 8)) {
+        const char *id = target + 8;
+        if (kind == DND_APP) {
+            if (!wm_taskbar_pinned(id) && !wm_taskbar_pin(id))
+                wm_notify("Taskbar full", "Unpin something first - the number of pins follows the "
+                          "width of the screen.", 1);
+            return 0;
+        }
+        struct app *a = app_find(id);
+        if (!a) return -1;
+        if (!a->document && !a->open) {
+            wm_notify("Cannot open that here", a->title, 0);
+            return -1;
+        }
+        return wm_open_app(id, payload) ? 0 : -1;
+    }
+    if (!strncmp(target, "app-window:", 11)) {
+        const char *id = target + 11;
+        if (kind == DND_APP) {
+            struct window *w = win_at_point(px, py);
+            if (w) wm_focus(w);
+            return 0;
+        }
+        struct app *a = app_find(id);
+        if (!a) return -1;
+        /* Files is the one app whose content *is* a folder, so a folder dropped on it navigates rather
+         * than trying to open the directory as a document. */
+        if (!strcmp(id, "files")) {
+            struct vfs_node *n = vfs_lookup(payload);
+            if (n && n->is_dir) return wm_open_app("files", (void *)payload) ? 0 : -1;
+        }
+        return wm_open_app(id, payload) ? 0 : -1;
+    }
+    return -1;
+}
+
+static void dnd_rect(int *x, int *y, int *w, int *h)
+{
+    *w = (int)strlen(dnd.label) * 8 + 20;
+    if (*w > 240) *w = 240;
+    *h = 24;
+    *x = mx + 12;
+    *y = my + 16;
+    if (*x + *w > screen_w - 2) *x = mx - *w - 8;
+    if (*y + *h > screen_h - 2) *y = my - *h - 8;
+}
+
+static void paint_dnd(void)
+{
+    if (!dnd.active) return;
+    int x, y, w, h;
+    const struct theme *t = theme_current();
+    dnd_rect(&x, &y, &w, &h);
+    dnd_lx = x; dnd_ly = y; dnd_lw = w; dnd_lh = h;
+    s_fill(&screen, x, y, w, h, color_blend(t->win_bg, t->main, 40));
+    s_frame_rect(&screen, x, y, w, h, t->main);
+    s_clip_text(&screen, x + 10, y + 5, dnd.label, t->text, w - 20);
+}
+
 /* -------------------------------------------------------------- input ---- */
 static void desktop_context(void)
 {
@@ -1223,14 +1520,17 @@ static void desktop_context(void)
         }
         if (hit >= 0) {
             if (!(desk_sel & (1u << hit))) desk_sel = (1u << hit);
-            static const char *m[2] = { "Open", "Remove from Desktop" };
-            wm_menu(mx, my, m, 2, desk_item_menu_cb, NULL);
+            static const char *m[4];
+            int n = wm_desk_actions(hit, m, 4);
+            wm_menu(mx, my, m, n > 0 ? n : 1, desk_item_menu_cb, (void *)(intptr_t)hit);
         } else if (desk_sel) {
             static const char *m[2] = { "Remove from Desktop", "Clear Selection" };
             wm_menu(mx, my, m, 2, desk_sel_menu_cb, NULL);
         } else {
-            static const char *m[1] = { "Restore removed icons" };
-            wm_menu(mx, my, m, 1, desk_empty_menu_cb, NULL);
+            /* Empty wallpaper is a surface too, and it offers what belongs here: the icons that were put
+             * away, and the two places the rest of the work actually happens. */
+            static const char *m[3] = { "Restore hidden icons", "Open Files", "Open Terminal" };
+            wm_menu(mx, my, m, 3, desk_empty_menu_cb, NULL);
         }
     wm_full();
 }
@@ -1283,6 +1583,18 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
         if (desk_drag >= 0 && !desk_drag_moved &&
             (mx - desk_sx > 6 || mx - desk_sx < -6 || my - desk_sy > 6 || my - desk_sy < -6))
             desk_drag_moved = 1;
+        if (dnd.active) dnd_dirty = 1;
+        if (launch_press >= 0 && launch.active && !dnd.active && (mx - launch_press_x > 6 ||
+            mx - launch_press_x < -6 || my - launch_press_y > 6 || my - launch_press_y < -6)) {
+            /* Six pixels of movement turns the press into a pick-up.  The launcher closes because the
+             * drop target has to be visible for the drag to mean anything. */
+            struct app *a = app_at(launch_press);
+            launch_press = -1;
+            launch.active = 0;
+            if (a) wm_dnd_begin(DND_APP, a->id, a->title);
+            wm_full();
+            return;
+        }
         if (resize_win) {
             struct window *w = resize_win;
             int nw = mx - w->x + resize_ox, nh = my - w->y + resize_oy;
@@ -1301,7 +1613,7 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
                 rs_nw = nw; rs_nh = nh; rs_pending = 1;
             }
         }
-        if (drag_win || band_active || resize_win || desk_drag >= 0) {
+        if (drag_win || band_active || resize_win || desk_drag >= 0 || dnd.active) {
             int x0 = omx < mx ? omx : mx, y0 = omy < my ? omy : my;
             int x1 = (omx > mx ? omx : mx) + CUR_W;
             int y1 = (omy > my ? omy : my) + CUR_H;
@@ -1328,6 +1640,12 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
                 int ow = (band_x0 < obx1 ? obx1 - band_x0 : band_x0 - obx1) + 2;
                 int oh = (band_y0 < oby1 ? oby1 - band_y0 : band_y0 - oby1) + 2;
                 UN(ox, oy, ow, oh);
+            }
+            if (dnd.active) {
+                if (dnd_lw > 0) UN(dnd_lx, dnd_ly, dnd_lw, dnd_lh);
+                int dx, dy, dw, dh;
+                dnd_rect(&dx, &dy, &dw, &dh);
+                UN(dx, dy, dw, dh);
             }
             if (desk_drag >= 0) {
                 int ix, iy, iw, ih;
@@ -1436,6 +1754,25 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
         }
     }
     if (!e->down) {
+        if (dnd.active) { wm_dnd_drop(mx, my); wm_full(); return; }
+        if (launch_press >= 0) {
+            /* A release that is still on the row the press started on is the click, and it launches.
+             * Anywhere else - another row, the search field, outside the panel - closes the launcher the
+             * same way any menu would.  A drag from the same press was already consumed above, and it
+             * never reaches this branch. */
+            int press = launch_press;
+            launch_press = -1;
+            if (launch.active && press == launcher_at_point()) {
+                struct app *a = app_at(press);
+                launch.active = 0;
+                if (a) wm_open_app(a->id, NULL);
+            } else if (launch.active) {
+                launch.active = 0;
+                launch.hover = -1;
+            }
+            wm_full();
+            return;
+        }
         if(app_capture){struct window *c=app_capture;if(!e->buttons)app_capture=NULL;if(c->app&&c->app->mouse){APP_T0(c);c->app->mouse(c,e,mx-c->x-1,my-c->y-WIN_TITLEBAR);APP_T1(c);}dirty=1;return;}
         if(band_active&&e->button!=band_button)return;
         if(band_active&&band_button==MBTN_RIGHT&&mx-band_x0<=4&&mx-band_x0>=-4&&my-band_y0<=4&&my-band_y0>=-4){band_active=0;desktop_context();return;}
@@ -1504,9 +1841,13 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
         int px = 8, py = screen_h - TASKBAR_H - 308, pw = 300, ph = 300;
         if (in_rect(mx, my, px, py, pw, ph)) {
             int hit = launcher_at_point();
-            if (hit >= 0) {
-                wm_open_app(app_at(hit)->id, NULL);
-                launch.active = 0;
+            /* Pressing an entry in the launcher and moving is how an application gets onto the desktop
+             * or the bar; releasing without moving is the normal "launch it" click, so the two are
+             * separated by the same six pixels the icon grid uses. */
+            if (hit >= 0 && e->button == MBTN_LEFT) {
+                launch_press = hit;
+                launch_press_x = mx;
+                launch_press_y = my;
             }
             wm_full();
             return;
@@ -1603,6 +1944,7 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
             lua_apps_refresh();
             launch.offset = 0;
             launch.active = !launch.active;
+            launch_press = -1;
             wm_full();
             launch.q[0] = 0; launch.qpos = 0;
             dirty = 1;
@@ -1610,7 +1952,17 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
         }
         int visible=pin_count,cap=wm_taskbar_capacity();if(visible>cap)visible=cap;
         for(int i=0;i<visible;i++)if(in_rect(mx,my,168+i*40,screen_h-TASKBAR_H+6,34,TASKBAR_H-12)){
-            if(e->button==MBTN_RIGHT){static const char *choices[]={"Open","Unpin from bar"};strcpy(pin_menu_id,task_pins[i]);wm_menu(168+i*40,screen_h-TASKBAR_H-54,choices,2,pin_menu_answer,NULL);}
+            if(e->button==MBTN_RIGHT){
+                /* One more line, only when it would do something: an app whose desktop icon was put away
+                 * can have it back from the bar it is already pinned to. */
+                static const char *choices[3];
+                int n = 0;
+                choices[n++] = "Open";
+                choices[n++] = "Unpin from bar";
+                if (wm_desk_app_state(task_pins[i]) == 1) choices[n++] = "Put its icon back";
+                strcpy(pin_menu_id, task_pins[i]);
+                wm_menu(168 + i * 40, screen_h - TASKBAR_H - (n * 24 + 8), choices, n, pin_menu_answer, NULL);
+            }
             else if(e->button==MBTN_LEFT)wm_open_app(task_pins[i],NULL);
             wm_full();return;
         }
@@ -1779,7 +2131,8 @@ static void wm_destroy_session(void)
     focused_w=modal_w=drag_win=resize_win=NULL;
     mouse_rx=mouse_ry=mouse_sens=0;
     rs_pending=0; band_active=0; desk_drag=-1; desk_sel=0;
-    menu.active=0; launch.active=0; ndmg=0; mbuttons=0;app_capture=NULL;
+    menu.active=0; launch.active=0; launch_press=-1; ndmg=0; mbuttons=0;app_capture=NULL;
+    if(dnd.active){dnd.active=0;dnd_dirty=0;}
     if (wp_cache.px) {
         pfree(wp_cache.px,(u32)wp_cache.w*wp_cache.h*4);
         memset(&wp_cache,0,sizeof(wp_cache));

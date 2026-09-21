@@ -17,6 +17,32 @@ void cpu_reboot_8042(void){
     for(unsigned i=0;i<100000;i++)__asm__ volatile("pause");
     panic("reset controller did not restart the machine");
 }
+/* What the user is told about the GPU, in one place, because the three possible states mean very
+ * different things: nothing matched, an engine that works but on another function, and an engine
+ * painting the screen.  Each line says which, and the middle one says why the desktop is still on the
+ * CPU so it cannot be read as a failure.  It lives here, on the desktop side, because a PCI driver has
+ * no business raising notifications. */
+static void gpu_boot_notice(void)
+{
+    const struct gpu_module_state *ms = gpu_module_state();
+    if (gpu_engine_drives_output()) {
+        wm_notify("GPU 2D engine bound",
+                  ms && ms->bound ? "Driver module loaded from disk and verified by readback; solid "
+                  "output rectangles are drawn by the GPU."
+                  : "Built-in port active; output rectangles are drawn by the GPU.", 0);
+        return;
+    }
+    if (gpu_engine_available()) {
+        wm_notify("GPU engine verified on a second adapter",
+                  "The 2D engine works, but another PCI function feeds this display, so the desktop "
+                  "stays on the CPU. Run graphics in Terminal for details.", 0);
+        return;
+    }
+    wm_notify("GPU acceleration unavailable",
+              "Using CPU software rendering. No compatible GPU driver module was loaded. Run graphics "
+              "in Terminal for detected hardware.", 1);
+}
+
 void kernel_panic(const char *reason){panic(reason);}
 void input_status(char *out,int max){usb_status(out,max);}
 void desktop_start(const struct boot_framebuffer *fb){
@@ -52,7 +78,7 @@ void desktop_start(const struct boot_framebuffer *fb){
     strcpy(line,"rtc: ");fmt_u32(number,rtc.year);strcat(line,number);strcat(line,"-");fmt_pad2(number,rtc.mon);strcat(line,number);strcat(line,"-");fmt_pad2(number,rtc.day);strcat(line,number);
     boot_screen_step(line,82);
     theme_load_from_settings();apps_register_all();cpu_meter_init();wm_init();
-    wm_notify("GPU acceleration unavailable","Using CPU software rendering. No compatible GPU backend is linked. Run graphics in Terminal for detected hardware.",1);
+    gpu_boot_notice();
     boot_screen_step("wm: compositor ready; native and Lua apps registered",94);
     boot_screen_step("Finishing... I think...",100);
     /* Original readable finished log; service input while showing it. */

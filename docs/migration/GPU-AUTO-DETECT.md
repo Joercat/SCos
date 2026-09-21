@@ -1,8 +1,11 @@
 # GPU auto-detection and the driver registry, as implemented
 
-Date: 2026-09-21. Status: **implemented and verified in this tree**; the driver *code*
-that does GPU pixel work is not ported yet, and this document says exactly which of the
-two halves exists so the distinction cannot be read as a claim of acceleration.
+Date: 2026-09-21. Status: **implemented and verified in this tree**. One family's engine
+now exists as a loadable module (`docs/migration/GPU-DRIVER-MODULES.md`); the other
+fourteen do not, and this document says exactly which half exists for which family, so the
+distinction cannot be read as a general claim of acceleration. Nothing here infers support:
+a family is named only when an upstream driver binds that exact ID, and an engine is used
+only when it has read back the pixels it was told to paint.
 
 `GPU-BASIC-2D-RESEARCH.md` (same directory) is the measurement of which existing
 lightweight driver could be reused per family. This document is the first thing built on
@@ -16,12 +19,16 @@ use on a given machine, and it must never guess.
 |---|---|---|
 | `kernel/include/gpu.h` | 155 | device, family-match, capability and engine-ABI records; the boundary the compositor would call |
 | `kernel/drivers/gpu/gpu_ids.h` | 1,291 (generated) | 1,019 exact `vendor:device` rules with chip names across 15 families, plus the measured per-family entry-point statuses |
-| `kernel/drivers/gpu/gpu_tables.c` | 27 | sole owner of the generated tables; the only accessor surface |
+| `kernel/drivers/gpu/gpu_match.c` | 74 | the matcher itself, shared verbatim by the kernel and the boot stub so both name the same family |
 | `kernel/drivers/gpu/gpu_ports.c` | 80 | one record per family: port state, engine ops, and what stands between this family and GPU work |
-| `kernel/drivers/gpu/gpu_detect.c` | 373 | enumeration, matching, scanout ownership, engine dispatch, report, boot log |
+| `kernel/drivers/gpu/gpu_detect.c` | 403 | enumeration, matching, scanout ownership, engine dispatch, report, boot log |
+| `kernel/include/gpu_abi.h` | 202 | the on-disk module format and the one-way engine ABI |
+| `kernel/drivers/gpu/gpu_module.c` | 762 | store index, validation, relocation, entry, readback self-test, refusal reasons |
+| `drivers/gpu/ati/module.c` | 599 | the first module: Haiku's Rage128 2D engine, four documented deviations |
 | `tools/research/gen_gpu_tables.py` | 473 | extracts the tables from a pinned upstream checkout; `--check` verifies them |
-| `tools/tests/gpu_detect_sim.c` | 340 | host harness: shipped detection sources against a simulated PCI bus |
-| `tools/tests/test_gpu_detect.py` | 149 | the suite: table freshness, host harness, then QEMU with emulated adapters |
+| `tools/build_gpu_module.py` | 458 | packs a family into `.MOD`, refuses imports and anything it cannot express; `--verify` re-reads the result |
+| `tools/tests/gpu_detect_sim.c` | 364 | host harness: shipped detection sources against a simulated PCI bus |
+| `tools/tests/test_gpu_detect.py` | 185 | the suite: table freshness, host harness, then QEMU with emulated adapters and a real module load |
 
 `kernel/desktop/graphics.c` is now presentation only: it asks the GPU subsystem what it
 found and prints it. `kernel/drivers/pci.c` gained a config-write counter, used as a
@@ -102,6 +109,23 @@ by construction and then asserted at run time:
    gpu: PCI 0:5.0 1af4:1050 sub=0 matched=none
    gpu: 4 display function(s), 1019 ID rule(s) in 15 family record(s), 0 without a port record
    gpu: scanout owner identified by BAR address, 0 PCI config write(s) issued
+   
+   A few lines later the same boot loads that family's driver from disk, and says so in the
+   order a reader needs to trust it:
+
+   ```
+   gpu: module 2 module(s), 25936 B on the boot disk: 13536 B opened for this chip, 12400 B never read
+   gpu: module ati (8360 B code+data, 376 B zeroed, 288 reloc, 47 id rule(s)) validated
+   gpu: module test surface: aperture of this function at 0x80000000+3145728, 1024x768 stride 1024
+   gpu: ati: Rage128 GUI engine ready
+   gpu: module ati bound: engine verified in device memory (225/225 pixels)
+   gpu: engine drives its own aperture only: another function feeds the console, so output stays on the CPU
+   ```
+
+   Those last two lines are the point of the module layer and the reason this document keeps
+   detection and driving apart: a bound engine on a function that does not feed the console is
+   real, verified, and correctly unused. `GPU-DRIVER-MODULES.md` records that machinery and every
+   defect found getting it to this point.
    ```
 
    `0:3.0` is the interesting line: QEMU's emulated Rage 128 is matched to the `ati`
@@ -144,8 +168,9 @@ Scanout owner 0:2.0 identified from its BAR address alone.
 ```
 
 A matched adapter gains the family, the chip name, the upstream entry-point statuses,
-`SCos port: not ported yet` and one line saying what stands between that family and GPU
-work, as in the captured run above (`family: ati, chip: RAGE 128 PRO GL, source:
+`SCos port: not ported yet` - or, when the family's module is what bound, that a module was
+loaded from storage and verified by readback - and one line saying what stands between that
+family and GPU work, as in the captured run above (`family: ati, chip: RAGE 128 PRO GL, source:
 src/add-ons/kernel/drivers/graphics/ati/driver.cpp`). On the i5-11400 with its Rocket
 Lake UHD 730 the same lines read `8086:4c8b … match: none - no upstream table binds
 8086:4c8b`, which is the truth rather than a gap in the tooling: no light driver's table

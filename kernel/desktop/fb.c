@@ -14,6 +14,23 @@ void fb_init(void){
  if(!screen.px)panic("desktop framebuffer allocation failed");
 }
 static u32 component(u32 c,u32 mask){unsigned shift=0;while(!(mask&1)){mask>>=1;shift++;}return ((c*mask/255)<<shift);}
+/* A solid rectangle is the common case for the wallpaper, the boot screens, window chrome and any
+ * cleared region.  Copying one to the console costs a full pass over uncached device memory, while
+ * the engine needs a handful of register writes, so the flip offers the rectangle to the GPU first.
+ * The scan that proves the rectangle really is uniform reads the compositor's own RAM and stops at
+ * the first differing pixel, so a textured rectangle costs a few rows and then gets copied as before.
+ * screen.px stays authoritative either way: this only skips the output copy, never the truth buffer. */
+static int engine_output_fill(int x,int y,int w,int h){
+ if(w<64||h<8||!gpu_engine_drives_output())return 0;
+ const u32 *src=screen.px+(size_t)y*screen_w+x;
+ u32 color=*src;
+ for(int r=0;r<h;r++){
+  const u32 *row=src+(size_t)r*screen_w;
+  for(int c=0;c<w;c++)if(row[c]!=color)return 0;
+ }
+ if(gpu_engine_fill_rectangle(x,y,w,h,color)!=0)return 0;
+ return gpu_engine_wait_idle()==0;
+}
 void fb_flip_rect(int x,int y,int w,int h){
  if(x<0){w+=x;x=0;}if(y<0){h+=y;y=0;}
  if(w<=0||h<=0||x>=screen_w||y>=screen_h)return;
@@ -21,6 +38,7 @@ void fb_flip_rect(int x,int y,int w,int h){
  if(h>screen_h-y)h=screen_h-y;
  volatile u32 *fb=(void*)(uintptr_t)output.base;
  int native=output.red==0xff0000&&output.green==0xff00&&output.blue==0xff;
+ if(native&&engine_output_fill(x,y,w,h))return;
  for(int r=0;r<h;r++){
   const u32 *src=screen.px+(size_t)(y+r)*screen_w+x;
   volatile u32 *dst=fb+(size_t)(y+r)*output.stride+x;

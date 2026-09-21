@@ -80,6 +80,15 @@ static char logline[160];
 static char describe[96];
 static u32 blit_count, fill_count;
 static int engine_dead, last_error;
+/* Some boards - and the emulator this port is developed against - report GUI_ACTIVE as permanently
+ * set: the bit stays high with nothing queued, so it cannot be used as an idle signal.  Waiting on it
+ * would either have to be unbounded (never acceptable in a kernel module) or would detach an engine
+ * that works.  So the status is sampled once, right after the GUI reset and before this driver has
+ * submitted a command: if the card already claims to be busy the bounded wait is skipped and the
+ * kernel's readback self-test decides, because it is the pixels that say whether the engine works.
+ * On a card whose bit does drop nothing changes, and the wait runs as upstream wrote it. */
+static int gui_busy_bit_unreliable;
+static int refusal_logged;
 
 static u32 in_reg(u32 offset)
 {
@@ -109,6 +118,16 @@ static char *append_hex(char *at, u32 value)
     *at++ = 'x';
     for (int shift = 28; shift >= 0; shift -= 4) *at++ = digits[(value >> shift) & 0xf];
     *at++ = ' ';
+    return at;
+}
+
+/* Decimal, for counts that mean nothing in hex. */
+static char *append_dec(char *at, u32 value)
+{
+    char digits[10];
+    int i = 0;
+    do { digits[i++] = (char)('0' + value % 10u); value /= 10u; } while (value);
+    while (i) *at++ = digits[--i];
     return at;
 }
 
@@ -169,6 +188,7 @@ static void engine_reset(void)
 static s32 engine_idle(void)
 {
     if (!fifo_ready(64)) return -1;
+    if (gui_busy_bit_unreliable) { engine_flush(); return 0; }
     u64 deadline = X->ticks() + 4000000u;
     for (;;) {
         if (!(in_reg(R128_GUI_STAT) & R128_GUI_ACTIVE)) {
@@ -219,7 +239,19 @@ static int rect_ok(const struct scos_gpu_surface *surface, s32 x, s32 y, s32 w, 
     if ((u32)x + (u32)w > surface->width || (u32)y + (u32)h > surface->height) return 0;
     /* Everything must stay inside the aperture: the hardware address is offset + y*pitch. */
     u64 end = (u64)surface->offset_bytes + (u64)(y + h) * surface->pitch_bytes;
-    return end <= X->device->vram_bytes;
+    if (end <= X->device->vram_bytes) return 1;
+    /* Say so once, with the numbers: a compositor that silently loses every accelerated rectangle
+     * is the kind of bug that takes a week to notice, and the log is the only view of this driver. */
+    if (!refusal_logged) {
+        refusal_logged = 1;
+        char *at = append_str(logline, "ati: rectangle needs ");
+        at = append_dec(at, (u32)end);
+        at = append_str(at, " B, device has ");
+        at = append_dec(at, (u32)X->device->vram_bytes);
+        *at = 0;
+        note(logline);
+    }
+    return 0;
 }
 
 /* ------------------------------------------------------------ drawing ---- */
@@ -377,6 +409,17 @@ static s32 engine_init(void)
     }
     out_reg(R128_SCALE_3D_CNTL, 0);
     engine_reset();
+    {
+        u32 stat = in_reg(R128_GUI_STAT);
+        if (stat & R128_GUI_ACTIVE) {
+            gui_busy_bit_unreliable = 1;
+            char *at = append_str(logline, "ati: GUI_ACTIVE high at bring-up (");
+            at = append_hex(at, stat);
+            at = append_str(at, "); idle decided by readback");
+            *at = 0;
+            note(logline);
+        }
+    }
     gui_master_cntl = (data_type << R128_GMC_DST_DATATYPE_SHIFT) | R128_GMC_CLR_CMP_CNTL_DIS |
                       R128_GMC_AUX_CLIP_DIS;
     if (!fifo_ready(2)) return -1;
@@ -506,7 +549,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     /* Registers: a memory BAR that is not the aperture holding the scanout surface.  QEMU's
      * ati-vga is BAR0 aperture / BAR2 registers, which this rule finds without any chip-specific
      * table, and the choice is logged so a boot log shows what was mapped. */
-    u64 surface_bar = 0, register_bar = 0;
+    u64 surface_bar = 0, register_bar = 0, register_bytes = 0;
     for (int i = 0; i < 6; i++) {
         u64 base = device->bar_base[i], bytes = device->bar_bytes[i];
         if (!base || !bytes || device->bar_is_io[i]) continue;
@@ -514,14 +557,22 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
         if (device->framebuffer_base >= base &&
             device->framebuffer_base < base + bytes) { surface_bar = base; continue; }
         if (bytes <= 0x100000ull && (bytes & (bytes - 1)) == 0 && bytes >= 0x1000 &&
-            !register_bar) register_bar = base;
+            !register_bar) { register_bar = base; register_bytes = bytes; }
     }
     if (!register_bar) { note("ati: no register BAR found on this function; staying on CPU"); return -1; }
     if (!surface_bar) surface_bar = register_bar;   /* aperture and regs may share a BAR (Mach64) */
     u64 mapped = 0;
-    registers = X->map(register_bar, 0x1000u, 0, &mapped);
+    /* The register block of a Rage128 runs past 0x1800 (GUI_STAT is 0x1740), so mapping a page of it
+     * would leave the status and FIFO registers unreachable and every access in this driver would be
+     * dropped by the kernel's bounds check.  Ask for the whole BAR; the kernel maps what it can and
+     * reports the real size back, which is what `registers_size' then means. */
+    registers = X->map(register_bar, register_bytes, 0, &mapped);
     if (!registers) { note("ati: MMIO mapping failed; staying on CPU"); return -1; }
-    registers_size = mapped ? mapped : 0x1000u;
+    registers_size = mapped ? mapped : register_bytes;
+    if (registers_size < R128_GUI_STAT + 4u) {
+        note("ati: register BAR is smaller than the Rage128 block; staying on CPU");
+        return -1;
+    }
     front.width = device->width; front.height = device->height;
     front.pitch_bytes = device->pitch; front.bytes_per_pixel = device->bytes_per_pixel;
     /* Where inside the aperture the visible surface starts: upstream's si.frameBufferOffset. */
@@ -532,6 +583,11 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
         return -1;
     }
     ops.context = 0;
+    /* Stamp the table itself rather than trusting the bytes that were packed: the ABI and the size are
+     * what the kernel validates before it calls anything, and a module that reports them from its own
+     * running code cannot be misread. */
+    ops.size = (u32)sizeof(ops);
+    ops.abi = SCOS_GPU_ABI_VERSION;
     *out_ops = &ops;
     note("ati: Rage128 GUI engine ready");
     return 0;

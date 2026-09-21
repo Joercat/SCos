@@ -55,17 +55,25 @@ struct module_record {
     u32 header_crc, computed_crc;
     u32 reloc_count, id_count;
     u32 store_count;             /* modules on the disk, including the ones never opened */
-    u32 store_bytes;
+    u32 store_bytes, opened_bytes, unopened_bytes;
     int refusal;                 /* first failing predicate, for the log line */
     const struct scos_gpu_engine_ops *ops;
     int self_test_pixels, self_test_matches;
     struct scos_gpu_surface front, back;
+    u64 test_virtual;            /* CPU-visible start of the surface the engine writes */
+    u32 test_stride, test_width, test_height;
 };
 
 static struct module_record record;
 static struct scos_gpu_exports exports;
 static struct scos_gpu_device_info info;
-static u64 mmio_handle, mmio_phys, mmio_bytes;
+struct mapping {
+    u64 physical, virtual, bytes;
+};
+/* Every mapping a module can reach, including the one the kernel made first for the self-test.  A
+ * module may only read or write inside one of these, and only through the handle we handed back,
+ * which is what keeps a bug in a port from turning into a write to an arbitrary physical address. */
+static struct mapping mapping[4];
 static u64 window_base, window_bytes;
 static u32 saved[16 * 16];
 static int saved_valid;
@@ -83,35 +91,72 @@ static void module_log(const char *line)
     klog("gpu: %s", buffer);
 }
 
+#define DEVICE_MAP_LIMIT (4096u * 2048u)   /* the kernel's per-mapping cap, see device_map() */
+
+static struct mapping *mapping_find(u64 handle)
+{
+    for (unsigned i = 0; i < sizeof(mapping) / sizeof(mapping[0]); i++)
+        if (mapping[i].virtual && handle >= mapping[i].virtual &&
+            handle + 4 <= mapping[i].virtual + mapping[i].bytes) return &mapping[i];
+    return 0;
+}
+
 static u32 module_read32(u64 handle, u32 offset)
 {
-    if (handle != mmio_handle || offset + 4 > mmio_bytes) return 0xffffffffu;
+    struct mapping *m = mapping_find(handle);
+    if (!m || (u64)offset + 4 > m->bytes) return 0xffffffffu;
     return *(volatile uint32_t*)(uintptr_t)(handle + offset);
 }
 
 static void module_write32(u64 handle, u32 offset, u32 value)
 {
-    if (handle != mmio_handle || offset + 4 > mmio_bytes) return;
+    struct mapping *m = mapping_find(handle);
+    if (!m || (u64)offset + 4 > m->bytes) return;
     *(volatile uint32_t*)(uintptr_t)(handle + offset) = value;
+}
+
+static u64 mapping_size(u64 handle)
+{
+    struct mapping *m = mapping_find(handle);
+    return m ? m->bytes - (handle - m->virtual) : 0;
+}
+
+static u64 map_window(u64 physical, u64 bytes, u32 write_combine)
+{
+    if (bytes > DEVICE_MAP_LIMIT) bytes = DEVICE_MAP_LIMIT;
+    for (unsigned i = 0; i < sizeof(mapping) / sizeof(mapping[0]); i++)
+        if (mapping[i].physical == physical && mapping[i].bytes >= bytes) return mapping[i].virtual;
+    u64 mapped_bytes = 0;
+    void *mapped = device_map(physical, bytes, write_combine ? 1 : 0, &mapped_bytes);
+    if (!mapped) return 0;
+    for (unsigned i = 0; i < sizeof(mapping) / sizeof(mapping[0]); i++) {
+        if (mapping[i].virtual) continue;
+        mapping[i] = (struct mapping){ .physical = physical, .virtual = (u64)(uintptr_t)mapped,
+                                       .bytes = mapped_bytes };
+        return (u64)(uintptr_t)mapped;
+    }
+    return 0;                              /* out of window slots: refuse rather than replace */
 }
 
 static u64 module_map(u64 physical, u64 bytes, u32 write_combine, u64 *mapped_bytes)
 {
-    /* Only the BARs of the function this module was loaded for may be mapped, and only once.  A
-     * module cannot walk to another device because it is not given a way to name one. */
-    if (physical != info.bar_base[0] && physical != info.bar_base[1] &&
-        physical != info.bar_base[2] && physical != info.bar_base[3] &&
-        physical != info.bar_base[4] && physical != info.bar_base[5]) {
+    /* Only the BARs of the function this module was loaded for may be mapped.  A module cannot walk
+     * to another device because it is not given a way to name one, and it cannot walk past the end
+     * of a BAR because the window table bounds every access. */
+    int allowed = 0;
+    for (int bar = 0; bar < 6; bar++)
+        if (physical >= info.bar_base[bar] &&
+            physical + bytes <= info.bar_base[bar] + info.bar_bytes[bar]) allowed = 1;
+    if (!allowed) {
         module_log("refused a mapping outside this function's BARs");
         return 0;
     }
-    if (mmio_handle) { *mapped_bytes = mmio_bytes; return mmio_handle; }
-    void *mapped = device_map(physical, bytes, write_combine ? 1 : 0, mapped_bytes);
-    if (!mapped) { module_log("device memory mapping failed"); return 0; }
-    mmio_handle = (u64)(uintptr_t)mapped;
-    mmio_phys = physical;
-    mmio_bytes = *mapped_bytes;
-    return mmio_handle;
+    u64 handle = map_window(physical, bytes, write_combine);
+    if (!handle) { module_log("device memory mapping failed"); return 0; }
+    /* The truth, not the request: a mapping is capped, and a driver that is told the real size
+     * bounds its own accesses instead of faulting on a refused read later. */
+    if (mapped_bytes) *mapped_bytes = mapping_size(handle);
+    return handle;
 }
 
 static u64 module_ticks(void)
@@ -175,11 +220,50 @@ static const char *reject_reason(int code)
     }
 }
 
+static u32 rd32le(const u8 *at)
+{
+    return (u32)at[0] | ((u32)at[1] << 8) | ((u32)at[2] << 16) | ((u32)at[3] << 24);
+}
+
+static int same_name(const char *a, const u8 *b)
+{
+    for (unsigned i = 0; i < 8; i++) {
+        char x = a[i], y = (char)(b[i] | 0x20);       /* the index holds upper-case 8.3 stems */
+        if (x >= 'A' && x <= 'Z') x = (char)(x | 0x20);
+        if (!x || x != y) return x == 0 && (y == 0 || y == ' ');
+    }
+    return 1;
+}
+
+/* Add up what the disk holds, from the index the firmware copied into the arena, so the report can
+ * state the cost of the unused families in bytes instead of adjectives.  An index that disagrees with
+ * the stub is ignored rather than trusted: it is used for reporting only, never for loading. */
+static void measure_store(const struct boot_handoff *handoff)
+{
+    const u8 *idx = (const u8*)(uintptr_t)handoff->index_address;
+    u32 size = handoff->module_index_size;
+    u64 limit = GPU_MODULE_REGION * (handoff->module_store_count ? handoff->module_store_count : 1);
+    record.store_bytes = record.opened_bytes = record.unopened_bytes = 0;
+    if (!idx || size < 8u) return;
+    u32 count = rd32le(idx), total = rd32le(idx + 4);
+    /* `total' counts the module files, not this table, so it is bounded by the region a module could
+     * ever be loaded into; anything larger means the index and the stub disagree and gets ignored. */
+    if (count != handoff->module_store_count || 8u + count * 16u > size || total > limit) return;
+    record.store_bytes = total;
+    for (u32 i = 0; i < count; i++) {
+        const u8 *e = idx + 8u + i * 16u;
+        u32 bytes = rd32le(e + 8);
+        if (same_name(handoff->module_name, e)) record.opened_bytes += bytes;
+        else record.unopened_bytes += bytes;
+    }
+}
+
 static int validate(const struct boot_handoff *handoff, const struct gpu_device *device,
                     const struct scos_gpu_module_header **out_header)
 {
     struct scos_gpu_module_header *header;
     if (!handoff->module_bytes || !handoff->module_address) return 1;
+    const u32 hdr = SCOS_GPU_MODULE_HEADER_SIZE;
     u64 region = GPU_MODULE_AREA(handoff->arena_start);
     u64 limit = GPU_MODULE_REGION;
     if (handoff->module_address != region || handoff->module_bytes > limit) return 7;
@@ -189,24 +273,37 @@ static int validate(const struct boot_handoff *handoff, const struct gpu_device 
     header = (struct scos_gpu_module_header*)(uintptr_t)region;
     if (header->magic != SCOS_GPU_MODULE_MAGIC) return 2;
     if (header->abi != SCOS_GPU_ABI_VERSION) return 3;
-    if (header->header_size != SCOS_GPU_MODULE_HEADER_SIZE) return 4;
+    if (header->header_size != hdr) return 4;
     if (header_checksum_of(header) != header->header_words) return 5;
-    u64 payload_length = handoff->module_bytes - SCOS_GPU_MODULE_HEADER_SIZE;
-    if (mod_crc32((void*)(uintptr_t)(region + SCOS_GPU_MODULE_HEADER_SIZE),
-                  (size_t)payload_length) != header->payload_crc) return 6;
-    u64 load_end = (u64)header->rxe_off + header->rxe_size + header->data_size;
-    if (header->rxe_off != SCOS_GPU_MODULE_HEADER_SIZE) return 7;
-    if (load_end > handoff->module_bytes - header->reloc_count * 16u) return 7;
-    if (header->image_size > limit) return 7;
+    u64 payload_length = handoff->module_bytes - hdr;
+    if (mod_crc32((void*)(uintptr_t)(region + hdr), (size_t)payload_length) != header->payload_crc)
+        return 6;
+    /* The origin rule for the whole format: an offset in a module header or relocation table counts
+     * from byte zero of the file, which is also where this copy lives.  So the loaded blocks occupy
+     * [hdr, hdr + load_size), .bss continues to hdr + image_size, and the header itself is read-only
+     * metadata no relocation may touch. */
+    u64 load_end = (u64)hdr + header->load_size;
+    u64 image_end = (u64)hdr + header->image_size;
+    if (header->rxe_off != hdr) return 7;
+    if (load_end > handoff->module_bytes - (u64)header->reloc_count * 16u) return 7;
+    if (image_end > handoff->module_bytes) return 9;   /* .bss bytes must at least be reserved */
+    if (image_end > limit) return 7;
     if (header->data_off != header->rxe_off + header->rxe_size) return 8;
     if (header->load_size != header->rxe_size + header->data_size) return 7;
     if ((u64)header->reloc_off + header->reloc_count * 16u > handoff->module_bytes) return 9;
-    if (header->entry_init < SCOS_GPU_MODULE_HEADER_SIZE ||
-        header->entry_init - SCOS_GPU_MODULE_HEADER_SIZE >= header->rxe_size) return 10;
+    /* Stored metadata must stay clear of the image, .bss included: the module writes to its own
+     * globals, so a table that shared those bytes would be edited by the driver as it ran. */
+    if (header->reloc_off < image_end) return 9;
+    if (header->module_min_bytes > handoff->module_bytes) return 9;
+    /* An entry point has to be inside the read/execute block: .text is where the code is, and the
+     * region holding it is the only one the kernel marks executable. */
+    if (header->entry_init < hdr || header->entry_init >= (u64)hdr + header->rxe_size) return 10;
     if (header->entry_teardown &&
-        (header->entry_teardown < SCOS_GPU_MODULE_HEADER_SIZE ||
-         header->entry_teardown - SCOS_GPU_MODULE_HEADER_SIZE >= header->rxe_size)) return 10;
+        (header->entry_teardown < hdr ||
+         header->entry_teardown >= (u64)hdr + header->rxe_size)) return 10;
     if (header->id_count == 0) return 17;
+    if ((u64)header->id_off + header->id_count * sizeof(struct scos_gpu_pci_id) > load_end)
+        return 9;
     if (header->flags & SCOS_GPU_MODULE_TAKES_DISPLAY) return 13;
     const char *family = (const char*)header->family;
     if (!device->match || strcmp(family, device->match->family) != 0) return 11;
@@ -216,9 +313,11 @@ static int validate(const struct boot_handoff *handoff, const struct gpu_device 
         u32 width = r->type == SCOS_GPU_RELOC_ABS64 ? 8u : 4u;
         if (r->type != SCOS_GPU_RELOC_ABS64 && r->type != SCOS_GPU_RELOC_ABS32S &&
             r->type != SCOS_GPU_RELOC_PC32 && r->type != SCOS_GPU_RELOC_PLT32) return 14;
-        if ((u64)r->offset + width > header->load_size) return 14;
-        if ((u64)r->symbol + (u64)(r->addend < 0 ? -r->addend : r->addend) > header->image_size)
-            return 14;
+        if (r->offset < hdr || (u64)r->offset + width > load_end) return 14;
+        if ((u64)r->symbol + (u64)(r->addend < 0 ? -r->addend : r->addend) > image_end) return 14;
+        /* A module may not be pointed at kernel memory it was not given: every reference must land
+         * inside its own image, which is what makes "no imports" enforceable rather than aspirational. */
+        if (r->symbol < hdr) return 14;
     }
     /* Cross-check every id the module claims against what the generated table knows for its family.
      * The module is allowed to claim fewer, never more: an engine cannot widen detection. */
@@ -230,25 +329,33 @@ static int validate(const struct boot_handoff *handoff, const struct gpu_device 
                 device->match->ids[k].device == claims[i].device) { known = 1; break; }
         if (!known) return 12;
     }
+    record.load_bytes = header->load_size;
+    record.image_bytes = header->image_size;
+    record.resident_bytes = (u64)hdr + header->image_size;
+    record.reloc_count = header->reloc_count;
+    record.id_count = header->id_count;
     *out_header = header;
     record.header_crc = header->payload_crc;
     record.computed_crc = mod_crc32((void*)(uintptr_t)(region + SCOS_GPU_MODULE_HEADER_SIZE),
                                     (size_t)payload_length);
-    record.reloc_count = header->reloc_count;
-    record.id_count = header->id_count;
-    record.load_bytes = header->load_size;
-    record.image_bytes = header->image_size;
-    record.resident_bytes = header->image_size;
     return 0;
 }
 
-static void relocate(u64 base, const struct scos_gpu_module_header *header)
+static int relocate(u64 base, const struct scos_gpu_module_header *header)
 {
     for (unsigned i = 0; i < header->reloc_count; i++) {
         struct scos_gpu_reloc *r = (struct scos_gpu_reloc*)(uintptr_t)
             (base + header->reloc_off + (u64)i * 16u);
         u64 place = base + r->offset;
         u64 target = base + r->symbol;
+        /* The same predicate validate() applies, re-checked here: the loader must not fault on a
+         * module whose header was rewritten between the two passes (a boot disk is read while the
+         * firmware still owns the controller, and a torn read is exactly what this catches). */
+        u32 width = r->type == SCOS_GPU_RELOC_ABS64 ? 8u : 4u;
+        u64 load_end = SCOS_GPU_MODULE_HEADER_SIZE + (u64)header->load_size;
+        if (r->offset < SCOS_GPU_MODULE_HEADER_SIZE || (u64)r->offset + width > load_end ||
+            r->symbol < SCOS_GPU_MODULE_HEADER_SIZE ||
+            (u64)r->symbol >= SCOS_GPU_MODULE_HEADER_SIZE + header->image_size) return -1;
         switch (r->type) {
         case SCOS_GPU_RELOC_ABS64:
             *(uint64_t*)(uintptr_t)place = target + (int64_t)r->addend;
@@ -260,12 +367,17 @@ static void relocate(u64 base, const struct scos_gpu_module_header *header)
             break;
         case SCOS_GPU_RELOC_PC32:
         case SCOS_GPU_RELOC_PLT32:
+            /* S + A - P.  Both P and S are measured from the same base here, so the base cancels and
+             * `place' itself is the address the 4 bytes are written to - adding another 4 (the width
+             * of the field) is wrong for RELA records, whose addend already carries the -4 that
+             * x86-64 uses for PC-relative references. */
             *(int32_t*)(uintptr_t)place =
-                (int32_t)((int64_t)target + (int64_t)r->addend - (int64_t)(place + 4));
+                (int32_t)((int64_t)r->symbol + (int64_t)r->addend - (int64_t)r->offset);
             break;
         default: break;
         }
     }
+    return 0;
 }
 
 /* ---------------------------------------------------------- self-test ---- */
@@ -276,15 +388,19 @@ static void relocate(u64 base, const struct scos_gpu_module_header *header)
  * whether the port is right.  Any damage is repaired by the CPU immediately, before this function
  * returns, because the LFB is not the desktop's source of truth - `screen.px` is, and the next flip
  * repaints whatever the test touched. */
-static int engine_self_test(const struct boot_handoff *handoff)
+static int engine_self_test(void)
 {
     const struct scos_gpu_engine_ops *ops = record.ops;
     if (!ops || !ops->fill) return 0;
-    u32 width = handoff->framebuffer.width, height = handoff->framebuffer.height;
+    u32 width = record.test_width, height = record.test_height;
+    if (!record.test_virtual) {
+        module_log("this function has no CPU-readable frame buffer; leaving the engine unbound");
+        return 0;
+    }
     if (width < 64 || height < 64) return 0;
     s32 x = (s32)width - 48, y = (s32)height - 32;
-    volatile uint32_t *fb = (volatile uint32_t*)(uintptr_t)handoff->framebuffer.base;
-    u32 stride = handoff->framebuffer.stride;
+    volatile uint32_t *fb = (volatile uint32_t*)(uintptr_t)record.test_virtual;
+    u32 stride = record.test_stride;
     /* Save the region we are about to overwrite, then restore it through the CPU at the end. */
     for (int row = 0; row < 16; row++)
         for (int col = 0; col < 16; col++)
@@ -351,10 +467,18 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
 {
     const struct scos_gpu_module_header *header = 0;
     record.store_count = handoff->module_store_count;
+    measure_store(handoff);
+    /* Say what the disk offers and what this machine opened, on every boot whether or not the module
+     * turns out to be usable: the whole point of one file per family is that a machine with fifteen
+     * modules on its disk reads exactly one, and the only proof of that which costs nothing to run is
+     * a log line naming both numbers. */
+    klog(MODULE_LOG_PREFIX "%u module(s), %u B on the boot disk: %u B opened for this chip, %u B never "
+         "read", record.store_count, record.store_bytes, record.opened_bytes, record.unopened_bytes);
     record.present = 0;
     record.bound = 0;
     record.ops = 0;
-    mmio_handle = mmio_phys = mmio_bytes = 0;
+    for (unsigned i = 0; i < sizeof(mapping) / sizeof(mapping[0]); i++)
+        mapping[i] = (struct mapping){0, 0, 0};
     if (handoff->module_name[0]) {
         unsigned i = 0;
         while (i + 1 < sizeof(record.name) && handoff->module_name[i]) {
@@ -375,10 +499,15 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
         record.family[i] = header->family[i]; i++;
     }
     record.family[i] = 0;
-    relocate(record.region, header);
+    if (relocate(record.region, header) != 0) {
+        record.refusal = 14;
+        klog(MODULE_LOG_PREFIX "rejected: a relocation left the image after loading");
+        return -1;
+    }
     /* .bss is part of the image size but not stored in the file: zero it before the module runs. */
     if (header->bss_size)
-        memset((void*)(uintptr_t)(record.region + header->load_size), 0, header->bss_size);
+        memset((void*)(uintptr_t)(record.region + SCOS_GPU_MODULE_HEADER_SIZE + header->load_size),
+               0, header->bss_size);
     klog(MODULE_LOG_PREFIX "%s (%u B code+data, %u B zeroed, %u reloc, %u id rule(s)) validated",
          record.name, header->load_size, header->bss_size, record.reloc_count, record.id_count);
 
@@ -403,6 +532,44 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
             info.bar_bytes[bar] = bytes;
         }
     }
+    /* The self-test and the module must look at the same memory: the surface *this function*
+     * displays from.  When it is the one feeding the console, that is the LFB the firmware set up.
+     * When it is a second card - an emulated primary in a VM, or onboard plus discrete - the console
+     * belongs to another function altogether, so the aperture of this one is used and the console is
+     * never touched.  Guessing here would mean either a test that proves nothing or a module asked to
+     * draw into memory it cannot reach. */
+    {
+        u64 need = (u64)info.width * info.height * info.bytes_per_pixel;
+        u64 physical = 0, physical_bytes = 0;
+        if (device->is_scanout) {
+            physical = handoff->framebuffer.base;
+            physical_bytes = handoff->framebuffer.size;
+        } else {
+            for (int bar = 0; bar < 6; bar++)
+                if (info.bar_base[bar] && info.bar_bytes[bar] >= need) {
+                    physical = info.bar_base[bar];
+                    physical_bytes = info.bar_bytes[bar];
+                    break;
+                }
+        }
+        /* The module bounds every operation against the device memory it was given, so it has to be
+         * told how much there is: an engine handed only the console's extent would refuse blits into
+         * the rest of its own aperture, and one handed more than exists would write off the end. */
+        info.vram_bytes = physical_bytes > need ? physical_bytes : need;
+        record.test_virtual = physical && need ? map_window(physical, need, 0) : 0;
+        record.test_stride = device->is_scanout ? (u32)handoff->framebuffer.stride : info.pitch / 4u;
+        record.test_width = info.width;
+        record.test_height = info.height;
+        if (record.test_virtual && !device->is_scanout) {
+            info.framebuffer_base = physical;
+            info.framebuffer_bytes = need;
+            info.framebuffer_pointer = record.test_virtual;
+            info.pitch = record.test_stride * info.bytes_per_pixel;
+        }
+        klog(MODULE_LOG_PREFIX "test surface: %s 0x%x+%u, %ux%u stride %u",
+             device->is_scanout ? "console LFB at" : "aperture of this function at",
+             (unsigned)(u32)physical, (unsigned)need, info.width, info.height, record.test_stride);
+    }
     exports = (struct scos_gpu_exports){
         .size = sizeof(exports), .abi = SCOS_GPU_ABI_VERSION, .device = &info,
         .log = module_log, .map = module_map, .read32 = module_read32,
@@ -420,7 +587,9 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
     if (ops->abi != SCOS_GPU_ABI_VERSION || ops->size > sizeof(*ops) ||
         ops->size < 7u * sizeof(void *)) {   /* must at least reach wait_idle */
         record.refusal = 3;
-        klog(MODULE_LOG_PREFIX "reports an engine table this kernel cannot call");
+        klog(MODULE_LOG_PREFIX "reports an engine table this kernel cannot call: size %u abi %u "
+             "(kernel has %u abi %u)", ops->size, ops->abi, (u32)sizeof(*ops),
+             (u32)SCOS_GPU_ABI_VERSION);
         return -1;
     }
     record.ops = ops;
@@ -439,7 +608,7 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
         window_base = record.front.offset_bytes + window_offset;
         window_bytes = window_size;
     }
-    if (!engine_self_test(handoff)) {
+    if (!engine_self_test()) {
         record.refusal = 16;
         record.ops = 0;
         klog(MODULE_LOG_PREFIX "self-test failed (%d/%d pixels); engine detached, CPU compositor "
@@ -479,6 +648,8 @@ const struct gpu_module_state *gpu_module_state(void)
     snapshot.file_bytes = record.file_bytes;
     snapshot.store_count = record.store_count;
     snapshot.store_bytes = record.store_bytes;
+    snapshot.opened_bytes = record.opened_bytes;
+    snapshot.unopened_bytes = record.unopened_bytes;
     snapshot.reloc_count = record.reloc_count;
     snapshot.id_count = record.id_count;
     snapshot.refusal = record.refusal;
@@ -571,7 +742,9 @@ void gpu_module_report(char *out, size_t capacity, const struct boot_handoff *ha
     if (record.store_count > 1) {
         put(w, "; the other ");
         put_number(w, record.store_count - 1);
-        put(w, " were never read");
+        put(w, " were never opened (");
+        put_number(w, record.unopened_bytes);
+        put(w, " B no RAM was given for)");
     }
     put(w, "\n");
     put(w, "Engine self-test: ");

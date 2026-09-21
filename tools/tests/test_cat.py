@@ -4,6 +4,7 @@ from qemu_support import Guest
 
 def package(source,id='test-app',permissions=0):
     source=source.encode();p=bytearray(128+len(source));p[:8]=b'SCOSCAT1';struct.pack_into('<7I',p,8,128,len(source),0,2,permissions,560,360);p[36:36+len(id)]=id.encode();p[68:76]=b'Test App';p[128:]=source;struct.pack_into('<I',p,16,zlib.crc32(p));return bytes(p)
+def strarg(g,text,offset=0):g.debug.write(g.scratch+offset,text.encode()+b'\0');return g.scratch+offset
 def build(g,source,id='test-app',flags=0):
     raw=source.encode();g.debug.write(g.scratch+512,raw);g.debug.write(g.scratch+131072,struct.pack('<32s40sIII4xQI4x',id.encode(),b'Test App',560,360,flags,g.scratch+512,len(raw)));g.debug.write(g.scratch,('home/apps/'+id+'.cat').encode()+b'\0');ok=g.call('cat_build',g.scratch,g.scratch+131072,g.scratch+220000,256);return ok,g.string(g.scratch+220000)
 def check(g,source,error=None,flags=0):
@@ -16,7 +17,9 @@ def check(g,source,error=None,flags=0):
 def test():
   for ide in [False,True]:
     with Guest('cat-ide' if ide else 'cat-usb',ide=ide) as g:
-      assert g.call('app_count')==14
+      # 11 visible native applications, 2 internal WM clients, and no application manager: the
+      # functions that hub window used to gather belong to the surfaces they act on.
+      assert g.call('app_count')==13
       # Raw source and project files are never launchable applications.
       g.save('home/apps/raw.lua','return {}');g.debug.write(g.scratch,b'home/apps/raw.lua\0');assert not g.call('lua_app_install',g.scratch)
       good=package('return {}')
@@ -104,11 +107,15 @@ end}'''
       g.snapshot('settings-short');g.close(settings)
       # Check all native apps remain C clients and repaint against the custom palette.
       windows=[]
-      for name in ['files','terminal','notepad','browser','calendar','settings','about','blackjack','sysmon','solitaire','studio','applications']:
+      # Eleven native applications, and no manager among them: which apps exist and what each can do is
+      # answered by the surfaces (launcher, desktop icons, taskbar, Files), so there is no hub window
+      # left to launch, paint or close.
+      for name in ['files','terminal','notepad','browser','calendar','settings','about','blackjack','sysmon','solitaire','studio']:
         w=g.launch(name);windows.append(w)
-      assert g.call('wm_win_count')==12;g.snapshot('native-apps')
+      assert g.call('wm_win_count')==11;g.snapshot('native-apps')
+      assert not g.call('app_find', strarg(g,'applications')), 'the Applications manager came back'
       for w in windows:g.close(w)
-      print('PASS confirmed persistent custom palette/background and all 12 built-in C app lifecycles',flush=True)
+      print('PASS confirmed persistent custom palette/background and all 11 built-in C app lifecycles',flush=True)
       # Studio: keyboard shortcuts drive its real editor/compiler/save/run path.
       studio=g.launch('studio');g.debug.send('c');g.press('ctrl','s');g.pause()
       assert g.read('home/projects/my-app.project')[:8]==b'SCOSPRJ1'

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """Pack one linked relocatable object into a SCos GPU display module.
+Packing is mechanical and original to SCos.  What it packs is not: the objects come from the ported
+family code under drivers/gpu/, whose upstream provenance and licence each module states in its own
+source header (the first module, `ati', descends from Haiku's rage128 accelerator under the MIT
+licence).  Nothing in this script is copied from an upstream build system.
 
     tools/build_gpu_module.py --input build/gpu/ati.o --family ati --out build/gpu/ati.mod
 
@@ -33,8 +37,9 @@ ABI_VERSION = 1
 MAGIC = 0x4D504753  # "SGPM"
 HEADER_SIZE = 192
 FAMILY_NAME = 16
-MAX_IMAGE = 512 * 1024  # must fit the module region the boot arena reserves
+MAX_IMAGE = 256 * 1024 - 192  # the boot arena's module region, minus the header
 ID_RULE_SIZE = 20
+RELOC_SIZE = 16            # sizeof(struct scos_gpu_reloc) in kernel/include/gpu_abi.h
 
 RXE, DATA, BSS = 0, 1, 2
 BLOCK_NAMES = {RXE: "rxe", DATA: "data", BSS: "bss"}
@@ -193,7 +198,11 @@ def pack(args):
             offset += rxe_size
         elif kind == BSS:
             offset += rxe_size + data_size
-        return offset
+        # Every offset the header and the relocation table carry is measured from the start of the
+        # module file, which is also where the kernel places the image, so the loader can add the
+        # field to its load address with no further adjustment.  .bss has no bytes in the file, but
+        # its address still has to be expressible, hence the same origin.
+        return offset + HEADER_SIZE
 
     def find(name):
         for index, entry in enumerate(symbols):
@@ -220,7 +229,7 @@ def pack(args):
         raise Packed("scos_module_ids must be an array of %u-byte rules (got %u bytes)"
                      % (ID_RULE_SIZE, ids_size))
     ids_off = resolve(ids_index)
-    if ids_off + ids_size > rxe_size:
+    if ids_off + ids_size > HEADER_SIZE + rxe_size:
         raise Packed("the id table must live inside the read/execute block")
 
     relocs = []
@@ -252,10 +261,10 @@ def pack(args):
             if symbols[symbol][4] == 3 and symbols[symbol][1] not in placed:  # STT_SECTION elsewhere
                 raise Packed("%s+0x%x: %s is in an unmapped section" % (section["sname"],
                                                                          r_offset, name))
-            place = base + r_offset
+            place = HEADER_SIZE + base + r_offset
             if kind == DATA:
                 place += rxe_size
-            if place >= rxe_size + data_size:
+            if place >= HEADER_SIZE + rxe_size + data_size:
                 raise Packed("%s+0x%x: relocation placed outside the loaded image"
                              % (section["sname"], r_offset))
             relocs.append((place, RELOC_TYPE[r_type], resolve(symbol), r_addend))
@@ -264,15 +273,22 @@ def pack(args):
         if previous[0] == current[0]:
             raise Packed("two relocations land on image offset 0x%x" % current[0])
 
-    payload = bytes(rxe) + bytes(data) + b"".join(struct.pack("<IIIi", *r) for r in relocs)
+    # .bss has no contents, but it still occupies image bytes, so the metadata that follows the
+    # image starts after it.  Placing the relocation table at the end of the *loaded* blocks instead
+    # put it on top of .bss, and the module's own writes to its zero-initialised globals landed in the
+    # middle of the table the loader is reading - which is how a correctly packed module came in looking
+    # corrupt.  `load | bss | relocs' keeps stored bytes and image bytes disjoint.
+    payload = (bytes(rxe) + bytes(data) + bytes(bss_total) +
+               b"".join(struct.pack("<IIIi", *r) for r in relocs))
+    stored = HEADER_SIZE + image_size + len(relocs) * RELOC_SIZE
     payload_crc = binascii.crc32(payload) & 0xFFFFFFFF
     fields = [MAGIC, ABI_VERSION, HEADER_SIZE, 0,
               HEADER_SIZE, rxe_size, HEADER_SIZE + rxe_size, data_size, bss_total,
-              HEADER_SIZE + rxe_size + data_size, len(relocs), HEADER_SIZE + ids_off,
+              HEADER_SIZE + image_size, len(relocs), ids_off,
               ids_size // ID_RULE_SIZE,
-              HEADER_SIZE + entries["scos_module_init"], HEADER_SIZE + entries["scos_module_teardown"],
+              entries["scos_module_init"], entries["scos_module_teardown"],
               16, rxe_size + data_size, image_size, payload_crc,
-              image_size if not args.min_bytes else args.min_bytes, args.flags]
+              stored if not args.min_bytes else args.min_bytes, args.flags]
     head = struct.pack("<4I16s17I", *fields[:4], args.family.encode()[:FAMILY_NAME - 1], *fields[4:])
     head = head + b"\0" * (HEADER_SIZE - len(head))
     assert len(head) == HEADER_SIZE, len(head)
@@ -302,7 +318,7 @@ def parse(blob):
                   entry_init=entry_init, entry_teardown=entry_teardown, align=align,
                   load_size=load_size, image_size=image_size, payload_crc=payload_crc,
                   min_bytes=min_bytes, flags=flags,
-                  relocs=[struct.unpack_from("<IIIi", blob, reloc_off + 16 * n)
+                  relocs=[struct.unpack_from("<IIIi", blob, reloc_off + RELOC_SIZE * n)
                           for n in range(reloc_count)],
                   ids=[struct.unpack_from("<IIIII", blob, id_off + ID_RULE_SIZE * n)
                        for n in range(id_count)])
@@ -325,12 +341,15 @@ def verify(path, table_path):
     payload = blob[HEADER_SIZE:]
     if binascii.crc32(payload) & 0xFFFFFFFF != module["payload_crc"]:
         problems.append("payload crc mismatch (the file is corrupt)")
-    if len(blob) != HEADER_SIZE + module["load_size"] + module["reloc_count"] * 16:
+    if len(blob) != HEADER_SIZE + module["image_size"] + module["reloc_count"] * RELOC_SIZE:
         problems.append("file size %u is not header + loaded image + relocation table"
                         % len(blob))
     if module["load_size"] != module["rxe_size"] + module["data_size"]:
         problems.append("load size does not match the two blocks")
     if module["data_off"] != module["rxe_off"] + module["rxe_size"]:
+        problems.append("data block is not contiguous with the read/execute block")
+    if module["reloc_off"] < HEADER_SIZE + module["image_size"]:
+        problems.append("the relocation table overlaps the image (it must follow .bss)")
         problems.append("data block is not contiguous with the read/execute block")
     if module["image_size"] > MAX_IMAGE:
         problems.append("image size %u exceeds the module region" % module["image_size"])
@@ -343,9 +362,11 @@ def verify(path, table_path):
     for (place, rtype, target, _addend) in module["relocs"]:
         if rtype not in set(RELOC_TYPE.values()):
             problems.append("reloc type %u is not supported" % rtype)
-        if place + (8 if rtype == 1 else 4) > module["load_size"]:
+        if place < HEADER_SIZE:
+            problems.append("reloc at 0x%x would rewrite the module header" % place)
+        if place + (8 if rtype == 1 else 4) > HEADER_SIZE + module["load_size"]:
             problems.append("reloc at 0x%x writes outside the loaded image" % place)
-        if target >= module["image_size"]:
+        if target < HEADER_SIZE or target >= HEADER_SIZE + module["image_size"]:
             problems.append("reloc target 0x%x is outside the image" % target)
     if module["entry_init"] < HEADER_SIZE or module["entry_init"] - HEADER_SIZE >= module["rxe_size"]:
         problems.append("entry_init is outside the read/execute block")

@@ -102,6 +102,8 @@ struct gpu_module_state {
     uint64_t file_bytes;             /* bytes read off the disk */
     uint32_t store_count;            /* modules on the disk, including those never opened */
     uint32_t store_bytes;
+    uint32_t opened_bytes;           /* the one file the firmware was told to read */
+    uint32_t unopened_bytes;         /* every other family: on the disk, never loaded, never run */
     uint32_t reloc_count, id_count;
     int refusal;                     /* nonzero predicate code when present == 0 */
     int self_test_pixels, self_test_matches;
@@ -126,6 +128,10 @@ int gpu_engine_move_display(int x, int y);
 /* 1 when an engine is bound and willing to try the operation; used to choose a
  * path, never to claim a result. */
 int gpu_engine_available(void);
+/* Whether the engine's front surface is the memory the console actually scans out.  A bound engine
+ * on a *second* card drives its own aperture only, and painting the desktop there would move pixels
+ * nobody can see; the compositor asks this before it hands a rectangle to the GPU. */
+int gpu_engine_drives_output(void);
 
 struct gpu_driver {
     const char *family;

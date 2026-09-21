@@ -70,9 +70,20 @@ includes the license texts and math-file notices at `/system/licenses.txt`.
   `intel_810`/`s3`/`3dfx` driver files), the Be Sample Code License (`nvidia/driver.c`, `matrox/driver.c`,
   `via/driver.c`, `neomagic/driver.c`) and the MIT-style grant in
   `et6x00/license`. No accelerator, kernel driver, header or build file was
-  copied, and **no hardware driver is imported**: `docs/migration/`
-  `GPU-AUTO-DETECT.md` records that every family's engine ops remain null, so all
-  drawing still happens in SCos' own CPU compositor.
+  copied at that point. That section's conclusion - that no engine may be claimed before
+  it exists - is what the detection layer still enforces, family by family.
+
+- **Haiku `rage128` 2D engine** (`src/add-ons/accelerants/rage128/` at `7be0fef0`, MIT) -
+  ported as the first on-disk GPU driver module, `drivers/gpu/ati/`. The solid-fill and
+  screen-to-screen paths, the FIFO accounting and the engine-reset order come from
+  upstream; the accelerant machinery, `set_engine_token`, the B* API and every unbounded
+  wait do not, and the port's header comment lists the four deliberate deviations with
+  their reasons. It is not vendored as a tree and not linked into the kernel: it is packed
+  into `\SCOS\ATI.MOD` and loaded only on a machine whose detected family is `ati`, which
+  `docs/migration/GPU-DRIVER-MODULES.md` measures on every boot. The `intel_extreme` and
+  `radeon_hd` engine code was read during the audit but contributes nothing here: no
+  app_server consumes their legacy 2D engine ABI, and their engines are incomplete at the
+  source.
 
 ## Build boundary
 

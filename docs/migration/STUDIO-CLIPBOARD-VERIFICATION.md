@@ -10,7 +10,9 @@ No new drivers, no physical-PC acceptance, no frozen-32-bit changes.
 ## Changes
 
 - Removed native Counter/Sketch implementations and registrations. A fresh boot
-  has eleven visible native applications (plus two internal WM clients).
+  has eleven visible native applications (plus two internal WM clients). A later change removed the
+  eleventh (the `Applications` manager) in favour of per-icon and per-surface affordances, so a fresh
+  boot now has ten.
 - Optional Lua demonstrations are packaged under `/home/demos/*.cat`, outside
   boot discovery. An in-OS README explains installing them and opening their
   source in Studio. They are not in the launcher before explicit registration.
