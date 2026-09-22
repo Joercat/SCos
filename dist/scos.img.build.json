@@ -1,15 +1,20 @@
 {
  "branch": "arena/01a09dfd-scos",
  "build_tag": "x64-dev",
- "built": "2026-09-22T21:08:23Z",
- "commit": "e56bbb8f8115",
- "kernel_bytes": 818712,
- "kernel_sha256": "db5a650749791dac750e066d607708896b3c824c00169ec8d9c544b86ea66891",
+ "built": "2026-09-22T22:08:06Z",
+ "commit": "a7c40e585b0d",
+ "kernel_bytes": 823096,
+ "kernel_sha256": "22bcbf3289405d782ce2c51058dced27027e8abea25e8bddb98543162c8b35b0",
  "modules": [
   {
    "bytes": 13536,
    "name": "ATI.MOD",
    "sha256": "6e7c79c5969f087b33068af09912748fa2987a074565d972d344066bb32becb0"
+  },
+  {
+   "bytes": 7216,
+   "name": "CIRRUS.MOD",
+   "sha256": "1671b52f3d963c1e811160df6b882cf8403580080c49dcc9f9d06f26476bbda4"
   }
  ],
  "tree": "clean"
