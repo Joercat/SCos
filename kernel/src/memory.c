@@ -14,11 +14,26 @@ static struct efi_memory owned_map[BOOT_MAP_MAX];
 static size_t owned_count;
 static int initialized;
 static uint64_t reserved_pages;
+static uint64_t tables_from_arena,tables_from_allocator;  /* reported: is the pool actually big enough? */
 static uint64_t irq_save(void){uint64_t f;__asm__ volatile("pushfq;popq %0;cli":"=r"(f)::"memory");return f;}
 static void irq_restore(uint64_t f){if(f&512)__asm__ volatile("sti":::"memory");}
+/* Page-table frames come out of the boot arena's pool until the allocator exists, and out of the
+ * allocator afterwards.  The pool is sized for everything the identity mapping and the module region
+ * need (dozens of pages), but a mapping need must never be able to fail the machine at runtime: before
+ * this fallback, growing a mapping past the pool panicked, and the only way to avoid that was to keep
+ * megabytes of RAM reserved that nothing else could use.  pages_allocate() already returns zeroed
+ * memory, which is what a table frame has to start as. */
 static uint64_t *new_table(void){
- if(table_next>=table_end)panic("page-table arena exhausted");
- uint64_t *p=(void*)table_next;table_next+=PAGE;memset(p,0,PAGE);return p;
+ if(table_next<table_end){
+  uint64_t *p=(void*)table_next;table_next+=PAGE;memset(p,0,PAGE);tables_from_arena++;return p;
+ }
+ uint64_t *p=0;
+ if(initialized){
+  uintptr_t got=pages_allocate(1);
+  if(got){p=(void*)got;tables_from_allocator++;}
+ }
+ if(!p)panic("page-table frames unavailable");
+ return p;
 }
 static uint64_t *descend(uint64_t *table,size_t index){
  if(table[index]&128)panic("conflicting page-table leaf");
@@ -195,6 +210,9 @@ uintptr_t page_allocate(void){return pages_allocate(1);}
 void page_release(uintptr_t p){pages_release(p,1);}
 uint64_t memory_free_pages(void){return free_pages;}
 uint64_t memory_reserved_pages(void){return reserved_pages;}
+/* Table frames taken from the boot arena's pool, and from the page allocator after init: the pair says
+ * whether BOOT_ARENA_SIZE is still a sane reservation, and is asserted by tools/tests/test_memory.py. */
+uint64_t memory_table_pages(int from_arena){return from_arena?tables_from_arena:tables_from_allocator;}
 
 uintptr_t pages_allocate(size_t count){return pages_allocate_limit(count,PHYSICAL_LIMIT);}
 

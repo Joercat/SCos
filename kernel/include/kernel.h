@@ -30,6 +30,7 @@ void memory_init(const struct boot_handoff *,const struct efi_memory *);
 uintptr_t pages_allocate(size_t count);
 void pages_release(uintptr_t,size_t);
 uint64_t memory_reserved_pages(void);
+uint64_t memory_table_pages(int from_arena);   /* pool vs allocator table frames: is BOOT_ARENA_SIZE sized right? */
 uintptr_t page_allocate(void);
 void page_release(uintptr_t);
 uint64_t memory_free_pages(void);

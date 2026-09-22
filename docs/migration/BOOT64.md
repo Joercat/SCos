@@ -93,9 +93,18 @@ firmware or driver was imported into the guest. See [EMULATOR.md](EMULATOR.md).
    preferring pixel count near 1024×768. Validate actual mode, pitch, direct
    framebuffer bounds and disjoint RGB/BGR/contiguous channel bitmasks. BLT-only
    output is rejected. This is not a multi-GPU selection or acceleration driver.
-8. Allocate a 16-MiB LoaderData arena below 4 GiB for the handoff, final map and
+8. Allocate a 2-MiB LoaderData arena below 4 GiB for the handoff, final map and
    kernel page-table construction. The kernel allocation is also below 4 GiB;
    the resulting physical allocator can use conventional RAM above 4 GiB.
+   The size is the layout's own arithmetic - 256 KiB of prefix (handoff page, memory
+   map, module index), a 1.5 MiB page-table pool and the 256 KiB module region - and it
+   used to be 16 MiB. That was not headroom but a leak: `memory_init()` excludes the whole
+   arena from the page allocator and `reserved_pages` counts it, so an idle machine reported
+   ~17 MiB of kernel memory while 17 table frames were in use and 14 MiB of RAM was held by
+   nobody. `new_table()` now falls back to the page allocator once the pool is spent, which is
+   what makes the arena a startup convenience instead of a ceiling; `tools/tests/test_memory.py`
+   asserts the reservation stays small, that the pool still suffices for everything boot maps, and
+   that free RAM shows the difference.
 9. Preserve the ACPI 2.0 RSDP candidate. Calibrate a startup deadline from TSC
    around a real 10-ms firmware Stall call; no guessed CPU frequency is used.
    This clock is for startup timeout detection, not a production clock subsystem.

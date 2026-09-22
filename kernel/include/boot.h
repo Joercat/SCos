@@ -5,7 +5,15 @@
 #define BOOT_MAGIC UINT64_C(0x3436544f4f424353)
 #define BOOT_VERSION 3
 #define BOOT_MAP_MAX 512
-#define BOOT_ARENA_SIZE (16ULL * 1024 * 1024)
+/* The one contiguous block the stub hands the kernel, sized to what the layout below actually holds:
+ * 256 KiB of prefix (handoff page, the EFI memory map copy, the module index at +200 KiB), a 1.5 MiB
+ * page-table pool, and the 256 KiB module region at the top.  It used to be 16 MiB, which was not a
+ * reserve for anything: the whole span is excluded from the page allocator (memory_init maps it
+ * arena_start..table_end and never returns it), so an idle 128 MiB machine reported ~17 MiB of "kernel"
+ * memory while 14 MiB of it held nothing at all, and new_table() could not be reached anyway because the
+ * pool it needs is dozens of pages.  Table growth past the pool now falls back to the page allocator, so
+ * the size is a startup convenience rather than a ceiling: see memory.c. */
+#define BOOT_ARENA_SIZE (2ULL * 1024 * 1024)
 #define GPU_MODULE_REGION (256ULL * 1024)
 #define GPU_MODULE_AREA(arena) ((arena) + BOOT_ARENA_SIZE - GPU_MODULE_REGION)
 #define BOOT_INDEX_ADDRESS(arena) ((arena) + 200ULL * 1024)

@@ -68,7 +68,7 @@ no module for the detected family, 3 the read failed.
 
 ## 3. Where the module lives in memory
 
-The arena is 16 MiB allocated by `AllocateMaxAddress` below the 4 GiB line, and it is the only region
+The arena is 2 MiB allocated by `AllocateMaxAddress` below the 4 GiB line, and it is the only region
 the kernel maps after `ExitBootServices()`:
 
 ```
@@ -76,13 +76,16 @@ arena + 0            boot_handoff (192 B)
 arena + 4 KiB        UEFI memory map (<= 128 KiB)
 arena + 200 KiB      DRVLIST.IDX copy
 arena + 256 KiB      page tables (table_next .. table_end)
-arena + 16 MiB - 256 KiB   GPU_MODULE_AREA: header, image, .bss, relocations
+arena + 2 MiB - 256 KiB  GPU_MODULE_AREA: header, image, .bss, relocations
 ```
 
 `memory_init()` maps that last range `RWX` and nothing else outside the kernel image is writable and
 executable at the same time. `table_end` is the module area, so the page-table allocator can never
 grow into a module, and `GPU_MODULE_REGION` (256 KiB) is the hard cap the loader enforces against the
-header's own sizes.
+header's own sizes. Table frames past the pool come from the page allocator instead of panicking; that
+allocator cannot hand out arena pages, because the arena is excluded from the free ranges, so the
+fallback does not weaken the boundary - it only removes the possibility of a boot-time reservation
+becoming a ceiling on how much a machine can map.
 
 Everything the loader does is expressed as an offset from the start of the *file*, which is also where
 the copy begins: the header occupies `[0, 192)`, `.text` (which contains the module's claimed ID table)
