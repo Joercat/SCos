@@ -62,6 +62,25 @@ struct sim_device {
 static struct sim_device sim[MAX_SIM];
 static int sim_count;
 
+/* The kernel's device mapper, replaced here by one fabricated page of content.  The point of the
+ * register probe is that a value comes back out of an aperture the kernel mapped itself, so the
+ * harness has to be able to say what that aperture answers - including "all-ones", which on real
+ * hardware means the function is not responding, and which must never be reported as a chip id. */
+static uint32_t sim_mmio[1024];
+static uint64_t sim_mmio_phys;
+static int sim_maps;
+static int sim_map_fails;
+
+void *device_map(uint64_t physical, uint64_t bytes, int write_combine, uint64_t *mapped_bytes)
+{
+    (void)write_combine;
+    if (sim_map_fails || bytes > sizeof(sim_mmio)) return 0;
+    sim_maps++;
+    sim_mmio_phys = physical;
+    if (mapped_bytes) *mapped_bytes = bytes;
+    return sim_mmio;
+}
+
 static void sim_add(struct sim_device d)
 {
     if (sim_count >= MAX_SIM) { fprintf(stderr, "sim: too many devices\n"); exit(2); }
@@ -382,11 +401,14 @@ int main(void)
      * and cannot say which function the firmware is scanning out from, which is the difference between
      * "driver not loaded" and "driver refused". */
     {
+        /* The same layout, with the 1 MiB MMIO BAR the real card also has: this is where the kernel
+         * stops at "named", so the register probe is the whole difference between naming a chip and
+         * having touched it.  0x2b0000a1 is a Blackwell-shaped NV_PMC_BOOT_0: chip id 0x2b0, revision 0xa. */
         uint64_t keep = fake_fb.base;
         uint64_t high_half = 0x100000000ull;
         struct sim_device pair[2] = {
             {0, 1, 0, 3, 0, 0, 0x10de, 0x2d83,
-             {0u, 0x0000000cu, (uint32_t)(high_half >> 32), 0u, 0u, 0u}, 7},
+             {0xe0100000u, 0x0000000cu, (uint32_t)(high_half >> 32), 0u, 0u, 0u}, 7},
             {0, 2, 0, 3, 0, 0, 0x8086, 0x29c2, {0xe0000008u}, 7},
         };
         fake_fb.base = high_half;             /* the LFB begins at that BAR */
@@ -397,6 +419,62 @@ int main(void)
         expect(owner && owner->bar[1] == high_half, "the upper config word is folded into the BAR");
         expect(owner && owner->named_only, "the chip is named from the registry, not bound");
         expect(owner && !gpu_module_eligible(owner), "no module is offered for a naming row");
+        sim_maps = 0;
+        sim_mmio[0] = 0x2b0000a1u;
+        sim_mmio[1] = 0x00000000u;
+        run_with(pair, 2);
+        owner = gpu_scanout_device();
+        expect(owner && owner->reg_state == 1, "the unclaimed function's BAR0 was read");
+        expect(owner && owner->reg_first == 0x2b0000a1u, "the value read is the one the device answered");
+        expect(sim_maps == 1, "exactly one aperture was mapped, and only for the unclaimed function");
+        expect(sim_mmio_phys == 0xe0100000ull, "the probe used BAR0, not the frame buffer BAR");
+        expect(writes_seen == 0, "the register probe wrote no configuration space");
+        {
+            char text[4096];
+            gpu_report(text, sizeof(text));
+            expect(find_substring(text, "device registers: BAR0 at 0x00000000e0100000 read: first dword 0x2b0000a1") != NULL,
+                   "the report quotes the address and the value that were read");
+            expect(find_substring(text, "chip id 0x000002b0, implementation 0x00000000, revision 0x0000000a") != NULL,
+                   "the NVIDIA fields are decoded where nvkm reads them: chip [31:20], impl [11:8], rev [7:4]");
+        }
+        /* A device that answers all-ones is a dead function, not a chip id: report it as unreachable. */
+        sim_mmio[0] = 0xffffffffu;
+        sim_mmio[1] = 0xffffffffu;
+        run_with(pair, 2);
+        owner = gpu_scanout_device();
+        expect(owner && owner->reg_state == 2, "an all-ones read is reported as not responding");
+        {
+            char text[4096];
+            gpu_report(text, sizeof(text));
+            expect(find_substring(text, "BAR0 mapped, but every read returned 0xffffffff") != NULL,
+                   "a dead function is described as not answering, not as a chip id");
+            expect(find_substring(text, "first dword 0xffffffff") == NULL,
+                   "an unreachable device is never reported as if the all-ones value were an id");
+        }
+        /* QEMU's std VGA is the case this guard exists for: its BAR0 *is* the frame buffer the
+         * kernel already maps for the console, so a second mapping would be a duplicate page-table
+         * request for the same aperture.  Skipping it is the correct answer, not a missed probe. */
+        {
+            uint64_t keep2 = fake_fb.base;
+            struct sim_device std[1] = {
+                {0, 0, 0, 3, 0, 0, 0x1234, 0x1111, {0xe0000000u, 0u, 0u, 0u, 0u, 0u}, 7},
+            };
+            fake_fb.base = 0xe0000000ull;
+            sim_maps = 0;
+            run_with(std, 1);
+            const struct gpu_device *vga = gpu_device(0);
+            expect(vga && vga->reg_state == 5,
+                   "a BAR0 that is the scanout aperture is reported as skipped, not as unprobed");
+            expect(sim_maps == 0, "the scanout aperture is never mapped twice");
+            fake_fb.base = keep2;
+        }
+        /* Memory decode off means the kernel must not go looking, because making it work would mean
+         * writing configuration space, which detection never does. */
+        pair[0].command = 0x00000006 & ~0x2u;
+        run_with(pair, 2);
+        owner = gpu_scanout_device();
+        expect(owner && owner->reg_state == 4, "memory decode disabled is detected and reported as such");
+        expect(sim_maps == 0, "no mapping was attempted while memory decoding was disabled");
         fake_fb.base = keep;
     }
 

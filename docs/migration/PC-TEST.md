@@ -142,3 +142,21 @@ are different problems and should be diagnosed separately.
 See [the unnumbered input/compositor verification record](INPUT-COMPOSITOR.md)
 for the lower default sensitivity, fractional-motion and drag-trail fixes,
 additional UI/settings corrections, and the focused PC retest checklist.
+
+## Which build is on the stick, and what it touched (r-after-provenance)
+
+Type `version` in the terminal, or read the first lines of `graphics`. Both now
+name the commit the kernel was compiled from, the branch's tree state and the UTC
+build time - and `\SCOS\BUILD.TXT` on the ESP carries the same record plus the
+sha256 of the kernel and of every driver module, so a stick can be dated from
+another OS without booting it. If `graphics` does not print
+`Build: <commit> clean, <date>`, the machine is not running the build under
+discussion, and nothing about features should be concluded from it. See
+[BUILD-PROVENANCE.md](BUILD-PROVENANCE.md).
+
+`graphics` also gained `Device access:`, which reports whether the kernel read the
+scanning adapter's own registers. On the RTX 5050 the expected line is a real
+`NV_PMC_BOOT_0` value; `mapped, all-ones reads` means the chip was addressed but
+did not answer; `memory decode disabled by firmware` means the BIOS left the
+function without its aperture enabled and SCos will not write configuration space
+to fix it, because detection is read-only by contract.

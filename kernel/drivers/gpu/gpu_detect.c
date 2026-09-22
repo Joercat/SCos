@@ -58,6 +58,38 @@ const char *gpu_vendor_name(uint16_t vendor)
     }
 }
 
+/* Reading a device register needs no write, no sizing and no modeset: map the first page of BAR0 and
+ * load two dwords.  On an NVIDIA function that is NV_PMC_BOOT_0 (chipset number in [15:8], revision in
+ * [7:4]), and NV_PMC_BOOT_4; on an ATI Rage function, CONFIG_CHIP_ID and CONFIG_AMPUS.  Either way the
+ * value comes out of the silicon, which is the point: it turns "we named your chip from a table" into
+ * "we read your chip", and it shows whether an aperture the kernel mapped above 4 GiB is reachable on
+ * real firmware.  Functions a module could claim are left alone, so an aperture is never mapped twice. */
+void *device_map(uint64_t physical, uint64_t bytes, int write_combine, uint64_t *mapped_bytes);
+
+static int probe_shadows_scanout(const struct gpu_device *g);
+
+static void probe_registers(struct gpu_device *g)
+{
+    volatile uint32_t *mmio;
+    uint64_t mapped = 0;
+    void *window;
+
+    g->reg_state = 0;
+    g->reg_base = 0;
+    g->reg_first = g->reg_second = 0;
+    if (!g->bar[0] || g->bar[0] >> 46) return;         /* no aperture, or beyond what can be mapped */
+    if (probe_shadows_scanout(g)) { g->reg_state = 5; return; }
+    if (gpu_module_eligible(g)) return;                /* a module owns this aperture, not us */
+    if (!(g->command & 0x2)) { g->reg_state = 4; return; }
+    window = device_map(g->bar[0], 4096, 0, &mapped);
+    if (!window || mapped < 8) { g->reg_state = 3; g->reg_base = g->bar[0]; return; }
+    g->reg_base = g->bar[0];
+    mmio = (volatile uint32_t *)window;
+    g->reg_first = mmio[0];
+    g->reg_second = mmio[1];
+    g->reg_state = (g->reg_first == 0xffffffffu && g->reg_second == 0xffffffffu) ? 2 : 1;
+}
+
 /* Raw BAR register values only.  Sizing a BAR means writing all-ones into it first,
  * and that is precisely the kind of operation that can take away the running console,
  * so this subsystem never does it; a ported driver that needs the size asks for it in
@@ -74,6 +106,14 @@ static void read_bars(struct gpu_device *g)
             i++;                            /* consumed as the upper half */
         }
     }
+}
+
+/* Whether BAR0 names the same physical start the firmware is already scanning out from.  The kernel
+ * maps that aperture itself, for the console, so mapping it a second time to read two dwords would be
+ * redundant at best and a page-table conflict at worst. */
+static int probe_shadows_scanout(const struct gpu_device *g)
+{
+    return g->bar[0] && output.base && (g->bar[0] & ~0xfffull) == output.base;
 }
 
 static void record(struct gpu_device *g, uint8_t bus, uint8_t slot, uint8_t function,
@@ -161,9 +201,19 @@ void gpu_init(const struct boot_framebuffer *fb)
             if (g->named_only)
                 klog("gpu:   %x:%x is named by the PCI id registry only; no driver table in this tree "
                      "binds it, so nothing was loaded for it", g->vendor, g->device);
+            if (g->reg_state == 1)
+                klog("gpu:   read 0x%x from BAR0 of %x:%x; device registers are reachable",
+                     g->reg_first, g->vendor, g->device);
+            else if (g->reg_state == 2)
+                klog("gpu:   BAR0 of %x:%x is mapped but answers all-ones; the device is not responding",
+                     g->vendor, g->device);
             device_count++;
         }
     }
+
+    for (int i = 0; i < device_count; i++)
+        if (!devices[i].match || devices[i].named_only || !devices[i].bound)
+            probe_registers(&devices[i]);
 
     /* The scanning adapter is the one whose BAR already points at the framebuffer the
      * firmware validated.  Matching addresses is enough to know which device owns the
@@ -328,6 +378,14 @@ static void put_hex(struct writer *w, uint16_t value)
     put(w, text);
 }
 
+static void put_hex8(struct writer *w, uint32_t value)
+{
+    char text[9];
+    hex4(text, (uint16_t)(value >> 16));
+    hex4(text + 4, (uint16_t)value);
+    put(w, text);
+}
+
 static void put_line(struct writer *w, const char *text)
 {
     put(w, text);
@@ -392,6 +450,47 @@ void gpu_report(char *out, size_t capacity)
         put(&w, "  upstream entry points: ");
         put(&w, g->match->features);
         put_line(&w, "");
+        put(&w, "  device registers: ");
+        switch (g->reg_state) {
+        case 1:
+            put(&w, "BAR0 at 0x");
+            put_hex8(&w, (uint32_t)(g->reg_base >> 32));
+            put_hex8(&w, (uint32_t)g->reg_base);
+            put(&w, " read: first dword 0x");
+            put_hex8(&w, g->reg_first);
+            put(&w, ", second 0x");
+            put_hex8(&w, g->reg_second);
+            if (g->vendor == 0x10de) {
+                /* Decoded exactly the way nvkm reads this register: chip id [31:20], implementation
+                 * [11:8], revision [7:4].  GA102 answers 0x168000a1, which is "168, rev a" - the same
+                 * shape as any other vendor's chip id, and the reason the raw dword is also printed. */
+                put(&w, " (NV_PMC_BOOT_0: chip id 0x");
+                put_hex8(&w, (g->reg_first >> 20) & 0xfff);
+                put(&w, ", implementation 0x");
+                put_hex8(&w, (g->reg_first >> 8) & 0xf);
+                put(&w, ", revision 0x");
+                put_hex8(&w, (g->reg_first >> 4) & 0xf);
+                put(&w, ")");
+            }
+            put_line(&w, "");
+            break;
+        case 2:
+            put_line(&w, "BAR0 mapped, but every read returned 0xffffffff - the device is not answering");
+            break;
+        case 3:
+            put_line(&w, "BAR0 is outside the kernel's mapping capacity, so it was not read");
+            break;
+        case 4:
+            put_line(&w, "not read: memory decoding is disabled in this function's command register, "
+                         "and detection does not write configuration space");
+            break;
+        case 5:
+            put_line(&w, "not read: BAR0 is the frame buffer aperture the kernel already maps for scanout");
+            break;
+        default:
+            put_line(&w, "not read (a driver module may claim this function, or no BAR0 was reported)");
+            break;
+        }
         const struct gpu_driver *port = gpu_port_for(g->match->family);
         put(&w, "  SCos port: ");
         if (g->module_ops)

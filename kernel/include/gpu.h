@@ -65,6 +65,14 @@ struct gpu_device {
     uint64_t bar[6];                 /* raw BAR register values, never sized */
     int command, header_type;        /* read-only copies for the report */
     uint8_t named_only;              /* row came from the naming table: a known chip, no driver claim */
+    /* Real device access for a chip this tree has no engine for: the first two dwords of BAR0, read
+     * through a mapping the kernel owns and never releases.  Probing is skipped for any function a
+     * module could claim, because a second mapping of the same aperture would collide with the
+     * module's own window.  reg_state: 0 not probed, 1 readable, 2 the device answered all-ones,
+     * 3 the mapping was refused, 4 the function has memory decoding disabled in its command register. */
+    uint64_t reg_base;
+    uint32_t reg_first, reg_second;
+    uint8_t reg_state;
 };
 
 #define GPU_MAX_DEVICES 8

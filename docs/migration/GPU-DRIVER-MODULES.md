@@ -355,3 +355,47 @@ the raised `device_map()` bound are what a real panel needs to be scanned out at
 for Fermi-and-later NVIDIA parts still does not exist outside the vendor stack, whose supported hardware
 begins at Turing with GSP firmware active. See GPU-BASIC-2D-RESEARCH.md for the audit that ends that
 road, and note that a request to map a 4K frame buffer no longer panics the machine: that was fixed.
+
+## Reading the chip on a function no driver claims
+
+Identification alone meant that on a Blackwell panel the kernel had never issued a single read to the
+device it was describing. `probe_registers()` in `gpu_detect.c` now maps the first page of BAR0 of every
+detected display function that no module could claim, and loads `NV_PMC_BOOT_0` and the dword after it -
+no sizing, no reset, no write of any kind, and no mapping at all where a module owns the aperture, so an
+aperture is never mapped twice. `gpu_report()` and `graphics` print the address, the value, and the chip
+id / implementation / revision decoded exactly where nvkm reads them (`[31:20]`, `[11:8]`, `[7:4]`), and
+four states are distinguished rather than collapsed into a number: readable, all-ones (the device did not
+answer), mapping refused, and memory decode disabled by firmware. `tools/tests/gpu_detect_sim.c` drives
+all of it against a fabricated aperture - including the insistence that an all-ones read is never reported
+as if it were a chip id - because no emulator here can present an NVIDIA function.
+
+This is device access, not acceleration, and it is described that way on purpose: it establishes that the
+kernel can talk to the chip at the address the firmware left, which is the precondition any engine needs.
+
+## What "no matter what it takes" would have to include, for a 2025-class NVIDIA card
+
+The claim that Blackwell is GSP-only was re-checked against the 2026 record rather than asserted:
+
+- nouveau's GB202 display series states it in its own words - "GB20x is GSP-only. This table supplies the
+  register programming the GSP-RM display path needs from the chip" (v3, August 2026), and a reviewer of
+  the same series notes "booting these cards without GSP isn't possible on nouveau anyhow". Even scanout
+  register programming for GB207 goes through the vendor's Resource Manager.
+- `nova-core`, the in-tree Rust driver being written for Hopper/Blackwell, needs the GSP image *and* a
+  second ELF32 (FMC) image, selected per architecture - `.fwsignature_gb20x` covers GB202/203/205/206/207
+  - with `ENOTSUPP` otherwise (patch series, February 2026; v9 April 2026).
+- NVIDIA's own tracker records that `NVreg_EnableGpuFirmware=0` has no effect on Blackwell: GSP is
+  mandatory, and even there it is reported to die under load (Xid 109) without a heartbeat restart.
+- Linux 6.18 made GSP the nouveau default for Turing/Ampere, keeping the older firmware path only for
+  those two generations; "We've always been GSP-only on Ada and later."
+
+That is also the explanation for "nouveau worked on my PC out of the box": a distribution loads the
+R570 GSP image from `linux-firmware` on the user's behalf (NVIDIA donated the 570.144 blobs precisely
+because Hopper and Blackwell cannot be brought up without them, 61 MB shared by GA10x/AD10x and larger
+again for GB20x). Nouveau was not doing it unaided; a package nobody noticed had installed made it work.
+
+Under the standing rule that this kernel stays its own and that imports larger than a few thousand lines
+are not shipped, the consequence for a GeForce RTX 5050 is fixed: there is no engine to port. The blob is
+proprietary firmware, the host side of the interface is NVIDIA's Resource Manager, and the userspace that
+would consume the resulting submission queue (NVK, Mesa) is built against kernel DRM buffer management that
+this module ABI has no equivalent of. What is left to do honestly is what has been done here - real register
+access, exact chip identification, and a compositor that stops wasting the CPU it has.

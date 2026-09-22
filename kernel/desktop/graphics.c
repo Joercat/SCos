@@ -135,6 +135,22 @@ void graphics_report(char *out, size_t capacity)
         put(&w, scos_build_modified() ? "  (UNCOMMITTED tree - not evidence about any commit)\n"
                                       : "  (matches the committed source)\n");
     }
+    /* Whether the scanning adapter's own registers were read.  "Identified" and "touched" are
+     * different claims and this OS has until now been able to make only the first. */
+    if (owner) {
+        put(&w, "Device access: ");
+        if (owner->reg_state == 1) {
+            put(&w, "BAR0 of ");
+            fmt_u32(number, (uint32_t)owner->bar[0]); put(&w, number);
+            put(&w, " read through the kernel's device mapping; first dword 0x");
+            fmt_u32(number, owner->reg_first); put(&w, number);
+            put(&w, "\n");
+        } else if (owner->reg_state == 2) put(&w, "mapped, all-ones reads\n");
+        else if (owner->reg_state == 3) put(&w, "BAR0 beyond the mapping capacity\n");
+        else if (owner->reg_state == 4) put(&w, "memory decode disabled by firmware\n");
+        else if (owner->reg_state == 5) put(&w, "BAR0 is the scanout aperture; already mapped once\n");
+        else put(&w, "none (this function is left to a driver module)\n");
+    }
     put(&w, "Display: ");
     fmt_u32(number, scanout.width);
     put(&w, number);
