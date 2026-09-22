@@ -1082,6 +1082,14 @@ static const struct gpu_pci_id gpu_ids_radeon_hd[] = {
 /* Per-family match records.  `.upstream` is what the family's hook table
  * hands out today in that checkout; it is a capability *inventory*, not a
  * statement that SCos has ported the code that uses it. */
+/* The one local record, described above the generator's own provenance header: this family is
+ * not read out of an upstream driver.  The id row is what the module claims and the loader
+ * cross-checks; deleting it here stops drivers/gpu/cirrus from loading at all rather than leaving it
+ * unverified. */
+static const struct gpu_pci_id gpu_ids_cirrus[] = {
+    {0x1013, 0x00B8, "GD 5446 (PCI)"},        /* the last Cirrus with a bitBLT engine */
+};
+
 static const struct gpu_match gpu_match_table[] = {
     {
         .family = "radeon", .primary_vendor = 0x1002,
@@ -1283,9 +1291,25 @@ static const struct gpu_match gpu_match_table[] = {
         .source = "src/add-ons/accelerants/virtio",
         .note = "no PCI ID table: binds by class or firmware",
     },
+    {
+        .family = "cirrus", .primary_vendor = 0x1013,
+        .class_base = 0x03, .class_sub_a = 0x00, .class_sub_b = 0xff,
+        .ids = gpu_ids_cirrus, .id_count = 1u,
+        .upstream = {
+        .engine2d = 1, .vsync = 0, .pan = 0, .cursor = 0, .overlay = 0,
+        .fill = 1, .blit = 1, .span = 0, .modeset = 0, .dpms = 0,
+        },
+        .features = "engine:SCos-authored bitBLT driver, device-verified; retrace:absent; pan:absent;"
+        " cursor:absent; overlay:absent; fill_rect:direct; screen_blit:direct; fill_span:absent; set_"
+        "mode:absent; dpms:absent",
+        .source = "drivers/gpu/cirrus (no upstream driver; verified against QEMU's CL-GD5446 model)",
+        .note = "hand-authored id row and capability record, not generated from an upstream table",
+    },
 };
 
-#define GPU_MATCH_COUNT 15u
-#define GPU_ID_TOTAL 1019u
+/* GPU_MATCH_COUNT and GPU_ID_TOTAL include the hand-authored cirrus record: 16 families, and
+ * 1020 exact ids that bind a driver (1019 from upstream tables plus the one local row). */
+#define GPU_MATCH_COUNT 16u
+#define GPU_ID_TOTAL 1020u
 
 #endif

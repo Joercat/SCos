@@ -530,6 +530,8 @@ extern u32 input_key_enqueued, input_mouse_enqueued, input_key_dropped, input_mo
 
 void desktop_start(const struct boot_framebuffer *fb);
 void desktop_framebuffer(const struct boot_framebuffer *fb);
+int fb_scroll_output(u32 x,u32 y,u32 w,u32 h,u32 step,u32 color);
+void fb_scroll_cpu(u32 x,u32 y,u32 w,u32 h,u32 step,u32 color);
 size_t allocation_bytes(const void *p);
 u64 memory_reserved_pages(void);
 uintptr_t pages_allocate(size_t count);

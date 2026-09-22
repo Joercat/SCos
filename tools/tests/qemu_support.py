@@ -27,11 +27,12 @@ class Debugger:
 class Guest:
     # `devices` are extra emulated PCI functions added to the run, one spec per entry;
     # the GPU detection test uses them to attach display adapters beside the boot one.
-    def __init__(self,name='cat',ide=False,cpus=1,devices=()):
-        self.name=name;self.ide=ide;self.cpus=cpus;self.devices=list(devices)
+    def __init__(self,name='cat',ide=False,cpus=1,devices=(),vga='std'):
+        self.name=name;self.ide=ide;self.cpus=cpus;self.devices=list(devices);self.vga=vga
     def __enter__(self):
         RESULTS.mkdir(parents=True,exist_ok=True)
         args=['python3','tools/run_qemu.py','--memory','128','--dry-run']
+        args+=['--vga',self.vga]
         for spec in self.devices:args+=['--device',spec]
         if not self.ide:args+=['--usb-boot']
         lines=subprocess.check_output(args,cwd=ROOT,text=True).splitlines();self.directory=Path(lines[0].split(': ',1)[1]);cmd=shlex.split(lines[-1]);cmd=[('pc' if self.ide and x=='q35' else x) for x in cmd if x!='-no-reboot'];cmd+=['-gdb',f'unix:{self.directory}/debug,server=on,wait=off']

@@ -247,6 +247,21 @@ families, the tier can additionally own the copies and fills.
 
 ## 5. Where a basic accelerator *can* be won today
 
+**Update, 2026-09-22 - one of these was won, and it is measured.** The plan in this section rated a
+Cirrus CL-GD5446 bitBLT out of scope on the grounds that no one would ship such a card; the constraint that
+actually matters is different, and was settled by building it: the CL-GD5446 is the only display device this
+environment can emulate whose 2D engine is reachable through the interface SCos gives a driver module (a
+mapping of the register BAR and 32-bit accesses, no port I/O, no bus-master DMA). `drivers/gpu/cirrus`
+now drives the console of a `-vga cirrus` guest: the kernel's read-back self-test passes on the card's own
+memory, a whole 800x600 repaint costs the CPU nothing and 480,000 pixels the engine, and one console
+scroll is one bit-block transfer of 368,640 pixels. The numbers, the register-model findings (the block
+lives at BAR+0x100, `BLTWIDTH` counts bytes, the start bit is edge-triggered) and the limits are written up
+in `GPU-DRIVER-MODULES.md`; what the card still cannot do - no copy from system memory, so the compositor's
+RAM-resident frame cannot be pushed by the engine - is stated there rather than glossed. What has *not*
+changed is the conclusion about modern GPUs in section 4: none of this makes a GeForce RTX 5050 render, and
+nothing in it was ported from a vendor's code.
+
+
 Four concrete, non-speculative observations:
 
 1. **For this machine's iGPU, the achievable tier is the display engine, not the

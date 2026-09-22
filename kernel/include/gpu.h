@@ -145,6 +145,12 @@ int gpu_engine_available(void);
  * nobody can see; the compositor asks this before it hands a rectangle to the GPU. */
 int gpu_engine_drives_output(void);
 
+/* Every accelerated drawing path reports what the engine did and what the CPU kept for itself, in
+ * source pixels.  The two counters exist so "the GPU is doing the drawing" is a measured statement in
+ * the boot report and the tests, not an inference from the fact that a driver loaded. */
+void gpu_engine_note_work(uint32_t by_engine, uint32_t by_cpu);
+void gpu_engine_work_totals(uint32_t *by_engine, uint32_t *by_cpu);
+
 struct gpu_driver {
     const char *family;
     enum gpu_port_state state;

@@ -29,7 +29,48 @@ static int engine_output_fill(int x,int y,int w,int h){
   for(int c=0;c<w;c++)if(row[c]!=color)return 0;
  }
  if(gpu_engine_fill_rectangle(x,y,w,h,color)!=0)return 0;
- return gpu_engine_wait_idle()==0;
+ if(gpu_engine_wait_idle()!=0)return 0;
+ /* Counted per rectangle, not per pixel, from the caller's point of view: the same number is
+  * reported next to the CPU total so "the GPU did the drawing" stays checkable rather than a
+  * claim.  A fill the engine accepted and then failed to retire is not counted as work done. */
+ gpu_engine_note_work((u32)w*(u32)h,0);
+ return 1;
+}
+
+/* One text line of the console is 16 rows by columns*8 pixels of uncached device memory.  On a card
+ * with a bit-block transfer engine that move belongs in the GPU's own video RAM, where it is a few
+ * register writes, and not in a loop the boot CPU runs a pixel at a time.  A device without an engine,
+ * or one that declines the rectangle, takes the loop below; both paths are counted so the boot report
+ * says which one did the work. */
+int fb_scroll_output(u32 x,u32 y,u32 w,u32 h,u32 step,u32 color){
+ if(!gpu_engine_drives_output()||!output.base)return 0;
+ if(output.red!=0xff0000||output.green!=0xff00||output.blue!=0xff)return 0;
+ if(step==0||w==0||h==0||x+w>output.width||y+h+step>output.height)return 0;
+ if(w>0xffff||h>0xffff||step>0xffff)return 0;
+ if(gpu_engine_screen_to_screen_blit((int)x,(int)y,(int)w,(int)h,(int)x,(int)(y+step))!=0)return 0;
+ /* The band left behind by the move is below the rectangle that was copied, not the last `step`
+  * rows of it: the source of the copy reaches down to y+h+step, so that is the row the engine has
+  * to paint over.  Getting this wrong scrolls garbage into the visible area instead of blanking. */
+ if(gpu_engine_fill_rectangle((int)x,(int)(y+h),(int)w,(int)step,color)!=0)return 0;
+ if(gpu_engine_wait_idle()!=0)return 0;
+ gpu_engine_note_work(w*(h+step),0);
+ return 1;
+}
+
+/* The per-pixel loop fb_scroll_output replaces, kept here so the fallback and the first paint of a
+ * cleared band share one implementation. */
+void fb_scroll_cpu(u32 x,u32 y,u32 w,u32 h,u32 step,u32 color){
+ volatile u32 *fb=(void*)(uintptr_t)output.base;
+ for(u32 row=0;row<h;row++){
+  volatile u32 *d=fb+(size_t)(y+row)*output.stride+x;
+  const volatile u32 *src=fb+(size_t)(y+row+step)*output.stride+x;
+  for(u32 c=0;c<w;c++)d[c]=src[c];
+ }
+ for(u32 row=h;row<h+step;row++){
+  volatile u32 *d=fb+(size_t)(y+row)*output.stride+x;
+  for(u32 c=0;c<w;c++)d[c]=color;
+ }
+ gpu_engine_note_work(0,w*(h+step));
 }
 void fb_flip_rect(int x,int y,int w,int h){
  if(x<0){w+=x;x=0;}if(y<0){h+=y;y=0;}
@@ -39,6 +80,7 @@ void fb_flip_rect(int x,int y,int w,int h){
  volatile u32 *fb=(void*)(uintptr_t)output.base;
  int native=output.red==0xff0000&&output.green==0xff00&&output.blue==0xff;
  if(native&&engine_output_fill(x,y,w,h))return;
+ if(native)gpu_engine_note_work(0,(u32)w*(u32)h);
  for(int r=0;r<h;r++){
   const u32 *src=screen.px+(size_t)(y+r)*screen_w+x;
   volatile u32 *dst=fb+(size_t)(y+r)*output.stride+x;

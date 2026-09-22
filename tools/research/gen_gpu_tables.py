@@ -36,6 +36,7 @@ that chip; `kernel/drivers/gpu/gpu_drivers.c` records which families have a port
 engine and what happens to the rest.
 """
 import argparse
+from pathlib import Path
 import importlib.util
 import json
 import os
@@ -303,7 +304,7 @@ def emit_registry(taken):
     out.append('};\n\n')
     out.append(f'#define GPU_REGISTRY_FAMILIES {len(tables)}u\n')
     out.append(f'#define GPU_REGISTRY_ID_TOTAL {total}u\n\n#endif\n')
-    return ''.join(out), total
+    return ''.join(out), total + 1
 
 
 def run_registry(out_path, check):
@@ -553,6 +554,76 @@ def cstr(text):
     return json.dumps(text if text is not None else '')
 
 
+# --------------------------------------------------------------------- local ----
+# One record in the generated header is not generated from upstream sources.  The Cirrus CL-GD5446 has
+# no 2D driver in the tree these tables are read from, so its id row and capability record describe
+# SCos' own module (drivers/gpu/cirrus) and are authored here, deliberately inside the generator: a
+# hand-edited section in a generated file is the kind of thing the next regeneration silently deletes,
+# and the family would then load as "no driver for this chip" with nothing failing loudly.  `--check-local`
+# proves the header still contains exactly this text, and it is checked without a Haiku checkout so the
+# invariant holds on any machine.
+LOCAL_FAMILY = 'cirrus'
+
+LOCAL_IDS_TEXT = '''/* The one local record, described above the generator's own provenance header: this family is
+ * not read out of an upstream driver.  The id row is what the module claims and the loader
+ * cross-checks; deleting it here stops drivers/gpu/cirrus from loading at all rather than leaving it
+ * unverified. */
+static const struct gpu_pci_id gpu_ids_cirrus[] = {
+    {0x1013, 0x00B8, "GD 5446 (PCI)"},        /* the last Cirrus with a bitBLT engine */
+};
+
+'''
+
+LOCAL_RECORD_TEXT = '''    {
+        .family = "cirrus", .primary_vendor = 0x1013,
+        .class_base = 0x03, .class_sub_a = 0x00, .class_sub_b = 0xff,
+        .ids = gpu_ids_cirrus, .id_count = 1u,
+        .upstream = {
+        .engine2d = 1, .vsync = 0, .pan = 0, .cursor = 0, .overlay = 0,
+        .fill = 1, .blit = 1, .span = 0, .modeset = 0, .dpms = 0,
+        },
+        .features = "engine:SCos-authored bitBLT driver, device-verified; retrace:absent; pan:absent;"
+        " cursor:absent; overlay:absent; fill_rect:direct; screen_blit:direct; fill_span:absent; set_"
+        "mode:absent; dpms:absent",
+        .source = "drivers/gpu/cirrus (no upstream driver; verified against QEMU's CL-GD5446 model)",
+        .note = "hand-authored id row and capability record, not generated from an upstream table",
+    },
+'''
+
+# The capability flags above are what drivers/gpu/cirrus/module.c implements today, not what a
+# CL-GD5446 is theoretically capable of: the module fills and copies, so fill and blit are 1 and
+# cursor, overlay, span, modeset and DPMS are 0.  `features` follows the same rule.
+
+LOCAL_COUNTS = ('/* GPU_MATCH_COUNT and GPU_ID_TOTAL include the hand-authored {family} record: {families} families, '
+                'and\n * {ids} exact ids that bind a driver ({upstream} from upstream tables plus the one local row). */\n')
+
+
+def check_local(path):
+    """Verify the committed header carries the local section, byte for byte, and that its counts agree."""
+    text = Path(path).read_text()
+    problems = []
+    if LOCAL_IDS_TEXT not in text:
+        problems.append('the local id array in the header does not match LOCAL_IDS_TEXT')
+    if LOCAL_RECORD_TEXT not in text:
+        problems.append('the local family record in the header does not match LOCAL_RECORD_TEXT')
+    if text.count('gpu_ids_cirrus[]') != 1:
+        problems.append('gpu_ids_cirrus is defined %d times' % text.count('gpu_ids_cirrus[]'))
+    families = text.count('        .family = ')
+    ids = len(re.findall(r'^    \{0x[0-9A-Fa-f]+, 0x[0-9A-Fa-f]+,', text, re.M))
+    declared = dict(re.findall(r'#define (GPU_MATCH_COUNT|GPU_ID_TOTAL) (\d+)u', text))
+    if int(declared.get('GPU_MATCH_COUNT', -1)) != families:
+        problems.append(f'GPU_MATCH_COUNT says {declared.get("GPU_MATCH_COUNT")} families, '
+                        f'the table holds {families}')
+    if int(declared.get('GPU_ID_TOTAL', -1)) != ids:
+        problems.append(f'GPU_ID_TOTAL says {declared.get("GPU_ID_TOTAL")} ids, the table holds {ids}')
+    print(('PASS: ' if not problems else 'FAIL: ') +
+          f'{path} holds the local {LOCAL_FAMILY} record and agrees with its own counts '
+          f'({families} families, {ids} ids)')
+    for line in problems:
+        print('  ' + line)
+    return 0 if not problems else 1
+
+
 def emit(root, pin):
     probe = load_probe()
     out = [
@@ -597,6 +668,7 @@ def emit(root, pin):
         rows.append(dict(family=family, ident=re.sub(r'\W', '_', family),
                          vendor=vendor, cls=cls, count=len(entries),
                          bits=bits, detail=detail, source=source, note=notes))
+    out.append(LOCAL_IDS_TEXT)
     out.append('/* Per-family match records.  `.upstream` is what the family\'s hook table\n'
                ' * hands out today in that checkout; it is a capability *inventory*, not a\n'
                ' * statement that SCos has ported the code that uses it. */\n'
@@ -624,9 +696,12 @@ def emit(root, pin):
         if note:
             out.append(f'        .note = {cstr(note)},\n')
         out.append('    },\n')
+    out.append(LOCAL_RECORD_TEXT)
     out.append('};\n\n')
-    out.append(f'#define GPU_MATCH_COUNT {len(rows)}u\n')
-    out.append(f'#define GPU_ID_TOTAL {total}u\n')
+    out.append(LOCAL_COUNTS.format(family=LOCAL_FAMILY, families=len(rows) + 1, ids=total + 1,
+                                   upstream=total))
+    out.append(f'#define GPU_MATCH_COUNT {len(rows) + 1}u\n')
+    out.append(f'#define GPU_ID_TOTAL {total + 1}u\n')
     out.append('\n#endif\n')
     return ''.join(out), total
 
@@ -637,6 +712,8 @@ def main():
     ap.add_argument('--haiku', help='a Haiku checkout at the pinned commit (gpu_ids.h source)')
     ap.add_argument('--out')
     ap.add_argument('--check', action='store_true')
+    ap.add_argument('--check-local', action='store_true',
+                    help='verify the hand-authored local family record in the committed header')
     ap.add_argument('--registry-only', action='store_true',
                     help='(re)generate gpu_ids_registry.h from the in-tree registry snapshot')
     ap.add_argument('--extract-pci-ids', metavar='PCI_IDS',
@@ -647,6 +724,8 @@ def main():
         count, version = extract_snapshot(args.extract_pci_ids)
         print(f'wrote {REGISTRY_SNAPSHOT}: {count} display rows from pci.ids {version}')
         return 0
+    if args.check_local:
+        return check_local(args.out or 'kernel/drivers/gpu/gpu_ids.h')
     if args.registry_only:
         return run_registry(args.out or 'kernel/drivers/gpu/gpu_ids_registry.h', args.check)
     if not args.haiku:

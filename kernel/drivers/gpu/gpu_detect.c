@@ -336,6 +336,24 @@ int gpu_engine_available(void)
     return (bound && bound->ops) || gpu_module_ops() ? 1 : 0;
 }
 
+static uint32_t engine_work_pixels, cpu_work_pixels;
+
+void gpu_engine_note_work(uint32_t by_engine, uint32_t by_cpu)
+{
+    /* Saturating: these are a sanity check on the first few seconds of a boot, and a wrapped counter
+     * would report less GPU work than happened, which is the one failure mode worth avoiding. */
+    const uint64_t e = (uint64_t)engine_work_pixels + by_engine;
+    const uint64_t c = (uint64_t)cpu_work_pixels + by_cpu;
+    engine_work_pixels = e > 0xffffffffull ? 0xffffffffu : (uint32_t)e;
+    cpu_work_pixels = c > 0xffffffffull ? 0xffffffffu : (uint32_t)c;
+}
+
+void gpu_engine_work_totals(uint32_t *by_engine, uint32_t *by_cpu)
+{
+    if (by_engine) *by_engine = engine_work_pixels;
+    if (by_cpu) *by_cpu = cpu_work_pixels;
+}
+
 int gpu_engine_drives_output(void)
 {
     /* A statically linked port is compiled for the console device, so it drives the output by
@@ -523,6 +541,21 @@ void gpu_report(char *out, size_t capacity)
         put(&w, "  (");
         put_number(&w, (unsigned)(device_count - REPORT_DEVICE_LIMIT));
         put_line(&w, " further display function(s) reported in the boot log only)");
+    }
+    {
+        /* The number the whole driver effort is judged by: how many pixels the card painted versus how
+         * many the CPU still copied one by one.  It is printed on every boot, including boots where a
+         * module loaded correctly but never drew a thing, because "a driver is present" and "the GPU is
+         * doing the drawing" are different claims and only the second one matters to the user. */
+        uint32_t engine_px = 0, cpu_px = 0;
+        gpu_engine_work_totals(&engine_px, &cpu_px);
+        put(&w, "  pixels painted: ");
+        put_number(&w, engine_px);
+        put(&w, " by the GPU's 2D engine, ");
+        put_number(&w, cpu_px);
+        put_line(&w, " by the CPU compositor");
+        if (!engine_px)
+            put_line(&w, "  (no GPU drawing yet: the CPU copied every pixel of this boot)");
     }
     put(&w, "  detection issued ");
     put_number(&w, (unsigned)gpu_config_writes_during_detect());

@@ -399,3 +399,79 @@ proprietary firmware, the host side of the interface is NVIDIA's Resource Manage
 would consume the resulting submission queue (NVK, Mesa) is built against kernel DRM buffer management that
 this module ABI has no equivalent of. What is left to do honestly is what has been done here - real register
 access, exact chip identification, and a compositor that stops wasting the CPU it has.
+
+## Cirrus CL-GD5446: the second family, and the first that paints the console it is on
+
+_Measured 2026-09-22 on `arena/01a09dfd-scos`, QEMU 11.0.2, `-vga cirrus`, 128 MiB, single vCPU, TCG._
+
+`drivers/gpu/cirrus/module.c` is the second on-disk driver module and the first one whose engine feeds
+the screen the user looks at. It was written against the chip's programming model and then checked
+against QEMU's CL-GD5446 (`hw/display/cirrus_vga.c`, `hw/display/cirrus_vga_rop.h`) rather than against
+a datasheet summary, because the model is the device this repository can boot and three of the
+differences mattered enough to break the driver:
+
+- The flat bitBLT register block starts at **offset 0x100 of the register BAR**, not at 0. The first 256
+  bytes of that BAR are the legacy VGA index/data registers remapped into memory, so writing the blit
+  registers at offset 0 is *silently inert*: the stores land in the VGA port window, the engine is never
+  told to start, and every register read still looks plausible.
+- **`BLTWIDTH` counts bytes, `BLTHEIGHT` counts rows**, and both hold one less than the transfer.
+  Programming a pixel count instead makes the card paint a quarter of the requested rectangle and report
+  success; that is how this was first caught, with the kernel's read-back self-test scoring 60 of 225
+  pixels (4 columns the engine filled correctly, 15 rows it never reached).
+- The control byte is **edge-triggered**. A transfer begins when `START` goes 0 → 1, and releasing
+  `RESET` is its own event: writing `RESET` and then `START` reads as "reset released" and nothing
+  happens. The order has to be reset, release, start.
+- `BLTWIDTH`, `BLTHEIGHT` and both pitch registers keep **five bits of their high byte**, so a register
+  round trip must be judged against the masked value. The module's init-time probe does exactly that and
+  reports the expected and observed values into the boot log, which is what turned "the writes never
+  landed" from a guess into a measurement.
+- The model rejects a transfer whose row exceeds its 2 KiB staging buffer, so a wide rectangle is issued
+  as a row of tiles and each tile is waited on before the next starts. A backwards copy is tiled from the
+  far end of the row, because otherwise the tile written first is the source a later tile still needs.
+
+**What this engine does not do**, in the same breath as what it does: no mode setting (the scanout
+surface is the one the firmware validated), no hardware cursor or overlay, and no copy from system
+memory. The last one is a property of the chip rather than a shortcut - CPU-to-video on a CL-GD5446 is
+a stream the processor feeds through the bitBLT window, not a bus-master read of RAM, so "let the GPU
+pull the compositor's frame out of memory" is not expressible on this hardware; the composition target
+has to be the card's own memory, which is what `vram_window` and `set_surfaces` in the module ABI exist
+for and what the kernel does not yet ask of a driver.
+
+The family record for Cirrus in `kernel/drivers/gpu/gpu_ids.h` is **hand-authored, not generated from an
+upstream table** - there is no Cirrus 2D driver in the tree the generator reads. That is stated in the
+record itself (`.note`), in `.source`, and in a comment block above the id row; the row and its
+capability bits are held in `tools/research/gen_gpu_tables.py` so a regeneration reproduces them instead
+of deleting the family, and `python3 tools/research/gen_gpu_tables.py --check-local` (run by
+`tools/tests/test_gpu_detect.py`) fails if the header and the generator drift apart or if the counts at
+the bottom of the table stop agreeing with the rows above them. The module loader's own cross-check is
+the last line: an id a module claims that the table does not carry is a refusal to load, not an
+unverified load.
+
+### Measured numbers
+
+All four are from `tools/tests/test_gpu_render.py`, which boots this image and reads the results out of
+the running kernel and out of QEMU's own screenshot of the emulated device:
+
+| operation | engine | CPU |
+| --- | --- | --- |
+| kernel self-test: fill 16x16 in card memory, then move it 16 px | 225 of 225 pixels read back | 0 |
+| compositor repaint of the whole 800x600 screen | 480,000 pixels | 0 |
+| one console scroll, 768x480 moved up 16 rows | 368,640 pixels | 0 |
+| desktop brought up on this machine, before any of the above | 0 | 17,312,532 |
+
+The last row is the honest baseline: the engine takes the work it is asked for, and the compositor still
+copies a great deal of non-uniform desktop with the CPU because its source of truth is RAM. The colour
+the engine painted is present in QEMU's `screendump` at the corners and the centre of the frame, which is
+the part of this that is a measurement rather than a claim - the pixels are in the device's memory, not
+merely in the kernel's idea of it.
+
+Booting this device also exposed a loader rule worth stating on its own: EDK2's Cirrus GOP *advertises*
+1024x768 while reporting a frame buffer that only holds 800x600, and `boot/uefi/main.c` used to treat
+that as fatal. It now sets each preferred mode, checks the aperture can actually hold the screen, and
+falls to the next mode if not - on real hardware that is the difference between a desktop and a black
+screen. Measured in the same run: `console LFB at 0x80000000+1920000, 800x600 stride 800`, with 0 PCI
+config writes issued by detection.
+
+For comparison, `-vga none -device ati-vga` was tried in the same session as a console device and gives
+no GOP at all (`EFI_NOT_FOUND`, so no boot), which is why the ATI module is verified as a second PCI
+function in every other test and does not drive any screen here.

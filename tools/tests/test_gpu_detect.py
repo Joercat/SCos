@@ -135,16 +135,29 @@ def test_tampered_module_is_refused():
     assert original.find(needle, pos + 1) < 0, 'module payload appears twice; refusing to guess'
     img = bytearray(original)
     img[pos] ^= 0x01
-    # The index header is <II count,total>; the one entry is <8s name, I size, I crc32>.  Rewrite that
-    # crc so the stub accepts the tampered file, leaving only the kernel's check to refuse it.
-    hdr = struct.pack('<II', 1, len(clean))
-    hpos = img.find(hdr)
-    assert hpos >= 0, 'DRVLIST.IDX header not found in the image'
-    entry = bytes(img[hpos + 8:hpos + 8 + 16])
-    size, recorded = struct.unpack('<II', entry[8:16])
+    # The index is `<II count,total>` followed by one `<8s NAME, I size, I crc32>` per driver (the
+    # upper-case ESP spelling, which is also what the boot stub matches on), in the order the packer
+    # put them on the disk.  It is located by rebuilding it from `build/gpu/*.mod`
+    # rather than by assuming a single driver: the store has to describe every family that was packed,
+    # and once more than one module ships, "the index matches the files" is itself worth testing.
+    packed = sorted((ROOT / 'build' / 'gpu').glob('*.mod'))
+    assert len(packed) >= 2, ('expected one module per driver family on the disk', [q.name for q in packed])
+    blobs = {q: q.read_bytes() for q in packed}
+    index = struct.pack('<II', len(packed), sum(len(b) for b in blobs.values()))
+    for path in packed:
+        blob = blobs[path]
+        index += struct.pack('<8sII', path.stem.upper().encode()[:8].ljust(8, b'\0'), len(blob),
+                             zlib.crc32(blob) & 0xffffffff)
+    hpos = img.find(index)
+    assert hpos >= 0, 'the driver index on the image does not describe build/gpu/*.mod'
+    slot = packed.index(module)
+    entry_at = hpos + 8 + 16 * slot
+    size, recorded = struct.unpack('<II', bytes(img[entry_at + 8:entry_at + 16]))
     assert size == len(clean), (size, len(clean))
     assert recorded == (zlib.crc32(clean) & 0xffffffff), 'the index crc does not match the module on disk'
-    struct.pack_into('<I', img, hpos + 8 + 12, zlib.crc32(bytes(bad)) & 0xffffffff)
+    # Rewrite that entry's crc so the stub accepts the tampered file, leaving only the kernel's own
+    # check to refuse it.
+    struct.pack_into('<I', img, entry_at + 12, zlib.crc32(bytes(bad)) & 0xffffffff)
     image.write_bytes(bytes(img))
     try:
         with Guest('gpu-tamper', devices=['ati-vga']) as g:
@@ -172,6 +185,20 @@ def test_tampered_module_is_refused():
         assert restored, 'could not restore build/scos.img after the tamper test'
 
 
+def test_local_record_survives_regeneration():
+    """The header is generated, except for one hand-authored family - and that exception is checked.
+
+    `gen_gpu_tables.py --check` needs a Haiku checkout, which not every machine has, so the invariant
+    that matters when nobody is regenerating is stated separately: the committed header must still hold
+    the local Cirrus record byte for byte, define it once, and carry counts that agree with the table it
+    sits in.  A regeneration that dropped the family, or an edit that left the counts behind, fails here.
+    """
+    check = subprocess.run([sys.executable, 'tools/research/gen_gpu_tables.py', '--check-local'],
+                           cwd=ROOT, capture_output=True, text=True)
+    print(check.stdout.strip())
+    assert check.returncode == 0, check.stdout + check.stderr
+
+
 def test_qemu_emulated_adapters():
     devices = [spec for spec, *_ in CASES]
     with Guest('gpu-detect', devices=devices) as g:
@@ -188,7 +215,10 @@ def test_qemu_emulated_adapters():
         # headers: it is the only place where a reader can see that most of the table is naming.
         tables = next(l for l in lines if 'id rules bind a driver' in l)
         counts = [int(x) for x in re.findall(r'(\d+)', tables.split('tables:', 1)[1])]
-        assert counts[:2] == [1019, 1296], (counts, tables)
+                # 1020 = the 1019 ids read out of the pinned upstream tables plus the one hand-authored Cirrus
+        # row; 1296 is the naming table, which binds no driver.  Both numbers are printed by the boot
+        # itself, so this checks the shipped image, not a rebuild of the header.
+        assert counts[:2] == [1020, 1296], (counts, tables)
         assert unrecorded == 0, summary
         writes = next(l for l in lines if 'scanout owner' in l)
         assert '0 PCI config write(s) issued' in writes, writes
@@ -269,6 +299,7 @@ def test():
     test_host_harness()
     if not (ROOT / '.tools' / 'qemu' / 'bin' / 'qemu-system-x86_64').exists():
         raise AssertionError('QEMU bundle missing; run tools/setup_qemu.py before this suite')
+    test_local_record_survives_regeneration()
     test_qemu_emulated_adapters()
     test_tampered_module_is_refused()
 

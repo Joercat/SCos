@@ -186,20 +186,37 @@ static status graphics(struct boot_framebuffer *f){
  struct gop *g=0;status s=bs->handle_protocol(system->output_handle,&gop_guid,(void**)&g);
  if(FAILED(s))s=bs->locate_protocol(&gop_guid,0,(void**)&g);
  if(FAILED(s))return s;
- /* Prefer a modest readable mode; do not assume current firmware mode is usable. */
- uint32_t selected=UINT32_MAX;uint64_t best=UINT64_MAX;
- for(uint32_t i=0;i<g->mode->max_mode&&i<4096;i++){
-  size_t n=0;struct mode_info *m=0;s=g->query(g,i,&n,&m);
-  if(!FAILED(s)&&m){if(n>=sizeof(*m)&&mode_valid(m)){uint64_t pixels=(uint64_t)m->width*m->height;uint64_t score=pixels>=1024*768?pixels-1024*768:(1ULL<<32)+1024*768-pixels;if(score<best){best=score;selected=i;}}bs->free_pool(m);}
+ uint32_t skipped[6];size_t skipped_count=0;
+ /* A mode list describes what the firmware can *describe*, not what the device can *hold*.  EDK2's
+  * Cirrus GOP advertises 1024x768 while reporting a frame buffer only large enough for 800x600, and
+  * a real card's list routinely carries sizes whose stride does not fit the reserved aperture.
+  * Picking the most preferred mode and then refusing to boot over its aperture would leave a machine
+  * with a perfectly usable smaller mode on a black screen, so the fit is checked after the mode is
+  * actually set, and a mode that cannot hold its own screen is skipped rather than fatal. */
+ for(;;){
+  uint32_t selected=UINT32_MAX;uint64_t best=UINT64_MAX;
+  for(uint32_t i=0;i<g->mode->max_mode&&i<4096;i++){
+   int tried=0;for(size_t k=0;k<skipped_count;k++)if(skipped[k]==i)tried=1;
+   if(tried)continue;
+   size_t n=0;struct mode_info *m=0;s=g->query(g,i,&n,&m);
+   if(!FAILED(s)&&m){if(n>=sizeof(*m)&&mode_valid(m)){uint64_t pixels=(uint64_t)m->width*m->height;uint64_t score=pixels>=1024*768?pixels-1024*768:(1ULL<<32)+1024*768-pixels;if(score<best){best=score;selected=i;}}bs->free_pool(m);}
+  }
+  if(selected==UINT32_MAX)return skipped_count?ERROR(3):s;
+  s=g->set(g,selected);
+  const struct mode_info *m=g->mode->info;
+  if(FAILED(s)||g->mode->info_size<sizeof(*m)||!mode_valid(m)||!g->mode->base||
+     g->mode->base>=PHYSICAL_LIMIT||g->mode->size>PHYSICAL_LIMIT-g->mode->base||
+     (uint64_t)m->stride*m->height*4>g->mode->size){
+   /* Unusable, whether the firmware refused it or handed it over too small: remember it so the next
+    * pass chooses the best of what is left instead of picking the same mode again. */
+   if(skipped_count<sizeof skipped/sizeof*skipped)skipped[skipped_count++]=selected;
+   continue;
+  }
+  *f=(struct boot_framebuffer){g->mode->base,g->mode->size,m->width,m->height,m->stride,m->red,m->green,m->blue};
+  if(m->format==0){f->red=255;f->green=65280;f->blue=16711680;}
+  if(m->format==1){f->red=16711680;f->green=65280;f->blue=255;}
+  return 0;
  }
- if(selected==UINT32_MAX)return ERROR(3);
- s=g->set(g,selected);if(FAILED(s))return s;
- const struct mode_info *m=g->mode->info;
- if(g->mode->info_size<sizeof(*m)||!mode_valid(m)||!g->mode->base||g->mode->base>=PHYSICAL_LIMIT||g->mode->size>PHYSICAL_LIMIT-g->mode->base||(uint64_t)m->stride*m->height*4>g->mode->size)return ERROR(3);
- *f=(struct boot_framebuffer){g->mode->base,g->mode->size,m->width,m->height,m->stride,m->red,m->green,m->blue};
- if(m->format==0){f->red=255;f->green=65280;f->blue=16711680;}
- if(m->format==1){f->red=16711680;f->green=65280;f->blue=255;}
- return 0;
 }
 status EFIAPI efi_main(handle image,struct system_table *table){
  system=table;

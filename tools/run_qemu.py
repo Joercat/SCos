@@ -23,6 +23,9 @@ def main():
     ap.add_argument("--device", action="append", default=[], metavar="SPEC",
                     help="extra -device argument, repeatable; used by the GPU detection "
                          "test to attach emulated PCI display functions next to the boot one")
+    ap.add_argument("--vga", choices=("std", "cirrus", "none"), default="std",
+                    help="display device presenting the firmware console; cirrus is the one case "
+                         "where the console and an emulated 2D engine are the same PCI function")
     ap.add_argument("--dry-run", action="store_true", help="print the command without starting QEMU")
     args = ap.parse_args()
     image = args.image.resolve()
@@ -54,7 +57,7 @@ def main():
                "-drive", f"if=pflash,format=raw,unit=1,file={escape(run / 'vars.fd')}",
                "-accel", "tcg", "-cpu", "max", "-m", str(args.memory), "-smp", "1",
                "-drive", disk,
-               "-vga", "std", "-nic", "none", "-display", "none",
+               "-vga", args.vga, "-nic", "none", "-display", "none",
                "-serial", f"file:{run / 'serial.log'}",
                "-qmp", f"unix:{escape(run / 'qmp.sock')},server=on,wait=off", "-no-reboot"]
     if args.xhci or args.usb_boot:

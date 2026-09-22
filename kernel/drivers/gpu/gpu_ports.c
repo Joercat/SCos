@@ -58,6 +58,10 @@ static const struct gpu_driver ports[] = {
     GPU_PORT("vesa",
         "no 2D engine: firmware VBE gives modes and a linear framebuffer, not a "
         "blitter"),
+    GPU_PORT("cirrus",
+        "SCos-authored CL-GD5446 bitBLT module: solid fills and screen-to-screen copies in the "
+        "aperture the console scans out; no 3D, no modeset, no system-memory BLT (the chip's FIFO "
+        "costs more to feed than a write-combined store), no cursor"),
     GPU_PORT("framebuffer",
         "no 2D engine, and the retrace hook is a stub returning -1, so this is "
         "exactly the path SCos is on now"),

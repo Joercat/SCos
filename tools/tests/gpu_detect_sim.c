@@ -255,7 +255,35 @@ int main(void)
     const int families = gpu_match_family_count();
     printf("harness: %d family record(s), %d device ID rule(s)\n",
            families, gpu_match_id_total());
-    expect(families == 15, "the generated table covers the 15 surveyed families");
+    /* Two different provenances live in one table, and the distinction has to survive regeneration:
+     * fifteen records are generated from pinned upstream driver sources, and exactly one — Cirrus —
+     * is hand-authored here because no upstream 2D driver exists in this tree to read an ID table
+     * from.  Asserting the split, not just the total, is what stops a `--haiku` regeneration from
+     * silently dropping the local family (it would leave 15 upstream + 0 local) or from somebody
+     * quietly adding an unsourced record (16 upstream would fail here, not just the count). */
+    int upstream_records = 0, local_records = 0;
+    for (int f = 0; f < families; f++) {
+        const struct gpu_match *m = gpu_match_family(f);
+        if (!m) continue;
+        if (m->note && strstr(m->note, "hand-authored")) local_records++;
+        else upstream_records++;
+    }
+    expect(families == 16, "the table holds 15 generated families plus the hand-authored one");
+    expect(upstream_records == 15, "every surveyed upstream family still has a generated record");
+    expect(local_records == 1, "exactly one record is hand-authored, and it is marked as such");
+    {
+        int cirrus = 0;
+        for (int f = 0; f < families; f++) {
+            const struct gpu_match *m = gpu_match_family(f);
+            if (m && m->note && strstr(m->note, "hand-authored"))
+                cirrus = m->id_count > 0 && m->upstream.engine2d == 1 && m->upstream.fill == 1 &&
+                         m->upstream.blit == 1 && m->upstream.pan == 0 && m->upstream.cursor == 0 &&
+                         m->upstream.overlay == 0 && m->upstream.span == 0 &&
+                         m->upstream.modeset == 0 && m->upstream.dpms == 0 &&
+                         m->upstream.vsync == 0 && strstr(m->family, "cirrus") != 0;
+        }
+        expect(cirrus, "the hand-authored record is Cirrus, and claims only what its module does");
+    }
 
     /* One device per family, at both ends of that family's own table.  Feeding the
      * oldest and newest ID is the point: an off-by-one or a truncated parse in the

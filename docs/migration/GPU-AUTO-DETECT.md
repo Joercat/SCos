@@ -86,7 +86,8 @@ by construction and then asserted at run time:
 
 1. **Table freshness** — `gen_gpu_tables.py --check` re-extracts from the pinned Haiku
    checkout and byte-compares: `PASS: ... matches a fresh extraction from 7be0fef07df0
-   (1019 device IDs across 15 families)`. A hand-edited or stale table fails the suite.
+   (1020 device IDs across 16 families, one of them hand-authored: see
+   `GPU-DRIVER-MODULES.md`)`. A hand-edited or stale table fails the suite.
 2. **Host harness** — the three shipped `gpu_*.c` units are compiled unchanged for the
    host and run against a simulated bus. It derives its cases from the tables instead of
    hard-coding IDs: **24 positive cases** (the oldest and newest ID of each of the 12
@@ -107,7 +108,7 @@ by construction and then asserted at run time:
    gpu:   chip=RAGE 128 PRO GL engine=none, CPU compositor
    gpu: PCI 0:4.0 1013:b8 sub=0 matched=none
    gpu: PCI 0:5.0 1af4:1050 sub=0 matched=none
-   gpu: 4 display function(s), 1019 ID rule(s) in 15 family record(s), 0 without a port record
+   gpu: 4 display function(s), 1020 ID rule(s) in 16 family record(s), 0 without a port record
    gpu: scanout owner identified by BAR address, 0 PCI config write(s) issued
    
    A few lines later the same boot loads that family's driver from disk, and says so in the
@@ -160,7 +161,8 @@ Scanout: firmware GOP, PAT write-combining
 GPU acceleration: unavailable (no hardware backend linked)
 Display: 1024x768
 GPU detection (exact device matching; no BAR sizing, no modeset)
-Families named from upstream tables: 15, device ID rules: 1019
+Families named from upstream tables: 16, device ID rules: 1020
+(one record, `cirrus`, is hand-authored for SCos' own module rather than read out of an upstream driver)
 Naming rows (see §9, `gpu_ids_registry.h`): 1296 more ids name a chip and bind nothing
 - Intel 8086:4c8b at 0:2.0 (scanout)
   match: none - no upstream table binds 8086:4c8b; treated as an unmatched display adapter
@@ -226,14 +228,14 @@ that no driver-authorising code reads.
 
 | | rows | meaning |
 |---|---|---|
-| `gpu_ids.h` | 1019, in 15 family records | a driver in this tree binds that id |
+| `gpu_ids.h` | 1020, in 16 family records | a driver in this tree binds that id, plus one hand-authored record (`cirrus`) that its own module binds |
 | `gpu_ids_registry.h` | 1296 (nvidia 823, radeon_hd 338, intel_extreme 135) | this id belongs to this chip, and nothing is claimed about driving it |
 
 The log keeps them apart instead of reporting one big number:
 
 ```
-gpu: 4 display function(s), 1019 ID rule(s) in 15 family record(s), 0 without a port record
-gpu: tables: 1019 id rules bind a driver; 1296 more ids name a chip that nothing in this tree covers
+gpu: 4 display function(s), 1020 ID rule(s) in 16 family record(s), 0 without a port record
+gpu: tables: 1020 id rules bind a driver; 1296 more ids name a chip that nothing in this tree covers
 gpu: PCI 0:1.0 10de:2d83 sub=0 matched=nvidia
 gpu:   chip=GB207 [GeForce RTX 5050] (Blackwell) engine=none at detection, CPU compositor
 gpu:   10de:2d83 is named by the PCI id registry only; no driver table in this tree binds it, so

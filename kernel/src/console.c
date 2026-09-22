@@ -1,4 +1,5 @@
 #include "kernel.h"
+#include "../include/scos.h"
 extern const uint8_t font8x16[256][16];
 static struct boot_framebuffer fb;
 static size_t row,col,columns,rows;
@@ -9,14 +10,33 @@ static uint32_t component(unsigned value,uint32_t mask){unsigned shift=0;while(!
 static uint32_t color(unsigned r,unsigned g,unsigned b){return component(r,fb.red)|component(g,fb.green)|component(b,fb.blue);}
 void console_init(const struct boot_framebuffer *framebuffer){
  fb=*framebuffer;columns=fb.width/8;rows=fb.height/16;row=col=0;
+#ifndef TESTABLE
+ /* Tell the compositor where the screen is now, not when the desktop starts.  The boot log is the
+  * first thing this machine scrolls, and it scrolls through the same scanout surface the desktop will
+  * use; if the compositor is only told about it later, every line of the boot log is copied pixel by
+  * pixel by the CPU even on a machine whose card can move it in one register write. */
+ desktop_framebuffer(framebuffer);
+#endif
  foreground=color(216,226,240);background=color(16,23,34);
  volatile uint32_t *p=(void*)(uintptr_t)fb.base;
  for(size_t y=0;y<fb.height;y++)for(size_t x=0;x<fb.width;x++)p[y*fb.stride+x]=background;
 }
 static void scroll(void){
+ const size_t width=columns*8,band=(rows-1)*16;
+#ifndef TESTABLE
+ /* Ask the GPU to move the screen up a line first.  It is the same rectangle the fallback walks
+  * pixel by pixel, and on a card whose own video RAM *is* the console surface the copy never
+  * reaches the CPU at all: one line of a 1024x768 text screen is ~780 KB of uncached read-
+  * modify-write the boot CPU no longer does.  No engine, an engine bound to a different card, or a
+  * rectangle the engine declines all fall through to fb_scroll_cpu, so every machine scrolls. */
+ if(fb.base&&rows>1){
+  if(!fb_scroll_output(0,0,width,band,16,background))fb_scroll_cpu(0,0,width,band,16,background);
+  row=rows-1;return;
+ }
+#endif
  volatile uint32_t *p=(void*)(uintptr_t)fb.base;
- for(size_t y=0;y<(rows-1)*16;y++)for(size_t x=0;x<columns*8;x++)p[y*fb.stride+x]=p[(y+16)*fb.stride+x];
- for(size_t y=(rows-1)*16;y<rows*16;y++)for(size_t x=0;x<columns*8;x++)p[y*fb.stride+x]=background;
+ for(size_t y=0;y<band;y++)for(size_t x=0;x<width;x++)p[y*fb.stride+x]=p[(y+16)*fb.stride+x];
+ for(size_t y=band;y<rows*16;y++)for(size_t x=0;x<width;x++)p[y*fb.stride+x]=background;
  row=rows-1;
 }
 static void emit(char c){
