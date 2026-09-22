@@ -21,6 +21,9 @@ static void ab_paint(struct window *w)
     char line[120];
     strcpy(line, "SCos x64 development - build " SCOS_BUILD_TAG);
     int tw=s_text_width(line);if(tw>s->w-56)tw=s->w-56;s_clip_text(s,cx-tw/2,y,line,t->main,s->w-56); y += 24;
+    /* The commit the panel is describing, so a screenshot of this window is evidence. */
+    scos_build_stamp(line, sizeof(line));
+    tw=s_text_width(line);if(tw>s->w-56)tw=s->w-56;s_clip_text(s,cx-tw/2,y,line,t->text,s->w-56); y += 24;
 
     s_line(s, 24, y, s->w - 24, y, t->main); y += 14;
 

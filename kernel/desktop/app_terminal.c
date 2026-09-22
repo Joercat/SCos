@@ -170,7 +170,7 @@ static const char *help_text =
     "kill <pid>- Terminate an app task (see 'procs')\n"
     "tab       - new | close | <n>: terminal tabs (also Ctrl+T)\n"
     "whoami    - Show current user\n"
-    "version   - Show system version\n"
+    "version   - Show system version and the commit + tree state it was built from\n"
     "uptime    - Time since boot (PIT)\n"
     "free      - Memory usage (real page allocator)\n"
     "cpu       - CPU brand, TSC reference rate and load\n"
@@ -581,7 +581,12 @@ static void run_command(struct term *t, const char *command)
         }
     }
     else if (!strcmp(cmd, "whoami")) strcpy(response, "user");
-    else if (!strcmp(cmd, "version")) strcpy(response, "SCos unnumbered x64 development - build " SCOS_BUILD_TAG "");
+    else if (!strcmp(cmd, "version")) {
+        strcpy(response, "SCos unnumbered x64 development - build " SCOS_BUILD_TAG " from ");
+        scos_build_stamp(response + strlen(response), sizeof(response) - strlen(response));
+        if (scos_build_modified())
+            strncat(response, "  [WARNING: built with uncommitted changes]", sizeof(response) - strlen(response) - 1);
+    }
     else if (!strcmp(cmd, "calc")) {
         if (nargs != 4) strcpy(response, "Usage: calc <number1> <operator> <number2>");
         else {

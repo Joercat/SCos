@@ -126,6 +126,15 @@ void graphics_report(char *out, size_t capacity)
             put(&w, "not consulted: no PCI display function matched a driver family\n");
         }
     }
+    /* First line a helper asks for when a report and a repository disagree. */
+    {
+        char stamp[96];
+        scos_build_stamp(stamp, sizeof(stamp));
+        put(&w, "Build: ");
+        put(&w, stamp);
+        put(&w, scos_build_modified() ? "  (UNCOMMITTED tree - not evidence about any commit)\n"
+                                      : "  (matches the committed source)\n");
+    }
     put(&w, "Display: ");
     fmt_u32(number, scanout.width);
     put(&w, number);

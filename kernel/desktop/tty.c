@@ -420,7 +420,9 @@ static void tty_exec(char *cmd)
         struct rtc_time rt;
         rtc_read(&rt);
         tty_print("SCos System Information:");
-        tty_print("OS Version: unnumbered x64 development (build " SCOS_BUILD_TAG ")");
+        tty_print("OS Version: unnumbered x64 development (build " SCOS_BUILD_TAG " from ");
+        { char stamp[96]; scos_build_stamp(stamp, sizeof(stamp)); tty_print(stamp); }
+        tty_print(scos_build_modified() ? ", UNCOMMITTED)" : ")");
         tty_print("Kernel: sckern (SCos x64 development)");
         tty_print("Architecture: x86-64 (native UEFI)");
         strcpy(m, "Uptime: ");

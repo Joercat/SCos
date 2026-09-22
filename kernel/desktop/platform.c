@@ -66,6 +66,8 @@ void desktop_start(const struct boot_framebuffer *fb){
     strcpy(line,"video: GOP ");fmt_u32(number,fb->width);strcat(line,number);strcat(line,"x");fmt_u32(number,fb->height);strcat(line,number);
     boot_screen_step(line,32);graphics_init(fb);
     if(!vfs_init_defaults())panic("initial desktop filesystem allocation failed");
+    { char stamp[96]; scos_build_stamp(stamp, sizeof(stamp));
+      klog("build: %s branch %s", stamp, SCOS_BUILD_BRANCH); }
     boot_screen_step("vfs: factory file tree built",40);
     acpi_init();int drives=ata_init();
     strcpy(line,"ata: ");fmt_u32(number,(u32)drives);strcat(line,number);strcat(line," drive(s); ");strncat(line,fs_image_target(),70);

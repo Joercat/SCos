@@ -6,10 +6,13 @@ Firmware loads EFI/BOOT/BOOTX64.EFI; that application reads SCOS/KERNEL.ELF
 and its accidental-corruption CRC from the same EFI system partition.
 """
 from pathlib import Path
+import hashlib
+import json
 import struct
 import sys
 import tempfile
 import uuid
+import re
 import zlib
 
 SECTOR = 512
@@ -115,6 +118,58 @@ def name(value):
     return (base.ljust(8)+ext.ljust(3)).encode('ascii')
 
 
+
+# --------------------------------------------------------------- provenance ----
+# The kernel carries build/scosbuild.h's commit, tree state and build time as plain string literals;
+# this record is generated from that same header and checked against the bytes being packed, so the
+# disk can never claim to hold a build it does not.  \SCOS\BUILD.TXT lands on the ESP for anyone
+# holding the stick, and build.json is what the repository commits next to the image.
+def stamp_values(directory):
+    header = Path(directory) / 'scosbuild.h'
+    if not header.exists():
+        raise SystemExit('build/scosbuild.h is missing: build through the Makefile, which generates '
+                         'the build stamp that the kernel and this disk record must agree on')
+    text = header.read_text()
+    found = dict(re.findall(r'#define SCOS_BUILD_(\w+) "([^"]*)"', text))
+    missing = [f for f in ('COMMIT', 'BRANCH', 'TREE', 'DATE') if f not in found]
+    if missing:
+        raise SystemExit('build/scosbuild.h has no stamp for %s' % ', '.join(missing))
+    return found
+
+
+def provenance(directory, elf):
+    v = stamp_values(directory)
+    for field in ('COMMIT', 'DATE'):
+        needle = v[field].encode()
+        if len(needle) >= 8 and elf.count(needle) < 1:
+            raise SystemExit(
+                'refusing to pack this image: the build stamp says commit %s built %s, but the kernel '
+                'binary does not contain that stamp. The kernel was compiled before the stamp changed - '
+                'run `make` again instead of shipping an image that misreports itself.' % (v['COMMIT'], v['DATE']))
+    return v
+
+
+def build_record(v, elf, modules):
+    lines = ['SCos x64 UEFI image - build record',
+             '  build tag   : x64-dev',
+             '  commit      : %s' % v['COMMIT'],
+             '  branch      : %s' % v['BRANCH'],
+             '  tree state  : %s' % v['TREE'],
+             '  built (UTC) : %s' % v['DATE'],
+             '  kernel.elf  : %d B sha256 %s' % (len(elf), hashlib.sha256(elf).hexdigest())]
+    for path, blob in modules:
+        lines.append('  module %-9s: %d B sha256 %s' % (path, len(blob), hashlib.sha256(blob).hexdigest()))
+    if v['TREE'] != 'clean':
+        lines.append('  WARNING: this image was built with uncommitted changes. Treat it as an experiment:')
+        lines.append('           features it lacks, or has, say nothing about any commit in the repository.')
+    lines.append('')
+    return '\n'.join(lines), {'build_tag': 'x64-dev', 'commit': v['COMMIT'], 'branch': v['BRANCH'],
+                             'tree': v['TREE'], 'built': v['DATE'], 'kernel_bytes': len(elf),
+                             'kernel_sha256': hashlib.sha256(elf).hexdigest(),
+                             'modules': [{'name': n, 'bytes': len(b), 'sha256': hashlib.sha256(b).hexdigest()}
+                                         for n, b in modules]}
+
+
 def main(directory):
     d = Path(directory)
     efi = (d/'BOOTX64.EFI').read_bytes()
@@ -202,8 +257,16 @@ def main(directory):
     if len(index) > 4096:
         raise ValueError('driver index too large')
     ic = allocate(index)
+    v = provenance(directory, elf)
+    # The record names the modules as the ESP holds them (FAT is upper-case), which is what a reader
+    # checking the stick with another OS will see, so the two must not use different spellings.
+    record_text, record_json = build_record(v, elf,
+                                            [(stem + '.MOD', blob) for stem, blob in modules])
+    (d / 'BUILD.TXT').write_text(record_text)
+    (d / 'build.json').write_text(json.dumps(record_json, sort_keys=True, indent=1) + '\n')
+    bc = allocate(record_text.encode())
     scos = (dot(0, dirs[3]) + entry('KERNEL.ELF', kc, len(elf)) + entry('KERNEL.CRC', cc, 4)
-            + entry('DRVLIST.IDX', ic, len(index)))
+            + entry('BUILD.TXT', bc, len(record_text.encode())) + entry('DRVLIST.IDX', ic, len(index)))
     for stem, blob in modules:
         scos += entry(stem + '.MOD', allocate(blob), len(blob))
     directory_data = [entry('EFI', dirs[1], directory=True)+entry('SCOS', dirs[3], directory=True),

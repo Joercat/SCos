@@ -1,0 +1,16 @@
+{
+ "branch": "arena/01a09dfd-scos",
+ "build_tag": "x64-dev",
+ "built": "2026-09-22T20:24:04Z",
+ "commit": "275f716978b5",
+ "kernel_bytes": 818680,
+ "kernel_sha256": "f20fa33b3a436a16a248fdc4aa0215e526de8b0453975a348fc47106998edd49",
+ "modules": [
+  {
+   "bytes": 13536,
+   "name": "ATI.MOD",
+   "sha256": "6e7c79c5969f087b33068af09912748fa2987a074565d972d344066bb32becb0"
+  }
+ ],
+ "tree": "modified"
+}

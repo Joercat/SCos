@@ -6,6 +6,27 @@
 #include "kernel.h"
 #include "gpu.h"      /* display adapter registry: detection, matching, engine boundary */
 #define SCOS_BUILD_TAG "x64-dev"
+/* Which commit these bytes came from.  build/scosbuild.h is generated from the repository by
+ * tools/buildinfo.py on every make, and tools/makedisk.py refuses to pack a kernel whose compiled-in
+ * stamp differs from the record written next to the image.  Ask for it with `version` or `graphics`,
+ * or read \SCOS\BUILD.TXT off the disk from another OS: an image that was built from uncommitted
+ * code, or from an older tree than the one under discussion, says so instead of being argued about. */
+/* __has_include, not a bare include: tools/tests compiles some of these files directly with their own
+ * flags and has no build/ to look in.  An unstamped kernel is still a working kernel - and makedisk
+ * refuses to pack one, so the fallback can never quietly reach a machine. */
+#if defined(__has_include)
+#  if __has_include("scosbuild.h")
+#    include "scosbuild.h"
+#  endif
+#endif
+#ifndef SCOS_BUILD_COMMIT
+#  define SCOS_BUILD_COMMIT "unstamped"
+#  define SCOS_BUILD_BRANCH "unstamped"
+#  define SCOS_BUILD_TREE "unknown"
+#  define SCOS_BUILD_DATE "unknown"
+#endif
+void scos_build_stamp(char *out, int cap);   /* "<commit> <tree>, <date>" (UTC) */
+int scos_build_modified(void);              /* 1 when the build ran on a dirty tree */
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;

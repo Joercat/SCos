@@ -1,8 +1,13 @@
 # Native x64 UEFI application + freestanding AMD64 kernel. No BIOS target.
+# `stamp` is defined above `all` in this file, so pin the default goal rather than leaving it to order.
+.DEFAULT_GOAL := all
 CC := gcc
 LD := ld
 BUILD := build
-COMMON := -m64 -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone -mgeneral-regs-only -O2 -Wall -Wextra -Werror -std=c11 -Ikernel/include
+# Provenance: build/scosbuild.h holds the commit, branch, tree state and build time, generated from the
+# repository on every make run.  scos.h includes it, so -I$(BUILD) is needed by every compile here,
+# including the GPU modules and the boot stub.  Only kernel/desktop/buildinfo.c reads the values.
+COMMON := -I$(BUILD) -m64 -ffreestanding -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -mno-red-zone -mgeneral-regs-only -O2 -Wall -Wextra -Werror -std=c11 -Ikernel/include
 CFLAGS := $(COMMON) -fpie -mcmodel=small
 EFI_CFLAGS := $(COMMON) -fpie -fno-ident -fshort-wchar -Iboot/uefi
 SOURCES := $(wildcard kernel/src/*.c)
@@ -16,13 +21,30 @@ DRIVER_OBJECTS := $(patsubst kernel/drivers/%.c,$(BUILD)/driver-%.o,$(DRIVER_SOU
 # engine code running, and a ported family is added per file rather than in one blob.
 GPU_SOURCES := $(wildcard kernel/drivers/gpu/*.c)
 GPU_OBJECTS := $(patsubst kernel/drivers/gpu/%.c,$(BUILD)/gpu-%.o,$(GPU_SOURCES))
-.PHONY: all clean milestone-check gpu-modules
+.PHONY: all clean milestone-check gpu-modules stamp FORCE dist
+# The stamp rule runs on every make.  tools/buildinfo.py rewrites the header only when the repository
+# state actually moved, so nothing but the file that reads it is recompiled, and a link of unchanged
+# objects reproduces the same image bytes.  buildinfo.o is deliberately rebuilt every time: it is the
+# kernel's only copy of the stamp, and if it were ever cached, the OS would misreport itself.
+$(BUILD)/desktop-buildinfo.o: FORCE
+	$(CC) $(APP_CFLAGS) -c kernel/desktop/buildinfo.c -o $@
+stamp: $(BUILD)/scosbuild.h
+$(BUILD)/scosbuild.h: $(BUILD) FORCE
+	@python3 tools/buildinfo.py --header $@
+FORCE:
 all: milestone-check $(BUILD)/scos.img
 milestone-check:
 	python3 tools/check_milestone.py
+# A delivery is the image, its checksum and its build record together; shipping one of the three
+# alone is how a stick ends up carrying something nobody can date.
+dist: all
+	cp $(BUILD)/scos.img dist/scos.img
+	cp $(BUILD)/build.json dist/scos.img.build.json
+	sha256sum dist/scos.img > dist/scos.img.sha256
+.PHONY: dist
 $(BUILD):
 	mkdir -p $@
-$(BUILD)/%.o: kernel/src/%.c kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD)
+$(BUILD)/%.o: kernel/src/%.c kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD) $(BUILD)/scosbuild.h
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/entry.o: kernel/x86_64/entry.S | $(BUILD)
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
@@ -83,13 +105,13 @@ clean:
 	rm -rf $(BUILD)
 
 APP_CFLAGS := $(filter-out -mgeneral-regs-only,$(CFLAGS)) -mno-avx -fno-strict-aliasing
-$(BUILD)/desktop-%.o: kernel/desktop/%.c kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD)
+$(BUILD)/desktop-%.o: kernel/desktop/%.c kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD) $(BUILD)/scosbuild.h
 	$(CC) $(APP_CFLAGS) -c $< -o $@
 # Every callback reachable from a hardware IRQ remains general-register-only.
 $(BUILD)/desktop-kbd.o $(BUILD)/desktop-mouse.o $(BUILD)/desktop-cpumeter.o $(BUILD)/desktop-klog.o $(BUILD)/desktop-platform.o: APP_CFLAGS = $(CFLAGS) -fno-strict-aliasing
-$(BUILD)/driver-%.o: kernel/drivers/%.c kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD)
+$(BUILD)/driver-%.o: kernel/drivers/%.c kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD) $(BUILD)/scosbuild.h
 	$(CC) $(CFLAGS) -fno-strict-aliasing -c $< -o $@
-$(BUILD)/gpu-%.o: kernel/drivers/gpu/%.c kernel/drivers/gpu/gpu_ids.h kernel/include/gpu.h kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD)
+$(BUILD)/gpu-%.o: kernel/drivers/gpu/%.c kernel/drivers/gpu/gpu_ids.h kernel/include/gpu.h kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD) $(BUILD)/scosbuild.h
 	$(CC) $(CFLAGS) -fno-strict-aliasing -c $< -o $@
 
 include kernel/lua/runtime.mk
