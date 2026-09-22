@@ -122,6 +122,206 @@ SEARCH_SUBDIRS = ['src/add-ons/kernel/drivers/graphics/{}',
                   'src/add-ons/accelerants/{}', 'headers/private/graphics/{}']
 
 
+# --------------------------------------------------------------- naming rows (separate generated file)
+
+# A family's own binding table in gpu_ids.h says which chips that upstream driver claims.  That is a
+# promise a ported engine may be asked to keep, so it is never widened from a registry.  What the PCI
+# id registry does give is the NAME of a chip no driver in this tree covers: a 2025 GPU should be
+# reported as "GB207 [GeForce RTX 5050] (Blackwell), nothing in tree drives this generation" rather
+# than as an unknown device.  Those rows go to their own generated header, are matched by a separate
+# pass, and can never select a module: gpu_match_device() marks them, and both the boot stub and
+# gpu_module.c refuse to load anything for them.
+REGISTRY_SNAPSHOT = 'tools/research/pci.ids.display.txt'
+REGISTRY_VENDORS = {'nvidia': (0x10de,), 'radeon_hd': (0x1002, 0x1022), 'intel_extreme': (0x8086,)}
+# The registry's leading codename maps to a generation, worth carrying in the name because the generation
+# is what decides whether any driver could exist at all.  Unknown codenames get no suffix, never a guess.
+NV_ARCH = (('GF1', 'Fermi'), ('GK', 'Kepler'), ('GM', 'Maxwell'), ('GP', 'Pascal'), ('GV', 'Volta'),
+           ('TU', 'Turing'), ('GA', 'Ampere'), ('AD', 'Ada'), ('GH', 'Hopper'), ('GB', 'Blackwell'),
+           ('GR1', 'Rubin'))
+SNAPSHOT_ROW = re.compile(r'^([0-9a-fA-F]{4})\t([0-9a-fA-F]{4})\t(.+?)\s*$')
+# Keep a display product, drop a companion function: without the drop list the registry's
+# "GB202 High Definition Audio Controller" would land in a display table.
+SNAPSHOT_FILTER = {
+    0x10de: (r'GeForce|Quadro|Tesla|NVS |RIVA|\bTNT\b|Vanta|nForce',
+             r'Audio|HDMI|USB|SATA|IDE|SMBus|LPC|LAN|Ethernet|Bridge|NVMe|TPM|Modem|1394|xHCI|EHCI'),
+    0x1002: (r'Radeon|FireGL|FirePro|FireMV|Rage|Wonder|Mach|All-In',
+             r'Audio|HDMI|USB|SATA|IDE|Bridge|ETH|1394|SMBus|FP64|IOMMU|Fabric|XHCI'),
+    0x1022: (r'Radeon|Instinct|Graphic', r'Audio|HDMI|USB|SATA|Bridge|Fabric|IOMMU|GMEM|NBIO|SMU|XHCI|PCI'),
+    0x8086: (r'Graphics|Arc |Iris|UHD Graphics|HD Graphics|GMA|Extreme Graphics|i740|iAGP|Ironlake',
+             r'Audio|HDMI|USB|SATA|IDE|Bridge|LAN|Ethernet|Thunderbolt|TBT|xHCI|EHCI|SMBus|DRAM|WiFi|AX2|CNVi'),
+}
+
+
+def nvidia_architecture(name):
+    head = name.split(' [')[0].split('(')[0].strip()
+    for prefix, arch in NV_ARCH:
+        if head.startswith(prefix):
+            return arch
+    return None
+
+
+def read_snapshot():
+    """The in-tree naming snapshot: `vendor<TAB>device<TAB>name` rows plus its provenance comments.
+    Keeping the rows in the tree is what makes --check-work-for-registry reproducible without the
+    1.7 MB upstream file or network access."""
+    rows, prov = [], []
+    with open(REGISTRY_SNAPSHOT) as fh:
+        for line in fh.read().splitlines():
+            if line.startswith('#'):
+                prov.append(line[2:] if line.startswith('# ') else line[1:])
+                continue
+            m = SNAPSHOT_ROW.match(line)
+            if m:
+                rows.append((int(m.group(1), 16), int(m.group(2), 16), m.group(3)))
+    return rows, prov
+
+
+def extract_snapshot(src):
+    """Rebuild the in-tree snapshot from a real pci.ids.  The only step that needs the upstream file,
+    and it is run by hand every couple of years, never by the build."""
+    with open(src, errors='replace') as fh:
+        lines = fh.read().splitlines()
+    vendor = re.compile(r'^([0-9a-fA-F]{4})  (\S.*)$')
+    device = re.compile(r'^\t([0-9a-fA-F]{4})  (\S.*?)\s*$')
+    out, current, version = [], None, ''
+    for line in lines:
+        if not line.startswith('\t'):
+            m = vendor.match(line)
+            if m:
+                hid = m.group(1)
+                current = int(hid, 16) if hid in ('10de', '1002', '1022', '8086') else None
+            elif line.startswith('#\tVersion:'):
+                version = line.split(':', 1)[1].strip()
+            elif line.startswith('#\tDate:'):
+                version += ' (dated ' + line.split(':', 1)[1].strip() + ')'
+            continue
+        if current is None:
+            continue
+        m = device.match(line)
+        if not m:
+            continue
+        keep, drop = SNAPSHOT_FILTER[current]
+        name = m.group(2)
+        if re.search(keep, name, re.I) and not re.search(drop, name, re.I):
+            out.append((current, int(m.group(1), 16), name))
+    seen, rows = set(), []
+    for v, d, n in sorted(out):
+        if (v, d) in seen:
+            continue
+        seen.add((v, d))
+        rows.append('%04x\t%04x\t%s' % (v, d, n))
+    head = ('# PCI id registry snapshot: display-product device ids, used only to NAME a chip.\n'
+            f'# Source: pci.ids (PCI ID Project), version {version}.\n'
+            '#   Upstream: https://github.com/pciutils/pciids - licence GPL-2.0-or-later OR BSD-3-Clause.\n'
+            '#   A dev-time input to tools/research/gen_gpu_tables.py: nothing here is compiled, and no\n'
+            '#   row here can select or vouch for a driver.\n'
+            '# Columns: vendor<TAB>device<TAB>name, sorted; companion functions (audio, bridges, USB,\n'
+            '#   SATA, network) are filtered out so that every row names a display controller.\n')
+    with open(REGISTRY_SNAPSHOT, 'w') as fh:
+        fh.write(head + '\n'.join(rows) + '\n')
+    return len(rows), version
+
+
+def driver_pairs(ids_path):
+    """Every (vendor, device) already bound by gpu_ids.h, read off the generated file itself, so
+    registry mode needs no Haiku checkout and cannot contradict a driver table."""
+    row = re.compile(r'^\s*\{0x([0-9a-fA-F]{1,4}), 0x([0-9a-fA-F]{1,4}), ')
+    out = set()
+    with open(ids_path) as fh:
+        for line in fh:
+            m = row.match(line)
+            if m:
+                out.add((int(m.group(1), 16), int(m.group(2), 16)))
+    return out
+
+
+def emit_registry(taken):
+    """One row per distinct chip *name*, at the lowest id that carries it.  The registry lists a product
+    under several ids - desktop, laptop, a refresh, an OEM SKU - and a table whose job is to answer
+    "what is this thing" does not need five rows that all say GB207M [GeForce RTX 5050 Max-Q]: each
+    kept row costs image space, and the dropped ones are ids nobody can look up.  Unknown and reserved
+    placeholders are dropped outright, since naming a chip 'Reserved Dev ID B' would be a fake."""
+    by_family = {}
+    placeholder = re.compile(r'Reserved|Unidentified|Unknown|Device ID|not specified', re.I)
+    named = {}
+    for vendor, device, name in read_snapshot()[0]:
+        if placeholder.search(name):
+            continue
+        key = (vendor, name)
+        if key not in named or device < named[key]:
+            named[key] = device
+    for vendor, device, name in read_snapshot()[0]:
+        if (vendor, device) in taken or named.get((vendor, name)) != device:
+            continue                     # bound by a driver table already, or a duplicate id for a name
+        for family, vendors in REGISTRY_VENDORS.items():
+            if vendor in vendors:
+                if family == 'nvidia':
+                    arch = nvidia_architecture(name)
+                    if arch:
+                        name = name + ' (' + arch + ')'
+                by_family.setdefault(family, []).append((vendor, device, name))
+                break
+    for family in by_family:
+        by_family[family].sort()
+    prov = [l for l in read_snapshot()[1] if l.startswith('Source:')]
+    out = ['/* Generated by tools/research/gen_gpu_tables.py --registry-only - do not edit by hand.\n',
+           ' *\n',
+           ' * Chip NAMES only, from tools/research/pci.ids.display.txt.  These rows exist so that a\n'
+           ' * machine can be told what it has when no driver in this tree covers it, instead of being\n'
+           ' * told "unknown device".  A row here never selects a module and never implies\n'
+           ' * acceleration: gpu_match_device() reports it separately, and the boot stub and\n'
+           ' * gpu_module.c both refuse to load a driver for it.  The rows that bind a driver live in\n'
+           ' * gpu_ids.h, generated from the pinned upstream driver sources; no id appears in both.\n']
+    for line in prov:
+        out.append(' * ' + line + '\n')
+    out += [' *\n',
+            ' * Refresh: gen_gpu_tables.py --extract-pci-ids <pci.ids>, then --registry-only.\n',
+            ' */\n',
+            '#ifndef SCOS_GPU_IDS_REGISTRY_H\n#define SCOS_GPU_IDS_REGISTRY_H\n\n',
+            '/* Included only by kernel/drivers/gpu/gpu_match.c, which owns both generated tables: these\n',
+            ' * are `static` arrays, so exactly one translation unit may include this file. */\n\n']
+    total, tables = 0, []
+    for family in sorted(by_family):
+        ident = re.sub(r'\W', '_', family)
+        entries = by_family[family]
+        total += len(entries)
+        tables.append((family, ident, len(entries)))
+        out.append(f'/* {family}: {len(entries)} display ids named by the registry and bound by no\n'
+                   f'   driver table in the tree - known chips with nothing ported for them. */\n')
+        out.append(f'static const struct gpu_pci_id gpu_registry_{ident}[] = {{\n')
+        for vendor, device, name in entries:
+            out.append(f'    {{{hex(vendor)}, {hex(device)}, {cstr(sanitize(name))}}}, /* pci.ids */\n')
+        out.append('};\n\n')
+    out.append('struct gpu_registry_table {\n')
+    out.append('    const char *family;\n')
+    out.append('    const struct gpu_pci_id *ids;\n')
+    out.append('    uint16_t count;\n')
+    out.append('};\n\n')
+    out.append('static const struct gpu_registry_table gpu_registry_table[] = {\n')
+    for family, ident, count in tables:
+        out.append(f'    {{{cstr(family)}, gpu_registry_{ident}, {count}u}},\n')
+    out.append('};\n\n')
+    out.append(f'#define GPU_REGISTRY_FAMILIES {len(tables)}u\n')
+    out.append(f'#define GPU_REGISTRY_ID_TOTAL {total}u\n\n#endif\n')
+    return ''.join(out), total
+
+
+def run_registry(out_path, check):
+    text, total = emit_registry(driver_pairs(os.path.join(
+        os.path.dirname(os.path.abspath(out_path)), 'gpu_ids.h')))
+    if check:
+        old = open(out_path).read() if os.path.exists(out_path) else ''
+        if old != text:
+            raise SystemExit('gpu_ids_registry.h is stale: run '
+                             'gen_gpu_tables.py --registry-only --out kernel/drivers/gpu/gpu_ids_registry.h')
+        print(f'PASS: gpu_ids_registry.h matches the in-tree registry snapshot ({total} names)')
+        return 0
+    with open(out_path, 'w') as fh:
+        fh.write(text)
+    print(f'wrote {out_path}: {total} naming rows')
+    return 0
+
+
 def head_of(root):
     p = subprocess.run(['git', '-C', root, 'rev-parse', 'HEAD'],
                        capture_output=True, text=True)
@@ -431,13 +631,26 @@ def emit(root, pin):
     return ''.join(out), total
 
 
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--haiku', required=True)
+    ap.add_argument('--haiku', help='a Haiku checkout at the pinned commit (gpu_ids.h source)')
     ap.add_argument('--out')
     ap.add_argument('--check', action='store_true')
+    ap.add_argument('--registry-only', action='store_true',
+                    help='(re)generate gpu_ids_registry.h from the in-tree registry snapshot')
+    ap.add_argument('--extract-pci-ids', metavar='PCI_IDS',
+                    help='rebuild tools/research/pci.ids.display.txt from a real pci.ids file')
     ap.add_argument('--allow-head', action='store_true')
     args = ap.parse_args()
+    if args.extract_pci_ids:
+        count, version = extract_snapshot(args.extract_pci_ids)
+        print(f'wrote {REGISTRY_SNAPSHOT}: {count} display rows from pci.ids {version}')
+        return 0
+    if args.registry_only:
+        return run_registry(args.out or 'kernel/drivers/gpu/gpu_ids_registry.h', args.check)
+    if not args.haiku:
+        raise SystemExit('--haiku DIR is required to regenerate gpu_ids.h; use --registry-only '                         'for the naming header, which reads the in-tree snapshot instead')
     head = head_of(args.haiku)
     if head != PIN and not args.allow_head:
         raise SystemExit(f'Haiku checkout is at {head}, expected {PIN} '

@@ -64,12 +64,16 @@ struct gpu_device {
     int is_scanout;                  /* this function feeds the visible console */
     uint64_t bar[6];                 /* raw BAR register values, never sized */
     int command, header_type;        /* read-only copies for the report */
+    uint8_t named_only;              /* row came from the naming table: a known chip, no driver claim */
 };
 
 #define GPU_MAX_DEVICES 8
 
 void gpu_init(const struct boot_framebuffer *fb);
 int gpu_device_count(void);
+/* Whether a device's match comes from a driver's binding table (may load a module) or from the
+ * naming table (must not). */
+int gpu_module_eligible(const struct gpu_device *g);
 const struct gpu_device *gpu_device(int index);
 const struct gpu_device *gpu_scanout_device(void);
 /* The bound driver, i.e. the one family whose ported code SCos will use.  NULL

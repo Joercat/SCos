@@ -315,6 +315,12 @@ Measured state of the candidate ports, from the pinned Haiku tree (engine line c
 | `s3` | 710 | 7,039 | a serialised BLT register index pair rather than a MMIO window |
 | `intel_810` | 83 | 2,425 | the smallest 2D core in the set; no device model exists here either, so like NeoMagic it would be committed against hardware that can prove the readback, never against a guess |
 
+A chip the naming table knows but no driver table binds can never reach this pipeline at all:
+`gpu_module_eligible()` is the single predicate that allows a module to be read, it fails for a naming
+row, and the UEFI stub asks the same question before it opens a file - so widening the names in
+`gpu_ids_registry.h` cannot widen what gets loaded, and an RTX 5050 is identified without a driver being
+read for it.
+
 `neomagic` is the next one deliberately *not* committed here: QEMU has no NeoMagic device model, no machine in
 reach has one, and a driver whose engine state has never been read back is exactly the "we assume it works"
 claim this whole subsystem exists to prevent.  It lands with a machine that can prove it, or not at all.

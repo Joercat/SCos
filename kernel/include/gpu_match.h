@@ -58,10 +58,19 @@ const struct gpu_match *gpu_match_device(uint16_t vendor, uint16_t device, uint8
                                          const struct gpu_pci_id **row_out);
 const char *gpu_family_name(const struct gpu_match *match);
 
+/* Whether the row that matched came from the naming table instead of a driver's own binding table.
+ * "this is a GB207" is knowledge about the chip; "the nvidia driver binds this chip" is a claim about a
+ * driver, and only the second may cause a module to be read off the disk.  A caller that already matched
+ * has the row; the boot stub, which has nothing but ids, uses gpu_match_named_only(). */
+int gpu_match_row_is_registry(const struct gpu_match *match, const struct gpu_pci_id *row);
+int gpu_match_named_only(uint16_t vendor, uint16_t device, uint8_t subclass);
+
 /* The generated family table, one record per family SCos can name.  `gpu_match_id_total()` is the
  * number of exact IDs across them. */
 int gpu_match_family_count(void);
 const struct gpu_match *gpu_match_family(int index);
 int gpu_match_id_total(void);
+/* Rows in gpu_ids.h (they bind a driver) and rows in gpu_ids_registry.h (they only name a chip). */
+int gpu_registry_id_total(void);
 
 #endif

@@ -145,6 +145,14 @@ void graphics_report(char *out, size_t capacity)
             "performed (config writes during detection: ");
     put_number(&w, (unsigned)gpu_config_writes_during_detect());
     put(&w, ").\n");
+    /* Kept in the report for the same reason the loader keeps two tables: one number is "a driver in
+     * this tree binds this id", the other is "we know what this chip is called".  Collapsing them into
+     * one big rule count would let a name read like support. */
+    put(&w, "Tables: ");
+    put_number(&w, (unsigned)gpu_match_id_total());
+    put(&w, " id rules bind a driver; ");
+    put_number(&w, (unsigned)gpu_registry_id_total());
+    put(&w, " further ids name a chip that no driver in this tree covers\n");
     if (owner) {
         put(&w, "Scanout owner ");
         put_number(&w, (unsigned)owner->bus);

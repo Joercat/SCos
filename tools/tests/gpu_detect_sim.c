@@ -216,6 +216,21 @@ void gpu_module_report(char *out, size_t capacity, const struct boot_handoff *ha
     if (capacity) out[0] = 0;
 }
 
+/* Ids newer than every driver in this tree, taken from the generated naming table.  What is being
+ * asserted is the whole design of that table in six lines: it must identify the chip, and it must
+ * change nothing else - no port bound, no module eligible, and `named_only` set so that every later
+ * stage can tell a name from a claim. */
+static const struct {
+    uint16_t vendor, device;
+    const char *family, *name;
+} named_rows[] = {
+    {0x10de, 0x2d83, "nvidia", "GB207 [GeForce RTX 5050] (Blackwell)"},
+    {0x10de, 0x2b85, "nvidia", "GB202 [GeForce RTX 5090] (Blackwell)"},
+    {0x10de, 0x1b06, "nvidia", "GP102 [GeForce GTX 1080 Ti] (Pascal)"},
+    {0x1002, 0x744c, "radeon_hd", "Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M]"},
+    {0x8086, 0x56a1, "intel_extreme", "DG2 [Arc A750]"},
+};
+
 int main(void)
 {
     const int families = gpu_match_family_count();
@@ -259,6 +274,7 @@ int main(void)
                 failures++;
             }
             expect(g && !g->bound, "no family reports a bound engine");
+            expect(g && !g->named_only, "a row from the driver's own table is not a naming row");
             expect(g && gpu_bound_driver() == NULL, "no driver is bound anywhere");
             cases++;
         }
@@ -268,7 +284,8 @@ int main(void)
     /* Negative cases.  Each one has to bind to *nothing*: a wrong vendor, a wrong
      * device, or the right ID at a subclass the upstream driver's own loop skips. */
     struct sim_device negative[] = {
-        {0, 12, 0, 3, 0, 0, 0x8086, 0x4c8b, {0xe0000008u}, 7},   /* Rocket Lake UHD 730 */
+        {0, 12, 0, 3, 0, 0, 0x8086, 0x4c8b, {0xe0000008u}, 7},   /* named by the registry now */
+        {0, 18, 0, 3, 0, 0, 0x10de, 0x0006, {0}, 7},              /* NVIDIA MPS: in neither table */
         {0, 13, 0, 3, 0, 0, 0x1002, 0x7479, {0}, 7},             /* RDNA3, not in table */
         {0, 14, 0, 3, 0, 0, 0x1234, 0x1111, {0xe0000008u}, 7},   /* QEMU Bochs scanout  */
         {0, 15, 0, 3, 0, 0, 0x10de, 0x2230, {0}, 7},             /* GA102, past NV48    */
@@ -291,6 +308,19 @@ int main(void)
             }
         }
         if (claimed) continue;
+        if (gpu_match_named_only(probe.vendor, probe.device, probe.class_sub)) {
+            /* The driver tables do not bind this id, but the naming table knows the chip, so
+             * "unmatched" would be the wrong expectation: it has to be named, marked, and bind
+             * nothing.  Asked here rather than kept in a hand-written list, so that refreshing the
+             * registry snapshot cannot leave a stale negative case claiming an id is unknown. */
+            run_with(&probe, 1);
+            const struct gpu_device *g = device_for(probe.vendor, probe.device);
+            expect(g && g->match && g->named_only, "known by name only, and marked as such");
+            expect(g && g->chip && g->chip[0], "a name-only device still carries the chip's name");
+            expect(g && !g->bound, "a name binds no engine");
+            expect(g && !gpu_module_eligible(g), "a name selects no module");
+            continue;
+        }
         run_with(&probe, 1);
         const struct gpu_device *g = device_for(probe.vendor, probe.device);
         char note[128];
@@ -305,6 +335,29 @@ int main(void)
         struct sim_device d = {0, 17, 0, 3, 0, 0, 0x8086, 0x29c2, {0xe0000008u}, 7};
         run_with(&d, 1);
         const struct gpu_device *g = device_for(0x8086, 0x29c2);
+    int named_cases = 0;
+    for (unsigned i = 0; i < sizeof named_rows / sizeof *named_rows; i++) {
+        struct sim_device d = {
+            .bus = 0, .dev = 6, .fn = 0, .class_base = 3, .class_sub = 0, .rev = 0,
+            .vendor = named_rows[i].vendor, .device = named_rows[i].device,
+            .bar = {0xe0000008u, 0, 0, 0, 0, 0}, .command = 7,
+        };
+        char note[192];
+        snprintf(note, sizeof note, "%04x:%04x named by the registry as %s",
+                 d.vendor, d.device, named_rows[i].family);
+        run_with(&d, 1);
+        const struct gpu_device *g = device_for(d.vendor, d.device);
+        expect(g && g->match && strcmp(g->match->family, named_rows[i].family) == 0, note);
+        expect(g && g->named_only, "the matcher marks a naming row as naming, not binding");
+        expect(g && !g->bound, "a naming row binds no engine");
+        expect(g && gpu_bound_driver() == NULL, "a naming row binds nothing anywhere");
+        snprintf(note, sizeof note, "the chip name is the registry's own row: %s", named_rows[i].name);
+        expect(g && g->chip && strcmp(g->chip, named_rows[i].name) == 0, note);
+        expect(g && !gpu_module_eligible(g), "a naming row cannot put a module on the table");
+        named_cases++;
+    }
+    printf("harness: %d naming-row case(s) checked\n", named_cases);
+
         expect(g && g->match && strcmp(g->match->family, "intel_extreme") == 0,
                "the same ID at subclass 0x00 does match intel_extreme");
     }

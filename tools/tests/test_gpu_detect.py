@@ -60,6 +60,29 @@ def test_generated_tables():
     assert result.returncode == 0, 'generated ID tables are stale or hand-edited'
 
 
+def test_registry_naming_header():
+    """`gpu_ids_registry.h` is regenerated from an in-tree snapshot, so it can be verified with no
+    network and no Haiku checkout - which matters because the whole point of that table is chips that
+    postdate every driver in the tree."""
+    r = subprocess.run([sys.executable, 'tools/research/gen_gpu_tables.py', '--registry-only',
+                        '--out', 'kernel/drivers/gpu/gpu_ids_registry.h', '--check'],
+                       cwd=ROOT, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    print(r.stdout.strip())
+    reg = (ROOT / 'kernel/drivers/gpu/gpu_ids_registry.h').read_text()
+    drv = (ROOT / 'kernel/drivers/gpu/gpu_ids.h').read_text()
+    # A naming row for the machine this work was asked for, and the invariant that the two tables
+    # never overlap: an id bound by a driver must not also be filed as "known, nothing more".
+    assert 'GB207 [GeForce RTX 5050] (Blackwell)' in reg, 'the registry table lost the RTX 5050 row'
+    ROW = r'\{0x([0-9a-f]{1,4}), 0x([0-9a-f]{1,4}), "[^"]+"\}'
+    reg_ids = {tuple(int(x, 16) for x in m) for m in re.findall(ROW, reg)}
+    # Driver rows are the ones whose provenance comment names an upstream file, not the registry.
+    drv_ids = {tuple(int(x, 16) for x in m) for m in re.findall(ROW + r', /\* (?!pci\.ids)', drv)}
+    assert len(reg_ids) > 1200 and len(drv_ids) > 1000, (len(reg_ids), len(drv_ids))
+    assert not (reg_ids & drv_ids), ('ids present in both tables: '
+                                     + ', '.join(hex(d) for _, d in sorted(reg_ids & drv_ids)[:6]))
+
+
 def test_host_harness():
     out = ROOT / 'build' / 'gpu-detect-host'
     out.parent.mkdir(exist_ok=True)
@@ -161,6 +184,11 @@ def test_qemu_emulated_adapters():
         # named must not have been reprogrammed, and the desktop must still be alive.
         summary = next(l for l in lines if 'display function(s)' in l)
         unrecorded = int(re.search(r'(\d+) without a port record', summary).group(1))
+        # The split counts must be visible on the serial log of a real boot too, not only in the
+        # headers: it is the only place where a reader can see that most of the table is naming.
+        tables = next(l for l in lines if 'id rules bind a driver' in l)
+        counts = [int(x) for x in re.findall(r'(\d+)', tables.split('tables:', 1)[1])]
+        assert counts[:2] == [1019, 1296], (counts, tables)
         assert unrecorded == 0, summary
         writes = next(l for l in lines if 'scanout owner' in l)
         assert '0 PCI config write(s) issued' in writes, writes
@@ -237,6 +265,7 @@ def test_qemu_emulated_adapters():
 def test():
     RESULTS.mkdir(parents=True, exist_ok=True)
     test_generated_tables()
+    test_registry_naming_header()
     test_host_harness()
     if not (ROOT / '.tools' / 'qemu' / 'bin' / 'qemu-system-x86_64').exists():
         raise AssertionError('QEMU bundle missing; run tools/setup_qemu.py before this suite')

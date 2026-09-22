@@ -161,6 +161,7 @@ GPU acceleration: unavailable (no hardware backend linked)
 Display: 1024x768
 GPU detection (exact device matching; no BAR sizing, no modeset)
 Families named from upstream tables: 15, device ID rules: 1019
+Naming rows (see §9, `gpu_ids_registry.h`): 1296 more ids name a chip and bind nothing
 - Intel 8086:4c8b at 0:2.0 (scanout)
   match: none - no upstream table binds 8086:4c8b; treated as an unmatched display adapter
 Detection is not driver support: no BAR sizing, GPU reset or modeset was performed (config writes during detection: 0).
@@ -214,3 +215,81 @@ The generated header is derived data, not code: PCI IDs and chip-name strings fr
 (`et6x00/license`). No file was copied; the extraction tool is in the tree, so the header
 can be reproduced or re-derived at a different commit. `third_party/README.md` records
 the same provenance for the driver code that a later port would reuse.
+
+## 9. Naming rows: what an id registry adds, and what it must not
+
+§2's rule is that a row in `gpu_ids.h` means "the upstream driver for this family binds this chip".
+That rule cannot be stretched: the table is Haiku's own, and its Nvidia half stops in 2007, so
+without a second source the OS cannot even say what a 2025 GPU is.  The registry supplies names, not
+claims, and it is therefore a **separate generated table** - `kernel/drivers/gpu/gpu_ids_registry.h` -
+that no driver-authorising code reads.
+
+| | rows | meaning |
+|---|---|---|
+| `gpu_ids.h` | 1019, in 15 family records | a driver in this tree binds that id |
+| `gpu_ids_registry.h` | 1296 (nvidia 823, radeon_hd 338, intel_extreme 135) | this id belongs to this chip, and nothing is claimed about driving it |
+
+The log keeps them apart instead of reporting one big number:
+
+```
+gpu: 4 display function(s), 1019 ID rule(s) in 15 family record(s), 0 without a port record
+gpu: tables: 1019 id rules bind a driver; 1296 more ids name a chip that nothing in this tree covers
+gpu: PCI 0:1.0 10de:2d83 sub=0 matched=nvidia
+gpu:   chip=GB207 [GeForce RTX 5050] (Blackwell) engine=none at detection, CPU compositor
+gpu:   10de:2d83 is named by the PCI id registry only; no driver table in this tree binds it, so
+```
+
+### What enforces the difference
+
+* `gpu_match_device()` tries the driver tables first and the naming table only after they miss, so a
+  chip that a driver binds is never re-described as merely known.
+* The winning row's provenance is asked, not guessed: `gpu_match_row_is_registry()` decides by which
+  array the row lives in, `struct gpu_device` carries `named_only`, and `gpu_module_eligible()` is the
+  single predicate that says whether a module may be read for a function at all - a naming row fails it,
+  so nothing is loaded, nothing is bound, and the in-tree port lookup in `identify()` returns before
+  it could claim the chip.
+* The UEFI stub asks the same question before it reads a file, so firmware does not hand the kernel
+  bytes for a generation nothing can drive.
+* `gpu_detect_sim.c` asserts both sides of that boundary.  Five named rows - `10de:2d83` RTX 5050,
+  `10de:2b85` RTX 5090, `10de:1b06` GTX 1080 Ti, `1002:744c` RX 7900 XTX, `8086:56a1` Arc A750 - must
+  come back matched by family, marked `named_only`, carrying the registry's own name, unbound and
+  module-ineligible; every row of every driver table must come back *not* marked; and the negative cases
+  re-derive themselves from the tables, so a snapshot refresh cannot leave a stale "this id is unknown"
+  assertion behind (that is how `8086:4c8b` came to move from the unknown list to the named list).
+
+### Where the rows come from, and what it costs
+
+`tools/research/pci.ids.display.txt` holds 2320 display-product rows extracted from `pci.ids`
+(PCI ID Project, version 2026.09.21; licence GPL-2.0-or-later OR BSD-3-Clause), for vendors
+10de/1002/1022/8086.  Companion functions are dropped, because the registry lists `GB202 High
+Definition Audio Controller` next to the chip itself and an audio function must not land in a display
+table; `Reserved`/`Unknown` placeholders are dropped, because naming a chip "Reserved Dev ID B" would
+be a fake; and one row survives per distinct name, at the lowest id carrying it, since desktop,
+Max-Q, refresh and OEM SKUs of the same product differ in nothing a driver would care about and the
+table is a lookup, not a shop window.  Nvidia rows carry the generation in the name (`(Blackwell)`)
+because the registry's leading codename maps to it and the generation is exactly what decides whether a
+driver could exist; ids whose codename is unknown get no suffix rather than a guess.
+
+The scanout side is unaffected: detection still reads only, and the naming table is consulted for
+functions the scanner has already accepted as class 0x03 display devices, so a misfiled id could never
+make the OS touch a non-display function.
+
+Cost, measured rather than estimated: `build/kernel.elf` goes from 710,736 to 809,480 bytes
+(+98,744, +13.9%), which is the price of naming ~1,300 chips.  That is a real cost and it is paid on
+purpose: the alternative is a machine that reports "unknown device" about the GPU it is running on.
+A refresh costs `--extract-pci-ids` plus `--registry-only` (a few hours of thought, no network at build
+time, no Haiku checkout needed), and both are verified offline by `test_gpu_detect.py`.
+
+### What this does not do for an RTX 5050
+
+It is worth stating plainly, because a name on a report is easy to misread as support.  For Turing and
+later there is no basic 2D engine to port: NVIDIA's own open kernel modules support "Turing (TU10x) or
+later" and require GSP firmware for every supported architecture, with exact version matching between
+kernel module, firmware and userspace; nouveau's GSP path is off by default except on Ada "where it's
+the only option"; and Haiku's Nvidia port likewise begins at Turing because older cards lack the GSP
+microcontroller.  NVIDIA dropped its open `xf86-video-nv` 2D driver at Fermi, and Haiku's `nvidia`
+driver states that "GF 8xxx and later cards will not be supported by this driver as their architecture
+is quite different from before".  So on this machine the truth is: the chip is identified, the console
+is the framebuffer its firmware set up, 2D is composited by the CPU, and no module is read - and the
+report says each of those things rather than leaving them to be inferred.
+

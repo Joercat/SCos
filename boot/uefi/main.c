@@ -237,7 +237,9 @@ status EFIAPI efi_main(handle image,struct system_table *table){
   const struct gpu_match *match=0;
   scan_display(0,0,seen,&visited,&gbus,&gslot,&gfn,&gvendor,&gdevice,&gsub,&match);
   const char *family=match?gpu_family_name(match):"";
-  if(match){
+  if(match&&!gpu_match_named_only(gvendor,gdevice,gsub)){
+   /* A chip the naming table knows but no driver table binds gets no module read at all: firmware
+    * must not hand the kernel bytes for a chip generation nothing can drive. */
    unsigned n=0;while(n<15&&family[n]){selected_family[n]=family[n];n++;}selected_family[n]=0;
    char16 path[32];family_file_name(family,path);
    phase="read gpu driver module";s=read_file(root,path,&module_data,&module_size);

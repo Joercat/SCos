@@ -52,6 +52,12 @@ includes the license texts and math-file notices at `/system/licenses.txt`.
 
 ## GPU device tables — data extracted from Haiku, not vendored code
 
+Alongside them, `tools/research/pci.ids.display.txt` holds 2,320 display-product rows extracted from
+`pci.ids` (PCI ID Project, version 2026.09.21, <https://github.com/pciutils/pciids>, licence
+GPL-2.0-or-later OR BSD-3-Clause).  It is a dev-time input used only to *name* a chip no driver in this
+tree covers; the rows it produces live in their own generated header, are marked as naming by the
+matcher, and can never select a driver module.  No `pci.ids` file is vendored and none is fetched at
+build time.
 - Upstream: https://github.com/haiku/haiku, commit
   `7be0fef07df0ecbe6f40a4cf2a7687775f1f28a0` (the pinned commit used by the GPU
   survey in `docs/migration/`).

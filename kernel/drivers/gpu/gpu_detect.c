@@ -27,6 +27,7 @@ static int config_writes_before, config_writes_after;
 static const struct gpu_driver *bound;
 static struct boot_framebuffer output;
 static int families_without_port_record;
+static int named_only_devices;    /* named by the registry, bound by no driver table */
 
 static void hex4(char *out, uint16_t value)
 {
@@ -90,6 +91,14 @@ static void record(struct gpu_device *g, uint8_t bus, uint8_t slot, uint8_t func
     read_bars(g);
 }
 
+/* Whether this function may have a driver module read for it at all.  The naming table knows chips; a
+ * module is only ever loaded for a chip that some driver's own binding table claims, and this is the
+ * one place that rule lives, so the boot loop, the test harness and any later caller cannot drift. */
+int gpu_module_eligible(const struct gpu_device *g)
+{
+    return g && g->match && !g->bound && !g->named_only;
+}
+
 static void identify(struct gpu_device *g)
 {
     const struct gpu_pci_id *row = 0;
@@ -97,6 +106,15 @@ static void identify(struct gpu_device *g)
     if (!match) return;
     g->match = match;
     g->chip = row ? row->name : 0;
+    if (gpu_match_row_is_registry(match, row)) {
+        /* The chip is named by the registry snapshot, which knows what a device id *is* and nothing
+         * about what could drive it.  Returning before the port lookup below is what stops a family
+         * that has a ported engine for one generation from claiming a chip two decades newer, or from
+         * having a module loaded for it by the code in gpu_module.c. */
+        g->named_only = 1;
+        named_only_devices++;
+        return;
+    }
     const struct gpu_driver *port = gpu_port_for(match->family);
     if (!port) {
         families_without_port_record++;
@@ -140,6 +158,9 @@ void gpu_init(const struct boot_framebuffer *fb)
             klog("gpu:   chip=%s engine=%s",
                  g->chip && g->chip[0] ? g->chip : "(no ID table match)",
                  g->bound ? "bound (in-tree port)" : "none at detection, CPU compositor");
+            if (g->named_only)
+                klog("gpu:   %x:%x is named by the PCI id registry only; no driver table in this tree "
+                     "binds it, so nothing was loaded for it", g->vendor, g->device);
             device_count++;
         }
     }
@@ -163,6 +184,10 @@ void gpu_init(const struct boot_framebuffer *fb)
          "%u without a port record",
          device_count, (unsigned)gpu_match_id_total(), gpu_match_family_count(),
          (unsigned)families_without_port_record);
+    /* Two counts, because the two tables make two different claims and a reader must be able to tell
+     * them apart without opening the headers: ids that bind a driver, and ids that only name a chip. */
+    klog("gpu: tables: %u id rules bind a driver; %u more ids name a chip that nothing in this tree "
+         "covers", (unsigned)gpu_match_id_total(), (unsigned)gpu_registry_id_total());
     klog("gpu: scanout owner %s, %u PCI config write(s) issued",
          scanout_index >= 0 ? "identified by BAR address" : "not identified by address",
          (unsigned)(config_writes_after - config_writes_before));
@@ -171,7 +196,7 @@ void gpu_init(const struct boot_framebuffer *fb)
     if (!bound && handoff && handoff->module_state) {
         for (int i = 0; i < device_count; i++) {
             struct gpu_device *g = &devices[i];
-            if (!g->match || g->bound) continue;
+            if (!gpu_module_eligible(g)) continue;
             if (strncmp(handoff->module_name, g->match->family,
                         strlen(g->match->family)) != 0) continue;
             if (gpu_module_bind(g, handoff) == 0) {
