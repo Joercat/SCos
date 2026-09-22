@@ -338,6 +338,12 @@ struct app {
     const char *file_suffix;
     void (*document)(struct window *,const char *);
     const char *(*failure)(struct window *w); /* optional startup/runtime status */
+    /* Optional drop target for a file dragged onto this app's window.  The application is asked
+     * first, with the position in its own client coordinates, and answers 1 when it has consumed
+     * the drop - File Explorer moves the file into whichever folder the pointer is over, which is a
+     * thing only File Explorer knows.  Answering 0 keeps the ordinary meaning of a drop on a
+     * window: open the file with this application. */
+    int (*drop)(struct window *w, const char *path, int x, int y);
 };
 
 #define WIN_TITLEBAR 26
@@ -480,6 +486,14 @@ void wm_desktop_restore(void);
 void wm_desktop_install(const char *id);
 int wm_desk_vis_count(void);
 int wm_desk_vis_get(int idx, char *app, char *path, char *label, int *kind);
+/* Read side of the icon grid.  The regression suites need to assert what a gesture *did* - which
+ * icons are selected, where an icon ended up on the grid, whether an application's windows are all
+ * put away - and one way to select a menu line by its text rather than by an index that shifts when
+ * a line is added. */
+u32  wm_desk_sel_mask(void);
+int  wm_desk_pos(int vis_idx, int *gx, int *gy);
+int  wm_desk_action_index(int item, const char *label);
+int  wm_app_minimized(const char *app_id);      /* 1 put away, 0 on screen, -1 not running */
 void wm_wallpaper_invalidate(void);
 void system_reset(void);
 

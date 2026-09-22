@@ -92,10 +92,56 @@ def test_apps_stay_within_their_share():
         print('PASS app allocation is accounted against real free memory: USB')
 
 
+
+
+def test_framebuffer_sized_mapping_is_permitted():
+    """What a display driver has to be able to map, on the machines this OS is meant to boot on.
+
+    The linear frame buffer is width*height*4 bytes, so the ceiling on device_map is not a detail: at
+    1920x1080 it fits in the old 8 MiB bound by 0.1 MiB, and every larger panel - 2560x1440, 3840x2160 -
+    was refused outright, which on a real machine reads as "the driver failed to start".  A modern card
+    also puts its BAR above 4 GiB, so that address has to be mappable too.  Nothing here reads device
+    memory; the assertions are about whether the mapping layer accepts the request and builds the pages.
+    """
+    with Guest('memory-map') as g:
+        before = g.call('memory_table_pages', 0)     # table frames taken from the allocator, in frames
+        fourk = 3840 * 2160 * 4                      # 33.2 MiB, the framebuffer of a 4K panel
+        base = 0x02000000                            # inside the guest's 128 MiB of RAM, large-mapped
+        out = g.scratch + 512
+        g.debug.write(out, (0).to_bytes(8, 'little'))
+        got = g.call('device_map', base, fourk, 1, out)
+        got_bytes = int.from_bytes(g.debug.read(out, 8), 'little')
+        assert got == base, ('a 4K-sized framebuffer was refused', hex(got))
+        assert got_bytes >= fourk, (got_bytes, fourk)
+        # The bound still exists - a request past it is refused rather than silently allocating table
+        # pages without limit, and the refusal is the point of the ceiling.
+        assert g.call('device_map', base, 512 * 1024 * 1024, 1, out) == 0, 'device_map has no ceiling'
+        # Above 4 GiB is where a modern card's frame buffer lives; the walk must accept the address.
+        got = g.call('device_map', 0x100000000, 4 * 1024 * 1024, 1, out)
+        assert got == 0x100000000, ('a BAR above 4 GiB was refused', hex(got))
+        g.call('device_unmap', 0x100000000, 4 * 1024 * 1024)
+        g.call('device_unmap', base, fourk)
+        # Reusing what the boot stub already mapped has to be *reuse*, not a re-walk: mapping the same
+        # span again returns the same address and costs no further page-table frames.  Before the leaf
+        # levels were recognised, this request panicked the machine instead; the bound below is what
+        # keeps the fix honest - 41 MiB of fresh 4 KiB mappings would need ten thousand frames, and
+        # frames taken by a genuine new table (the above-4GiB request) are counted, not hidden.
+        again = g.call('device_map', base, fourk, 1, out)
+        assert again == base, ('mapping the same span twice did not return the same address', hex(again))
+        after = g.call('memory_table_pages', 0)
+        assert 0 <= after - before <= 8, ('the span cost %d page-table frames' % (after - before))
+        g.call('device_unmap', base, fourk)
+        # An unmap that did not create the mappings must not clear the boot stub's leaves: the RAM the
+        # kernel is running on is still mapped afterwards, which is what this reads.
+        assert g.debug.read(0x100000, 4) != b'', 'unmapping a reused span took the identity map with it'
+        print(f'PASS a 4K panel and an above-4GiB BAR both map; extra page-table frames: {after - before}')
+
+
 def test():
     RESULTS.mkdir(parents=True, exist_ok=True)
     test_idle_reservation_is_small()
     test_apps_stay_within_their_share()
+    test_framebuffer_sized_mapping_is_permitted()
 
 
 if __name__ == '__main__':

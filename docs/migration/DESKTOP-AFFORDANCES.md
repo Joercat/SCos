@@ -16,7 +16,7 @@ that has three lines means there are exactly three things to do here.
 | Surface | Raised by | Actions |
 | --- | --- | --- |
 | A desktop application icon | right-click | Open · Pin to taskbar / Unpin from taskbar · Hide this icon · Uninstall app (only for a `.cat` app) |
-| A desktop file shortcut | right-click | Open · Show folder in Files · Remove this shortcut |
+| A desktop file shortcut | right-click | Open · Show folder in Files · Remove this shortcut · Open with... · Rename shortcut |
 | A rubber-band selection | right-click | Remove from Desktop · Clear Selection |
 | Empty wallpaper | right-click | Restore hidden icons · Open Files · Open Terminal |
 | A taskbar entry | right-click | Open · Unpin from bar · Put its icon back (only when that icon is hidden) |
@@ -96,3 +96,40 @@ is freed, and uninstalls a `.cat` application from its own desktop icon: window 
 icon and pin gone — and after a reboot on a writable disk, `system/desktop.json` still says so.
 
 Both suites drive the shipped `handle_mouse`, `wm_desk_*` and `wm_dnd_*`, not copies of their logic.
+
+## 6. The gestures themselves
+
+A menu that offers the right lines is half of a desktop; the other half is the direct manipulation, and
+that part was asserted nowhere until `tools/tests/test_affordances.py`. Its absence was a fair
+accusation: the suites pressed a button once and expected a window, or read a label back, so a gesture
+could have been broken outright and still passed. Every case now drives the shipped entry points -
+`handle_mouse`, `handle_key`, an application's own `mouse` callback - and asserts the consequence.
+
+| Gesture | Where | What it does |
+| --- | --- | --- |
+| press | an icon, a Files row | selects, and nothing more (single click must not launch) |
+| press twice inside `dbl_ms` | an icon | opens it (`desktop_open`) |
+| press twice inside `dbl_ms` | a Files row | opens the entry (`files_open_row`) |
+| press twice inside `dbl_ms` | a taskbar entry | puts that application's window away, or brings it back |
+| Enter | a selection of icons | opens every selected item |
+| Delete | a selection of icons | hides the apps, forgets the shortcuts - never deletes a file |
+| F2 | a selected shortcut | renames it, into `system/desktop.json` |
+| drag | an icon | moves it, snapped to the grid, nearest free cell on a clash |
+| drag | a Files row | carries the path to the wallpaper (shortcut), a window, or a bar entry |
+| drop a file on a **folder row** in Files | | moves the file into that folder |
+| drop a file on empty list space in Files | | moves it into the folder being shown |
+| drop a file on a **file row** in Files | | is declined by Files and falls back to opening it |
+
+The three drop rows above needed a hook rather than a special case in the window manager: `struct app`
+now carries an optional `drop(window, path, x, y)`, called in the application's client coordinates
+before the default meaning of a drop on a window, and returning 0 leaves that default intact. Only
+Files implements it - a drop landing on a particular row is a thing only the app that drew that row can
+know - and like every other app callback it is timed by the per-app accounting.
+
+Two invariants are worth stating because they were the difference between working and looking working.
+Double-click timing is measured in the kernel's 10 ms ticks (`prefs.dbl_ms / 10` against `tick_count`,
+PIT divisor 11932 = 100 Hz), and each surface keeps its own pair state: the bar's does not feed the
+icon grid's, so a click on the bar can never complete a double-click on an icon under it. And because
+the icon menu grew to five lines for a shortcut, `wm_desk_actions()` now requires a six-slot label
+array and refuses anything smaller - a contract the suites honour by selecting menu lines through
+`wm_desk_action_index()` by name instead of hard-coding an index.

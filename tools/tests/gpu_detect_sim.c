@@ -376,6 +376,30 @@ int main(void)
         expect(gpu_device_count() == 2, "both display functions are recorded");
     }
 
+    /* A card of the generation this machine has puts its frame buffer in a 64-bit BAR *above* 4 GiB.
+     * Ownership is decided by comparing that address with the one UEFI reported, so the fold of the two
+     * config words into one 64-bit value is load-bearing: without it the machine knows what chip it owns
+     * and cannot say which function the firmware is scanning out from, which is the difference between
+     * "driver not loaded" and "driver refused". */
+    {
+        uint64_t keep = fake_fb.base;
+        uint64_t high_half = 0x100000000ull;
+        struct sim_device pair[2] = {
+            {0, 1, 0, 3, 0, 0, 0x10de, 0x2d83,
+             {0u, 0x0000000cu, (uint32_t)(high_half >> 32), 0u, 0u, 0u}, 7},
+            {0, 2, 0, 3, 0, 0, 0x8086, 0x29c2, {0xe0000008u}, 7},
+        };
+        fake_fb.base = high_half;             /* the LFB begins at that BAR */
+        run_with(pair, 2);
+        const struct gpu_device *owner = gpu_scanout_device();
+        expect(owner && owner->vendor == 0x10de && owner->device == 0x2d83,
+               "a 64-bit BAR above 4 GiB still names the scanout owner");
+        expect(owner && owner->bar[1] == high_half, "the upper config word is folded into the BAR");
+        expect(owner && owner->named_only, "the chip is named from the registry, not bound");
+        expect(owner && !gpu_module_eligible(owner), "no module is offered for a naming row");
+        fake_fb.base = keep;
+    }
+
     /* Registry invariants: a family without a port record would be silently unusable,
      * and a record may not advertise a state it has no code for. */
     for (int f = 0; f < families; f++) {

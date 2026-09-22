@@ -115,14 +115,20 @@ void memory_init(const struct boot_handoff *b,const struct efi_memory *map){
 /* The leaf for p, only when the walk already exists.  This must not allocate: probing an unmapped
  * range may not leave an empty table behind, since the next caller to look at that 2MiB block would
  * otherwise find a half-built walk and have to decide whether it meant "mapped" or "not mapped". */
+/* The leaf that already covers p, at whatever level the boot stub chose: the identity map of RAM is
+ * built from 1GiB and 2MiB leaves, so both levels have to be recognised here.  Missing the 2MiB one was
+ * worse than an inefficiency - the slot was read as if it were a page-table page, and device_map then
+ * descended into a leaf and panicked, which is how a request to map a 4K panel's frame buffer over RAM
+ * the stub had already large-page mapped killed the machine instead of reusing the mapping. */
 static uint64_t *device_leaf(uintptr_t p){
  uint64_t *pdpt=&root[(p>>39)&511];
  if(!(*pdpt&1))return 0;
  uint64_t *pd=(uint64_t*)(uintptr_t)(*pdpt&ADDRESS)+((p>>30)&511);
  if(!(*pd&1))return 0;
- if(*pd&128)return pd;                     /* a 2MiB leaf already covers p */
+ if(*pd&128)return pd;                     /* a 1GiB leaf already covers p */
  uint64_t *pt=(uint64_t*)(uintptr_t)(*pd&ADDRESS)+((p>>21)&511);
  if(!(*pt&1))return 0;
+ if(*pt&128)return pt;                     /* a 2MiB leaf already covers p */
  return (uint64_t*)(uintptr_t)(*pt&ADDRESS)+((p>>12)&511);
 }
 /* Map device memory for a driver that has taken ownership of its function.  The kernel identity-maps
@@ -132,8 +138,14 @@ static uint64_t *device_leaf(uintptr_t p){
  * GOP) a no-op instead of a page-table conflict.  Attributes are always the UC/WC pair used for the
  * console, never a third combination, so no two mappings of the same memory can disagree.
  * Returns 0 when the range is not mappable (over the limit, or a leaf that is not ours). */
+/* The ceiling has to clear a whole display framebuffer, not a convenient page count: a GOP linear
+ * frame buffer is width*height*4, so 1920x1080 is 7.9 MiB but 2560x1440 is 14.2 MiB and 3840x2160 is
+ * 33.2 MiB.  Refusing anything the machine actually offers is how a real monitor ends up with no
+ * driver.  At 4 KiB pages the 40 MiB span costs twenty page-table pages, which the boot allocator can
+ * now supply even when the boot arena is exhausted (see memory_table_pages). */
+#define DEVICE_MAP_MAX (PAGE*10240)
 void *device_map(uint64_t physical,uint64_t bytes,int write_combine,uint64_t *mapped_bytes){
- if(!initialized||!bytes||bytes>PAGE*2048)return 0;
+ if(!initialized||!bytes||bytes>DEVICE_MAP_MAX)return 0;
  if(physical>>46)return 0;
  uintptr_t start=physical&~(uintptr_t)(PAGE-1);
  uintptr_t end=(physical+bytes+PAGE-1)&~(uintptr_t)(PAGE-1);

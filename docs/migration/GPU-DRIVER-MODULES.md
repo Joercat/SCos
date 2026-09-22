@@ -339,3 +339,19 @@ readback figure, must report `unavailable (no driver module loaded for this chip
 stub's opposite verdict (`module store: staged ... checksum verified`), and the window manager must still
 reach its main loop with the fallback notice on screen.  In other words the trust chain is tested by breaking
 the link the firmware is responsible for, and the image is restored afterwards.
+
+## Ownership across a 64-bit BAR
+
+Detection compares the address UEFI reported for the linear frame buffer with each function's BARs, so
+the fold of the two config words in `read_bars()` (a BAR whose type bits say 64-bit consumes the next
+word as its upper half) is what lets a machine whose card puts its frame buffer above 4 GiB say which
+function the firmware is scanning out from. `tools/tests/gpu_detect_sim.c` carries that case with an
+`0x10de:0x2d83` function at `BAR1 = 0x100000000`: ownership is found, the chip is named from the
+registry, and no module is offered - which is the accurate statement about that card. Finding a chip's
+addresses and driving its engine are different claims, and only the first one is true here.
+
+What this does *not* change is the ceiling on what can be accelerated. The mapping layer above 4 GiB and
+the raised `device_map()` bound are what a real panel needs to be scanned out at all; a 2D or 3D engine
+for Fermi-and-later NVIDIA parts still does not exist outside the vendor stack, whose supported hardware
+begins at Turing with GSP firmware active. See GPU-BASIC-2D-RESEARCH.md for the audit that ends that
+road, and note that a request to map a 4K frame buffer no longer panics the machine: that was fixed.

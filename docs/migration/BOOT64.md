@@ -287,3 +287,26 @@ Final memory-attribute hardening was additionally checked under ASan/UBSan for
 WB support and all excluded attribute bits, then native boot/IRQ preservation
 (128/256 MiB), high-page allocation (2048 MiB), USB boot and UD/RO/NX/DF dispatch
 were rerun on those final bytes. A clean rebuild matched the published checksum.
+
+## Mapping a real panel, and the two ways it used to fail
+
+The frame buffer a UEFI GOP hands over is `width * height * 4` bytes, and the kernel reaches it through
+`device_map()`, whose per-call ceiling was `PAGE*2048` - 8 MiB. 1920x1080 clears that by 0.1 MiB,
+which is the only reason the development machine ever saw a screen: 2560x1440 (14.2 MiB) and
+3840x2160 (33.2 MiB) were refused with no diagnostic beyond a driver that would not start. The ceiling
+is now `DEVICE_MAP_MAX`, 40 MiB, which covers a 4K panel and a QHD panel with the same 4 KiB-page cost
+that was already being paid for smaller ones - twenty page-table pages for the largest span, from the
+allocator when the boot arena is exhausted (see step 8).
+
+The second failure was worse because it was fatal. `device_leaf()`, the probe that decides whether an
+address is already mapped, recognised a 1 GiB leaf but not a 2 MiB one. The boot stub identity-maps RAM
+in large pages, so any mapping request over that region read a leaf as if it were a page-table page and
+then `descend()` panicked with `conflicting page-table leaf`. A 4K frame buffer request over
+large-mapped RAM therefore killed the machine instead of reusing the mapping that was already there.
+`device_leaf()` now returns the covering leaf at either level, and `device_unmap()` cannot clear one it
+did not create because it only removes entries carrying exactly the flags `device_map()` installs.
+
+Both are asserted in a booted guest by `tools/tests/test_memory.py`: a 3840x2160x4 request returns the
+identity address, costs no additional page-table frames (reuse, not a re-walk), mapping it again returns
+the same address, an over-ceiling request is still refused, a BAR at `0x100000000` maps, and after the
+unmap the RAM underneath is still readable.

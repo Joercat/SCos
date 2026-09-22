@@ -196,7 +196,7 @@ def test():
       g.call('paint_all');pointer(g,px,py);event(g,1)
       event(g,2,button=2,down=1,buttons=2);event(g,2,button=2,buttons=0)
       assert g.value('menu'),'right-clicking the installed app icon raised no menu'
-      lab=g.scratch+8000;n=g.call('wm_desk_actions',target,lab,4)
+      lab=g.scratch+8000;n=g.call('wm_desk_actions',target,lab,6)
       words=[g.string(g.ptr(lab+8*k),40) for k in range(n)]
       assert words[0]=='Open' and words[-1]=='Uninstall app',words
       mrect=struct.unpack('<4i',g.debug.read(g.base+g.symbols['menu']+4,16))

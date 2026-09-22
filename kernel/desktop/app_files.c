@@ -320,6 +320,48 @@ static void bg_menu_cb(int item, void *ud)
 }
 
 /* -------------------------------------------------------------- paint ---- */
+/* One move, from whichever folder the pointer was over.  Renaming into a directory is the whole of
+ * it - the VFS refuses a collision and refuses a folder moved inside itself, so nothing here has to
+ * second-guess what it is handed. */
+static int files_move_into(struct window *w, const char *dir, const char *src)
+{
+    struct files *f = w->data;
+    const char *base = files_base_name(src);
+    char from[300], dst[300];
+    if (!f || !base[0]) return 0;
+    if ((int)strlen(dir) + (int)strlen(base) + 2 >= (int)sizeof dst) {
+        wm_error_popup("The new path is too long to move that file.");
+        return 1;
+    }
+    strcpy(from, src);            /* the drop's payload belongs to the drag, not to us */
+    strcpy(dst, dir);
+    int dl = (int)strlen(dst);
+    if (dl && dst[dl - 1] != '/') { dst[dl] = '/'; dst[dl + 1] = 0; }
+    strcat(dst, base);
+    if (!strcmp(from, dst)) return 1;      /* it is already sitting in that folder */
+    if (vfs_rename(from, dst)) files_load(f);
+    else wm_notify("Move failed", "That file could not be moved into the folder - a name may already "
+                   "be taken there.", 1);
+    wm_redraw(w);
+    return 1;
+}
+
+static int files_drop(struct window *w, const char *path, int x, int y)
+{
+    struct files *f = w->data;
+    if (!f || f->notice || !path || !path[0]) return 0;
+    if (x < 4 || x > w->surf.w - 4 || y < LIST_Y + 4) return 0;   /* toolbar: not ours */
+    if (!vfs_lookup(path)) return 0;                              /* it vanished mid-drag */
+    int row = f->scroll + (y - LIST_Y - 4) / ROW_H;
+    if (row < 0) return 0;
+    /* Below the last row is the folder being shown, so a drop there files the thing here. */
+    if (row >= f->n) return files_move_into(w, f->path, path);
+    if (f->synth[row] || !files_is_dir_row(f, row)) return 0;      /* a file is not a container */
+    char dir[300];
+    if (!files_full_path(f, row, dir)) return 0;
+    return files_move_into(w, dir, path);
+}
+
 static void files_paint(struct window *w)
 {
     struct files *f = w->data;
@@ -511,6 +553,7 @@ static void files_key(struct window *w, struct key_event *e)
 struct app app_files = {
     .desktop_label = "Files",
     .uses_data = 1, .id = "files", .title = "File Explorer", .icon = ICON_FOLDER, .single = 0,
+    .drop = files_drop,
     .def_w = 700, .def_h = 500,
     .open = files_open, .paint = files_paint, .key = files_key,
     .mouse = files_mouse, .close = files_close,

@@ -13,6 +13,9 @@
 static void desktop_load(void);
 static void desktop_save(void);
 static __attribute__((noinline)) void menu_cancel(void);
+static void icon_rect(int i, int *x, int *y, int *w, int *h);
+static void desk_rename_ask(int item);
+static void desk_openwith(int item);
 #define BTN_SZ 18
 
 /* Stable slots: app/tab/dialog back-pointers must survive closing an earlier window. */
@@ -713,10 +716,17 @@ static void desk_reveal(const char *path)
  * and hidden, a shortcut to a file can be followed and forgotten, and a built-in is never offered an
  * "Uninstall" it would refuse.  The labels come from the same table the actions run, so the menu, the
  * keyboard paths and the test suite cannot drift into three descriptions of the same desktop. */
-static char desk_labels[4][40];
+static char desk_labels[6][40];
+/* "Open with..." needs a list that outlives the call that builds it, because the menu hands the answer
+ * back later; one list is enough, since only one menu can be raised at a time. */
+static char desk_openwith_path[300];
+static char desk_openwith_ids[16][32];
+static char desk_openwith_text[16][40];
+static const char *desk_openwith_labels[16];
+static int desk_openwith_count;
 int wm_desk_actions(int item, const char **labels, int max)
 {
-    if (item < 0 || item >= nitems || !labels || max < 4) return -1;
+    if (item < 0 || item >= nitems || !labels || max < 6) return -1;
     struct app *a = items[item].kind == 0 ? app_find(items[item].app) : 0;
     int n = 0;
 /* Each line is written into storage that outlives this call (a menu keeps the pointer until it is
@@ -727,6 +737,10 @@ int wm_desk_actions(int item, const char **labels, int max)
     if (a) DESK_LINE(wm_taskbar_pinned(a->id) ? "Unpin from taskbar" : "Pin to taskbar");
     else DESK_LINE("Show folder in Files");
     DESK_LINE(a ? "Hide this icon" : "Remove this shortcut");
+    /* A shortcut keeps the two lines its own row has in File Explorer, so the same work is possible
+     * from either surface.  An application icon is left alone: its name comes from the application,
+     * and it has exactly one handler. */
+    if (!a) { DESK_LINE("Open with..."); DESK_LINE("Rename shortcut"); }
     /* Built-in apps are not removable, so the line is not offered for them at all; the uninstall
      * request itself still refuses, because a menu is a convenience and not the protection. */
     if (a && a->external) DESK_LINE("Uninstall app");
@@ -736,8 +750,8 @@ int wm_desk_actions(int item, const char **labels, int max)
 
 int wm_desk_invoke(int item, int action)
 {
-    const char *labels[4];
-    int n = wm_desk_actions(item, labels, 4);
+    const char *labels[6];
+    int n = wm_desk_actions(item, labels, 6);
     if (n < 0 || action < 0 || action >= n) return -1;
     struct app *a = items[item].kind == 0 ? app_find(items[item].app) : 0;
     if (action == 0) {
@@ -766,6 +780,8 @@ int wm_desk_invoke(int item, int action)
     }
     if (!strcmp(labels[action], "Show folder in Files")) { desk_reveal(items[item].path); return 0; }
     if (!strcmp(labels[action], "Remove this shortcut")) { desk_forget(item); return 0; }
+    if (!strcmp(labels[action], "Open with...")) { desk_openwith(item); return 0; }
+    if (!strcmp(labels[action], "Rename shortcut")) { desk_rename_ask(item); return 0; }
     return -1;
 }
 
@@ -895,6 +911,123 @@ static void icon_rect(int i, int *x, int *y, int *w, int *h)
     *x = 16 + items[i].gx * 88;
     *y = 16 + items[i].gy * 96;
     *w = 80; *h = 88;
+}
+static void desk_rename_answer(int ok, const char *text, void *ud)
+{
+    int item = (int)(intptr_t)ud;
+    if (!ok || item < 0 || item >= nitems || !text || !text[0]) return;
+    if (items[item].kind != 1) return;
+    char next[sizeof items[item].label];
+    int n = 0;
+    /* A shortcut's name is stored in the desktop record, whose fields are separated by '|'; a name
+     * carrying one would be read back as two fields, so it is replaced rather than escaped. */
+    for (; text[n] && n + 1 < (int)sizeof next; n++) next[n] = text[n] == '|' ? '-' : text[n];
+    next[n] = 0;
+    if (!next[0] || (next[0] == ' ' && !next[1])) return;
+    strcpy(items[item].label, next);
+    desktop_save();
+    icons_dirty = 1;
+    dirty = 1;
+}
+
+static void desk_rename_ask(int item)
+{
+    static char ask[224];
+    if (item < 0 || item >= nitems) return;
+    if (items[item].kind != 1) {
+        wm_notify("Not renamable", "That name belongs to the application itself - only a shortcut to "
+                  "a file can be renamed here.", 0);
+        return;
+    }
+    /* The field starts empty and the old name goes in the question, which is how File Explorer's own
+     * rename asks it: an input pre-filled at the end invites a new name typed onto the end of the old
+     * one, and the desktop has no selection key to clear it with. */
+    strcpy(ask, "Rename \"");
+    strncat(ask, items[item].label, sizeof items[item].label);
+    strcat(ask, "\" to:");
+    wm_dialog("Rename shortcut", ask, "", desk_rename_answer, (void *)(intptr_t)item);
+    dirty = 1;
+}
+
+static void desk_openwith_answer(int item, void *ud)
+{
+    (void)ud;
+    if (item < 0 || item >= desk_openwith_count) return;
+    if (!wm_open_app(desk_openwith_ids[item], desk_openwith_path))
+        wm_notify("Cannot open it there", "That application did not take the file.", 1);
+}
+
+/* The desktop's share of Files' per-row menu.  A shortcut points at a file, so the file's other
+ * handlers have to be reachable from the icon too - otherwise the shortcut is a launch button with
+ * one fixed answer, and the file it names can only be opened elsewhere. */
+static void desk_openwith(int item)
+{
+    if (item < 0 || item >= nitems || items[item].kind != 1) return;
+    struct vfs_node *node = vfs_lookup(items[item].path);
+    if (!node) {
+        wm_notify("File is gone", "That shortcut points at something that is not on this machine any "
+                  "more.", 1);
+        return;
+    }
+    if (node->is_dir) { desk_reveal(items[item].path); return; }
+    desk_openwith_count = 0;
+    for (int i = 0; i < app_count() && desk_openwith_count < 16; i++) {
+        struct app *a = app_at(i);
+        if (!a || a->id[0] == '_' || (!a->document && !a->open)) continue;
+        strcpy(desk_openwith_ids[desk_openwith_count], a->id);
+        strncpy(desk_openwith_text[desk_openwith_count], a->title,
+                sizeof desk_openwith_text[0] - 1);
+        desk_openwith_text[desk_openwith_count][sizeof desk_openwith_text[0] - 1] = 0;
+        desk_openwith_labels[desk_openwith_count] = desk_openwith_text[desk_openwith_count];
+        desk_openwith_count++;
+    }
+    if (!desk_openwith_count) {
+        wm_notify("Nothing else can open this", "No installed application accepts documents.", 1);
+        return;
+    }
+    strcpy(desk_openwith_path, items[item].path);
+    int x, y, w, h;
+    icon_rect(item, &x, &y, &w, &h);
+    wm_menu(x, y + h + 2, desk_openwith_labels, desk_openwith_count, desk_openwith_answer, NULL);
+    dirty = 1;
+}
+
+u32 wm_desk_sel_mask(void) { return desk_sel; }
+
+int wm_desk_pos(int vis_idx, int *gx, int *gy)
+{
+    int n = 0;
+    for (int i = 0; i < nitems; i++) {
+        if (items[i].hidden) continue;
+        if (n++ != vis_idx) continue;
+        if (gx) *gx = items[i].gx;
+        if (gy) *gy = items[i].gy;
+        return 0;
+    }
+    return -1;
+}
+
+int wm_desk_action_index(int item, const char *label)
+{
+    const char *labels[6];
+    int n = wm_desk_actions(item, labels, 6);
+    if (n < 0 || !label) return -1;
+    for (int i = 0; i < n; i++)
+        if (!strcmp(labels[i], label)) return i;
+    return -1;
+}
+
+int wm_app_minimized(const char *app_id)
+{
+    if (!app_id || !app_id[0]) return -1;
+    int any = 0, shown = 0;
+    for (int i = 0; i < win_count; i++) {
+        struct window *w = wins[i];
+        if (!w->app || strcmp(w->app->id, app_id)) continue;
+        any = 1;
+        if (w->state != WIN_STATE_MIN) shown = 1;
+    }
+    return any ? (shown ? 0 : 1) : -1;
 }
 
 static void paint_icons(void)
@@ -1094,7 +1227,10 @@ static void paint_taskbar(void)
     s_clip_text(&screen,56,y+12,label,t->text,94);
 
     int visible=pin_count,cap=wm_taskbar_capacity();if(visible>cap)visible=cap;
-    for(int i=0;i<visible;i++){int x=168+i*40;struct app *a=app_find(task_pins[i]);if(!a)continue;s_fill(&screen,x,y+6,34,TASKBAR_H-12,blend(t->taskbar_bg,t->main,20));s_frame_rect(&screen,x,y+6,34,TASKBAR_H-12,t->main);s_icon(&screen,a->icon,x+5,y+8,t->text);}
+    for(int i=0;i<visible;i++){int x=168+i*40;struct app *a=app_find(task_pins[i]);if(!a)continue;
+        /* Dimmer when every window of that application is put away - the bar is the only place left
+         * that can say so, and double-clicking the entry is how it gets undone. */
+        s_fill(&screen,x,y+6,34,TASKBAR_H-12,blend(t->taskbar_bg,t->main,wm_app_minimized(task_pins[i])==1?7:20));s_frame_rect(&screen,x,y+6,34,TASKBAR_H-12,t->main);s_icon(&screen,a->icon,x+5,y+8,t->text);}
     /* power button */
     int px, py, pw, ph;
     tb_power_rect(&px, &py, &pw, &ph);
@@ -1480,6 +1616,17 @@ int wm_dnd_drop(int px, int py)
             struct vfs_node *n = vfs_lookup(payload);
             if (n && n->is_dir) return wm_open_app("files", (void *)payload) ? 0 : -1;
         }
+        /* A drop on a window normally means "open it with this application", but the application may
+         * have a better answer for the exact place the pointer is over: dropping a file on a folder
+         * row in File Explorer moves the file into that folder.  Declining leaves the default. */
+        struct window *w = win_at_point(px, py);
+        if (w && w->app == a && a->drop) {
+            int took;
+            APP_T0(w);
+            took = a->drop(w, payload, px - (w->x + 1), py - (w->y + WIN_TITLEBAR));
+            APP_T1(w);
+            if (took) return 0;
+        }
         return wm_open_app(id, payload) ? 0 : -1;
     }
     return -1;
@@ -1520,8 +1667,8 @@ static void desktop_context(void)
         }
         if (hit >= 0) {
             if (!(desk_sel & (1u << hit))) desk_sel = (1u << hit);
-            static const char *m[4];
-            int n = wm_desk_actions(hit, m, 4);
+            static const char *m[6];
+            int n = wm_desk_actions(hit, m, 6);
             wm_menu(mx, my, m, n > 0 ? n : 1, desk_item_menu_cb, (void *)(intptr_t)hit);
         } else if (desk_sel) {
             static const char *m[2] = { "Remove from Desktop", "Clear Selection" };
@@ -1963,8 +2110,35 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
                 strcpy(pin_menu_id, task_pins[i]);
                 wm_menu(168 + i * 40, screen_h - TASKBAR_H - (n * 24 + 8), choices, n, pin_menu_answer, NULL);
             }
-            else if(e->button==MBTN_LEFT)wm_open_app(task_pins[i],NULL);
-            wm_full();return;
+            else if(e->button==MBTN_LEFT&&e->down){
+                /* The bar's own double-click: put that application's window away, or bring it back.
+                 * The first press of the pair is an ordinary click, which raises or launches the
+                 * window, so the gesture always ends where the user means it to.  The timing is
+                 * deliberately not shared with the icon grid's: a press on the bar must not be taken
+                 * for the second half of a double-click on a desktop icon, or the other way round. */
+                static u64 bar_last_tick;
+                static int bar_last_i = -1, bar_last_x, bar_last_y;
+                int pair = bar_last_i == i &&
+                           (tick_count - bar_last_tick) <= (u64)prefs_get()->dbl_ms / 10 &&
+                           mx - bar_last_x <= 6 && mx - bar_last_x >= -6 &&
+                           my - bar_last_y <= 6 && my - bar_last_y >= -6;
+                bar_last_tick = tick_count; bar_last_x = mx; bar_last_y = my; bar_last_i = i;
+                struct window *t = 0;
+                for (int k = 0; k < win_count; k++)
+                    if (wins[k]->app && !strcmp(wins[k]->app->id, task_pins[i])) { t = wins[k]; break; }
+                if (pair && t) {
+                    if (t->state != WIN_STATE_MIN) wm_minimize_window(t);
+                    else {
+                        t->state = t->restore_state == WIN_STATE_MAX ? WIN_STATE_MAX : WIN_STATE_NORMAL;
+                        wm_focus(t);
+                    }
+                    bar_last_i = -1;      /* the pair is spent, so a third click starts a new one */
+                } else {
+                    wm_open_app(task_pins[i], NULL);
+                }
+                wm_full();return;
+            }
+            else if(e->button==MBTN_LEFT){wm_full();return;}
         }
         int px, py, pw, ph;
         tb_power_rect(&px, &py, &pw, &ph);
@@ -2018,6 +2192,24 @@ static void handle_key(struct key_event *e)
         launch_dirty = 1;
         dirty = 1;
         return;
+    }
+    /* Keyboard parity with the mouse on the icon grid, and only while the desktop itself has the
+     * keyboard - a focused window keeps its own Enter.  Enter opens everything selected, Delete
+     * (below) hides it, F2 renames a shortcut. */
+    if (e->pressed && desk_sel && !focused_w && !modal_w && !menu.active && !launch.active) {
+        if (e->keycode == '\r' || e->keycode == '\n') {
+            u32 sel = desk_sel;
+            for (int i = 0; i < nitems; i++)
+                if ((sel & (1u << i)) && !items[i].hidden) desktop_open(&items[i]);
+            dirty = 1;
+            return;
+        }
+        if (e->keycode == KEY_F2) {
+            for (int i = 0; i < nitems; i++)
+                if ((desk_sel & (1u << i)) && !items[i].hidden) { desk_rename_ask(i); break; }
+            dirty = 1;
+            return;
+        }
     }
     if (e->pressed && e->keycode == KEY_DELETE && desk_sel && !focused_w && !modal_w) {
         desk_remove_sel();
