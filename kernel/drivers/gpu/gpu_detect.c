@@ -381,7 +381,16 @@ int gpu_engine_move_display(int x, int y)
 
 int gpu_engine_available(void)
 {
-    return (bound && bound->ops) || gpu_module_ops() ? 1 : 0;
+    /* "An engine is available" has to mean an engine that can be asked to draw, because that is the claim
+     * the desktop raises a notification with.  A bound module always hands over an operations table - the
+     * table is also how it describes the chip - so testing the pointer measured whether a driver had
+     * loaded, not whether pixels could be moved.  On the machine this was written for, a module that reads
+     * the chip and implements nothing made this return 1, and the notice that followed told the user a 2D
+     * engine had been verified.  A fill pointer is the difference, and it is the one every drawing path
+     * already tests before calling. */
+    if (bound && bound->ops) return 1;
+    const struct scos_gpu_engine_ops *m = gpu_module_ops();
+    return m && m->fill ? 1 : 0;
 }
 
 static uint32_t engine_work_pixels, cpu_work_pixels;

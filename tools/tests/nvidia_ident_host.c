@@ -22,8 +22,13 @@
 #include <stdio.h>
 
 #include "gpu_abi.h"
+#include "blackwell_regs.h"      /* the fixture seeds rows by their published field positions, so it
+                                  * reads the same definitions the driver compiles against */
 
-#define REG_WORDS 4096
+/* Long enough to hold 0x22800 plus the 64 entries that follow it: the device-inventory array the driver
+ * now walks has to be *present* in the fixture for a zero to mean "row past the end of the table" instead
+ * of meaning "the fixture does not model that far". */
+#define REG_WORDS 0x9000
 static u32 registers[REG_WORDS];
 static int checks;                       /* assertions run, so the summary line counts rather than claims */
 static int stores;                       /* every write32 the module attempted: must stay 0 */
@@ -237,8 +242,10 @@ int main(void)
     check(ops && ops->describe, "the one operation it does offer is the description");
     const char *text = ops && ops->describe ? ops->describe(ops->context) : 0;
     check(text && str_len(text) > 40, "the description is non-empty");
-    /* gpu_module.c copies a description into a 160-byte field, so anything longer arrives clipped. */
-    check(text && str_len(text) < 160, "the description fits the kernel's describe field");
+    /* gpu_module.c copies a description into a 512-byte field and gpu_module_state mirrors it, so
+     * anything longer arrives clipped: the tail is the engine inventory, which is the clause the next
+     * increment of this driver reads. */
+    check(text && str_len(text) < 512, "the description fits the kernel's describe field");
     char needle[64];
     snprintf(needle, sizeof needle, "NV_PMC_BOOT_0=0x%08x", boot0);
     check(has(text, needle), "the description quotes the raw dword, so the decode can be re-checked");
@@ -246,10 +253,10 @@ int main(void)
           "an architecture the published table does not name is reported as unnamed, not refused");
     check(has(text, "impl 0x8"), "IMPLEMENTATION is taken from 23:20, where NVIDIA documents it");
     check(has(text, "rev A.1"), "MAJOR_REVISION 7:4 and MINOR_REVISION 3:0 are read as separate fields");
-    check(has(text, "reads 3, writes 0"),
-          "with no window at the documented address it read the boot register twice, the class register "
-          "once, and nothing else");
-    check(reads_served == 3, "the count it reports is the count it issued");
+    check(has(text, "reads 12, writes 0"),
+          "the boot register twice, the class register once, the inventory header, and four rows of each "
+          "candidate table before the walk reached the end of it");
+    check(reads_served == 12, "the count it reports is the count it issued");
     check(has(text, "window silent"), "and it says the submission window was silent");
     check(has(text, "feeds the console"),
           "the function whose BAR holds the firmware's surface says it feeds the console");
@@ -272,8 +279,9 @@ int main(void)
     check(verdict == 0 && has(text, "window class 0xc461=published"),
           "a class register answering with the published number is reported as matching it");
     check(has(text, "clock +2097us"), "and the clock in that page is measured, not assumed");
-    check(reads_served == 9 && has(text, "reads 9, writes 0"),
-          "two boot-register reads, one class read, six reads of the time pair, and no more");
+    check(reads_served == 18 && has(text, "reads 18, writes 0"),
+          "two boot-register reads, one class read, six reads of the time pair, nine for the inventory, "
+          "and no more");
     check(stores == 0, "the doorbell page was read and never written");
     check(log_count >= 2 && has(logs[1], "doorbell at BAR0+0x810090 named, not written"),
           "the second log line states what was not attempted, so the log cannot be misread as a submission");
@@ -313,9 +321,98 @@ int main(void)
           "a window beyond the register mapping is still answered, through a mapping of its own");
     check(maps == 2 && window_physical == 0xe0100000ull + 0x810000ull && window_mapping_bytes == 0x20000ull,
           "two mappings: the register BAR as far as the kernel maps it, and the 128 KiB window page");
-    check(reads_served == 9 && has(text, "reads 9, writes 0"),
-          "and the nine reads it reports are the nine the device served, whichever handle they went through");
+    snprintf(needle, sizeof needle, "reads %d, writes 0", reads_served);
+    check(reads_served == 18 && has(text, needle),
+          "and the reads it reports are the reads the device served, whichever handle they went through");
     check(stores == 0, "neither mapping was written to");
+
+    /* ---- 1g. the answer a chip with a published table would give: the driver has to read the rows, group
+     * them by their chain bit, and name the copy engine it found - because that engine and its runlist
+     * are what a submission has to be addressed to, and nothing published says either number for this
+     * generation.  The table is seeded at the Ampere offset only, and a smaller one at the Turing offset,
+     * so the run also measures which candidate the driver picks. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xc461u;
+    /* Each device is DATA then ENUM then ENGINE_TYPE, chained, exactly as dev_top.ref.txt describes:
+     * DATA carries the engine's PRI base shifted by 12 and an instance id, ENUM carries the runlist and
+     * engine numbers behind valid bits, TYPE names the engine. */
+#define TOP_ROW_DATA(pri, inst)     (1u | ((pri) << 12) | ((inst) << 26) | 0x80000000u)
+#define TOP_ROW_ENUM(eng, run)      (2u | ((eng) << 26) | ((run) << 21) | (1u << 5) | (1u << 4) | 0x80000000u)
+#define TOP_ROW_TYPE(t)             (3u | ((t) << 2))
+#define TOP_AT(base, n)             ((base) / 4u + (n))
+    for (unsigned i = 0; i < 64u; i++) registers[TOP_AT(0x22800u, i)] = 0u;
+    registers[TOP_AT(0x22800u, 0)] = TOP_ROW_DATA(0x40u, 0u);        /* graphics, PRI 0x40000 */
+    registers[TOP_AT(0x22800u, 1)] = TOP_ROW_ENUM(0u, 0u);
+    registers[TOP_AT(0x22800u, 2)] = TOP_ROW_TYPE(NV_PTOP_TYPE_GRAPHICS);
+    registers[TOP_AT(0x22800u, 3)] = TOP_ROW_DATA(0x100u, 1u);       /* first copy engine, PRI 0x100000 */
+    registers[TOP_AT(0x22800u, 4)] = TOP_ROW_ENUM(5u, 1u);
+    registers[TOP_AT(0x22800u, 5)] = TOP_ROW_TYPE(NV_PTOP_TYPE_LCE);
+    registers[TOP_AT(0x22800u, 6)] = TOP_ROW_DATA(0x110u, 2u);        /* second copy engine */
+    registers[TOP_AT(0x22800u, 7)] = TOP_ROW_ENUM(6u, 1u);
+    registers[TOP_AT(0x22800u, 8)] = TOP_ROW_TYPE(NV_PTOP_TYPE_LCE);
+    registers[TOP_AT(0x22800u, 9)] = TOP_ROW_DATA(0x10000u >> 12, 0u);
+    registers[TOP_AT(0x22800u, 10)] = TOP_ROW_TYPE(NV_PTOP_TYPE_GSP);
+    registers[TOP_AT(0x22800u, 11)] = 0u;                             /* end of the table */
+    registers[TOP_AT(0x22700u, 0)] = TOP_ROW_DATA(0x40u, 0u);         /* the older offset decodes too, */
+    registers[TOP_AT(0x22700u, 1)] = TOP_ROW_TYPE(NV_PTOP_TYPE_GRAPHICS);
+    registers[TOP_AT(0x22700u, 2)] = 0u;                              /* as two devices only */
+    registers[TOP_AT(0x22700u, 3)] = TOP_ROW_DATA(0x120u, 3u);
+    registers[TOP_AT(0x22700u, 4)] = TOP_ROW_TYPE(NV_PTOP_TYPE_LCE);
+    registers[TOP_AT(0x22700u, 5)] = 0u;
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "engines at 0x22800"),
+          "the table that decodes to more devices is the one reported, and its offset is named");
+    check(has(text, "LCE 2/VIC 0/GFX 1"),
+          "the engine types are counted from the chip's own entries, two copy engines and one graphics");
+    check(has(text, "GSP 1 of 4 devices"),
+          "a GSP entry is reported as what it is: this chip has the management engine attached");
+    check(has(text, "LCE pri 0x100000 inst 1 runlist 1 engine 5"),
+          "the first copy engine's PRI base, runlist and engine number come out of DATA and ENUM, "
+          "with the base shifted by the documented alignment");
+    snprintf(needle, sizeof needle, "reads %d, writes 0", reads_served);
+    check(has(text, needle), "and every inventory row is counted as a read");
+    check(stores == 0, "the inventory was read, never written: no engine was reprogrammed to list itself");
+    check(!has(text, "engine 6"),
+          "and the numbers belong to one device: a second copy engine further down the table must not "
+          "overwrite the first one's runlist or engine number");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    /* ---- 1h. the same table with the valid bits cleared: a zero in a field is a number, a clear valid
+     * bit means the chip said nothing, and the report has to keep those apart. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xc461u;
+    registers[TOP_AT(0x22800u, 0)] = TOP_ROW_DATA(0x100u, 4u);
+    /* An ENUM row that carries numbers but vouches for none of them: both valid bits clear.  It has to
+     * stay chained to the two rows around it, or the chip would be describing three devices, not one. */
+    registers[TOP_AT(0x22800u, 1)] = 2u | (7u << 26) | (3u << 21) | 0x80000000u;
+    registers[TOP_AT(0x22800u, 2)] = TOP_ROW_TYPE(NV_PTOP_TYPE_LCE);
+    registers[TOP_AT(0x22800u, 3)] = TOP_ROW_DATA(0x40u, 0u);
+    registers[TOP_AT(0x22800u, 4)] = TOP_ROW_TYPE(NV_PTOP_TYPE_VIC);
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "LCE pri 0x100000 inst 4 runlist ? engine ?"),
+          "fields the entry does not vouch for are printed as unknown, not as the seven and three they "
+          "happen to hold in a field nobody claimed");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    /* ---- 1i. an aperture, not a table: rows that are present but name no engine the published list
+     * knows.  Reading the array is only useful if a driver refuses to turn a pattern into an inventory. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xc461u;
+    for (unsigned i = 0; i < 6u; i++) registers[TOP_AT(0x22800u, i)] = 2u;   /* four bare ENUM rows, twice */
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "engine table silent at both published offsets"),
+          "a table that names no known engine is reported as no answer, not as an engine-less chip");
+    check(reads_served > 0 && stores == 0, "and the refusal cost no store");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
 
     /* ---- 1f. the kernel cannot map that page for this function. ---- */
     fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
@@ -327,9 +424,12 @@ int main(void)
     text = ops->describe(ops->context);
     check(verdict == 0 && has(text, "window unreachable"),
           "an unreachable page is reported as unreachable, not as a chip that answered nothing");
-    check(!has(text, "silent"), "the two words are not interchangeable, so the text must not blur them");
-    check(reads_served == 2 && has(text, "reads 2, writes 0"),
-          "and the failed mapping costs no register reads at all: the boot register is the only thing asked");
+    check(!has(text, "window silent"),
+          "the two words are not interchangeable, so the text must not blur them: the engine table may "
+          "still be silent, which is a different fact about a different block");
+    check(reads_served == 11 && has(text, "reads 11, writes 0"),
+          "and the failed mapping costs no read beyond the boot register and the inventory: the page it "
+          "could not reach is never asked about");
     check(maps == 2 && log_count == 1,
           "the attempt is recorded, and no doorbell line is written about a page that was never read");
 
@@ -337,7 +437,7 @@ int main(void)
     fixture_reset(&f, 0x10de, 0x2d83, 0);
     registers[0] = boot0;
     verdict = scos_module_init(&f.exports, &ops);
-    check(reads_served == 3, "a second run asks the chip again rather than reusing the last answer");
+    check(reads_served == 12, "a second run asks the chip again rather than reusing the last answer");
     check(verdict == 0 && has(ops->describe(ops->context), "not the console owner"),
           "with no firmware surface in its BARs it says another function feeds the console");
     check(stores == 0, "the second run still wrote nothing");
@@ -392,7 +492,7 @@ int main(void)
     text = ops->describe(ops->context);
     check(verdict == 0 && has(text, "not the console owner") && !has(text, "feeds the console"),
           "a rebind recomputes the inventory instead of repeating the previous one");
-    check(has(text, "reads 3, writes 0"), "and the read counter restarted, as a measurement must");
+    check(has(text, "reads 12, writes 0"), "and the read counter restarted, as a measurement must");
 
     /* Counted rather than written down: the number of scenarios has grown every time a new answer from a
      * chip was added to the driver, and a stale figure in a passing line is worse than no figure. */

@@ -589,3 +589,57 @@ config writes issued by detection.
 For comparison, `-vga none -device ati-vga` was tried in the same session as a console device and gives
 no GOP at all (`EFI_NOT_FOUND`, so no boot), which is why the ATI module is verified as a second PCI
 function in every other test and does not drive any screen here.
+
+## Asking the silicon which engines it has (r-engine-inventory)
+
+The first increment for a bound NVIDIA module could only answer "what chip is this", and the second had to
+answer "what can it be told to do", because building a submission for an engine nobody located is guesswork.
+The published answer to the second question is a register array, not a table in a driver: Turing's
+`manuals/turing/tu104/dev_top.ref.txt` documents `NV_PTOP_DEVICE_INFO(i)` at `0x00022700+i*4`, 64 entries,
+each grouped with the next by its CHAIN bit and read according to its ENTRY kind - DATA carrying
+`PRI_BASE << 12` and an instance id, ENUM carrying an engine number and a runlist number behind valid bits,
+ENGINE_TYPE naming the engine from a list that includes GRAPHICS 0, VIC 12, SEC 13, NVENC0 14, NVDEC 16,
+LCE 19, GSP 20, NVJPG 21. Ampere keeps the format at `0x00022800+i*4` and adds a header at `0x000224FC`
+(`MAX_DEVICES 15:4`, `MAX_ROWS_PER_DEVICE 19:16`, `NUM_ROWS 31:20`).
+
+For Blackwell consumer silicon NVIDIA publishes neither address. What it publishes, in
+`src/common/inc/swref/published/blackwell/gb202/dev_top_zb.h`, is one line:
+`NV_PTOP_ZB_DEVICE_INFO_DEV_TYPE_ENUM_LCE 0x13` - the same copy-engine number, which says the format carried
+forward while the address left the published set. So `drivers/gpu/nvidia/module.c` asks both offsets and
+reports the one whose rows decode. Three rules make that an answer rather than a reading of noise:
+
+* A table counts only with at least two devices, four accepted entries, and at least one engine the
+  published list knows. An aperture full of zeroes, or of the same dword repeated, produces entries and
+  produces no inventory: `engine table silent at both published offsets`, which is a statement about the
+  address and not about the chip.
+* A clear valid bit is not a zero. The runlist and engine number are printed as `?` unless the entry that
+  carries them vouches for them, and the PRI base is printed only when a DATA row was present. The
+  distinction decides what to write next: a device with an address and no runlist is a different problem
+  from a device with neither.
+* One device, one tuple. Address, instance, runlist and engine number are taken from the *same* group,
+  together or not at all. The host harness caught this bug while it was being written - a second copy
+  engine further down the table overwrote the first one's engine number, so the report described a device
+  that does not exist - and its check, `and the numbers belong to one device`, is what keeps it fixed.
+
+Nothing here is written: the walk is 9 reads on a chip whose table has ended (the header, then four rows of
+each candidate before the end is evident) and the read count in the report is the count the device served.
+`tools/tests/nvidia_ident_host.c` grows to 68 checks over a seeded table at the Ampere offset, a smaller
+one at the Turing offset, cleared valid bits, and a pattern that must be refused.
+
+### The notification, and the predicate that was lying about it
+
+The report and the notice are one change, because the machine that started this had a driver bound, a chip
+read, no engine implemented - and a notification saying `GPU engine verified on a second adapter`. It came
+from `gpu_engine_available()` testing `gpu_module_ops()` for non-null: every bound module hands over an
+operations table, since that is how it is described, so the predicate measured whether a driver had loaded
+rather than whether it could draw. It now tests the `fill` pointer, the same pointer every drawing path
+tests before calling it, and `gpu_boot_notice()` gained the branch that machine was entitled to: title
+`GPU is not rendering`, warning, named as a gap in SCos rather than as a fault in the hardware. The notice
+text is bounded by a `_Static_assert` against the 191 bytes `wm_notify()` copies, because a notice clipped
+mid-clause loses exactly the clause that says what is wrong.
+
+Measured on a booted image whose Cirrus module is replaced with one that binds, describes and offers no
+fill (`tools/tests/test_nvidia_ident.py`): `notification: GPU is not rendering` in the serial log, `No 2D
+engine bound` absent, `Engine: scratch module: reads nothing, offers no engine` in the `graphics` panel, and
+`pixels painted: 0 by the GPU's 2D engine` unchanged - which is the honest pairing: the panel now reports
+the idle GPU as idle in every place a user might look.

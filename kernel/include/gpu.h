@@ -111,7 +111,10 @@ struct gpu_module_state {
     int identification_only;         /* ... and it exposes no engine, only what the chip said */
     char name[24];
     char family[16];
-    char describe[256];
+    /* Enough for a driver's identity line *and* the engine inventory it read from the chip: the kernel
+     * copies the module's text without truncating it, and a clipped tail would cut the one clause
+     * that says whether a copy engine was found at all. */
+    char describe[512];
     uint64_t resident_bytes;         /* image in the executable boot-arena region */
     uint64_t file_bytes;             /* bytes read off the disk */
     uint32_t store_count;            /* modules on the disk, including those never opened */

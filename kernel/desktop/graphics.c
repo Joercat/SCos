@@ -65,7 +65,8 @@ void graphics_report(char *out, size_t capacity)
     else if (ms && ms->bound && gpu_engine_drives_output())
         put(&w, "CPU software compositor, GPU engine painting solid output rectangles\n");
     else if (ms && ms->bound && ms->identification_only)
-        put(&w, "CPU software compositor, driver module read the chip and offers no engine\n");
+        put(&w, "CPU software compositor - the GPU is NOT rendering: the module that knows this chip "
+                "implements no engine\n");
     else if (ms && ms->bound)
         put(&w, "CPU software compositor, GPU engine bound on a second PCI function\n");
     else put(&w, "CPU software compositor\n");
@@ -108,6 +109,17 @@ void graphics_report(char *out, size_t capacity)
         put(&w, " B; the other families' ");
         fmt_u32(number,ms->unopened_bytes);put(&w,number);
         put(&w, " B were never read\n");
+        /* What the driver read out of the chip, in the chip's own numbers, on the screen a user pastes.
+         * It used to live only in `gpuinfo', which meant the one panel everyone reads reported that a
+         * module had run while the answer it produced stayed one command away - and an answer nobody
+         * pastes is an answer that does not get acted on.  This is also where a report of "the GPU is
+         * not rendering" gets its reason: the identity line, the submission window and the engine
+         * inventory, in the driver's own words, with the read count it issued. */
+        if (ms->describe[0]) {
+            put(&w, "Engine: ");
+            put(&w, ms->describe);
+            put(&w, "\n");
+        }
     } else if (ms && ms->present) {
         put(&w, "module ");
         put(&w, ms->name);

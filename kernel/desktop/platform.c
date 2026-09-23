@@ -17,6 +17,17 @@ void cpu_reboot_8042(void){
     for(unsigned i=0;i<100000;i++)__asm__ volatile("pause");
     panic("reset controller did not restart the machine");
 }
+/* A notification has 191 bytes of text (wm_notify copies into a field of exactly that size) and 108
+ * pixels of height, so the sentence below is sized to arrive whole: `+ 4 + 15' is "The " and the longest
+ * family name the module state can hold.  Being clipped is not cosmetic here - the clause that names the
+ * problem is the last one, and a notice that loses it reads as a status line. */
+#define GPU_IDLE_NOTICE                                                      \
+    " module read this chip but implements no drawing engine, so the CPU "   \
+    "paints every pixel. That is a gap in SCos, not in this machine. "       \
+    "Run graphics in Terminal."
+_Static_assert(sizeof(GPU_IDLE_NOTICE) - 1 + 4 + 15 <= 191,
+               "an idle-GPU notice longer than the notice's own field; shorten it, do not enlarge the box");
+
 /* What the user is told about the GPU, in one place, because the three possible states mean very
  * different things: nothing matched, an engine that works but on another function, and an engine
  * painting the screen.  Each line says which, and the middle one says why the desktop is still on the
@@ -36,6 +47,22 @@ static void gpu_boot_notice(void)
         wm_notify("GPU engine verified on a second adapter",
                   "The 2D engine works, but another PCI function feeds this display, so the desktop "
                   "stays on the CPU. Run graphics in Terminal for details.", 0);
+        return;
+    }
+    if (ms && ms->bound && ms->identification_only) {
+        /* The state this machine is actually in, and the one the wording above would have misdescribed:
+         * a driver for this chip is resident and read it, so "no supported engine was matched" is
+         * false, while "the GPU renders nothing" is true.  Saying it as a warning is not pessimism -
+         * a screen that describes an idle GPU as an identified one is how a machine ends up reported as
+         * working.  The gap is named as SCos's own, because it is: nothing about this chip is missing. */
+        /* The long form of the reason lives in `graphics'; what fits here is the outcome, and the size is
+         * the `_Static_assert' above rather than a counted promise. */
+        char text[224], *at = text, *end = text + sizeof(text) - 1;
+        const char *parts[] = { "The ", ms->family, GPU_IDLE_NOTICE, 0 };
+        for (int i = 0; parts[i]; i++)
+            for (const char *c = parts[i]; *c && at < end; *at++ = *c++);
+        *at = 0;
+        wm_notify("GPU is not rendering", text, 1);
         return;
     }
     wm_notify("No 2D engine bound",

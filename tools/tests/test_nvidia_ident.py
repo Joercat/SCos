@@ -220,12 +220,27 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
             assert 'it offers no engine, so the CPU compositor keeps the screen' in joined, joined[-1500:]
             assert 'nothing was asked of the chip, so rendering stays on the CPU' in joined, joined[-1500:]
             assert 'engine in use' not in joined and 'verified in device memory' not in joined, joined[-1500:]
+            # And the user is told, without being asked to read a panel first.  The notice used to fall
+            # through to "No 2D engine bound ... no supported 2D engine was matched", which is false on a
+            # machine whose module did match and did read the chip; that machine is the one in question.
+            serial = g.serial()
+            assert 'notification: GPU is not rendering' in serial, serial[-1500:]
+            assert 'No 2D engine bound' not in serial, \
+                   'a bound module that implements no engine is not "nothing was matched": ' + serial[-800:]
             g.call('graphics_report', g.scratch, 4096)
             panel = g.string(g.scratch, 4096)
-            assert 'driver module read the chip and offers no engine' in panel, panel[-1200:]
+            # The first line a user reads has to carry the outcome, not a narrative about registers: this
+            # is the state where a module is resident, the chip was read, and nothing was drawn, and a
+            # reader should not have to infer "not rendering" from a paragraph.
+            assert '- the GPU is NOT rendering: the module that knows this chip implements no engine' \
+                   in panel, panel[-1200:]
             assert 'read this chip\u2019s own registers' in panel or \
                    "read this chip's own registers" in panel, panel[-1200:]
             assert 'verified by device readback' not in panel, panel[-1200:]
+            # The module's own words - identity, and on real silicon the submission window and the engine
+            # inventory - are on this panel and not only one command away, because this panel is what gets
+            # pasted when a machine is being diagnosed.
+            assert 'Engine: scratch module: reads nothing, offers no engine' in panel, panel[-1200:]
             g.call('gpu_report', g.scratch, 4096)
             report = g.string(g.scratch, 4096)
             assert 'SCos port: driver module bound for this family reads the chip and describes it' \

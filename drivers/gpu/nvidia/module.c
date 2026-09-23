@@ -57,11 +57,23 @@ struct inventory {
     int answered;                       /* the block returned something other than 0 and other than -1 */
     int owns_console;                   /* the firmware's scanout surface sits in one of these BARs */
     u64 console_offset;                 /* and this far into it */
-    /* Built once at the end of init, at the kernel's own limit for a description (256, in
-     * gpu_device_state.describe).  The size is asserted by the host harness rather than trusted here: a
-     * clipped tail would drop the clause about the submission window, which is the part a reader of the
-     * next increment came for. */
-    char text[256];
+    /* The engine inventory, as the chip's own device-info table described it.  These fields exist because
+     * a submission has to name an engine and a runlist, and the only honest source for either on a
+     * generation whose register manual was never published is the silicon.  `top_layout' is the part a
+     * reader needs: it separates "this chip has no copy engine" from "this driver could not find the list".
+     */
+    u32 top_layout;                     /* 0 no table decoded, 1 the 0x22700 array, 2 the 0x22800 array */
+    u32 top_devices, top_decoded;       /* devices named, entries accepted, by the table that won */
+    u32 top_lce, top_graphics, top_vic, top_copy, top_enc, top_dec, top_sec, top_gsp, top_jpg, top_other;
+    u32 top_ce_pri, top_ce_inst, top_ce_runlist, top_ce_engine;
+    int top_ce_runlist_valid, top_ce_engine_valid;   /* the entry's own valid bits: 0 is a value, "?" is not */
+    int top_ce_found;                   /* an LCE device also carried a PRI base: a place to write next */
+    u32 top_cfg, top_cfg_devices, top_cfg_rows_per_device, top_cfg_rows;
+    /* Built once at the end of init, at the kernel's own limit for a description (512, in
+     * gpu_module_state.describe - and the same number again here, because the shorter of the two is what
+     * decides what a user reads).  The size is asserted by the host harness rather than trusted here: a
+     * clipped tail would drop the engine inventory, which is the clause the next increment depends on. */
+    char text[512];
 };
 
 static struct inventory inv;
@@ -106,6 +118,138 @@ static int read_gpu_time(u64 *nanoseconds)
         }
     }
     return 0;
+}
+
+/* One device, told by the entries that describe it.  The published text fixes no order inside a device,
+ * so a group is searched for the three kinds instead of being assumed to present them in sequence, and a
+ * device that named no type is counted without a type rather than dropped. */
+struct top_counts {
+    u32 devices, decoded;
+    u32 lce, graphics, vic, copy, enc, dec, sec, gsp, jpg, other;
+    u32 ce_pri, ce_inst, ce_runlist, ce_engine;
+    int ce_found, ce_runlist_valid, ce_engine_valid;
+};
+
+static void top_count_device(struct top_counts *c, u32 type, u32 data, u32 en)
+{
+    if (type == NV_PTOP_TYPE_UNKNOWN && !data && !en) return;
+    c->devices++;
+    switch (type) {
+    case NV_PTOP_TYPE_GRAPHICS: c->graphics++; break;
+    case NV_PTOP_TYPE_COPY0: case NV_PTOP_TYPE_COPY1: case NV_PTOP_TYPE_COPY2: c->copy++; break;
+    case NV_PTOP_TYPE_VIC: c->vic++; break;
+    case NV_PTOP_TYPE_SEC: c->sec++; break;
+    case NV_PTOP_TYPE_NVENC0: case NV_PTOP_TYPE_NVENC1: c->enc++; break;
+    case NV_PTOP_TYPE_NVDEC: c->dec++; break;
+    case NV_PTOP_TYPE_NVJPG: c->jpg++; break;
+    case NV_PTOP_TYPE_GSP: c->gsp++; break;
+    case NV_PTOP_TYPE_LCE:
+        c->lce++;
+        /* The first copy engine's own address and runlist are what a submission would have to name, so
+         * they are taken while the group that carries them is still in hand.  Each field is used only if
+         * that entry's valid bit says it applies: a clear valid bit is not a zero, it is "this chip told
+         * me nothing", and reporting the difference is the whole reason the bit exists. */
+        /* One device, one tuple.  The address, the instance and the two numbers all have to come from
+         * the *same* engine, so the whole group is taken or not taken: claiming the first engine's
+         * address and the second engine's runlist would describe a device that does not exist, which is
+         * precisely the sort of inventary error a reader cannot see in a printed number. */
+        if (!c->ce_found && (data || en)) {
+            c->ce_found = 1;
+            if (data) {
+                c->ce_pri = NV_PTOP_DATA_PRI_BASE(data) << NV_PTOP_DATA_PRI_BASE_ALIGN;
+                c->ce_inst = NV_PTOP_DATA_INST_ID(data);
+            }
+            if (en && NV_PTOP_ENUM_RUNLIST_VALID(en)) {
+                c->ce_runlist = NV_PTOP_ENUM_RUNLIST(en);
+                c->ce_runlist_valid = 1;
+            }
+            if (en && NV_PTOP_ENUM_ENGINE_VALID(en)) {
+                c->ce_engine = NV_PTOP_ENUM_ENGINE(en);
+                c->ce_engine_valid = 1;
+            }
+        }
+        break;
+    default: c->other++; break;      /* IOCTRL, the video codecs: named, not counted as an engine */
+    }
+}
+
+/* One candidate table.  Entries belong to the same device while CHAIN is set, so a group is flushed when
+ * that bit clears; a NOT_VALID row ends a group too.  An all-ones read ends the walk, because past the
+ * end of a real BAR every register answers that way, and calling a field of ones a device list is the
+ * worst thing this code could do: it would print an inventory the chip never gave. */
+static void top_walk(u32 base, struct top_counts *c)
+{
+    u32 type = NV_PTOP_TYPE_UNKNOWN, data = 0, en = 0, empty_run = 0;
+    int open = 0;
+
+    for (u32 i = 0; i < NV_PTOP_DEVICE_INFO__SIZE_1; i++) {
+        u32 v = reg_read(base + i * 4u);
+        if (v == 0xffffffffu) { open = 0; return; }
+        u32 kind = NV_PTOP_ENTRY(v);
+        if (v == 0u || kind == NV_PTOP_ENTRY_NOT_VALID) {
+            if (open) {
+                top_count_device(c, type, data, en);
+                open = 0; type = NV_PTOP_TYPE_UNKNOWN; data = en = 0;
+            }
+            /* Rows past the end of the table are NOT_VALID by definition.  Four of them before anything
+             * has been decoded is an empty aperture, and reading the remaining sixty rows would raise the
+             * read count this driver reports without learning a single fact about the chip. */
+            if (++empty_run >= 4u) return;
+            continue;
+        }
+        empty_run = 0;
+        if (!open) { open = 1; type = NV_PTOP_TYPE_UNKNOWN; data = en = 0; }
+        if (kind == NV_PTOP_ENTRY_DATA) data = v;
+        else if (kind == NV_PTOP_ENTRY_ENUM) en = v;
+        else if (kind == NV_PTOP_ENTRY_ENGINE_TYPE) type = NV_PTOP_TYPE_ENUM(v);
+        c->decoded++;
+        if (!(v & NV_PTOP_CHAIN_BIT)) {
+            top_count_device(c, type, data, en);
+            open = 0; type = NV_PTOP_TYPE_UNKNOWN; data = en = 0;
+        }
+    }
+    if (open) top_count_device(c, type, data, en);
+}
+
+/* Ask the chip which engines it has.  The array is published for Turing at 0x22700 and for Ampere at
+ * 0x22800; for Blackwell NVIDIA publishes only the copy-engine enum number, so both offsets are asked and
+ * the answer that survives the format's own consistency test is the one reported.  Nothing is written.  A
+ * table that does not decode is reported as a table that did not decode, not as an engine-less chip. */
+static void probe_engines(void)
+{
+    struct top_counts best, cur;
+
+    memset(&best, 0, sizeof best);
+    inv.top_cfg = reg_read(NV_PTOP_DEVICE_INFO_CFG);
+    if (inv.top_cfg == 0xffffffffu) inv.top_cfg = 0u;
+    inv.top_cfg_devices = NV_PTOP_CFG_MAX_DEVICES(inv.top_cfg);
+    inv.top_cfg_rows_per_device = NV_PTOP_CFG_MAX_ROWS_PER_DEVICE(inv.top_cfg);
+    inv.top_cfg_rows = NV_PTOP_CFG_NUM_ROWS(inv.top_cfg);
+
+    for (u32 layout = 1u; layout <= 2u; layout++) {
+        memset(&cur, 0, sizeof cur);
+        top_walk(layout == 1u ? NV_PTOP_DEVICE_INFO_TURING : NV_PTOP_DEVICE_INFO_AMPERE, &cur);
+        /* Two devices, four accepted entries, and at least one naming an engine the published list knows:
+         * below that what sits in front of the decoder is an aperture, not a table.  The gate is what
+         * makes "the block moved" an honest answer instead of a wrong inventory. */
+        if (cur.devices < 2u || cur.decoded < 4u) continue;
+        if (cur.lce + cur.graphics + cur.vic + cur.copy + cur.enc + cur.dec + cur.sec +
+            cur.gsp + cur.jpg == 0u) continue;
+        if (cur.devices > best.devices) {
+            best = cur;
+            inv.top_layout = layout;
+        }
+    }
+    inv.top_devices = best.devices;   inv.top_decoded = best.decoded;
+    inv.top_lce = best.lce;           inv.top_graphics = best.graphics;
+    inv.top_vic = best.vic;           inv.top_copy = best.copy;
+    inv.top_enc = best.enc;           inv.top_dec = best.dec;
+    inv.top_sec = best.sec;           inv.top_gsp = best.gsp;
+    inv.top_jpg = best.jpg;           inv.top_other = best.other;
+    inv.top_ce_pri = best.ce_pri;     inv.top_ce_inst = best.ce_inst;
+    inv.top_ce_runlist = best.ce_runlist;   inv.top_ce_engine = best.ce_engine;
+    inv.top_ce_runlist_valid = best.ce_runlist_valid;   inv.top_ce_engine_valid = best.ce_engine_valid;
+    inv.top_ce_found = best.ce_found;
 }
 
 /* What the second measurement is for.  A Blackwell submission needs an addressable channel and a doorbell
@@ -242,6 +386,39 @@ static void build_text(void)
             put_text(&b, " clock frozen");
         }
     }
+    /* The inventory the chip itself gave.  It goes at the end of the description, after the identity and
+     * the window, because those two decide whether this sentence is about the silicon or about the
+     * mapping; and it is phrased in outcomes, since "3 LCE" on a screen the CPU is painting is the fact a
+     * reader needs before deciding what to write next. */
+    if (!inv.top_layout) {
+        put_text(&b, "; engine table silent at both published offsets");
+    } else {
+        put_text(&b, "; engines at 0x");
+        put_hex(&b, inv.top_layout == 1u ? NV_PTOP_DEVICE_INFO_TURING : NV_PTOP_DEVICE_INFO_AMPERE, 5);
+        put_text(&b, ": LCE ");   put_dec(&b, inv.top_lce);
+        put_text(&b, "/VIC ");    put_dec(&b, inv.top_vic);
+        put_text(&b, "/GFX ");    put_dec(&b, inv.top_graphics);
+        put_text(&b, "/ENC ");    put_dec(&b, inv.top_enc);
+        put_text(&b, "/DEC ");    put_dec(&b, inv.top_dec);
+        put_text(&b, "/SEC ");    put_dec(&b, inv.top_sec);
+        put_text(&b, "/GSP ");    put_dec(&b, inv.top_gsp);
+        put_text(&b, " of ");     put_dec(&b, inv.top_devices);
+        put_text(&b, " devices");
+        /* A copy engine present but unaddressed is a real answer, so the clause is printed for it with a
+         * question mark rather than dropped: "no LCE" and "LCE, no PRI base in its entry" are different
+         * things to find out, and only one of them ends the channel work before it starts. */
+        if (inv.top_lce) {
+            put_text(&b, ", LCE ");
+            if (inv.top_ce_found) {
+                put_text(&b, "pri 0x"); put_hex(&b, inv.top_ce_pri, 6);
+                put_text(&b, " inst "); put_dec(&b, inv.top_ce_inst);
+            } else put_text(&b, "pri ?");
+            put_text(&b, " runlist ");
+            if (inv.top_ce_runlist_valid) put_dec(&b, inv.top_ce_runlist); else put_text(&b, "?");
+            put_text(&b, " engine ");
+            if (inv.top_ce_engine_valid) put_dec(&b, inv.top_ce_engine); else put_text(&b, "?");
+        }
+    }
     *b.at = 0;
 }
 
@@ -318,6 +495,13 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     inv.window_live = inv.timer_ticking = 0;
     inv.timer_start = inv.timer_end = 0;
     inv.console_offset = 0;
+    inv.top_layout = 0;
+    inv.top_devices = inv.top_decoded = 0;
+    inv.top_lce = inv.top_graphics = inv.top_vic = inv.top_copy = inv.top_enc = 0;
+    inv.top_dec = inv.top_sec = inv.top_gsp = inv.top_jpg = inv.top_other = 0;
+    inv.top_ce_pri = inv.top_ce_inst = inv.top_ce_runlist = inv.top_ce_engine = 0;
+    inv.top_ce_found = inv.top_ce_runlist_valid = inv.top_ce_engine_valid = 0;
+    inv.top_cfg = inv.top_cfg_devices = inv.top_cfg_rows_per_device = inv.top_cfg_rows = 0;
     inv.handle = inv.physical = inv.mapped_bytes = 0;
     inv.text[0] = 0;
     X = exports;
@@ -376,10 +560,11 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     }
 
     probe_usermode();
+    probe_engines();
     build_text();
     /* Wide enough for the whole description plus the prefix: the window clause sits at the end of the
      * text, so a narrow log buffer would cut the one part this increment added. */
-    char line[288];
+    char line[608];
     struct buf b = { line, line + sizeof(line) - 1 };
     put_text(&b, "nvidia: ");
     put_hex(&b, device->vendor, 4);

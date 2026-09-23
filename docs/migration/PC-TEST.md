@@ -175,3 +175,27 @@ scanning adapter's own registers. On the RTX 5050 the expected line is a real
 did not answer; `memory decode disabled by firmware` means the BIOS left the
 function without its aperture enabled and SCos will not write configuration space
 to fix it, because detection is read-only by contract.
+
+### What the GPU is doing, said as an outcome (r-notice-truth)
+
+Two lines changed because a panel that narrates a process reads like a report of a result. `Renderer:` now
+ends in the outcome rather than in what the module did: on a machine whose driver read the chip and
+implements nothing, it says `- the GPU is NOT rendering: the module that knows this chip implements no
+engine`. And the module's own verdict, previously only in `gpuinfo`, is now printed on this panel as
+
+    Engine: NV_PMC_BOOT_0=0x... at BAR 0x... arch 0x..., ...; window class 0x...; engines at 0x22800:
+            LCE 2/VIC 0/GFX 1/ENC 0/DEC 0/SEC 0/GSP 1 of 4 devices, LCE pri 0x100000 inst 1 runlist 1
+            engine 5
+
+That last clause is read out of the chip, not looked up: it is the silicon's own list of the engines it
+has, which is the information a submission has to be addressed to. `engine table silent at both published
+offsets` means the driver could not find that list - the address is published for Turing and Ampere and not
+for Blackwell - and is deliberately *not* phrased as "this chip has no copy engine". `runlist ?` means the
+chip had the field and did not vouch for it; `runlist 0` would mean it said zero.
+
+The notification matches: a bound module that implements no engine produces **`GPU is not rendering`**, a
+warning that stays on screen, and never `No 2D engine bound`, which is a different machine's problem. On the
+build that introduced this, the notice for such a machine read `GPU engine verified on a second adapter` -
+the words were produced by a predicate that tested whether a driver's operation *table* existed instead of
+whether it contained a drawing operation. If a paste shows that sentence alongside `pixels painted: 0 by
+the GPU's 2D engine`, the build predates the fix.
