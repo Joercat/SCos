@@ -25,10 +25,10 @@
 #include "blackwell_regs.h"      /* the fixture seeds rows by their published field positions, so it
                                   * reads the same definitions the driver compiles against */
 
-/* Long enough to hold 0x22800 plus the 64 entries that follow it: the device-inventory array the driver
- * now walks has to be *present* in the fixture for a zero to mean "row past the end of the table" instead
- * of meaning "the fixture does not model that far". */
-#define REG_WORDS 0x9000
+/* Long enough to hold 0x32800 plus the 353 rows that follow it, because the driver now asks the second
+ * Blackwell block as well as the first: the device-inventory array has to be *present* in the fixture for a
+ * zero to mean "row past the end of the table" instead of meaning "the fixture does not model that far". */
+#define REG_WORDS 0x34000
 static u32 registers[REG_WORDS];
 static int checks;                       /* assertions run, so the summary line counts rather than claims */
 static int stores;                       /* every write32 the module attempted: must stay 0 */
@@ -253,10 +253,10 @@ int main(void)
           "an architecture the published table does not name is reported as unnamed, not refused");
     check(has(text, "impl 0x8"), "IMPLEMENTATION is taken from 23:20, where NVIDIA documents it");
     check(has(text, "rev A.1"), "MAJOR_REVISION 7:4 and MINOR_REVISION 3:0 are read as separate fields");
-    check(has(text, "reads 12, writes 0"),
-          "the boot register twice, the class register once, the inventory header, and four rows of each "
-          "candidate table before the walk reached the end of it");
-    check(reads_served == 12, "the count it reports is the count it issued");
+    check(has(text, "reads 13, writes 0"),
+          "the boot register twice, the class register once, the two inventory blocks' CFG words, and "
+          "four rows of each candidate table before the walk reached the end of it");
+    check(reads_served == 13, "the count it reports is the count it issued");
     check(has(text, "window silent"), "and it says the submission window was silent");
     check(has(text, "feeds the console"),
           "the function whose BAR holds the firmware's surface says it feeds the console");
@@ -279,8 +279,8 @@ int main(void)
     check(verdict == 0 && has(text, "window class 0xc461=published"),
           "a class register answering with the published number is reported as matching it");
     check(has(text, "clock +2097us"), "and the clock in that page is measured, not assumed");
-    check(reads_served == 18 && has(text, "reads 18, writes 0"),
-          "two boot-register reads, one class read, six reads of the time pair, nine for the inventory, "
+    check(reads_served == 19 && has(text, "reads 19, writes 0"),
+          "two boot-register reads, one class read, six reads of the time pair, ten for the inventory, "
           "and no more");
     check(stores == 0, "the doorbell page was read and never written");
     check(log_count >= 2 && has(logs[1], "doorbell at BAR0+0x810090 named, not written"),
@@ -322,7 +322,7 @@ int main(void)
     check(maps == 2 && window_physical == 0xe0100000ull + 0x810000ull && window_mapping_bytes == 0x20000ull,
           "two mappings: the register BAR as far as the kernel maps it, and the 128 KiB window page");
     snprintf(needle, sizeof needle, "reads %d, writes 0", reads_served);
-    check(reads_served == 18 && has(text, needle),
+    check(reads_served == 19 && has(text, needle),
           "and the reads it reports are the reads the device served, whichever handle they went through");
     check(stores == 0, "neither mapping was written to");
 
@@ -408,8 +408,10 @@ int main(void)
     for (unsigned i = 0; i < 6u; i++) registers[TOP_AT(0x22800u, i)] = 2u;   /* four bare ENUM rows, twice */
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(verdict == 0 && has(text, "engine table silent at both published offsets"),
-          "a table that names no known engine is reported as no answer, not as an engine-less chip");
+    check(verdict == 0 && has(text, "engine table not decoded: CFG 0x224fc=0x00000000 (v0x0), "
+                               "0x324fc=0x00000000 (v0x0)"),
+          "a table that names no known engine is reported as no answer, with the two blocks' self-report "
+          "quoted, so \"nothing was found\" can be told apart from \"the chip says there is nothing there\"");
     check(reads_served > 0 && stores == 0, "and the refusal cost no store");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
@@ -427,7 +429,7 @@ int main(void)
     check(!has(text, "window silent"),
           "the two words are not interchangeable, so the text must not blur them: the engine table may "
           "still be silent, which is a different fact about a different block");
-    check(reads_served == 11 && has(text, "reads 11, writes 0"),
+    check(reads_served == 12 && has(text, "reads 12, writes 0"),
           "and the failed mapping costs no read beyond the boot register and the inventory: the page it "
           "could not reach is never asked about");
     check(maps == 2 && log_count == 1,
@@ -437,7 +439,7 @@ int main(void)
     fixture_reset(&f, 0x10de, 0x2d83, 0);
     registers[0] = boot0;
     verdict = scos_module_init(&f.exports, &ops);
-    check(reads_served == 12, "a second run asks the chip again rather than reusing the last answer");
+    check(reads_served == 13, "a second run asks the chip again rather than reusing the last answer");
     check(verdict == 0 && has(ops->describe(ops->context), "not the console owner"),
           "with no firmware surface in its BARs it says another function feeds the console");
     check(stores == 0, "the second run still wrote nothing");
@@ -492,7 +494,87 @@ int main(void)
     text = ops->describe(ops->context);
     check(verdict == 0 && has(text, "not the console owner") && !has(text, "feeds the console"),
           "a rebind recomputes the inventory instead of repeating the previous one");
-    check(has(text, "reads 12, writes 0"), "and the read counter restarted, as a measurement must");
+    check(has(text, "reads 13, writes 0"), "and the read counter restarted, as a measurement must");
+
+    /* ---- 1j. the format Blackwell's own header publishes: CFG is the block's self-report - version 2, how
+     * many devices, how many rows each occupies, how many rows exist - and a device spans three dwords with
+     * fields running across the dword boundary.  This is the case that was missing, and it is the one that
+     * printed "silent" on a real card while the rows in front of the decoder were a table. ---- */
+#define TOP2_CFG(devices, rows_per, total) \
+    (NV_PTOP_CFG_VERSION_DEVICE_INFO2 | ((devices) << 4) | ((rows_per) << 16) | ((total) << 20))
+    /* Row 0 carries the type (30:24), the instance (23:16), the group (15:11) and the fault id (10:0), and
+     * says whether another row follows.  Row 1 holds bits 32..63: PRI_BASE 57:40 (+8) and IS_ENGINE 62:62
+     * (+30).  Row 2 holds 64..95: RLENG_ID 65:64 (+0) and RUNLIST_PRI_BASE 89:74 (+10). */
+#define TOP2_ROW0(type, inst, group, fault) \
+    (0x80000000u | ((type) << 24) | ((inst) << 16) | ((group) << 11) | (fault))
+#define TOP2_ROW1(pri, is_engine)  (0x80000000u | ((pri) << 8) | ((is_engine) << 30))
+#define TOP2_ROW2(rleng, runlist)  (((runlist) << 10) | (rleng))
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xc461u;
+    registers[0x224fc / 4u] = TOP2_CFG(4u, 3u, 12u);
+    registers[TOP_AT(0x22800u, 0)] = TOP2_ROW0(NV_PTOP_TYPE_GRAPHICS, 1u, 2u, 3u);
+    registers[TOP_AT(0x22800u, 1)] = TOP2_ROW1(0x40u, 1u);
+    registers[TOP_AT(0x22800u, 2)] = TOP2_ROW2(0u, 0x100u);
+    registers[TOP_AT(0x22800u, 3)] = TOP2_ROW0(NV_PTOP_TYPE_LCE, 5u, 1u, 7u);
+    registers[TOP_AT(0x22800u, 4)] = TOP2_ROW1(0x2a0u, 1u);
+    registers[TOP_AT(0x22800u, 5)] = TOP2_ROW2(3u, 0x1a00u);
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "engines at 0x22800 v2 (4 devices x 3 rows of 12, 12 read)"),
+          "a v2 table is decoded from the dimensions it reported itself, and the rows read are counted aloud");
+    check(has(text, "LCE 1/VIC 0/GFX 1"),
+          "the devices are tallied by the type field at 30:24, where LCE is 0x13 as on Turing and Ampere");
+    check(has(text, "LCE pri-field 0x0002a0 inst 5 runlist 0x01a00 engine 3"),
+          "the copy engine's PRI base, instance, runlist base and engine number are assembled across the "
+          "dword boundary they straddle, from one device and not from two");
+    check(has(text, " of 2 devices"), "and only the two devices the table named are counted");
+    snprintf(needle, sizeof needle, "reads %d, writes 0", reads_served);
+    check(has(text, needle), "the CFG word and every row are in the read count the module reports");
+    check(reads_served == 23,
+          "two boot-register reads, the class, six clock reads, one CFG word per block and the twelve rows "
+          "the chip said exist: nothing is read past the end of the table it decoded");
+    check(stores == 0, "the v2 table was read, never written");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    /* ---- 1k. the same table in the second block, one page over at 0x32800 with its own CFG: a driver that
+     * asks only 0x22800 calls this chip silent while its inventory sits a few hundred bytes away. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xc461u;
+    registers[0x324fc / 4u] = TOP2_CFG(4u, 3u, 12u);
+    registers[TOP_AT(0x32800u, 0)] = TOP2_ROW0(NV_PTOP_TYPE_GRAPHICS, 0u, 0u, 1u);
+    registers[TOP_AT(0x32800u, 1)] = TOP2_ROW1(0x40u, 1u);
+    registers[TOP_AT(0x32800u, 2)] = TOP2_ROW2(0u, 0x100u);
+    registers[TOP_AT(0x32800u, 3)] = TOP2_ROW0(NV_PTOP_TYPE_LCE, 2u, 0u, 2u);
+    registers[TOP_AT(0x32800u, 4)] = TOP2_ROW1(0x2b0u, 1u);
+    registers[TOP_AT(0x32800u, 5)] = TOP2_ROW2(1u, 0x1b00u);
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "engines at 0x32800 v2"),
+          "the second block is asked, and the address reported is the one that answered");
+    check(has(text, "LCE 1/VIC 0/GFX 1"), "and its contents are inventoried the same way");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    /* ---- 1l. a block that reports itself as a different version: no row is read at all, because the
+     * version selects the shape of an entry, and walking rows whose format is unknown turns a pattern into a
+     * sentence about a chip that never said it. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xc461u;
+    registers[0x224fc / 4u] = TOP2_CFG(4u, 3u, 12u) & ~0xfu;         /* version 0, not 2 */
+    registers[TOP_AT(0x22800u, 0)] = TOP2_ROW0(NV_PTOP_TYPE_LCE, 9u, 0u, 9u);
+    registers[TOP_AT(0x22800u, 1)] = TOP2_ROW1(0x2a0u, 1u);
+    registers[TOP_AT(0x22800u, 2)] = TOP2_ROW2(2u, 0x900u);
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "CFG 0x224fc=0x00c30040 (v0x0)"),
+          "a table whose CFG reports another version is quoted with that CFG rather than decoded anyway");
+    check(!has(text, "LCE 1"), "and nothing is counted as an engine from a format nobody established");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
 
     /* Counted rather than written down: the number of scenarios has grown every time a new answer from a
      * chip was added to the driver, and a stale figure in a passing line is worse than no figure. */

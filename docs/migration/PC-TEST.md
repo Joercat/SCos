@@ -240,3 +240,12 @@ names who stayed out, quotes the module by name, and points at the module's own 
 the invariant for whatever a configuration produces - a `Device access` line saying "none" has to say "none by
 the kernel" - because QEMU's own adapters take the branch where the kernel *did* read the block, and the state
 being described here is a Blackwell function under a module, which no guest on this host can present.
+
+The `Engine:` line that gets pasted now ends in the chip's own engine inventory on a Blackwell part, because
+the format Blackwell publishes was implemented: `engines at 0x22800 v2 (153 devices x 3 rows of 353, N
+read): LCE …/VIC …/GFX … of D devices, LCE pri-field 0x… inst n runlist 0x… engine n`, or, if the block does
+not answer as a v2 table, the two CFG dwords it answered with.  Both are results.  What is *not* a result is
+`window class 0x… clock frozen` - that says the doorbell page is not where the Volta and Turing documents
+put it, and until a submission window is found on this silicon, an engine listed in a table is an engine that
+cannot yet be addressed.  A paste with a decoded inventory and a frozen clock is the accurate description of
+"found it, cannot ring it yet", and that is where this machine currently sits.

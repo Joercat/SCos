@@ -646,3 +646,45 @@ fill (`tools/tests/test_nvidia_ident.py`): `notification: GPU is not rendering` 
 engine bound` absent, `Engine: scratch module: reads nothing, offers no engine` in the `graphics` panel, and
 `pixels painted: 0 by the GPU's 2D engine` unchanged - which is the honest pairing: the panel now reports
 the idle GPU as idle in every place a user might look.
+## Blackwell moved the engine table's format, not its address
+
+The first real-hardware run of the inventory probe came back `engine table silent at both published
+offsets`, on a card whose `NV_PMC_BOOT_0` had decoded cleanly a few characters earlier - so the reads worked
+and the *decoder* was wrong, not the chip.  The published headers say why.  The file that describes this
+generation is
+
+    NVIDIA/open-gpu-kernel-modules  src/common/inc/swref/published/blackwell/gb100/dev_top.h
+                                      (fetched 2026-09-23, kept at build/nvdoc/gb100-dev_top.h)
+
+and GB202 - the package description a GB207 falls under - publishes only `dev_top_zb.h` next to it, three
+further engine numbers, which is how the rest of the file is known to apply to the consumer part too.  It
+says the row address is Ampere's, `0x00022800 + i*4`, and that the contents are not:
+
+  * the block describes itself first: `NV_PTOP_DEVICE_INFO_CFG` at `0x224FC` carries VERSION 3:0 (2 selects
+    this layout), MAX_DEVICES 15:4 (published default 153), MAX_ROWS_PER_DEVICE 19:16 (3) and NUM_ROWS 31:20
+    (353).  A walk is bounded by what the chip claims, not by what a header once defaulted to;
+  * a device occupies `MAX_ROWS_PER_DEVICE` dwords, so 96 bits, and the fields run across the dword
+    boundary: TYPE_ENUM 30:24, INSTANCE_ID 23:16, GROUP_ID 15:11, FAULT_ID 10:0, RESET_ID 39:32,
+    DEVICE_PRI_BASE 57:40, IS_ENGINE 62:62, RLENG_ID 65:64, RUNLIST_PRI_BASE 89:74, with each row's bit 31
+    as the chain bit and a zero row meaning an empty slot;
+  * there is a **second** block, PTOP1, with its own CFG at `0x324FC` and rows at `0x32800`, so asking only
+    the Ampere address can call a chip silent while its inventory sits a few hundred bytes away.
+
+`probe_engines()` therefore reads both CFG words (2 reads, and nothing else, when neither says version 2)
+and only then walks; the legacy Turing and Ampere entry formats are still compared against each other for
+the older parts.  LCE is `0x13` here as in Turing and Ampere, so the engine tally needed no renumbering;
+HSHUB `0x18`, TMR `0x1f`, PBUS `0x33` and HUBMMU `0x35` are this generation's additions.  The two PRI bases
+are reported as the raw fields (`pri-field 0x…`, `runlist 0x…`) rather than as addresses, because the fields
+are 18 and 16 bits wide and turning them into an address needs an alignment claim no published file makes.
+
+A table that does not decode now says what the chip answered - `engine table not decoded: CFG
+0x224fc=0x… (v0x…), 0x324fc=0x… (v0x…)` - instead of `silent at both published offsets`, which is the
+difference between "this silicon has nothing there" and "nothing I asked in the way I knew how to ask
+answered".  Measured on the host (`tools/tests/nvidia_ident_host.c`, 79 checks): a v2 table assembled from
+its own dimensions, the copy engine's fields taken across the dword boundary from one device and not two,
+the second block found when the first is empty, an empty slot counted as nothing, and a CFG reporting
+another version read as no permission to decode - with `writes 0` in every case.
+
+`arch 0x1b (arch not in the published table)` stays as it is on purpose: `dev_pmc_zb.h` for this generation
+does not publish an architecture enum, and a mapping invented here would be a guess wearing a fact's
+clothes.  The number is printed so it can be checked against whatever NVIDIA publishes next.

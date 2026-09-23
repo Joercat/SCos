@@ -69,6 +69,9 @@ struct inventory {
     int top_ce_runlist_valid, top_ce_engine_valid;   /* the entry's own valid bits: 0 is a value, "?" is not */
     int top_ce_found;                   /* an LCE device also carried a PRI base: a place to write next */
     u32 top_cfg, top_cfg_devices, top_cfg_rows_per_device, top_cfg_rows;
+    u32 top_cfg1;                     /* the second block's CFG, 0x324fc: asked, and reported if unanswered */
+    u32 top_rows;                     /* rows actually read, so an inventory says how much was asked */
+    u32 top_v2_cfg;                   /* the CFG dword of whichever block answered, kept for the report */
     /* Built once at the end of init, at the kernel's own limit for a description (512, in
      * gpu_module_state.describe - and the same number again here, because the shorter of the two is what
      * decides what a user reads).  The size is asserted by the host harness rather than trusted here: a
@@ -125,6 +128,7 @@ static int read_gpu_time(u64 *nanoseconds)
  * device that named no type is counted without a type rather than dropped. */
 struct top_counts {
     u32 devices, decoded;
+    u32 rows;                               /* rows read, the v2 format's own measure of effort */
     u32 lce, graphics, vic, copy, enc, dec, sec, gsp, jpg, other;
     u32 ce_pri, ce_inst, ce_runlist, ce_engine;
     int ce_found, ce_runlist_valid, ce_engine_valid;
@@ -173,6 +177,85 @@ static void top_count_device(struct top_counts *c, u32 type, u32 data, u32 en)
     }
 }
 
+/* The Blackwell entry, once its rows are joined: `lo' is bits 0..63 of the 96-bit entry, `hi' the third
+ * row (bits 64..95).  A row of zero means the slot is invalid, per ROW_VALUE_INVALID, and a device with no
+ * type is not a device, so nothing is counted for it.  IS_ENGINE is the entry's own word for "this device is
+ * an engine that can be runlisted": it is the only vouching the two runlist fields get on this format, and
+ * it is carried into the report as a valid bit rather than being silently believed. */
+static void top_count_v2(struct top_counts *c, u64 lo, u64 hi)
+{
+    u32 type = NV_PTOP2_TYPE_ENUM(lo);
+
+    if (!lo) return;          /* ROW_VALUE_INVALID: a slot that says nothing is not a device of type 0 */
+    c->devices++;
+    switch (type) {
+    case NV_PTOP_TYPE_GRAPHICS: c->graphics++; break;
+    case NV_PTOP_TYPE_COPY0: case NV_PTOP_TYPE_COPY1: case NV_PTOP_TYPE_COPY2: c->copy++; break;
+    case NV_PTOP_TYPE_VIC: c->vic++; break;
+    case NV_PTOP_TYPE_SEC: c->sec++; break;
+    case NV_PTOP_TYPE_NVENC0: case NV_PTOP_TYPE_NVENC1: c->enc++; break;
+    case NV_PTOP_TYPE_NVDEC: c->dec++; break;
+    case NV_PTOP_TYPE_NVJPG: c->jpg++; break;
+    case NV_PTOP_TYPE_GSP: c->gsp++; break;
+    case NV_PTOP_TYPE_LCE:
+        c->lce++;
+        /* Same rule as the legacy walk: one device, one tuple, taken whole or not at all. */
+        if (!c->ce_found) {
+            c->ce_found = 1;
+            c->ce_pri = NV_PTOP2_DEVICE_PRI_BASE(lo);
+            c->ce_inst = NV_PTOP2_INSTANCE_ID(lo);
+            c->ce_runlist = NV_PTOP2_RUNLIST_PRI_BASE(hi);
+            c->ce_engine = NV_PTOP2_RLENG_ID(hi);
+            c->ce_runlist_valid = c->ce_engine_valid = (int)NV_PTOP2_IS_ENGINE(lo);
+        }
+        break;
+    default: c->other++; break;
+    }
+}
+
+/* The v2 table, walked the way the chip describes it rather than the way a previous generation did.  The
+ * CFG dword is read first because it is the block's self-report: if it does not say `version 2', no row is
+ * read at all, and the answer is `that block is not there' rather than a walk over an aperture.  NUM_ROWS
+ * from that dword bounds the read count, so a chip with a small table is not scanned past its end and a
+ * chip with the published 353 rows is fully asked.  A run of sixteen invalid slots ends the walk early:
+ * the table is dense at the front, and reading all 353 rows to confirm an empty tail would raise the
+ * driver's own read count without learning a fact. */
+static u32 top_walk_v2(u32 cfg, u32 rows_addr, struct top_counts *c)
+{
+    u32 devices, rows_per, rows, row = 0, invalid = 0;
+
+    if (cfg == 0xffffffffu || cfg == 0u) return 0u;
+    if (NV_PTOP_CFG_VERSION(cfg) != NV_PTOP_CFG_VERSION_DEVICE_INFO2) return 0u;
+    devices = NV_PTOP_CFG_MAX_DEVICES(cfg);
+    rows_per = NV_PTOP_CFG_MAX_ROWS_PER_DEVICE(cfg);
+    rows = NV_PTOP_CFG_NUM_ROWS(cfg);
+    if (!devices || devices > NV_PTOP_DEVICE_INFO2_SIZE_1) devices = NV_PTOP_DEVICE_INFO2_SIZE_1;
+    if (!rows_per || rows_per > 8u) rows_per = 3u;
+    if (!rows || rows > NV_PTOP_DEVICE_INFO2_SIZE_1) rows = NV_PTOP_DEVICE_INFO2_SIZE_1;
+    for (u32 d = 0; d < devices && row < rows; d++) {
+        u64 lo = 0, hi = 0;
+        int open = 0;
+        for (u32 r = 0; r < rows_per && row < rows; r++) {
+            u32 v = reg_read(rows_addr + row * 4u);
+            row++;                      /* every read consumes a row - and `break' below would otherwise
+                                         * skip a for-increment and make the next device re-read this one */
+            c->rows++;
+            if (v == 0xffffffffu) return cfg;      /* past the end of what this BAR answers */
+            if (!open) {
+                if (!v) { if (++invalid >= 16u) return cfg; continue; }
+                invalid = 0; open = 1; lo = 0; hi = 0;
+            }
+            if (r == 0) lo = v;
+            else if (r == 1) lo |= (u64)v << 32;
+            else hi = v;
+            c->decoded++;
+            if (!(v & NV_PTOP_CHAIN_BIT)) break;   /* ROW_CHAIN clear: this entry is complete */
+        }
+        if (open) top_count_v2(c, lo, hi);
+    }
+    return cfg;
+}
+
 /* One candidate table.  Entries belong to the same device while CHAIN is set, so a group is flushed when
  * that bit clears; a NOT_VALID row ends a group too.  An all-ones read ends the walk, because past the
  * end of a real BAR every register answers that way, and calling a field of ones a device list is the
@@ -211,36 +294,70 @@ static void top_walk(u32 base, struct top_counts *c)
     if (open) top_count_device(c, type, data, en);
 }
 
-/* Ask the chip which engines it has.  The array is published for Turing at 0x22700 and for Ampere at
- * 0x22800; for Blackwell NVIDIA publishes only the copy-engine enum number, so both offsets are asked and
- * the answer that survives the format's own consistency test is the one reported.  Nothing is written.  A
- * table that does not decode is reported as a table that did not decode, not as an engine-less chip. */
+/* Ask the chip which engines it has, in the order its own headers describe.  Blackwell's format is tried
+ * first - it is the one published for this generation, and its CFG says whether the block is there at all -
+ * then the Turing and Ampere arrays, which are what a chip that predates the v2 layout will answer with.
+ * Nothing is written.  A table that does not decode is reported as a table that did not decode, together with
+ * what the two CFG dwords said, because "no copy engine" and "the block is gated against me" are different
+ * facts and only one of them ends the submission work before it starts. */
 static void probe_engines(void)
 {
     struct top_counts best, cur;
+    u32 layouts[4][2] = {
+        { 0u, NV_PTOP_DEVICE_INFO_AMPERE },   /* PTOP0's rows, the v2 format, CFG read above */
+        { 0u, NV_PTOP_DEVICE_INFO_ROWS1 },    /* PTOP1's rows, the same format */
+        { 0u, NV_PTOP_DEVICE_INFO_TURING },                          /* legacy, Turing layout */
+        { 0u, NV_PTOP_DEVICE_INFO_AMPERE },                          /* legacy, Ampere layout */
+    };
 
     memset(&best, 0, sizeof best);
     inv.top_cfg = reg_read(NV_PTOP_DEVICE_INFO_CFG);
     if (inv.top_cfg == 0xffffffffu) inv.top_cfg = 0u;
+    inv.top_cfg1 = reg_read(NV_PTOP_DEVICE_INFO_CFG1);
+    if (inv.top_cfg1 == 0xffffffffu) inv.top_cfg1 = 0u;
     inv.top_cfg_devices = NV_PTOP_CFG_MAX_DEVICES(inv.top_cfg);
     inv.top_cfg_rows_per_device = NV_PTOP_CFG_MAX_ROWS_PER_DEVICE(inv.top_cfg);
     inv.top_cfg_rows = NV_PTOP_CFG_NUM_ROWS(inv.top_cfg);
 
-    for (u32 layout = 1u; layout <= 2u; layout++) {
+    for (u32 which = 0u; which < 4u; which++) {
         memset(&cur, 0, sizeof cur);
-        top_walk(layout == 1u ? NV_PTOP_DEVICE_INFO_TURING : NV_PTOP_DEVICE_INFO_AMPERE, &cur);
+        u32 cfg = 0u;
+        if (which < 2u) {
+            /* The CFG was read once above for the report; the walk is handed that value rather than
+             * asking the chip again, because two reads for one number is two chances to disagree. */
+            cfg = top_walk_v2(which ? inv.top_cfg1 : inv.top_cfg, layouts[which][1], &cur);
+            if (!cfg) continue;
+        } else {
+            /* The older formats have no self-report to consult, so they are only ever reached after both
+             * v2 blocks declined: on a Blackwell part those same addresses hold v2 rows, and decoding them
+             * with Ampere masks is how an inventory of nonsense gets printed with a straight face.  The
+             * `break' above is what guarantees that, not a test here. */
+            top_walk(layouts[which][1], &cur);
+        }
         /* Two devices, four accepted entries, and at least one naming an engine the published list knows:
-         * below that what sits in front of the decoder is an aperture, not a table.  The gate is what
-         * makes "the block moved" an honest answer instead of a wrong inventory. */
+         * below that what sits in front of the decoder is an aperture, not a table.  The gate is what makes
+         * "the block moved" an honest answer instead of a wrong inventory. */
         if (cur.devices < 2u || cur.decoded < 4u) continue;
         if (cur.lce + cur.graphics + cur.vic + cur.copy + cur.enc + cur.dec + cur.sec +
             cur.gsp + cur.jpg == 0u) continue;
+        if (which < 2u) {
+            /* A v2 block that decodes is the block the chip's own header described: nothing further is
+             * asked, and the older masks are never pointed at rows they cannot interpret. */
+            best = cur;
+            inv.top_layout = which + 1u;    /* 1 and 2 are v2: PTOP0 at 0x22800, PTOP1 at 0x32800 */
+            inv.top_v2_cfg = cfg;
+            break;
+        }
+        /* The legacy pair stays a comparison rather than a preference: on a Turing or Ampere part both
+         * offsets can hold a table, and the one naming more devices is the one worth quoting. */
         if (cur.devices > best.devices) {
             best = cur;
-            inv.top_layout = layout;
+            inv.top_layout = which + 1u;    /* 3 and 4 are the 0x22700 and 0x22800 legacy arrays */
+            inv.top_v2_cfg = 0u;
         }
     }
     inv.top_devices = best.devices;   inv.top_decoded = best.decoded;
+    inv.top_rows = best.rows;
     inv.top_lce = best.lce;           inv.top_graphics = best.graphics;
     inv.top_vic = best.vic;           inv.top_copy = best.copy;
     inv.top_enc = best.enc;           inv.top_dec = best.dec;
@@ -389,13 +506,39 @@ static void build_text(void)
     /* The inventory the chip itself gave.  It goes at the end of the description, after the identity and
      * the window, because those two decide whether this sentence is about the silicon or about the
      * mapping; and it is phrased in outcomes, since "3 LCE" on a screen the CPU is painting is the fact a
-     * reader needs before deciding what to write next. */
+     * reader needs before deciding what to write next.  Length is not a reason to drop any of it: the
+     * kernel's field is 512 bytes and the panel wraps. */
     if (!inv.top_layout) {
-        put_text(&b, "; engine table silent at both published offsets");
+        put_text(&b, "; engine table not decoded: CFG 0x224fc=0x");
+        put_hex(&b, inv.top_cfg, 8);
+        put_text(&b, " (v0x");
+        put_hex(&b, NV_PTOP_CFG_VERSION(inv.top_cfg), 1);
+        put_text(&b, "), 0x324fc=0x");
+        put_hex(&b, inv.top_cfg1, 8);
+        put_text(&b, " (v0x");
+        put_hex(&b, NV_PTOP_CFG_VERSION(inv.top_cfg1), 1);
+        put_text(&b, "); neither block reports the DEVICE_INFO2 format, and the Turing and Ampere arrays "
+                     "at those addresses named no engine either");
     } else {
+        static const u32 base_of[4] = { NV_PTOP_DEVICE_INFO_AMPERE, NV_PTOP_DEVICE_INFO_ROWS1,
+                                        NV_PTOP_DEVICE_INFO_TURING, NV_PTOP_DEVICE_INFO_AMPERE };
+        int v2 = inv.top_layout <= 2u;
         put_text(&b, "; engines at 0x");
-        put_hex(&b, inv.top_layout == 1u ? NV_PTOP_DEVICE_INFO_TURING : NV_PTOP_DEVICE_INFO_AMPERE, 5);
-        put_text(&b, ": LCE ");   put_dec(&b, inv.top_lce);
+        put_hex(&b, base_of[inv.top_layout - 1u], 5);
+        if (v2) {
+            /* The table's own dimensions, as it reported them, plus how many rows were read to answer: a
+               "0 engines" from a 353-row scan and from a 4-row scan are not the same finding. */
+            put_text(&b, " v2 (");
+            put_dec(&b, NV_PTOP_CFG_MAX_DEVICES(inv.top_v2_cfg));
+            put_text(&b, " devices x ");
+            put_dec(&b, NV_PTOP_CFG_MAX_ROWS_PER_DEVICE(inv.top_v2_cfg));
+            put_text(&b, " rows of ");
+            put_dec(&b, NV_PTOP_CFG_NUM_ROWS(inv.top_v2_cfg));
+            put_text(&b, ", ");
+            put_dec(&b, inv.top_rows);
+            put_text(&b, " read): LCE ");
+        } else put_text(&b, ": LCE ");
+        put_dec(&b, inv.top_lce);
         put_text(&b, "/VIC ");    put_dec(&b, inv.top_vic);
         put_text(&b, "/GFX ");    put_dec(&b, inv.top_graphics);
         put_text(&b, "/ENC ");    put_dec(&b, inv.top_enc);
@@ -410,11 +553,18 @@ static void build_text(void)
         if (inv.top_lce) {
             put_text(&b, ", LCE ");
             if (inv.top_ce_found) {
-                put_text(&b, "pri 0x"); put_hex(&b, inv.top_ce_pri, 6);
+                /* v2 calls it a field, and so does this line: the entry's 18 bits are not an address
+                   until something says what the low 12 are.  On the legacy format the field is shifted by
+                   12 by definition, so there the number really is one. */
+                put_text(&b, v2 ? "pri-field 0x" : "pri 0x");
+                put_hex(&b, inv.top_ce_pri, 6);
                 put_text(&b, " inst "); put_dec(&b, inv.top_ce_inst);
             } else put_text(&b, "pri ?");
             put_text(&b, " runlist ");
-            if (inv.top_ce_runlist_valid) put_dec(&b, inv.top_ce_runlist); else put_text(&b, "?");
+            if (inv.top_ce_runlist_valid) {
+                if (v2) { put_text(&b, "0x"); put_hex(&b, inv.top_ce_runlist, 5); }
+                else put_dec(&b, inv.top_ce_runlist);
+            } else put_text(&b, "?");
             put_text(&b, " engine ");
             if (inv.top_ce_engine_valid) put_dec(&b, inv.top_ce_engine); else put_text(&b, "?");
         }

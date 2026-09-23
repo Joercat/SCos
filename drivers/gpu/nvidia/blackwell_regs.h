@@ -115,6 +115,54 @@
 #define NV_PTOP_ENUM_RUNLIST_VALID(v)               (((v) >> 4) & 1u)
 #define NV_PTOP_TYPE_ENUM(v)                        (((v) >> 2) & 0xffu)    /* 30:2 */
 
+/*
+ * Blackwell did not move this table, it re-laid it out, and the header that says so is in the driver
+ * repository rather than the documentation one:
+ *   src/common/inc/swref/published/blackwell/gb100/dev_top.h      (fetched 2026-09-23, kept at
+ *                                                                   build/nvdoc/gb100-dev_top.h)
+ * GB202 - the package description a GB207 is covered by - publishes only `dev_top_zb.h`, three further
+ * engine numbers, which is how the rest of that file is known to apply to this chip as well.
+ *
+ * The row address is Ampere's; the row contents are not.  MAX_ROWS_PER_DEVICE dwords (published default 3,
+ * so 96 bits) describe one device, and a field's bit range runs past a dword boundary, which is why every
+ * Ampere mask returns nothing useful on this silicon.  The chip also states the shape of the table itself,
+ * which is what a walk should be bounded by rather than a guess:
+ *
+ *   NV_PTOP_DEVICE_INFO_CFG   0x000224FC: VERSION 3:0 (init 0x2 = the DEVICE_INFO2 format),
+ *                                         MAX_DEVICES 15:4 (init 0x099 = 153),
+ *                                         MAX_ROWS_PER_DEVICE 19:16 (init 0x3),
+ *                                         NUM_ROWS 31:20 (init 0x161 = 353)
+ *   NV_PTOP_DEVICE_INFO2(i)   0x00022800+i*4, __SIZE_1 353 rows
+ *   NV_PTOP1_DEVICE_INFO_CFG  0x000324FC, NV_PTOP1_DEVICE_INFO2(i) 0x00032800+i*4   (a second block)
+ *   row:  ROW_VALUE 31:0 (0 = the slot is invalid), ROW_CHAIN 31:31 (1 = another row continues this entry)
+ *   entry: DEV_FAULT_ID 10:0, DEV_GROUP_ID 15:11, DEV_INSTANCE_ID 23:16, DEV_TYPE_ENUM 30:24,
+ *          DEV_RESET_ID 39:32, DEV_DEVICE_PRI_BASE 57:40, DEV_IS_ENGINE 62:62, DEV_RLENG_ID 65:64,
+ *          DEV_RUNLIST_PRI_BASE 89:74
+ *
+ * LCE is 0x13 here as in Turing and Ampere, which is why the tally below is reused; HSHUB 0x18, TMR 0x1f,
+ * PBUS 0x33 and HUBMMU 0x35 are the additions from the two `_zb' files.  The two PRI bases are kept as the
+ * raw fields: they are 18 and 16 bits wide, so any "address" built from them would need an alignment claim
+ * this file cannot support.
+ */
+#define NV_PTOP_CFG_VERSION(v)                      ((v) & 0xfu)             /* 3:0   */
+#define NV_PTOP_CFG_VERSION_DEVICE_INFO2             0x2u
+#define NV_PTOP_DEVICE_INFO_CFG1                     0x000324fcu   /* NV_PTOP1_DEVICE_INFO_CFG */
+#define NV_PTOP_DEVICE_INFO_ROWS1                    0x00032800u   /* NV_PTOP1_DEVICE_INFO2(0) */
+#define NV_PTOP_DEVICE_INFO2_SIZE_1                    353u        /* rows, not entries */
+#define NV_PTOP2_FAULT_ID(lo)                        ((u32)((lo) & 0x7ffu))          /* 10:0  */
+#define NV_PTOP2_GROUP_ID(lo)                        ((u32)(((lo) >> 11) & 0x1fu))   /* 15:11 */
+#define NV_PTOP2_INSTANCE_ID(lo)                     ((u32)(((lo) >> 16) & 0xffu))  /* 23:16 */
+#define NV_PTOP2_TYPE_ENUM(lo)                       ((u32)(((lo) >> 24) & 0x7fu))  /* 30:24 */
+#define NV_PTOP2_RESET_ID(lo)                        ((u32)(((lo) >> 32) & 0xffu))  /* 39:32 */
+#define NV_PTOP2_DEVICE_PRI_BASE(lo)                 ((u32)(((lo) >> 40) & 0x3ffffu)) /* 57:40 */
+#define NV_PTOP2_IS_ENGINE(lo)                       ((u32)((lo) >> 62) & 1u)       /* 62:62 */
+#define NV_PTOP2_RLENG_ID(hi)                        ((u32)((hi) & 3u))              /* 65:64 */
+#define NV_PTOP2_RUNLIST_PRI_BASE(hi)                ((u32)(((hi) >> 10) & 0xffffu)) /* 89:74 */
+#define NV_PTOP_TYPE_HSHUB                          0x18u
+#define NV_PTOP_TYPE_TMR                            0x1fu
+#define NV_PTOP_TYPE_PBUS                           0x33u
+#define NV_PTOP_TYPE_HUBMMU                         0x35u
+
 #define NV_PTOP_TYPE_GRAPHICS  0u
 #define NV_PTOP_TYPE_COPY0     1u
 #define NV_PTOP_TYPE_COPY1     2u
