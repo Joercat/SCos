@@ -50,6 +50,34 @@ def run(cmd):
     return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
 
 
+def test_the_stub_scan_reaches_a_gpu_behind_a_bridge_in_a_real_boot():
+    """Boot a machine whose display function sits on a second bus, and read what the firmware scan saw.
+
+    The shape is the one a laptop with a discrete GPU has: a PCI-to-PCI bridge, and a display function on
+    the bus behind it.  The scan that shipped before `boot/uefi/pci_scan.c' recognised no bridge at all (it
+    read the cache line size where the header type lives) and, even where it did, ran its bus loop strictly
+    between the endpoints - empty for a link one bus wide.  Both mistakes made the module store unreachable
+    on real hardware while every QEMU guest, which puts its display device on bus 0, passed.  A host fixture
+    can prove the walk; only a boot proves the stub, the handoff and the kernel's report agree about it.
+    """
+    with Guest('gpu-bridge', devices=['pci-bridge,id=br1,chassis_nr=1', 'cirrus-vga,bus=br1'],
+               ide=True) as g:
+        log = g.serial()
+    lines = [l for l in log.splitlines() if l.startswith('gpu:')]
+    assert lines, log[-2000:]
+    print('\n'.join(lines[:14]))
+    scan = next(l for l in lines if 'the boot stub read' in l)
+    buses = int(re.search(r'on (\d+) bus\(es\)', scan).group(1))
+    display = int(re.search(r'(\d+) display;', scan).group(1))
+    state = int(re.search(r'module state (\d+)', scan).group(1))
+    assert buses >= 2, f'the scan did not descend the bridge: {scan}'
+    assert display == 2, f"the display function behind the bridge was not seen: {scan}"
+    assert state == 1, f'the store did not stage the module for the matched family: {scan}'
+    assert any(l.startswith('gpu: PCI 1:0.0 ') and 'matched=cirrus' in l for l in lines), \
+        'the kernel never reported the function on the far side of the bridge'
+    assert 'wm: entering main loop' in log, log[-2500:]
+
+
 def test_generated_tables():
     if not (HAIKU / '.git').exists():
         print(f'skip: no Haiku checkout at {HAIKU}; set SCOS_HAIKU to verify the tables')

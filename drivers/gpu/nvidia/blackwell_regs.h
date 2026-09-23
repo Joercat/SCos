@@ -58,5 +58,6 @@
 #define NV_USERMODE_TIME_0                     0x00810080u   /* R--4R, low 32 bits, 32 ns granularity */
 #define NV_USERMODE_TIME_1                     0x00810084u   /* R--4R, upper 29 bits */
 #define NV_USERMODE_NOTIFY_CHANNEL_PENDING     0x00810090u   /* -W-4R: named, never written here */
+#define NV_USERMODE_WINDOW_BYTES               0x00020000u   /* the window's own size, 0x81FFFF:0x810000 */
 
 #endif

@@ -70,10 +70,12 @@ def main():
     for spec in args.device:
         if not spec or spec.startswith("-") or any(c.isspace() for c in spec):
             ap.error(f"--device must be a single device spec with no whitespace: {spec!r}")
-        # Commas are QEMU's own argument separator, and doubled commas are its escape,
-        # exactly as the disk paths above are handled; nothing here can start a new
-        # command-line argument or name a host path.
-        command += ["-device", spec.replace(",", ",,")]
+        # A device spec's own commas are QEMU's property separators (`pci-bridge,chassis_nr=1' is one
+        # device), so they pass through as written.  Escaping them the way a *path* needs would leave no
+        # way to describe a PCI bridge - and a bridge is how a GPU ends up on a bus of its own, which is
+        # the topology this test suite must be able to boot.  Injection stays closed because of the two
+        # checks above: no whitespace, no leading dash, so no new argument and no host path.
+        command += ["-device", spec]
     if args.vnc:
         command += ["-vnc", f"unix:{run / 'vnc.sock'}"]
     print(f"QMP / serial log directory: {run}", flush=True)

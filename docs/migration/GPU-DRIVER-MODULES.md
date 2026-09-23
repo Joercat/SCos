@@ -442,9 +442,14 @@ small, deliberately unfinished driver, and it is worth being exact about why tha
   at 32 ns granularity - the low five bits of `TIME_0` are always zero, and the manual specifies the read
   order TIME_1, TIME_0, TIME_1, repeat on mismatch, so a rollover of the low half cannot be reported as a
   jump of seconds.  `probe_usermode()` follows exactly that sequence (retries bounded at eight) and reports
-  one of three *measured* answers: `window class 0x…=published clock +Nus`, `clock frozen`, or `window
-  silent`.  Blackwell's own manual is not published, so a class number that is not `0xc461` is printed as a
-  number and not translated into a generation, and no `GA10X`-style naming is invented for it.
+  one of four *measured* answers: `window class 0x…=published clock +Nus`, `clock frozen`, `window
+  silent`, and `window unreachable`.  The fourth exists because a real card's 16 MiB register BAR is longer
+  than the kernel's per-mapping cap, so the page at +0x810000 is not inside the mapping the boot register
+  came out of: the driver maps the window's own 128 KiB and, if the kernel will not give it that mapping,
+  says *unreachable* rather than *silent*.  Conflating the two would report a chip as having nothing there
+  on the strength of a limit in this OS's own mapper.  Blackwell's manual is not published, so a class
+  number that is not `0xc461` is printed as a number and not translated into a generation, and no
+  `GA10X`-style naming is invented for it.
 * The same document names the doorbell, `NV_USERMODE_NOTIFY_CHANNEL_PENDING` at +0x810090.  With no channel in
   the run queue, ringing it hangs the submission path, so **it is defined and never written**: the define is
   there so that the next step is anchored to an address NVIDIA published rather than one guessed here.  The
@@ -468,11 +473,12 @@ small, deliberately unfinished driver, and it is worth being exact about why tha
   naming ids** - the two numbers `test_gpu_detect.py` reads out of a real boot, not out of the headers.
 
 _Measured 2026-09-23._ The module compiles under the same `-Werror -ffreestanding` flags as every other
-module and packs to `OK nvidia.mod: family=nvidia rxe=5728 data=88 bss=576 relocs=153 ids=19 load=5816
-image=6392` - the growth over the first version being the time-window probe and a 256-byte `describe` field
-in the kernel's device record, which both the panel and the store line read.  `tools/tests/test_nvidia_ident.py`
+module and packs to `OK nvidia.mod: family=nvidia rxe=6000 data=88 bss=600 relocs=158 ids=19 load=6088
+image=6688` - the growth over the first version being the time-window probe, its own mapping for the page
+past the mapper's cap, and a 256-byte `describe` field in the kernel's device record, which both the panel
+and the store line read.  `tools/tests/test_nvidia_ident.py`
 compiles `module.c` unchanged against a fake
-`scos_gpu_exports` whose register file is an array and runs 51 checks: the decode of each field, all five
+`scos_gpu_exports` whose register file is an array and runs 59 checks: the decode of each field, all five
 refusal paths, the three window answers (a clock that advanced, a clock that did not, a window that answered
 all ones), that exactly one mapping was taken and it was the register BAR rather than the frame buffer, that
 the read count in the string equals the number of reads the fixture actually served, that a rebind

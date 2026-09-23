@@ -45,6 +45,10 @@ struct inventory {
     u64 handle;                         /* what the kernel's accessors want */
     u32 boot0, boot0_repeat;
     u32 usermode_class;                 /* NV_USERMODE_CFG0's class number, read from the device */
+    u64 mapping_bytes;                  /* what the kernel actually mapped, which its cap may shrink */
+    u64 window_handle;                  /* the window's own mapping, when the register one stops short */
+    int window_direct;                  /* reached through the register mapping: no second mapping taken */
+    int window_unreachable;             /* neither mapping reaches the documented page: says so, not "silent" */
     u64 timer_start, timer_end;         /* PTIMER as that window exposes it, in nanoseconds */
     int window_live;                    /* the class register answered with something other than 0 or -1 */
     int timer_ticking;                  /* and the clock moved between the two samples */
@@ -71,6 +75,15 @@ static void note(const char *text)
  * the code, not of the comment above.  A bound engine module is *allowed* to write - the kernel gives it
  * write32 because a blitter has to be configured - and an engine driver needs that.  This one does not,
  * so it does not take it, and the read count below is what the report prints. */
+/* A read of the user-mode page, through whichever mapping reaches it.  Counted in the same total as every
+ * other read, because the number the driver reports has to be the number it issued. */
+static u32 window_read(u32 offset)
+{
+    inv.reads++;
+    if (inv.window_direct) return X->read32(inv.handle, offset);
+    return X->read32(inv.window_handle, offset - NV_USERMODE_CFG0);
+}
+
 static u32 reg_read(u32 offset)
 {
     inv.reads++;
@@ -84,9 +97,9 @@ static u32 reg_read(u32 offset)
 static int read_gpu_time(u64 *nanoseconds)
 {
     for (int attempt = 0; attempt < 8; attempt++) {
-        u32 high = reg_read(NV_USERMODE_TIME_1);
-        u32 low = reg_read(NV_USERMODE_TIME_0);
-        u32 high_again = reg_read(NV_USERMODE_TIME_1);
+        u32 high = window_read(NV_USERMODE_TIME_1);
+        u32 low = window_read(NV_USERMODE_TIME_0);
+        u32 high_again = window_read(NV_USERMODE_TIME_1);
         if (high == high_again) {
             *nanoseconds = ((u64)high << 32) | low;
             return 1;
@@ -103,11 +116,25 @@ static int read_gpu_time(u64 *nanoseconds)
  * ceiling, measured.  Both answers are reported; neither is written to. */
 static void probe_usermode(void)
 {
-    /* Asked explicitly rather than left to the kernel's bounds check answering all-ones: a mapping that
-     * does not contain the window is a fact about this BAR, and saying so is truer than reporting that
-     * the device answered nothing. */
-    if (inv.mapped_bytes < NV_USERMODE_TIME_1 + 4u) return;
-    inv.usermode_class = NV_USERMODE_CFG0_CLASS_ID(reg_read(NV_USERMODE_CFG0));
+    /* The documented page sits at the top of a 16 MiB register BAR, which is past the kernel's per-mapping
+     * cap - so on a real card the register mapping stops short of it and the page is mapped on its own.
+     * Which of the two was used is recorded rather than glossed, because "the chip answers nothing at that
+     * address" and "this driver could not reach that address" are different facts, and only the first one
+     * says anything about the chip. */
+    if (inv.mapping_bytes >= NV_USERMODE_TIME_1 + 4u) {
+        inv.window_direct = 1;
+    } else {
+        u64 mapped = 0;
+        inv.window_handle = X->map(inv.physical + NV_USERMODE_CFG0, NV_USERMODE_WINDOW_BYTES, 0, &mapped);
+        if (!inv.window_handle ||
+            (mapped ? mapped : NV_USERMODE_WINDOW_BYTES) <
+                NV_USERMODE_NOTIFY_CHANNEL_PENDING + 4u - NV_USERMODE_CFG0) {
+            inv.window_handle = 0;
+            inv.window_unreachable = 1;
+            return;
+        }
+    }
+    inv.usermode_class = NV_USERMODE_CFG0_CLASS_ID(window_read(NV_USERMODE_CFG0));
     inv.window_live = inv.usermode_class != 0x0000u && inv.usermode_class != 0xffffu;
     if (!inv.window_live) return;
     if (!read_gpu_time(&inv.timer_start)) return;
@@ -193,10 +220,15 @@ static void build_text(void)
     put_text(&b, ", writes ");
     put_dec(&b, inv.writes);
     put_text(&b, inv.owns_console ? " feeds the console" : " not the console owner");
-    put_text(&b, "; window ");
-    if (!inv.window_live) {
-        put_text(&b, "silent");
+    if (inv.window_unreachable) {
+        /* A separate answer, because it is a fact about this mapping and not about the chip: saying
+         * "silent" here would report a device that has nothing there when the truth is that this driver
+         * could not reach far enough to ask. */
+        put_text(&b, "; window unreachable");
+    } else if (!inv.window_live) {
+        put_text(&b, "; window silent");
     } else {
+        put_text(&b, "; window ");
         put_text(&b, "class 0x");
         put_hex(&b, inv.usermode_class, 4);
         put_text(&b, inv.usermode_class == NV_USERMODE_CLASS_ID_VOLTA_TURING ? "=published" : "");
@@ -280,6 +312,9 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     inv.reads = inv.writes = 0;
     inv.answered = inv.owns_console = 0;
     inv.usermode_class = 0;
+    inv.mapping_bytes = 0;
+    inv.window_handle = 0;
+    inv.window_direct = inv.window_unreachable = 0;
     inv.window_live = inv.timer_ticking = 0;
     inv.timer_start = inv.timer_end = 0;
     inv.console_offset = 0;
@@ -300,6 +335,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     }
     u64 mapped = 0;
     u64 handle = X->map(inv.physical, inv.mapped_bytes, 0, &mapped);
+    inv.mapping_bytes = mapped ? mapped : inv.mapped_bytes;
     if (!handle) {
         note("nvidia: mapping the register BAR failed; the chip stays unread");
         inv.physical = 0;

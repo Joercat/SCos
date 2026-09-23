@@ -84,6 +84,11 @@ static uint32_t sim_mmio[1024];
 static uint64_t sim_mmio_phys;
 static int sim_maps;
 static int sim_map_fails;
+/* What the boot stub reported, modelled rather than assumed: 0 means the store never engaged for this
+ * machine, 1 means a module is in memory for one family.  Detection's decision to leave a register BAR
+ * alone depends entirely on which of those two it is, so the harness has to be able to say. */
+static unsigned sim_handoff_state;
+static const char *sim_handoff_family = "nvidia";
 
 void *device_map(uint64_t physical, uint64_t bytes, int write_combine, uint64_t *mapped_bytes)
 {
@@ -246,8 +251,14 @@ static const struct gpu_device *device_for(uint16_t vendor, uint16_t device)
 static struct boot_handoff sim_handoff;
 const struct boot_handoff *kernel_boot_handoff(void)
 {
-    sim_handoff.module_state = 0;      /* no module on the host: detection only, as designed */
-    sim_handoff.module_bytes = 0;
+    sim_handoff.module_state = sim_handoff_state;
+    sim_handoff.module_bytes = sim_handoff_state ? 4096u : 0u;    /* bind is stubbed; only the state matters */
+    sim_handoff.module_name[0] = 0;
+    if (sim_handoff_state) {
+        unsigned n = 0;
+        while (n < 15 && sim_handoff_family[n]) { sim_handoff.module_name[n] = sim_handoff_family[n]; n++; }
+        sim_handoff.module_name[n] = 0;
+    }
     return &sim_handoff;
 }
 
@@ -519,6 +530,8 @@ int main(void)
         /* Set after the run: registering devices resets the simulated bus, exactly as a real bus
          * forgets nothing but is only queried when something asks.  The link registers are read by the
          * report, not by detection, and that ordering is part of what this case pins down. */
+        sim_handoff_state = 1;
+        sim_maps = 0;                   /* measured per run: an earlier pass through this fixture mapped */
         run_with(pair, 2);
         owner = gpu_scanout_device();
         sim_set_link(0, 1, (4u << 16) | (16u << 20));    /* gen4 (16 GT/s per lane), 16 lanes */
@@ -534,8 +547,28 @@ int main(void)
             expect(find_substring(text, "no PCI Express capability on this function") != NULL,
                    "and says so plainly for the one that does not");
         }
-        expect(owner && owner->reg_state == 0, "the kernel does not map a BAR the module was loaded for");
+        expect(owner && owner->reg_state == 0, "the kernel does not map a BAR the module was staged for");
         expect(sim_maps == 0, "no aperture was mapped by the kernel for either function here");
+
+        /* ... and only because it was staged.  A machine whose store consulted nothing is the case that
+         * left a GeForce RTX 5050 unread by anybody: the function matched a driver family, the boot stub
+         * never reached the bus it sits on, and detection waited for a module that was never going to
+         * arrive.  Standing aside is right for a driver that exists and wrong for one that does not, so
+         * the same pair of functions is run again with the store silent. */
+        sim_handoff_state = 0;
+        sim_maps = 0;
+        run_with(pair, 2);
+        owner = gpu_scanout_device();
+        expect(owner && owner->reg_state == 1, "with nothing staged the kernel reads the chip itself");
+        expect(owner && owner->reg_kernel_fallback, "and records that the reading was not a driver's");
+        expect(sim_maps == 1, "exactly one aperture, for the function whose family had no module");
+        {
+            char text[4096];
+            gpu_report(text, sizeof(text));
+            expect(find_substring(text, "read by the kernel itself: this function matches a driver family, "
+                                        "but no module was staged for it") != NULL,
+                   "the report says so in as many words, so the number cannot be mistaken for a driver's");
+        }
         sim_maps = 0;
         sim_mmio[0] = 0x2b0000a1u;
         sim_mmio[1] = 0x00000000u;
@@ -546,6 +579,8 @@ int main(void)
         run_with(pair, 2);
         owner = gpu_scanout_device();
         expect(owner && owner->reg_state == 1, "the unclaimed function's BAR0 was read");
+        expect(owner && !owner->reg_kernel_fallback,
+               "a function no driver table claims was never anybody else's to read, so no fallback is claimed");
         expect(owner && owner->reg_first == 0x2b0000a1u, "the value read is the one the device answered");
         expect(sim_maps == 1, "exactly one aperture was mapped, and only for the unclaimed function");
         expect(sim_mmio_phys == 0xe0100000ull, "the probe used BAR0, not the frame buffer BAR");

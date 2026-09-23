@@ -73,6 +73,7 @@ struct gpu_device {
     uint64_t reg_base;
     uint32_t reg_first, reg_second;
     uint8_t reg_state;
+    uint8_t reg_kernel_fallback;     /* the kernel read them only because no module was staged */
 };
 
 #define GPU_MAX_DEVICES 8

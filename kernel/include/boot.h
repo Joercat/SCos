@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #define BOOT_MAGIC UINT64_C(0x3436544f4f424353)
-#define BOOT_VERSION 3
+#define BOOT_VERSION 4
 #define BOOT_MAP_MAX 512
 /* The one contiguous block the stub hands the kernel, sized to what the layout below actually holds:
  * 256 KiB of prefix (handoff page, the EFI memory map copy, the module index at +200 KiB), a 1.5 MiB
@@ -43,10 +43,18 @@ struct boot_handoff {
      * listing so the kernel can report how many modules exist but were never opened. */
     uint64_t module_address,module_bytes,index_address;
     uint32_t module_state,module_store_count,module_crc,module_index_size;
+    /* The stub's PCI walk, reported through rather than re-derived: how many functions it read, how many
+     * buses it reached and how many of them were display functions.  A report that only says "no module"
+     * cannot distinguish an empty bus from an unreached one, and those want different fixes. */
+    uint32_t pci_functions_seen,pci_buses_scanned,pci_display_functions;
     char module_name[16];
 };
 _Static_assert(sizeof(struct efi_memory)==40,"UEFI memory descriptor prefix");
-_Static_assert(sizeof(struct boot_handoff)==192,"handoff ABI v3");
+/* 208, not 204: three u32 fields were added to a struct whose size must be a multiple of its 8-byte
+ * alignment, so the padding the tail already carried moved.  The number is asserted because the kernel
+ * refuses a handoff of any other size, and a silent 4-byte drift is a boot that panics for no reason a
+ * user could guess. */
+_Static_assert(sizeof(struct boot_handoff)==208,"handoff ABI v4");
 _Static_assert(offsetof(struct boot_handoff,framebuffer)==88,"framebuffer ABI");
 int boot_memory_usable(const struct efi_memory *);
 int boot_map_valid(const struct efi_memory *,size_t);

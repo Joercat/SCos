@@ -152,6 +152,23 @@ by construction and then asserted at run time:
   no QEMU device models the engines of the families in `GPU-BASIC-2D-RESEARCH.md` §3.
   Nothing in this layer claims otherwise.
 
+4. **A GPU on a bus of its own** (`test_the_stub_scan_reaches_a_gpu_behind_a_bridge_in_a_real_boot`) - the
+   built image boots with a PCI-to-PCI bridge and a display function *behind* it, which is the topology a
+   laptop with a discrete GPU has and no other case in this suite had:
+
+   ```
+   gpu: PCI 0:2.0 1234:1111 sub=0 matched=none
+   gpu: PCI 1:0.0 1013:b8 sub=0 matched=cirrus
+   gpu: the boot stub read 7 function(s) on 2 bus(es), 2 display; module state 1
+   ```
+
+   Measured 2026-09-23.  The line about the stub is the one that matters: before `boot/uefi/pci_scan.c'
+   existed it read `1 bus, 1 display', and the module for the second function was never staged.  The same
+   boot also shows the engine guard doing its job rather than being talked about - with the console at the
+   firmware's 1024x768 the Cirrus self-test reports `engine blit did not land; check pitch and offset
+   encoding' and the engine is not bound, so a machine in an unrecognised mode keeps its CPU compositor
+   instead of a half-verified one.
+
 ## 5. The report, as a user sees it
 
 Captured from the emulated four-adapter run (QEMU, `ati-vga` attached), then abbreviated:
@@ -271,7 +288,26 @@ gpu: a driver read the chip and reported it; nothing was asked of the chip, so r
   so nothing is loaded, nothing is bound, and the in-tree port lookup in `identify()` returns before
   it could claim the chip.
 * The UEFI stub asks the same question before it reads a file, so firmware does not hand the kernel
-  bytes for a generation nothing can drive.
+  bytes for a generation nothing can drive.  The scan that decides which file to read lives in
+  `boot/uefi/pci_scan.c`, and it is tested against a synthetic config space
+  (`tools/tests/pci_scan_host.c`, run by `tools/tests/test_pci_scan.py`) rather than only against QEMU,
+  because it is the one part of detection whose failure is invisible from inside the kernel.
+* Two rules in that scan were wrong on real hardware and right in every guest, which is the worst
+  possible combination.  A type-1 header was recognised from the low byte of the dword at 0x0c - which is
+  the cache line size, not the header type at register 0x0e - so no bridge was ever descended; and the
+  loop over a bridge's buses ran from `secondary + 1` to `subordinate - 1`, a range that is *empty* for a
+  PCIe root port, whose link is exactly one bus wide.  A display function on bus 1 behind a root port was
+  therefore invisible while the same card on bus 0 in a guest was not, and the screen said "no PCI display
+  function matched a driver family" - true of the scan, false of the machine.
+* Detection had the other half of the same hole: an eligible function was left to "a driver module"
+  whether or not one had been staged, so nothing read its registers either.  The rule is narrower and
+  stated now - the kernel maps the scanout owner's own BAR0 when the store engaged with nothing, and the
+  report says *by the kernel, because the store staged no module for this family*, so a fallback can never
+  be read as a driver working.
+* The stub hands its counts to the kernel - functions inspected, buses scanned, display functions seen -
+  in the handoff (ABI v4, 208 bytes), and the panel prints them in the `module store:` line.  Those three
+  numbers are the whole difference between "this machine has nothing to load" and "the loader did not look
+  far enough", and a user should not have to know which one it is in order to report it.
 * `gpu_detect_sim.c` asserts both sides of that boundary, including the side that moved: `10de:2d83`
   and `10de:2b85` used to be naming rows and are now bound rows, so the harness checks that they name
   the `nvidia` family, mark the device as module-eligible, and that the kernel's own register probe then

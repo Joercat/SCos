@@ -1,6 +1,7 @@
 #include "efi.h"
 #include "boot.h"
 #include "gpu_match.h"
+#include "pci_scan.h"
 static struct system_table *system;
 static struct boot_services *bs;
 static struct boot_framebuffer fatal_framebuffer;
@@ -51,49 +52,15 @@ static uint32_t config_read(uint8_t bus,uint8_t slot,uint8_t function,uint8_t of
  out32(0xcf8,0x80000000u|((uint32_t)bus<<16)|((uint32_t)slot<<11)|((uint32_t)function<<8)|(offset&0xfc));
  return in32(0xcfc);
 }
-/* First display function whose id the shared matcher binds.  Bus numbers are followed through
- * bridges because a discrete GPU normally sits behind a PCIe port, and a scan of bus 0 alone would
- * miss it; the walk is bounded and each secondary bus is visited once. */
-static int scan_display(uint8_t bus,uint8_t depth,uint8_t *seen,unsigned *visited,
-                        uint8_t *found_bus,uint8_t *found_slot,uint8_t *found_fn,
-                        uint16_t *found_vendor,uint16_t *found_device,uint8_t *found_subclass,
-                        const struct gpu_match **found_match){
- if(depth>8)return 0;
- for(uint8_t slot=0;slot<32;slot++){
-  uint32_t vendev=config_read(bus,slot,0,0);
-  if(vendev==0xffffffffu||!vendev)continue;
-  uint32_t header=config_read(bus,slot,0,0xc);
-  uint32_t ccrev=config_read(bus,slot,0,8);
-  uint8_t subclass=(uint8_t)(ccrev>>16);
-  for(uint8_t function=0;function<8;function++){
-   if(function){
-    uint32_t other=config_read(bus,slot,function,0);
-    if(other==0xffffffffu||!other)continue;
-    ccrev=config_read(bus,slot,function,8);subclass=(uint8_t)(ccrev>>16);
-   }
-   uint32_t cls=ccrev>>16;
-   if(((cls>>8)&0xff)==3){
-    uint16_t vendor=(uint16_t)vendev,device=(uint16_t)(vendev>>16);
-    const struct gpu_match *match=gpu_match_device(vendor,device,subclass,0);
-    if(match&&!*found_match){
-     *found_match=match;*found_bus=bus;*found_slot=slot;*found_fn=function;
-     *found_vendor=vendor;*found_device=device;*found_subclass=subclass;
-    }
-    if(function)break;
-   }
-  }
-  if((header&0x7f)==1){
-   uint32_t busnumbers=config_read(bus,slot,0,0x18);
-   uint8_t secondary=(uint8_t)(busnumbers>>8),subordinate=(uint8_t)(busnumbers>>16);
-   for(unsigned next=(unsigned)secondary+1;next<(unsigned)subordinate&&next<255u;next++){
-    if(!next||seen[next])continue;
-    seen[next]=1;if(*visited>=64)break;(*visited)++;
-    if(scan_display(next,depth+1,seen,visited,found_bus,found_slot,found_fn,found_vendor,
-                    found_device,found_subclass,found_match)&&*found_match)return 1;
-   }
-  }
- }
- return *found_match!=0;
+/* The stub's config access, handed to the shared walk: the 0xcf8/0xcfc index ports, which is what firmware
+ * leaves an EFI application that has no ECAM reservation to use.  Reads only, and the walk itself does no
+ * sizing, no command write and no reset. */
+static uint32_t scan_config_read(void *context,uint8_t bus,uint8_t slot,uint8_t function,uint8_t offset){
+ (void)context;return config_read(bus,slot,function,offset);
+}
+static int scan_display(struct pci_display_scan *out){
+ const struct pci_config_reader reader={scan_config_read,0};
+ return pci_scan_display_functions(&reader,out);
 }
 static void family_file_name(const char *family,char16 *out){
  /* 8.3 stem derived from the family: first eight characters, uppercase, extension ".MOD".  The same
@@ -248,13 +215,17 @@ status EFIAPI efi_main(handle image,struct system_table *table){
   * pool for now and move into the executable boot-arena region once that region exists. */
  void *module_data=0;size_t module_size=0;void *index_data=0;size_t index_size=0;
  uint32_t store_count=0,select_state=0;char selected_family[16];selected_family[0]=0;
+ unsigned pci_functions_seen=0,pci_buses_scanned=0,pci_display_seen=0;
  {
-  uint8_t seen[256];memset(seen,0,sizeof(seen));unsigned visited=0;
-  uint8_t gbus=0,gslot=0,gfn=0,gsub=0;uint16_t gvendor=0,gdevice=0;
-  const struct gpu_match *match=0;
-  scan_display(0,0,seen,&visited,&gbus,&gslot,&gfn,&gvendor,&gdevice,&gsub,&match);
+  struct pci_display_scan scan;
+  scan_display(&scan);
+  const struct gpu_match *match=scan.match;
+  /* Kept for the kernel's report, because the stub is the only witness to what the scan reached: with no
+     numbers the panel cannot say "the bus was empty" apart from "the bus was never looked at". */
+  pci_functions_seen=scan.functions_inspected;pci_buses_scanned=scan.buses_scanned;
+  pci_display_seen=scan.display_functions;
   const char *family=match?gpu_family_name(match):"";
-  if(match&&!gpu_match_named_only(gvendor,gdevice,gsub)){
+  if(match&&!gpu_match_named_only(scan.vendor,scan.device,scan.subclass)){
    /* A chip the naming table knows but no driver table binds gets no module read at all: firmware
     * must not hand the kernel bytes for a chip generation nothing can drive. */
    unsigned n=0;while(n<15&&family[n]){selected_family[n]=family[n];n++;}selected_family[n]=0;
@@ -293,7 +264,8 @@ status EFIAPI efi_main(handle image,struct system_table *table){
  have_arena=1;
  memset((void*)(uintptr_t)arena,0,BOOT_ARENA_SIZE);
  struct boot_handoff *h=(void*)(uintptr_t)arena;
- *h=(struct boot_handoff){.magic=BOOT_MAGIC,.version=BOOT_VERSION,.size=sizeof(*h),.kernel_start=kernel_base,.kernel_end=end,.arena_start=arena,.arena_size=BOOT_ARENA_SIZE,.framebuffer=fb};
+ *h=(struct boot_handoff){.magic=BOOT_MAGIC,.version=BOOT_VERSION,.size=sizeof(*h),.kernel_start=kernel_base,.kernel_end=end,.arena_start=arena,.arena_size=BOOT_ARENA_SIZE,.framebuffer=fb,
+   .pci_functions_seen=pci_functions_seen,.pci_buses_scanned=pci_buses_scanned,.pci_display_functions=pci_display_seen};
  for(size_t i=0;i<table->table_count&&i<4096;i++)if(equal(&table->tables[i].guid,&acpi_guid,sizeof(acpi_guid))){h->rsdp=(uintptr_t)table->tables[i].table;break;}
  phase="calibrate startup timeout";
  uint64_t start_ticks=ticks();s=bs->stall(10000);uint64_t elapsed=ticks()-start_ticks;

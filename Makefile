@@ -63,8 +63,14 @@ $(BUILD)/efi-font.o: kernel/src/font.c Makefile | $(BUILD)
 $(BUILD)/efi-gpu_match.o: kernel/drivers/gpu/gpu_match.c kernel/drivers/gpu/gpu_ids.h \
                           kernel/include/gpu_match.h kernel/include/boot.h Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
-$(BUILD)/BOOTX64.EFI: $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o
-	$(LD) -mi386pep --subsystem 10 --entry efi_main --image-base 0 --no-insert-timestamp --enable-reloc-section -o $@ $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o
+# The PCI walk is a unit of its own so that a fixture config space can exercise the bus ranges a real
+# machine has: a GPU behind a root port sits on a secondary bus, and that is exactly where a scan of bus 0
+# or an exclusive bus range loses it.  Same source, same flags, linked into the stub.
+$(BUILD)/efi-pci_scan.o: boot/uefi/pci_scan.c boot/uefi/pci_scan.h kernel/include/gpu_match.h \
+                         kernel/drivers/gpu/gpu_ids.h $(BUILD)/scosbuild.h Makefile | $(BUILD)
+	$(CC) $(EFI_CFLAGS) -Ikernel/drivers/gpu -c $< -o $@
+$(BUILD)/BOOTX64.EFI: $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o
+	$(LD) -mi386pep --subsystem 10 --entry efi_main --image-base 0 --no-insert-timestamp --enable-reloc-section -o $@ $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o
 $(BUILD)/scos.img: $(BUILD)/BOOTX64.EFI $(BUILD)/kernel.elf tools/makedisk.py
 	python3 tools/makedisk.py $(BUILD)
 

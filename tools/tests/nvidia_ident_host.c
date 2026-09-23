@@ -25,6 +25,7 @@
 
 #define REG_WORDS 4096
 static u32 registers[REG_WORDS];
+static int checks;                       /* assertions run, so the summary line counts rather than claims */
 static int stores;                       /* every write32 the module attempted: must stay 0 */
 static int maps;
 static int reads_served;                 /* every read the module issued, so its count can be matched */
@@ -60,16 +61,39 @@ static void fake_log(const char *line)
     logs[log_count++] = slot;
 }
 
+/* Two handles, because a real 16 MiB register BAR is longer than the kernel's per-mapping cap and the
+ * driver has to map the user-mode page on its own to reach it.  Serving both from one buffer would let a
+ * driver that never asks for the second mapping pass, which is exactly the case that matters on hardware.
+ */
+#define REG_HANDLE 0x1000ull
+#define WINDOW_HANDLE 0x2000ull
+static u64 low_mapping_bytes = 0x1000000ull;      /* 16 MiB: enough for the window, so no second map */
+static int window_map_fails;
+static u64 window_physical, window_mapping_bytes;
+static u64 first_physical;
+
 static u64 fake_map(u64 physical, u64 bytes, u32 write_combine, u64 *mapped_bytes)
 {
-    (void)bytes;
     maps++;
+    if (first_physical && physical == first_physical + 0x00810000ull) {
+        window_physical = physical;
+        window_mapping_bytes = 0;
+        if (mapped_bytes) *mapped_bytes = 0;
+        if (window_map_fails) return 0;
+        if (mapped_bytes) *mapped_bytes = 0x20000ull;
+        window_mapping_bytes = 0x20000ull;
+        return WINDOW_HANDLE;
+    }
+    if (!first_physical) first_physical = physical;
     mapped_physical = physical;
     if (write_combine) {
         printf("  note: module asked for a write-combined mapping of a register BAR\n");
     }
-    if (mapped_bytes) *mapped_bytes = 0x1000000ull;
-    return 0x1000ull;                    /* any non-zero handle: reads below ignore it */
+    /* The kernel clamps a request to its own cap and reports the size it actually mapped; a device that
+     * answers 16 MiB but maps 8 has to be modelled that way or the driver's second mapping is never tested.
+     */
+    if (mapped_bytes) *mapped_bytes = bytes < low_mapping_bytes ? bytes : low_mapping_bytes;
+    return REG_HANDLE;
 }
 
 /* The user-mode window, modelled separately from the low registers because it lives 8 MiB into BAR0:
@@ -88,8 +112,9 @@ static u32 unstable_value;
 
 static u32 fake_read32(u64 handle, u32 offset)
 {
-    (void)handle;
     reads_served++;
+    if (handle == WINDOW_HANDLE) offset += 0x00810000u;   /* relative to the window's own mapping */
+    else if (handle != REG_HANDLE) { printf("  note: read through an unknown handle\n"); return 0xffffffffu; }
     if (offset == 0x00810000u) return umode_class;
     if (offset == 0x00810084u) return 0;                    /* TIME_1: the high half stays zero */
     if (offset == 0x00810080u) {                            /* TIME_0: the nanosecond counter */
@@ -165,6 +190,9 @@ static void fixture_reset(struct fixture *f, u32 vendor, u32 device_id, u64 fram
     timer_tick = 0;
     unstable = 0;
     unstable_reads = 0;
+    low_mapping_bytes = 0x1000000ull;
+    window_map_fails = 0;
+    window_physical = window_mapping_bytes = first_physical = 0;
     unstable_value = 0xffffffffu;
     mapped_physical = 0;
     log_count = 0;
@@ -179,6 +207,7 @@ extern void scos_module_teardown(struct scos_gpu_engine_ops *ops);
 static int failures;
 static void check(int ok, const char *what)
 {
+    checks++;
     printf("%s: %s\n", ok ? "PASS" : "FAIL", what);
     if (!ok) failures++;
 }
@@ -271,6 +300,39 @@ int main(void)
     check(has(text, "clock frozen"), "a clock that does not advance is reported as frozen");
     check(has(logs[1], "no submission is attempted"), "and that answer decides against the channel");
 
+    /* ---- 1e. the shape a real card has: a 16 MiB register BAR, mapped by the kernel only as far as its
+     * cap, so the documented page lies outside the first mapping and has to be mapped on its own.  This
+     * is the case that would otherwise report "silent" about a chip whose window is live. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xc461u;
+    low_mapping_bytes = 0x800000ull;            /* the kernel's per-mapping cap, as shipped */
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "window class 0xc461=published clock +2097us"),
+          "a window beyond the register mapping is still answered, through a mapping of its own");
+    check(maps == 2 && window_physical == 0xe0100000ull + 0x810000ull && window_mapping_bytes == 0x20000ull,
+          "two mappings: the register BAR as far as the kernel maps it, and the 128 KiB window page");
+    check(reads_served == 9 && has(text, "reads 9, writes 0"),
+          "and the nine reads it reports are the nine the device served, whichever handle they went through");
+    check(stores == 0, "neither mapping was written to");
+
+    /* ---- 1f. the kernel cannot map that page for this function. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xc461u;
+    low_mapping_bytes = 0x800000ull;
+    window_map_fails = 1;
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "window unreachable"),
+          "an unreachable page is reported as unreachable, not as a chip that answered nothing");
+    check(!has(text, "silent"), "the two words are not interchangeable, so the text must not blur them");
+    check(reads_served == 2 && has(text, "reads 2, writes 0"),
+          "and the failed mapping costs no register reads at all: the boot register is the only thing asked");
+    check(maps == 2 && log_count == 1,
+          "the attempt is recorded, and no doorbell line is written about a page that was never read");
+
     /* ---- 2. the same chip with the console behind another function. ---- */
     fixture_reset(&f, 0x10de, 0x2d83, 0);
     registers[0] = boot0;
@@ -332,7 +394,9 @@ int main(void)
           "a rebind recomputes the inventory instead of repeating the previous one");
     check(has(text, "reads 3, writes 0"), "and the read counter restarted, as a measurement must");
 
-    printf("%s: nvidia identification module, %d scenario(s), %d failure(s)\n",
-           failures ? "FAIL" : "PASS", 8, failures);
+    /* Counted rather than written down: the number of scenarios has grown every time a new answer from a
+     * chip was added to the driver, and a stale figure in a passing line is worse than no figure. */
+    printf("%s: nvidia identification module, %d check(s) over the fixture's chip answers, %d failure(s)\n",
+           failures ? "FAIL" : "PASS", checks, failures);
     return failures ? 1 : 0;
 }

@@ -72,7 +72,18 @@ void *device_map(uint64_t physical, uint64_t bytes, int write_combine, uint64_t 
 static int probe_shadows_scanout(const struct gpu_device *g);
 static int identification_only_module_bound(void);
 
-static void probe_registers(struct gpu_device *g)
+/* Whether the firmware did anything at all about a driver module for this machine.  Standing aside is
+ * right when the store staged one (or tried to and failed in a way the report already names), because the
+ * design is one module per boot and an aperture must not be mapped twice.  It was wrong in the case that
+ * motivated this comment: the stub's scan reached no display function, so `module_state' stayed 0, the
+ * kernel waited for a driver that was never going to arrive, and the chip was read by nobody.  When the
+ * store consulted nothing, the kernel reads the boot register itself and says that it did. */
+static int module_store_engaged(const struct boot_handoff *handoff)
+{
+    return handoff && handoff->module_state != 0;
+}
+
+static void probe_registers(struct gpu_device *g, const struct boot_handoff *handoff)
 {
     volatile uint32_t *mmio;
     uint64_t mapped = 0;
@@ -83,7 +94,18 @@ static void probe_registers(struct gpu_device *g)
     g->reg_first = g->reg_second = 0;
     if (!g->bar[0] || g->bar[0] >> 46) return;         /* no aperture, or beyond what can be mapped */
     if (probe_shadows_scanout(g)) { g->reg_state = 5; return; }
-    if (gpu_module_eligible(g)) return;                /* a module owns this aperture, not us */
+    if (gpu_module_eligible(g)) {
+        /* Standing aside for a driver is correct whenever the store is doing something about this family -
+         * one module per boot is the design, and mapping the same aperture twice to ask the same question
+         * twice would be worse than not asking.  The case that used to read nothing at all is an eligible
+         * function on a machine where the store engaged with nothing: the boot stub never reached the bus
+         * the chip sits on, so no driver was staged, and detection waited for one that was never going to
+         * arrive.  The fallback is deliberately narrow - the function already being scanned out from,
+         * because a report that cannot describe the device driving the screen is the worst place to be
+         * silent - and it says out loud that the kernel, not a driver, did the reading. */
+        if (!g->is_scanout || module_store_engaged(handoff)) { g->reg_state = 0; return; }
+        g->reg_kernel_fallback = 1;
+    }
     if (!(g->command & 0x2)) { g->reg_state = 4; return; }
     window = device_map(g->bar[0], 4096, 0, &mapped);
     if (!window || mapped < 8) { g->reg_state = 3; g->reg_base = g->bar[0]; return; }
@@ -206,8 +228,9 @@ void gpu_init(const struct boot_framebuffer *fb)
                 klog("gpu:   %x:%x is named by the PCI id registry only; no driver table in this tree "
                      "binds it, so nothing was loaded for it", g->vendor, g->device);
             if (g->reg_state == 1)
-                klog("gpu:   read 0x%x from BAR0 of %x:%x; device registers are reachable",
-                     g->reg_first, g->vendor, g->device);
+                klog("gpu:   read 0x%x from BAR0 of %x:%x; device registers are reachable%s",
+                     g->reg_first, g->vendor, g->device,
+                     g->reg_kernel_fallback ? " (the kernel, because no module was staged for it)" : "");
             else if (g->reg_state == 2)
                 klog("gpu:   BAR0 of %x:%x is mapped but answers all-ones; the device is not responding",
                      g->vendor, g->device);
@@ -215,13 +238,11 @@ void gpu_init(const struct boot_framebuffer *fb)
         }
     }
 
-    for (int i = 0; i < device_count; i++)
-        if (!devices[i].match || devices[i].named_only || !devices[i].bound)
-            probe_registers(&devices[i]);
-
     /* The scanning adapter is the one whose BAR already points at the framebuffer the
      * firmware validated.  Matching addresses is enough to know which device owns the
-     * console, and unlike sizing a BAR it cannot disturb it. */
+     * console, and unlike sizing a BAR it cannot disturb it.  This runs before the register
+     * probe below precisely because the probe's "leave it to a driver" rule needs to know
+     * whether this is the function the screen is being driven from. */
     for (int i = 0; i < device_count; i++) {
         for (int b = 0; b < 6; b++) {
             if (devices[i].bar[b] && devices[i].bar[b] == output.base) {
@@ -230,10 +251,21 @@ void gpu_init(const struct boot_framebuffer *fb)
             }
         }
     }
+
+    for (int i = 0; i < device_count; i++)
+        if (!devices[i].match || devices[i].named_only || !devices[i].bound)
+            probe_registers(&devices[i], handoff);
     config_writes_after = (int)pci_config_writes;
     if (config_writes_after != config_writes_before)
         klog("gpu: BUG: detection issued %u PCI config write(s); it must read only",
              (unsigned)(config_writes_after - config_writes_before));
+    if (handoff)
+        /* The stub's own numbers, in the log the user can read without opening the panel: "no module was
+         * staged" means something different when two buses were scanned than when one empty bus was. */
+        klog("gpu: the boot stub read %u function(s) on %u bus(es), %u display; module state %u",
+             (unsigned)handoff->pci_functions_seen,
+             (unsigned)handoff->pci_buses_scanned, (unsigned)handoff->pci_display_functions,
+             (unsigned)handoff->module_state);
     klog("gpu: %u display function(s), %u ID rule(s) in %u family record(s), "
          "%u without a port record",
          device_count, (unsigned)gpu_match_id_total(), gpu_match_family_count(),
@@ -569,6 +601,12 @@ void gpu_report(char *out, size_t capacity)
                 }
                 put(&w, ")");
             }
+            if (g->reg_kernel_fallback)
+                /* Named as the kernel's own reading, so a report cannot be mistaken for a driver's work:
+                 * this line is printed when the function matches a driver family and the disk's module for
+                 * it never reached memory. */
+                put(&w, " (read by the kernel itself: this function matches a driver family, but no module "
+                        "was staged for it)");
             put_line(&w, "");
             break;
         case 2:

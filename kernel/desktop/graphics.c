@@ -134,7 +134,20 @@ void graphics_report(char *out, size_t capacity)
         } else if (h->module_state == 3) {
             put(&w, "the stub could not read the module file\n");
         } else {
-            put(&w, "not consulted: no PCI display function matched a driver family\n");
+            /* The stub is the only witness to what its scan reached, and after ExitBootServices its counts
+             * are the sole way this screen can tell "the bus holds no display function" from "the bus was
+             * never looked at" - which is the difference between a machine with nothing to load and a
+             * loader that stopped at a bridge. */
+            put(&w, "not consulted: the read-only scan the stub ran inspected ");
+            fmt_u32(number, h->pci_functions_seen); put(&w, number);
+            put(&w, " function(s) on ");
+            fmt_u32(number, h->pci_buses_scanned); put(&w, number);
+            put(&w, " bus(es) and found ");
+            fmt_u32(number, h->pci_display_functions); put(&w, number);
+            if (h->pci_display_functions)
+                put(&w, " display function(s), none claimed by a driver family in the binding table\n");
+            else
+                put(&w, " display function(s)\n");
         }
     }
     /* First line a helper asks for when a report and a repository disagree. */
@@ -155,12 +168,26 @@ void graphics_report(char *out, size_t capacity)
             fmt_u32(number, (uint32_t)owner->bar[0]); put(&w, number);
             put(&w, " read through the kernel's device mapping; first dword 0x");
             fmt_u32(number, owner->reg_first); put(&w, number);
+            /* Who read it matters as much as what came back.  The kernel's own probe is a fallback for a
+             * machine whose module was never staged; a driver module reading the chip is a driver working.
+             * The panel states which of the two happened instead of letting a raw dword imply either. */
+            if (owner->reg_kernel_fallback)
+                put(&w, " - by the kernel, because the store staged no module for this family");
             put(&w, "\n");
         } else if (owner->reg_state == 2) put(&w, "mapped, all-ones reads\n");
         else if (owner->reg_state == 3) put(&w, "BAR0 beyond the mapping capacity\n");
         else if (owner->reg_state == 4) put(&w, "memory decode disabled by firmware\n");
         else if (owner->reg_state == 5) put(&w, "BAR0 is the scanout aperture; already mapped once\n");
-        else put(&w, "none (this function is left to a driver module)\n");
+        else {
+            /* "left to a driver module" used to be printed whether or not a module existed for this
+             * machine, which is exactly how a chip ends up unread by anybody while the screen claims
+             * someone is in charge of it.  The two cases now say which one it is. */
+            const struct boot_handoff *acc = kernel_boot_handoff();
+            if (acc && acc->module_state == 1)
+                put(&w, "none (a driver module is staged for this function)\n");
+            else
+                put(&w, "none (no BAR0 the kernel could read, and the store staged no module)\n");
+        }
     }
     put(&w, "Display: ");
     fmt_u32(number, scanout.width);
