@@ -241,6 +241,11 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
             # inventory - are on this panel and not only one command away, because this panel is what gets
             # pasted when a machine is being diagnosed.
             assert 'Engine: scratch module: reads nothing, offers no engine' in panel, panel[-1200:]
+            # And the boundary is on the same panel, on a booted machine, not only in the source comment: a
+            # reader who sees a coprocessor's registers quoted has to be able to see that nothing was written
+            # to them and that no firmware is involved yet.
+            assert 'GSP path: the management processor' in panel, panel[-1400:]
+            assert 'neither carries nor downloads' in panel, panel[-1400:]
             # `Device access: none' on its own was read as "nobody has touched my card" on the one machine
             # where a module had read twenty-odd registers of it.  The line has to name whose access is
             # absent, and it is long enough to have been clipped before the wrap: both halves of that are

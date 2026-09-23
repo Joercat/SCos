@@ -44,6 +44,33 @@
 #define NV_PMC_BOOT_0_ARCHITECTURE_TU100  0x16u   /* Turing  */
 #define NV_PMC_BOOT_0_ARCHITECTURE_GA100  0x17u   /* Ampere  */
 
+/* ------------------------------------------------------------------------ the GSP ----
+ * Blackwell's management processor, and the block a driver talks to it through.  Published in full for
+ * this generation - `src/common/inc/swref/published/blackwell/gb100/dev_gsp.h`, fetched 2026-09-23 and
+ * kept at build/nvdoc/gb100-dev_gsp.h - which is more than can be said for the copy engines: their PTOP
+ * entry gives a field whose units no manual defines, while the GSP's own registers are absolute offsets in
+ * the same PRI aperture this driver already reads.  Every one of them is read here and none is written:
+ * whether the coprocessor is out of reset, whether it has flagged a fatal error, and what is in the two
+ * mailboxes decides what the next step of this path can even be attempted against.
+ *
+ *   NV_PGSP_FALCON_MAILBOX0/1        0x110040 / 0x110044   31:0 each, init 0
+ *   NV_PGSP_FALCON_ENGINE            0x1103c0              RESET 0:0 (assert 1 / deassert 0),
+ *                                                          RESET_STATUS 10:8 (0 = asserted, 2 = deasserted)
+ *   NV_PGSP_FALCON_IRQSTAT           0x110008              FATAL_ERROR 24:24
+ *   NV_PGSP_RISCV_FAULT_CONTAINMENT_SRCSTAT 0x111700       GLOBAL_MEM 0:0 (1 = faulted)
+ */
+#define NV_PGSP_BASE                       0x00110000u
+#define NV_PGSP_FALCON_MAILBOX0            0x00110040u
+#define NV_PGSP_FALCON_MAILBOX1            0x00110044u
+#define NV_PGSP_FALCON_ENGINE              0x001103c0u
+#define NV_PGSP_FALCON_ENGINE_RESET_STATUS(v)   (((v) >> 8) & 7u)     /* 10:8 */
+#define NV_PGSP_FALCON_ENGINE_RESET_ASSERTED    0x0u
+#define NV_PGSP_FALCON_ENGINE_RESET_DEASSERTED  0x2u
+#define NV_PGSP_FALCON_IRQSTAT             0x00110008u
+#define NV_PGSP_FALCON_IRQSTAT_FATAL(v)           (((v) >> 24) & 1u)  /* 24:24 */
+#define NV_PGSP_RISCV_FAULT_SRCSTAT        0x00111700u
+#define NV_PGSP_RISCV_FAULT_GLOBAL(v)               ((v) & 1u)        /* 0:0, 1 = faulted */
+
 /* The user-mode window: the block a submission is rung through, and the copy of the GPU's own clock that
  * is readable without any privileged setup.  Published for Volta and Turing in
  * manuals/turing/tu104/dev_usermode.ref.txt (offsets inside the register BAR); NVIDIA publishes no

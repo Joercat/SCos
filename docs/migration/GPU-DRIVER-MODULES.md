@@ -720,3 +720,32 @@ field became 768 on both sides rather than the sentence being shortened until it
 the same choice made for notifications.  The host fixture now measures the *widest* report the format can
 produce (153 slots, 353 rows, three copy engines, every named type, silent window) against that ceiling,
 because a bound that only the friendly case stays under is a bound that clips a real card's worst day.
+
+## Starting the coprocessor path: read the GSP, write nothing
+
+Blackwell's engines are managed by the GSP - an on-card RISC-V coprocessor - and on this generation the
+vendor's own driver reaches it only by booting a firmware image it does not ship in source.  Choosing that
+path means the first thing worth knowing is not how to submit work but whether the coprocessor is reachable
+and what state it is in, and unlike the copy-engine base, that is *published*:
+`src/common/inc/swref/published/blackwell/gb100/dev_gsp.h` (fetched 2026-09-23, cached at
+`build/nvdoc/gb100-dev_gsp.h`) gives absolute offsets inside the same PRI aperture the module already reads:
+`NV_PGSP_FALCON_MAILBOX0/1` at `0x110040`/`0x110044`, `NV_PGSP_FALCON_ENGINE` at `0x1103c0` whose bits 10:8
+are the reset status (0 asserted, 2 deasserted), `NV_PGSP_FALCON_IRQSTAT` at `0x110008` with `FATAL_ERROR`
+at bit 24, and `NV_PGSP_RISCV_FAULT_CONTAINMENT_SRCSTAT` at `0x111700`.  Five reads, no writes, and the
+result goes at the end of the same `Engine:` sentence:
+
+    GSP engine out of reset, mailboxes 0x12345678/0x9abcdef0        (coprocessor up, words exchanged)
+    GSP engine in reset, mailboxes 0x0/0x0, fatal error flagged     (held in reset; starting it is step one)
+    GSP block at 0x110000 unreachable (engine reads 0xffffffff)    (nothing there to hand work to)
+
+Two rules kept this honest while it was written.  An all-ones read is *no answer*, so the fatal and
+containment bits are taken only from registers that replied - decoding bit 24 of `0xffffffff` would report a
+fatal error on a block that never spoke, and the fixture now checks that case specifically, because a driver
+that reads zeros out of an absent aperture will happily describe a coprocessor sitting in reset at address
+zero.  And the report states the boundary rather than implying progress: `GSP path: the management
+processor's registers above were read, never written; booting work through it needs the vendor firmware
+image, which this OS neither carries nor downloads, so a card whose GSP is in reset is a card this build
+cannot give work to.`  The next milestone on this path is intake - a firmware image the user stages, checked
+for size and checksum before anything attempts to use it - and it is deliberately not faked by writing to
+the mailboxes first.  Measured in the fixture: 93 checks, 0 failures, four of them about the coprocessor's
+three states and the unmodelled-block case, all of them with `writes 0`.

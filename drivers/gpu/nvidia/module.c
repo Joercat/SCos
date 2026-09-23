@@ -69,6 +69,10 @@ struct inventory {
     int top_ce_runlist_valid, top_ce_engine_valid;   /* the entry's own valid bits: 0 is a value, "?" is not */
     int top_ce_found;                   /* an LCE device also carried a PRI base: a place to write next */
     u32 top_cfg, top_cfg_devices, top_cfg_rows_per_device, top_cfg_rows;
+    u32 gsp_irqstat, gsp_engine;      /* NV_PGSP_FALCON_IRQSTAT / _ENGINE, as read */
+    u32 gsp_mailbox0, gsp_mailbox1;   /* the two words a driver and the firmware leave for each other */
+    u32 gsp_faultstat;                /* NV_PGSP_RISCV_FAULT_CONTAINMENT_SRCSTAT */
+    int gsp_reachable;                /* the block answered at all, rather than every read being all-ones */
     u32 top_cfg1;                     /* the second block's CFG, 0x324fc: asked, and reported if unanswered */
     u32 top_rows;                     /* rows actually read, so an inventory says how much was asked */
     u32 top_engines, top_bus;         /* entries the chip called engines, and the bus blocks it also lists */
@@ -390,6 +394,22 @@ static void probe_engines(void)
     inv.top_ce_raw0 = best.raw[0];  inv.top_ce_raw1 = best.raw[1];  inv.top_ce_raw2 = best.raw[2];
 }
 
+/* Is the coprocessor this generation runs its engines through reachable, and is it up?  Five reads of
+ * registers NVIDIA publishes for gb100, and no write among them.  The reset status says whether the
+ * processor is out of reset; the fatal and containment bits say whether it is complaining; the two mailboxes
+ * are the words a driver and the firmware leave each other, which is where any handoff would begin.  If the
+ * block answers, the next step of this path has something to be attempted against, and if it answers with
+ * all ones, that is the ceiling and it gets reported as the ceiling rather than worked around. */
+static void probe_gsp(void)
+{
+    inv.gsp_irqstat = reg_read(NV_PGSP_FALCON_IRQSTAT);
+    inv.gsp_engine = reg_read(NV_PGSP_FALCON_ENGINE);
+    inv.gsp_mailbox0 = reg_read(NV_PGSP_FALCON_MAILBOX0);
+    inv.gsp_mailbox1 = reg_read(NV_PGSP_FALCON_MAILBOX1);
+    inv.gsp_faultstat = reg_read(NV_PGSP_RISCV_FAULT_SRCSTAT);
+    inv.gsp_reachable = !(inv.gsp_engine == 0xffffffffu && inv.gsp_irqstat == 0xffffffffu);
+}
+
 /* What the second measurement is for.  A Blackwell submission needs an addressable channel and a doorbell
  * to ring it through, and nothing published says where that block is on this generation.  So the chip is
  * asked instead: if the class register answers with a class number and the clock in the same page is
@@ -613,6 +633,30 @@ static void build_text(void)
      * cannot outlive them.  Naming engines and reaching them are different things: a Blackwell part takes
      * work through a channel in a window it lets a driver ring, and whether that window answered is a
      * reading, not an opinion. */
+    /* The management processor, in the state it was found in.  This is reported ahead of any plan that
+     * depends on it, because a plan built on a coprocessor nobody checked is the mistake this driver has
+     * been careful about from the first line. */
+    put_text(&b, "; GSP ");
+    if (!inv.gsp_reachable) {
+        put_text(&b, "block at 0x110000 unreachable (engine reads 0x");
+        put_hex(&b, inv.gsp_engine, 8);
+        put_text(&b, ")");
+    } else {
+        /* An all-ones read is no answer, and a bit taken out of it is a fact the chip never gave: the
+         * fatal and containment flags are only quoted from registers that actually replied. */
+        u32 st = inv.gsp_engine == 0xffffffffu ? 0xffu
+                                                : NV_PGSP_FALCON_ENGINE_RESET_STATUS(inv.gsp_engine);
+        put_text(&b, "engine ");
+        if (st == NV_PGSP_FALCON_ENGINE_RESET_DEASSERTED) put_text(&b, "out of reset");
+        else if (st == NV_PGSP_FALCON_ENGINE_RESET_ASSERTED) put_text(&b, "in reset");
+        else { put_text(&b, "reset status 0x"); put_hex(&b, st, 2); }
+        put_text(&b, ", mailboxes 0x"); put_hex(&b, inv.gsp_mailbox0, 8);
+        put_text(&b, "/0x"); put_hex(&b, inv.gsp_mailbox1, 8);
+        if (inv.gsp_irqstat != 0xffffffffu && NV_PGSP_FALCON_IRQSTAT_FATAL(inv.gsp_irqstat))
+            put_text(&b, ", fatal error flagged");
+        if (inv.gsp_faultstat != 0xffffffffu && NV_PGSP_RISCV_FAULT_GLOBAL(inv.gsp_faultstat))
+            put_text(&b, ", global memory faulted");
+    }
     if (inv.top_lce && !inv.window_live) {
         put_text(&b, "; engines are register blocks, not channels: no submission window answered, so "
                      "nothing was submitted");
@@ -761,6 +805,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
 
     probe_usermode();
     probe_engines();
+    probe_gsp();
     build_text();
     /* Wide enough for the whole description plus the prefix: the window clause sits at the end of the
      * text, so a narrow log buffer would cut the one part this increment added. */
@@ -790,6 +835,27 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
                                        : "with the clock frozen no submission is attempted");
         *t.at = 0;
         note(second);
+    }
+    /* The coprocessor gets its own line, because on this generation the work goes through it and a reader
+     * deciding what to build next needs its state, not an inference from the mailbox addresses. */
+    {
+        static char third[240];
+        struct buf u = { third, third + sizeof(third) - 1 };
+        put_text(&u, "nvidia: GSP block at BAR0+0x110000 read, nothing written; ");
+        if (!inv.gsp_reachable)
+            put_text(&u, "the block does not answer, so there is nothing to hand work to yet");
+        else if (inv.gsp_engine == 0xffffffffu)
+            put_text(&u, "and only some of its registers replied, so no state is claimed for it");
+        else if (NV_PGSP_FALCON_ENGINE_RESET_STATUS(inv.gsp_engine) ==
+                 NV_PGSP_FALCON_ENGINE_RESET_DEASSERTED)
+            put_text(&u, "it is out of reset, so a firmware handoff has a running processor to speak to");
+        else if (NV_PGSP_FALCON_ENGINE_RESET_STATUS(inv.gsp_engine) ==
+                 NV_PGSP_FALCON_ENGINE_RESET_ASSERTED)
+            put_text(&u, "it is held in reset, so starting it is the first thing any GSP path has to do");
+        else
+            put_text(&u, "its reset status is a value no published name covers");
+        *u.at = 0;
+        note(third);
     }
 
     *out_ops = &ops;

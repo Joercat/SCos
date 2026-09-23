@@ -237,6 +237,17 @@ void graphics_report(char *out, size_t capacity)
     /* Kept in the report for the same reason the loader keeps two tables: one number is "a driver in
      * this tree binds this id", the other is "we know what this chip is called".  Collapsing them into
      * one big rule count would let a name read like support. */
+    {
+        /* Where the work has to go through on this generation, and what this build does and does not do
+         * about it.  Printed beside the numbers rather than in prose somewhere else, because the state of
+         * the coprocessor is the thing a reader needs in order to agree or argue with the next step. */
+        const struct gpu_module_state *gsp = gpu_module_state();
+        if (gsp && gsp->bound) {
+            put(&w, "GSP path: the management processor's registers above were read, never written; booting "
+                    "work through it needs the vendor firmware image, which this OS neither carries nor "
+                    "downloads, so a card whose GSP is in reset is a card this build cannot give work to.\n");
+        }
+    }
     put(&w, "Tables: ");
     put_number(&w, (unsigned)gpu_match_id_total());
     put(&w, " id rules bind a driver; ");

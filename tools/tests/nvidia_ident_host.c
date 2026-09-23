@@ -30,12 +30,34 @@
  * zero to mean "row past the end of the table" instead of meaning "the fixture does not model that far". */
 #define REG_WORDS 0x34000
 static u32 registers[REG_WORDS];
+/* The GSP block sits at 0x110000 and beyond, past the aperture this fixture models, and extending the array
+ * a megabyte to reach it would silently turn "the fixture does not model that far" (an all-ones read, a
+ * block that is not there) into "the block answered zero" (a coprocessor held in reset).  So the five
+ * registers the driver reads are modelled where they are read, the way the window's registers already are,
+ * and their default is the answer an unmodelled aperture gives. */
+static u32 gsp_regs[5];           /* MAILBOX0, MAILBOX1, ENGINE, IRQSTAT, FAULT SRCSTAT */
+static u32 *gsp_slot(u32 offset)
+{
+    switch (offset) {
+    case NV_PGSP_FALCON_MAILBOX0: return &gsp_regs[0];
+    case NV_PGSP_FALCON_MAILBOX1: return &gsp_regs[1];
+    case NV_PGSP_FALCON_ENGINE: return &gsp_regs[2];
+    case NV_PGSP_FALCON_IRQSTAT: return &gsp_regs[3];
+    case NV_PGSP_RISCV_FAULT_SRCSTAT: return &gsp_regs[4];
+    default: return 0;
+    }
+}
 static int checks;                       /* assertions run, so the summary line counts rather than claims */
 static int stores;                       /* every write32 the module attempted: must stay 0 */
 static int maps;
 static int reads_served;                 /* every read the module issued, so its count can be matched */
 static u64 mapped_physical;
-static const char *logs[24];
+/* One slot per line the module may log, and the module logs three per init now - identity, the doorbell
+ * when its page is live, and the coprocessor - across more scenarios than the array first held.  A fixture
+ * that overflows its own log buffer crashes in the middle of a passing line, which is a worse way to learn
+ * about a change than a compile error. */
+#define LOG_SLOTS 64
+static const char *logs[LOG_SLOTS];
 static int log_count;
 
 static int str_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
@@ -55,9 +77,10 @@ static int has(const char *haystack, const char *needle)
 /* ------------------------------------------------------------------ the fake kernel ---- */
 static void fake_log(const char *line)
 {
+    if (log_count >= LOG_SLOTS) { printf("  note: log fixture full\n"); return; }
     /* The kernel copies a log line into its own buffer; the harness keeps a private copy so a
        `static char text[]` inside the module cannot be rewritten by a later scenario. */
-    static char pool[24][256];
+    static char pool[LOG_SLOTS][256];
     if (log_count >= 24) return;
     char *slot = pool[log_count];
     int i = 0;
@@ -131,6 +154,7 @@ static u32 fake_read32(u64 handle, u32 offset)
         unstable_reads++;
         if (unstable_reads > 1) return unstable_value;
     }
+    { u32 *g = gsp_slot(offset); if (g) return *g; }
     if (offset / 4u >= REG_WORDS) return 0xffffffffu;
     return registers[offset / 4u];
 }
@@ -202,6 +226,7 @@ static void fixture_reset(struct fixture *f, u32 vendor, u32 device_id, u64 fram
     mapped_physical = 0;
     log_count = 0;
     for (unsigned i = 0; i < REG_WORDS; i++) registers[i] = 0;
+    for (unsigned i = 0; i < 5u; i++) gsp_regs[i] = 0xffffffffu;   /* unseeded: the block does not answer */
 }
 
 extern int scos_module_init(const struct scos_gpu_exports *exports,
@@ -218,6 +243,13 @@ static void check(int ok, const char *what)
 }
 
 static const char *first_log(void) { return log_count ? logs[0] : ""; }
+/* Any line, because the module logs the doorbell line only when that page is live: a scenario that pins the
+ * index breaks the moment an unrelated line appears or disappears, and the fact under test is the text. */
+static int any_log(const char *needle)
+{
+    for (int i = 0; i < log_count; i++) if (has(logs[i], needle)) return 1;
+    return 0;
+}
 
 int main(void)
 {
@@ -255,10 +287,10 @@ int main(void)
           "an architecture the published table does not name is reported as unnamed, not refused");
     check(has(text, "impl 0x8"), "IMPLEMENTATION is taken from 23:20, where NVIDIA documents it");
     check(has(text, "rev A.1"), "MAJOR_REVISION 7:4 and MINOR_REVISION 3:0 are read as separate fields");
-    check(has(text, "reads 13, writes 0"),
-          "the boot register twice, the class register once, the two inventory blocks' CFG words, and "
-          "four rows of each candidate table before the walk reached the end of it");
-    check(reads_served == 13, "the count it reports is the count it issued");
+    check(has(text, "reads 18, writes 0"),
+          "the boot register twice, the class register once, the two inventory blocks' CFG words, four rows of "
+          "each candidate table before the walk reached its end, and five reads of the GSP block");
+    check(reads_served == 18, "the count it reports is the count it issued");
     check(has(text, "window silent"), "and it says the submission window was silent");
     check(has(text, "feeds the console"),
           "the function whose BAR holds the firmware's surface says it feeds the console");
@@ -281,8 +313,9 @@ int main(void)
     check(verdict == 0 && has(text, "window class 0xc461=published"),
           "a class register answering with the published number is reported as matching it");
     check(has(text, "clock +2097us"), "and the clock in that page is measured, not assumed");
-    check(reads_served == 19 && has(text, "reads 19, writes 0"),
-          "two boot-register reads, one class read, six reads of the time pair, ten for the inventory, "
+    check(reads_served == 24 && has(text, "reads 24, writes 0"),
+          "two boot-register reads, one class read, six reads of the time pair, fifteen for the inventory and "
+          "the GSP block, "
           "and no more");
     check(stores == 0, "the doorbell page was read and never written");
     check(log_count >= 2 && has(logs[1], "doorbell at BAR0+0x810090 named, not written"),
@@ -324,7 +357,7 @@ int main(void)
     check(maps == 2 && window_physical == 0xe0100000ull + 0x810000ull && window_mapping_bytes == 0x20000ull,
           "two mappings: the register BAR as far as the kernel maps it, and the 128 KiB window page");
     snprintf(needle, sizeof needle, "reads %d, writes 0", reads_served);
-    check(reads_served == 19 && has(text, needle),
+    check(reads_served == 24 && has(text, needle),
           "and the reads it reports are the reads the device served, whichever handle they went through");
     check(stores == 0, "neither mapping was written to");
 
@@ -431,17 +464,18 @@ int main(void)
     check(!has(text, "window silent"),
           "the two words are not interchangeable, so the text must not blur them: the engine table may "
           "still be silent, which is a different fact about a different block");
-    check(reads_served == 12 && has(text, "reads 12, writes 0"),
+    check(reads_served == 17 && has(text, "reads 17, writes 0"),
           "and the failed mapping costs no read beyond the boot register and the inventory: the page it "
           "could not reach is never asked about");
-    check(maps == 2 && log_count == 1,
-          "the attempt is recorded, and no doorbell line is written about a page that was never read");
+    check(maps == 2 && log_count == 2,
+          "the attempt is recorded, and no doorbell line is written about a page that was never read - the "
+          "GSP line is there because that block answers through the register mapping, not the window");
 
     /* ---- 2. the same chip with the console behind another function. ---- */
     fixture_reset(&f, 0x10de, 0x2d83, 0);
     registers[0] = boot0;
     verdict = scos_module_init(&f.exports, &ops);
-    check(reads_served == 13, "a second run asks the chip again rather than reusing the last answer");
+    check(reads_served == 18, "a second run asks the chip again rather than reusing the last answer");
     check(verdict == 0 && has(ops->describe(ops->context), "not the console owner"),
           "with no firmware surface in its BARs it says another function feeds the console");
     check(stores == 0, "the second run still wrote nothing");
@@ -496,7 +530,7 @@ int main(void)
     text = ops->describe(ops->context);
     check(verdict == 0 && has(text, "not the console owner") && !has(text, "feeds the console"),
           "a rebind recomputes the inventory instead of repeating the previous one");
-    check(has(text, "reads 13, writes 0"), "and the read counter restarted, as a measurement must");
+    check(has(text, "reads 18, writes 0"), "and the read counter restarted, as a measurement must");
 
     /* ---- 1j. the format Blackwell's own header publishes: CFG is the block's self-report - version 2, how
      * many devices, how many rows each occupies, how many rows exist - and a device spans three dwords with
@@ -533,7 +567,7 @@ int main(void)
     check(has(text, " of 2 devices"), "and only the two devices the table named are counted");
     snprintf(needle, sizeof needle, "reads %d, writes 0", reads_served);
     check(has(text, needle), "the CFG word and every row are in the read count the module reports");
-    check(reads_served == 23,
+    check(reads_served == 28,
           "two boot-register reads, the class, six clock reads, one CFG word per block and the twelve rows "
           "the chip said exist: nothing is read past the end of the table it decoded");
     check(stores == 0, "the v2 table was read, never written");
@@ -613,6 +647,59 @@ int main(void)
     check(has(text, "engines are register blocks, not channels: no submission window answered"),
           "and a report that names engines without a window to ring them says what follows from that");
     check(!has(text, "clock +"), "a silent window is not reported as a ticking one");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    /* ---- 1n. the management processor this generation submits work through, read and reported.  Its
+     * registers are published for gb100 in absolute terms, unlike the copy-engine base, so this is the
+     * first block on the path that can be described without an interpretation step. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xffffffffu;
+    gsp_regs[2] = NV_PGSP_FALCON_ENGINE_RESET_DEASSERTED << 8;
+    gsp_regs[0] = 0x12345678u;
+    gsp_regs[1] = 0x9abcdef0u;
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "GSP engine out of reset, mailboxes 0x12345678/0x9abcdef0"),
+          "the coprocessor's own state is quoted from its reset status and its two mailboxes");
+    check(!has(text, "fatal error") && !has(text, "faulted"),
+          "and clean bits are reported as nothing, not as reassurance");
+    check(any_log("GSP block at BAR0+0x110000 read, nothing written"),
+          "the log carries the same fact for anyone reading a serial capture instead of a panel");
+    check(any_log("out of reset, so a firmware handoff has a running processor to speak to"),
+          "and says what that makes possible without claiming anything was submitted");
+    check(stores == 0, "the GSP block was read and not written: no handoff was attempted");
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xffffffffu;
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(has(text, "GSP block at 0x110000 unreachable (engine reads 0xffffffff)"),
+          "a block that answers nothing is reported as unreachable, and an absent register file is not "
+          "silently read as a coprocessor sitting in reset at address zero");
+    check(any_log("the block does not answer, so there is nothing to hand work to yet"),
+          "and the log says the path stops there, rather than going on to plan around it");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    /* ---- 1o. a fatal error and a faulted containment region have to reach the report: a driver that
+     * reads a complaining coprocessor and prints a neutral sentence is the same lie in better words. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xffffffffu;
+    gsp_regs[2] = NV_PGSP_FALCON_ENGINE_RESET_ASSERTED << 8;
+    gsp_regs[3] = 1u << 24;
+    gsp_regs[4] = 1u;
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(has(text, "GSP engine in reset") && has(text, "fatal error flagged") &&
+          has(text, "global memory faulted"),
+          "a held-in-reset processor with its fatal bit set and containment tripped is reported as such");
+    check(any_log("held in reset, so starting it is the first thing any GSP path has to do"),
+          "and the log names the next step the state implies, no more of it than that");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
 
