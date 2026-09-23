@@ -66,6 +66,17 @@ make                       # same code, clean tree: the stamp flips to <that com
 make dist && git add -f dist/scos.img && git commit -m "dist: build record for <commit>"
 ```
 
+Because of that pattern the record legitimately names a commit *behind* HEAD, which is also what a
+forgotten `make dist` looks like from the outside.  The two are told apart mechanically:
+`tools/check_delivery.py`, run as the last step of `make dist`, reads the record, then reads the packed
+bytes back out of the image's own FAT32 ESP and hashes them - `KERNEL.ELF` and every `.MOD` - so a record
+refreshed without repacking (or the reverse) fails.  It also refuses an uncommitted tree state, a commit
+the repository does not contain, and any commit that touched `kernel/`, `boot/`, `drivers/`,
+`tools/makedisk.py`, the table generator or the Makefile since the record was made - while docs, tests and
+host-side tools may move freely without invalidating an image.  `tools/tests/test_delivery.py` breaks each
+of those states on a scratch copy to prove the check fires.  A stick, rather than a repository, is dated by
+`tools/verify-stick.py`, which reads the same record from the device without mounting or booting it.
+
 The second commit changes no source, so its kernel still carries the first commit's id — which is the
 commit that contains the code being judged. `dist/scos.img.sha256` is written as
 `<hash>  dist/scos.img` by `sha256sum` from the repository root, the format `sha256sum -c` expects.

@@ -99,6 +99,38 @@ def directory(blob):
     return entries
 
 
+def read_named_file(path, wanted_stem, wanted_ext):
+    """Bytes of one file from \\SCOS, so a caller can hash what the disk actually holds.
+
+    The record beside an image says what was packed; reading the packed bytes back out of the FAT is the
+    only way to find out whether the two still agree.  Returns None when the name is absent, which is a
+    fact a caller should have to handle rather than an exception that hides it.
+    """
+    handle = open(path, 'rb')
+    try:
+        def read(offset, count):
+            handle.seek(offset)
+            return handle.read(count)
+
+        found = find_fat32_boot_sector(read)
+        if not found:
+            raise ValueError('no FAT32 boot sector in the first %d MiB' % (SCAN_LIMIT // (1024 * 1024)))
+        base, sector = found
+        bpb = parse_bpb(sector)
+        scos = next((e for e in directory(read_cluster_chain(read, base, bpb, bpb['root_cluster']))
+                     if e['stem'] == 'SCOS' and e['directory']), None)
+        if not scos:
+            raise ValueError('the ESP holds no \\SCOS directory')
+        blob = read_cluster_chain(read, base, bpb, scos['cluster'])
+        entry = next((e for e in directory(blob) if e['stem'] == wanted_stem and e['ext'] == wanted_ext), None)
+        if not entry:
+            return None
+        offset = cluster_offset(read, base, bpb, entry['cluster'])
+        return read(offset, entry['size'])[:entry['size']]
+    finally:
+        handle.close()
+
+
 def read_record(path):
     """Return (build record text, file listing of \\SCOS) or raise with the reason it could not be had."""
     handle = open(path, 'rb')

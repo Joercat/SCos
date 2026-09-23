@@ -41,6 +41,10 @@ dist: all
 	cp $(BUILD)/scos.img dist/scos.img
 	cp $(BUILD)/build.json dist/scos.img.build.json
 	sha256sum dist/scos.img > dist/scos.img.sha256
+# The three files are only a delivery if they agree with each other and with the packed bytes, so the last
+# thing `make dist` does is read the record back out of the image it just wrote.  A delivery that drifted
+# fails here rather than on someone's machine a boot cycle later.
+	python3 tools/check_delivery.py
 .PHONY: dist
 $(BUILD):
 	mkdir -p $@
