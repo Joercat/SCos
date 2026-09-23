@@ -241,6 +241,19 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
             # inventory - are on this panel and not only one command away, because this panel is what gets
             # pasted when a machine is being diagnosed.
             assert 'Engine: scratch module: reads nothing, offers no engine' in panel, panel[-1200:]
+            # `Device access: none' on its own was read as "nobody has touched my card" on the one machine
+            # where a module had read twenty-odd registers of it.  The line has to name whose access is
+            # absent, and it is long enough to have been clipped before the wrap: both halves of that are
+            # checked here, in the panel string a user pastes.
+            line = [l for l in panel.splitlines() if l.startswith('Device access')]
+            assert line, 'the panel has no Device access line at all: ' + panel[-1200:]
+            # The bare sentence `Device access: none' was read as "nobody has touched my card" on the one
+            # machine where a module had read twenty-odd registers of it.  Whichever branch a given
+            # configuration takes, the line must say whose access is absent or must not claim none.
+            for l in line:
+                if 'none' in l:
+                    assert 'by the kernel' in l, \
+                        'a Device access line that says only "none" hides who read the chip: ' + l
             g.call('gpu_report', g.scratch, 4096)
             report = g.string(g.scratch, 4096)
             assert 'SCos port: driver module bound for this family reads the chip and describes it' \

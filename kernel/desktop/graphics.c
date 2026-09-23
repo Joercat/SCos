@@ -195,9 +195,23 @@ void graphics_report(char *out, size_t capacity)
              * machine, which is exactly how a chip ends up unread by anybody while the screen claims
              * someone is in charge of it.  The two cases now say which one it is. */
             const struct boot_handoff *acc = kernel_boot_handoff();
-            if (acc && acc->module_state == 1)
-                put(&w, "none (a driver module is staged for this function)\n");
-            else
+            if (acc && acc->module_state == 1) {
+                /* "Device access: none" used to be the whole sentence, and on a machine whose driver
+                 * module had in fact read twenty-odd registers of that chip it was read as "nobody has
+                 * touched my card".  It is the kernel that stayed out, not everybody: the module reports
+                 * its own reads a few lines above, and this line has to say whose access is absent. */
+                const struct gpu_module_state *ms = gpu_module_state();
+                put(&w, "none by the kernel");
+                if (ms && ms->present) {
+                    put(&w, " - the driver module ");
+                    put(&w, ms->name);
+                    put(&w, " reads this chip itself and quotes what it found above, so the registers were "
+                             "read; they were just not read by the code that draws this panel");
+                } else
+                    put(&w, " (a driver module is staged for this function, but it is not resident, so "
+                            "nobody has read it)");
+                put(&w, "\n");
+            } else
                 put(&w, "none (no BAR0 the kernel could read, and the store staged no module)\n");
         }
     }

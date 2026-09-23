@@ -231,3 +231,12 @@ end instead of zero, which made every caller count one empty row and inflate eve
 The consequence for this machine: the GPU notice is no longer sized to a byte budget that forced a short
 sentence. Its field is 512 bytes, `_Static_assert` checks the sentence against that, and the whole
 explanation - including what to run and what each answer would mean - arrives and wraps.
+
+One line of the `graphics' panel changed in the same stroke, for the same reason and by the same mechanism.
+`Device access: none (a driver module is staged for this function)' was accurate about the kernel and read as
+an accusation about the card, on the machine whose module had read twenty-odd registers of it: the line now
+names who stayed out, quotes the module by name, and points at the module's own counts above, arriving as one
+240-character sentence that would previously have lost its ending to three dots. `test_nvidia_ident.py` holds
+the invariant for whatever a configuration produces - a `Device access` line saying "none" has to say "none by
+the kernel" - because QEMU's own adapters take the branch where the kernel *did* read the block, and the state
+being described here is a Blackwell function under a module, which no guest on this host can present.
