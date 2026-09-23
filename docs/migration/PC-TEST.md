@@ -149,7 +149,22 @@ Type `version` in the terminal, or read the first lines of `graphics`. Both now
 name the commit the kernel was compiled from, the branch's tree state and the UTC
 build time - and `\SCOS\BUILD.TXT` on the ESP carries the same record plus the
 sha256 of the kernel and of every driver module, so a stick can be dated from
-another OS without booting it. If `graphics` does not print
+another OS without booting it. `tools/verify-stick.py` reads that record off a
+device or a file and compares it with the repository's own copy:
+
+```text
+python3 tools/verify-stick.py /dev/sdX --against dist/scos.img.build.json
+  commit      : 1db75411364f
+  built (UTC) : 2026-09-23T03:48:46Z
+  files on \SCOS  : ATI.MOD (13536 B), BUILD.TXT (580 B), ...
+MATCH: the disk record and the repository record are the same build
+```
+
+It opens the path read-only and writes nothing. `MISMATCH` means the stick holds a
+different build than the one being discussed, which is worth ten minutes before a
+boot cycle: a panel line that a build cannot print any more (a sentence deleted from
+its source) is proof the machine ran something else, and no conclusion about a
+feature should be drawn from it. If `graphics` does not print
 `Build: <commit> clean, <date>`, the machine is not running the build under
 discussion, and nothing about features should be concluded from it. See
 [BUILD-PROVENANCE.md](BUILD-PROVENANCE.md).
