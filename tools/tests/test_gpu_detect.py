@@ -71,9 +71,12 @@ def test_registry_naming_header():
     print(r.stdout.strip())
     reg = (ROOT / 'kernel/drivers/gpu/gpu_ids_registry.h').read_text()
     drv = (ROOT / 'kernel/drivers/gpu/gpu_ids.h').read_text()
-    # A naming row for the machine this work was asked for, and the invariant that the two tables
-    # never overlap: an id bound by a driver must not also be filed as "known, nothing more".
-    assert 'GB207 [GeForce RTX 5050] (Blackwell)' in reg, 'the registry table lost the RTX 5050 row'
+    # The invariant the two tables are built around: an id bound by a driver must not also be filed as
+    # "known, nothing more".  The machine this work was asked for - a GeForce RTX 5050 - is the case that
+    # moved: it used to be named by the registry alone, and is now a row of the binding table with a
+    # module behind it (drivers/gpu/nvidia), so it must be in gpu_ids.h and absent from the registry.
+    assert 'GB207 [GeForce RTX 5050]' in drv, 'the binding table lost the RTX 5050 row'
+    assert '0x2d83' not in reg, 'an id that binds a driver must not also be filed as naming-only'
     ROW = r'\{0x([0-9a-f]{1,4}), 0x([0-9a-f]{1,4}), "[^"]+"\}'
     reg_ids = {tuple(int(x, 16) for x in m) for m in re.findall(ROW, reg)}
     # Driver rows are the ones whose provenance comment names an upstream file, not the registry.
@@ -215,10 +218,12 @@ def test_qemu_emulated_adapters():
         # headers: it is the only place where a reader can see that most of the table is naming.
         tables = next(l for l in lines if 'id rules bind a driver' in l)
         counts = [int(x) for x in re.findall(r'(\d+)', tables.split('tables:', 1)[1])]
-                # 1020 = the 1019 ids read out of the pinned upstream tables plus the one hand-authored Cirrus
-        # row; 1296 is the naming table, which binds no driver.  Both numbers are printed by the boot
-        # itself, so this checks the shipped image, not a rebuild of the header.
-        assert counts[:2] == [1020, 1296], (counts, tables)
+        # 1039 = the 1019 ids read out of the pinned upstream tables, the one hand-authored Cirrus row,
+        # and the 19 Blackwell rows SCos added inside the nvidia family.  1277 is the naming table, which
+        # binds no driver.  It read 1296 before those rows existed: exactly 19 ids moved out of it,
+        # because a chip a driver binds is not also filed as "known, nothing more".  Both numbers come
+        # from the boot itself, so this checks the shipped image rather than a rebuilt header.
+        assert counts[:2] == [1039, 1277], (counts, tables)
         assert unrecorded == 0, summary
         writes = next(l for l in lines if 'scanout owner' in l)
         assert '0 PCI config write(s) issued' in writes, writes

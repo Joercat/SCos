@@ -123,7 +123,12 @@ def test_engine_paints_the_console():
         panel = g.string(g.scratch, 4096)
         assert 'driver module cirrus (family cirrus) loaded from storage and verified by device ' \
                'readback, 225/225 pixels; used for solid output rectangles' in panel, panel[-1800:]
-        assert 'the other families\' 13536 B were never read' in panel, panel[-1800:]
+        # Three files are on the disk now, and the two that are not Cirrus stay unopened: ati.mod is
+        # 13536 B and nvidia.mod is 6472 B, so 20008 B were never read on this boot.  That the NVIDIA
+        # file is *not* opened for a Cirrus machine is the per-family loading rule, and it is measured
+        # here rather than asserted in a comment.
+        assert 'the other families\' 20008 B were never read' in panel, panel[-1800:]
+        assert 'of 3 module file(s) on the disk' in panel, panel[-1800:]
 
         # --- the compositor's whole-screen repaint goes through the card --------------------------
         engine_before = g.value('engine_work_pixels')

@@ -86,7 +86,8 @@ by construction and then asserted at run time:
 
 1. **Table freshness** — `gen_gpu_tables.py --check` re-extracts from the pinned Haiku
    checkout and byte-compares: `PASS: ... matches a fresh extraction from 7be0fef07df0
-   (1020 device IDs across 16 families, one of them hand-authored: see
+   (1039 device IDs across 16 families - one whole record hand-authored, `cirrus', plus 19 Blackwell
+   id rows SCos added inside the generated `nvidia' family, so the count is not 1019+1 any more: see
    `GPU-DRIVER-MODULES.md`)`. A hand-edited or stale table fails the suite.
 2. **Host harness** — the three shipped `gpu_*.c` units are compiled unchanged for the
    host and run against a simulated bus. It derives its cases from the tables instead of
@@ -108,7 +109,7 @@ by construction and then asserted at run time:
    gpu:   chip=RAGE 128 PRO GL engine=none, CPU compositor
    gpu: PCI 0:4.0 1013:b8 sub=0 matched=none
    gpu: PCI 0:5.0 1af4:1050 sub=0 matched=none
-   gpu: 4 display function(s), 1020 ID rule(s) in 16 family record(s), 0 without a port record
+   gpu: 4 display function(s), 1039 ID rule(s) in 16 family record(s), 0 without a port record
    gpu: scanout owner identified by BAR address, 0 PCI config write(s) issued
    
    A few lines later the same boot loads that family's driver from disk, and says so in the
@@ -161,9 +162,10 @@ Scanout: firmware GOP, PAT write-combining
 GPU acceleration: unavailable (no hardware backend linked)
 Display: 1024x768
 GPU detection (exact device matching; no BAR sizing, no modeset)
-Families named from upstream tables: 16, device ID rules: 1020
-(one record, `cirrus`, is hand-authored for SCos' own module rather than read out of an upstream driver)
-Naming rows (see §9, `gpu_ids_registry.h`): 1296 more ids name a chip and bind nothing
+Families named from upstream tables: 16, device ID rules: 1039
+(one record, `cirrus`, is hand-authored for SCos' own module rather than read out of an upstream driver,
+and 19 further rows were added inside the generated `nvidia' family so Blackwell binds a driver at all)
+Naming rows (see §9, `gpu_ids_registry.h`): 1277 more ids name a chip and bind nothing
 - Intel 8086:4c8b at 0:2.0 (scanout)
   match: none - no upstream table binds 8086:4c8b; treated as an unmatched display adapter
 Detection is not driver support: no BAR sizing, GPU reset or modeset was performed (config writes during detection: 0).
@@ -228,17 +230,35 @@ that no driver-authorising code reads.
 
 | | rows | meaning |
 |---|---|---|
-| `gpu_ids.h` | 1020, in 16 family records | a driver in this tree binds that id, plus one hand-authored record (`cirrus`) that its own module binds |
-| `gpu_ids_registry.h` | 1296 (nvidia 823, radeon_hd 338, intel_extreme 135) | this id belongs to this chip, and nothing is claimed about driving it |
+| `gpu_ids.h` | 1039, in 16 family records | a driver in this tree binds that id - including one hand-authored record (`cirrus`) that its own module binds, and 19 Blackwell rows added inside the generated `nvidia` array so `drivers/gpu/nvidia` can be offered for them |
+| `gpu_ids_registry.h` | 1277 (nvidia 804, radeon_hd 338, intel_extreme 135) | this id belongs to this chip, and nothing is claimed about driving it |
 
 The log keeps them apart instead of reporting one big number:
 
 ```
-gpu: 4 display function(s), 1020 ID rule(s) in 16 family record(s), 0 without a port record
-gpu: tables: 1020 id rules bind a driver; 1296 more ids name a chip that nothing in this tree covers
+gpu: 4 display function(s), 1039 ID rule(s) in 16 family record(s), 0 without a port record
+gpu: tables: 1039 id rules bind a driver; 1277 more ids name a chip that nothing in this tree covers
 gpu: PCI 0:1.0 10de:2d83 sub=0 matched=nvidia
 gpu:   chip=GB207 [GeForce RTX 5050] (Blackwell) engine=none at detection, CPU compositor
 gpu:   10de:2d83 is named by the PCI id registry only; no driver table in this tree binds it, so
+```
+
+That last line is gone in the build that carries `drivers/gpu/nvidia`: the same id is now a row of the
+binding table, so the boot offers the module, the module reads `NV_PMC_BOOT_0` through the kernel's
+mapping, and the report prints what the chip answered plus the negotiated link.  What is *measured* here is
+every part of that except the number the chip answers with, because the building contains no Blackwell
+silicon: `test_nvidia_ident.py` packs a stand-in module of exactly the identification shape for the family
+QEMU can emulate, boots it, and reads the same lines from the serial log, the graphics panel and the report.
+On the machine with the real card, the register line is the measurement still outstanding - and the reason
+the driver reports a number instead of asserting a family is that nobody here has read that chip yet:
+
+```
+gpu:   chip=GB207 [GeForce RTX 5050] engine=none at detection, CPU compositor
+gpu: module nvidia (4392 B code+data, 240 B zeroed, 103 reloc, 19 id rule(s)) validated
+gpu: nvidia: 10de:2d83 at 0:1.0 identified from the chip's own boot register: NV_PMC_BOOT_0=...
+gpu: module bound for identification: it offers no rectangle operation, ...
+gpu: 0:1.0 module GB207 [GeForce RTX 5050] identified this chip; it offers no engine, so the CPU
+gpu: a driver read the chip and reported it; nothing was asked of the chip, so rendering stays on the CPU
 ```
 
 ### What enforces the difference
@@ -252,8 +272,11 @@ gpu:   10de:2d83 is named by the PCI id registry only; no driver table in this t
   it could claim the chip.
 * The UEFI stub asks the same question before it reads a file, so firmware does not hand the kernel
   bytes for a generation nothing can drive.
-* `gpu_detect_sim.c` asserts both sides of that boundary.  Five named rows - `10de:2d83` RTX 5050,
-  `10de:2b85` RTX 5090, `10de:1b06` GTX 1080 Ti, `1002:744c` RX 7900 XTX, `8086:56a1` Arc A750 - must
+* `gpu_detect_sim.c` asserts both sides of that boundary, including the side that moved: `10de:2d83`
+  and `10de:2b85` used to be naming rows and are now bound rows, so the harness checks that they name
+  the `nvidia` family, mark the device as module-eligible, and that the kernel's own register probe then
+  stands down for that function.  The rows that stay named - `10de:1b06` GTX 1080 Ti, `1002:744c` RX
+  7900 XTX, `8086:56a1` Arc A750 - must
   come back matched by family, marked `named_only`, carrying the registry's own name, unbound and
   module-ineligible; every row of every driver table must come back *not* marked; and the negative cases
   re-derive themselves from the tables, so a snapshot refresh cannot leave a stale "this id is unknown"

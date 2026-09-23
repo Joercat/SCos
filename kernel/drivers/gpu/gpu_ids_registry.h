@@ -156,7 +156,7 @@ static const struct gpu_pci_id gpu_registry_intel_extreme[] = {
     {0x8086, 0xfd80, "Wildcat Lake [Intel Graphics]"}, /* pci.ids */
 };
 
-/* nvidia: 823 display ids named by the registry and bound by no
+/* nvidia: 804 display ids named by the registry and bound by no
    driver table in the tree - known chips with nothing ported for them. */
 static const struct gpu_pci_id gpu_registry_nvidia[] = {
     {0x10de, 0x18, "NV3 [Riva 128]"}, /* pci.ids */
@@ -963,25 +963,6 @@ static const struct gpu_pci_id gpu_registry_nvidia[] = {
     {0x10de, 0x28a0, "AD107M [GeForce RTX 4060 Max-Q / Mobile] (Ada)"}, /* pci.ids */
     {0x10de, 0x28a1, "AD107M [GeForce RTX 4050 Max-Q / Mobile] (Ada)"}, /* pci.ids */
     {0x10de, 0x28a3, "AD107M [GeForce RTX 3050 A Laptop GPU] (Ada)"}, /* pci.ids */
-    {0x10de, 0x2b85, "GB202 [GeForce RTX 5090] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2b87, "GB202 [GeForce RTX 5090 D] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2b8c, "GB202 [GeForce RTX 5090 D V2] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2c02, "GB203 [GeForce RTX 5080] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2c05, "GB203 [GeForce RTX 5070 Ti] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2c09, "GB203 [GeForce RTX 5070] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2c18, "GB203M / GN22 [GeForce RTX 5090 Max-Q / Mobile] (Blackwell"}, /* pci.ids */
-    {0x10de, 0x2c19, "GB203M / GN22 [GeForce RTX 5080 Max-Q / Mobile] (Blackwell"}, /* pci.ids */
-    {0x10de, 0x2c58, "GB203M / GN22-X11 [GeForce RTX 5090 Max-Q / Mobile] (Black"}, /* pci.ids */
-    {0x10de, 0x2c59, "GB203M / GN22-X9 [GeForce RTX 5080 Max-Q / Mobile] (Blackw"}, /* pci.ids */
-    {0x10de, 0x2d04, "GB206 [GeForce RTX 5060 Ti] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2d05, "GB206 [GeForce RTX 5060] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2d18, "GB206M [GeForce RTX 5070 Max-Q / Mobile] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2d19, "GB206M [GeForce RTX 5060 Max-Q / Mobile] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2d83, "GB207 [GeForce RTX 5050] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2d98, "GB207M [GeForce RTX 5050 Max-Q / Mobile] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2f04, "GB205 [GeForce RTX 5070] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2f06, "GB205 [GeForce RTX 5060] (Blackwell)"}, /* pci.ids */
-    {0x10de, 0x2f18, "GB205M [GeForce RTX 5070 Ti Mobile] (Blackwell)"}, /* pci.ids */
 };
 
 /* radeon_hd: 338 display ids named by the registry and bound by no
@@ -1335,11 +1316,11 @@ struct gpu_registry_table {
 
 static const struct gpu_registry_table gpu_registry_table[] = {
     {"intel_extreme", gpu_registry_intel_extreme, 135u},
-    {"nvidia", gpu_registry_nvidia, 823u},
+    {"nvidia", gpu_registry_nvidia, 804u},
     {"radeon_hd", gpu_registry_radeon_hd, 338u},
 };
 
 #define GPU_REGISTRY_FAMILIES 3u
-#define GPU_REGISTRY_ID_TOTAL 1296u
+#define GPU_REGISTRY_ID_TOTAL 1277u
 
 #endif

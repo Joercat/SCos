@@ -304,7 +304,10 @@ def emit_registry(taken):
     out.append('};\n\n')
     out.append(f'#define GPU_REGISTRY_FAMILIES {len(tables)}u\n')
     out.append(f'#define GPU_REGISTRY_ID_TOTAL {total}u\n\n#endif\n')
-    return ''.join(out), total + 1
+    # The printed number is the number written: a summary one greater than the header it just produced is
+    # how a table's count stops being trustworthy, and `--registry-only' is what a person reads after a
+    # refresh, so the two must agree exactly.
+    return ''.join(out), total
 
 
 def run_registry(out_path, check):
@@ -564,6 +567,11 @@ def cstr(text):
 # invariant holds on any machine.
 LOCAL_FAMILY = 'cirrus'
 
+# Wording of the note a family record carries when SCos added rows to its upstream id list.  Distinct
+# from the local *record* note on purpose: one says rows were added to a generated family, the other
+# says the whole record is local, and the test harness counts the two separately.
+NOTE_NEW = 'id rows added by SCos (Blackwell), not from the upstream table'
+
 LOCAL_IDS_TEXT = '''/* The one local record, described above the generator's own provenance header: this family is
  * not read out of an upstream driver.  The id row is what the module claims and the loader
  * cross-checks; deleting it here stops drivers/gpu/cirrus from loading at all rather than leaving it
@@ -573,6 +581,43 @@ static const struct gpu_pci_id gpu_ids_cirrus[] = {
 };
 
 '''
+
+# A second kind of local content: hand-authored *rows inside a family the upstream table already owns*.
+# The record above had to be created from nothing because no upstream driver knows the CL-GD5446's
+# bitBLT; this one is different - the `nvidia` family record and its 249 ids come from Haiku's binding
+# table, and it stops before Blackwell, because that table was written while those chips were not out.
+# So only ids are added, not capabilities: every row below is a device the PCI ID Project names in
+# tools/research/pci.ids.display.txt, the same snapshot the registry is generated from, and the row moves
+# a chip from "named, nothing binds it" to "bound to drivers/gpu/nvidia", which reads that chip's own
+# boot register and offers no engine.  `run_registry' reads this header back to decide what the registry
+# may repeat (driver_pairs), so an id cannot end up in both tables, and --check-local below proves each
+# row is in the committed header exactly once.
+LOCAL_EXTRA_ROWS = {
+    'nvidia': ("""    /* Hand-authored by SCos, and the reason the count above is larger than the upstream family's:
+     * the Blackwell display ids the in-tree registry named while nothing bound them.  A row here is a
+     * matching rule that lets drivers/gpu/nvidia load for this chip and read NV_PMC_BOOT_0; it is not a
+     * claim that anything can be drawn, which is what the capability record below and gpu_ports.c say. */
+    {0x10DE, 0x2B85, "GB202 [GeForce RTX 5090]"},        /* Blackwell, identification only */
+    {0x10DE, 0x2B87, "GB202 [GeForce RTX 5090 D]"},
+    {0x10DE, 0x2B8C, "GB202 [GeForce RTX 5090 D V2]"},
+    {0x10DE, 0x2C02, "GB203 [GeForce RTX 5080]"},
+    {0x10DE, 0x2C05, "GB203 [GeForce RTX 5070 Ti]"},
+    {0x10DE, 0x2C09, "GB203 [GeForce RTX 5070]"},
+    {0x10DE, 0x2C18, "GB203M [GeForce RTX 5090 Max-Q / Mobile]"},
+    {0x10DE, 0x2C19, "GB203M [GeForce RTX 5080 Max-Q / Mobile]"},
+    {0x10DE, 0x2C58, "GB203M-X11 [GeForce RTX 5090 Max-Q / Mobile]"},
+    {0x10DE, 0x2C59, "GB203M-X9 [GeForce RTX 5080 Max-Q / Mobile]"},
+    {0x10DE, 0x2D04, "GB206 [GeForce RTX 5060 Ti]"},
+    {0x10DE, 0x2D05, "GB206 [GeForce RTX 5060]"},
+    {0x10DE, 0x2D18, "GB206M [GeForce RTX 5070 Max-Q / Mobile]"},
+    {0x10DE, 0x2D19, "GB206M [GeForce RTX 5060 Max-Q / Mobile]"},
+    {0x10DE, 0x2D83, "GB207 [GeForce RTX 5050]"},
+    {0x10DE, 0x2D98, "GB207M [GeForce RTX 5050 Max-Q / Mobile]"},
+    {0x10DE, 0x2F04, "GB205 [GeForce RTX 5070]"},
+    {0x10DE, 0x2F06, "GB205 [GeForce RTX 5060]"},
+    {0x10DE, 0x2F18, "GB205M [GeForce RTX 5070 Ti Mobile]"},
+""", 19),
+}
 
 LOCAL_RECORD_TEXT = '''    {
         .family = "cirrus", .primary_vendor = 0x1013,
@@ -595,7 +640,8 @@ LOCAL_RECORD_TEXT = '''    {
 # cursor, overlay, span, modeset and DPMS are 0.  `features` follows the same rule.
 
 LOCAL_COUNTS = ('/* GPU_MATCH_COUNT and GPU_ID_TOTAL include the hand-authored {family} record: {families} families, '
-                'and\n * {ids} exact ids that bind a driver ({upstream} from upstream tables plus the one local row). */\n')
+                'and\n * {ids} exact ids that bind a driver ({upstream} from upstream tables, the one local row, '
+                'and the\n * {extra} rows SCos added inside {extra_families} upstream family array). */\n')
 
 
 def check_local(path):
@@ -606,6 +652,15 @@ def check_local(path):
         problems.append('the local id array in the header does not match LOCAL_IDS_TEXT')
     if LOCAL_RECORD_TEXT not in text:
         problems.append('the local family record in the header does not match LOCAL_RECORD_TEXT')
+    for family, (rows_text, count) in LOCAL_EXTRA_ROWS.items():
+        if rows_text not in text:
+            problems.append(f'the hand-authored id rows for the {family} family are not in the header')
+        for vendor, device in re.findall(r'^    \{0x([0-9A-Fa-f]{1,4}), 0x([0-9A-Fa-f]{1,4}),',
+                                         rows_text, re.M):
+            hits = len(re.findall(r'^    \{0x%s, 0x%s,' % (vendor, device), text, re.M | re.I))
+            if hits != 1:
+                problems.append(f'id 0x{vendor}:0x{device} appears {hits} times in the header, '
+                                f'expected exactly once')
     if text.count('gpu_ids_cirrus[]') != 1:
         problems.append('gpu_ids_cirrus is defined %d times' % text.count('gpu_ids_cirrus[]'))
     families = text.count('        .family = ')
@@ -642,6 +697,7 @@ def emit(root, pin):
     ]
     total, rows = 0, []
     for family in FAMILIES:
+        extra_text, extra_rows = LOCAL_EXTRA_ROWS.get(family, ('', 0))
         if family in SPEC:
             entries, collapsed = extract(root, family)
             ident = re.sub(r'\W', '_', family)
@@ -657,16 +713,21 @@ def emit(root, pin):
                 short = where.split('/')[-1] if '/' in where else where
                 out.append(f'    {{{hex(vendor_id)}, {hex(device)}, '
                            f'{cstr(sanitize(name))}}}, /* {short} */\n')
+            if extra_text:
+                out.append(extra_text)
             out.append('};\n\n')
-            total += len(entries)
+            total += len(entries) + extra_rows
             notes = (f'{len(collapsed)} duplicate rows collapsed' if collapsed else None)
+            if extra_rows:
+                notes = ((notes + '; ' if notes else '') +
+                         f'{extra_rows} {NOTE_NEW}')
         else:
             ident = family
             entries, notes, source, cls, vendor = [], None, CLASS_ONLY[family], \
                 '0xff, 0xff, 0xff', 0
         bits, detail = measure(root, family, probe)
         rows.append(dict(family=family, ident=re.sub(r'\W', '_', family),
-                         vendor=vendor, cls=cls, count=len(entries),
+                         vendor=vendor, cls=cls, count=len(entries) + extra_rows,
                          bits=bits, detail=detail, source=source, note=notes))
     out.append(LOCAL_IDS_TEXT)
     out.append('/* Per-family match records.  `.upstream` is what the family\'s hook table\n'
@@ -699,7 +760,9 @@ def emit(root, pin):
     out.append(LOCAL_RECORD_TEXT)
     out.append('};\n\n')
     out.append(LOCAL_COUNTS.format(family=LOCAL_FAMILY, families=len(rows) + 1, ids=total + 1,
-                                   upstream=total))
+                                   upstream=total - sum(c for _, c in LOCAL_EXTRA_ROWS.values()),
+                                   extra=sum(c for _, c in LOCAL_EXTRA_ROWS.values()),
+                                   extra_families=len(LOCAL_EXTRA_ROWS)))
     out.append(f'#define GPU_MATCH_COUNT {len(rows) + 1}u\n')
     out.append(f'#define GPU_ID_TOTAL {total + 1}u\n')
     out.append('\n#endif\n')

@@ -60,6 +60,7 @@ struct module_record {
     const struct scos_gpu_engine_ops *ops;
     int self_test_pixels, self_test_matches;
     struct scos_gpu_surface front, back;
+    int identification_only;      /* bound module exposes no engine operation: inventory only */
     u64 test_virtual;            /* CPU-visible start of the surface the engine writes */
     u32 test_stride, test_width, test_height;
 };
@@ -388,10 +389,26 @@ static int relocate(u64 base, const struct scos_gpu_module_header *header)
  * whether the port is right.  Any damage is repaired by the CPU immediately, before this function
  * returns, because the LFB is not the desktop's source of truth - `screen.px` is, and the next flip
  * repaints whatever the test touched. */
+/* 0 = refused: the module cannot be used for drawing and is detached.  1 = the engine painted and read
+ * back what it was asked to.  2 = bound, and this module deliberately exposes no engine operation: see
+ * the comment on the empty-ops case below. */
 static int engine_self_test(void)
 {
     const struct scos_gpu_engine_ops *ops = record.ops;
-    if (!ops || !ops->fill) return 0;
+    record.identification_only = 0;
+    if (!ops) return 0;
+    if (!ops->fill) {
+        /* A driver that reads the chip and offers no rectangle operation is still worth binding: it is
+         * the difference between "nothing in this tree knows this chip" and "the family was identified
+         * from the chip's own register block".  There is nothing to paint-verify in that case, and
+         * detaching the module would throw the inventory away with it, so the verdict is its own (2)
+         * rather than a failure.  No drawing path is affected either way: every one of them checks the
+         * operation pointer first, and this module leaves it null. */
+        record.identification_only = 1;
+        module_log("bound for identification: it offers no rectangle operation, so there is nothing to "
+                   "paint-verify and the CPU keeps compositing");
+        return 2;
+    }
     u32 width = record.test_width, height = record.test_height;
     if (!record.test_virtual) {
         module_log("this function has no CPU-readable frame buffer; leaving the engine unbound");
@@ -608,7 +625,8 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
         window_base = record.front.offset_bytes + window_offset;
         window_bytes = window_size;
     }
-    if (!engine_self_test()) {
+    int self_test_verdict = engine_self_test();
+    if (self_test_verdict == 0) {
         record.refusal = 16;
         record.ops = 0;
         klog(MODULE_LOG_PREFIX "self-test failed (%d/%d pixels); engine detached, CPU compositor "
@@ -628,8 +646,16 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
     record.bound = 1;
     device->bound = 1;
     device->module_ops = ops;
-    klog(MODULE_LOG_PREFIX "%s bound: engine verified in device memory (%d/%d pixels)",
-         record.name, record.self_test_matches, record.self_test_pixels);
+    if (self_test_verdict == 2) {
+        /* No readback number, because nothing was asked of the card that could be read back.  Printing
+         * "0/0 pixels" as a verification result would be the kind of confident nonsense this loader
+         * exists to refuse, and printing a real number here would be a lie. */
+        klog(MODULE_LOG_PREFIX "%s bound: it read the chip's own registers and describes them; no "
+             "engine was offered to verify", record.name);
+    } else {
+        klog(MODULE_LOG_PREFIX "%s bound: engine verified in device memory (%d/%d pixels)",
+             record.name, record.self_test_matches, record.self_test_pixels);
+    }
     return 0;
 }
 
@@ -638,6 +664,7 @@ const struct gpu_module_state *gpu_module_state(void)
     static struct gpu_module_state snapshot;
     snapshot.present = record.present;
     snapshot.bound = record.bound;
+    snapshot.identification_only = record.identification_only;
     for (unsigned i = 0; i < sizeof(snapshot.name); i++)
         snapshot.name[i] = i < sizeof(record.name) ? record.name[i] : 0;
     for (unsigned i = 0; i < sizeof(snapshot.family); i++)

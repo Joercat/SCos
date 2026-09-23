@@ -309,6 +309,20 @@ Four concrete, non-speculative observations:
    a per-component `component()` call per pixel otherwise. Both are honest CPU wins, not
    GPU rendering, and I list them so the trade is not oversold.
 
+5. **A modern card can at least be read, and now is.** Item 4 of §4 said the practical ceiling for a
+   Blackwell chip was identification, not acceleration, and called the copy classes out of reach.  The
+   classes are in fact published (`classes/dma-copy/clc*b5.h` and `classes/host/clc*6f.h` in
+   NVIDIA/open-gpu-doc, MIT), so the vocabulary of a submission is available; what is not published is the
+   register database for those generations and the bring-up that runs through the chip's system processor,
+   which is why `drivers/gpu/nvidia` ships as an identification driver and nothing more: it reads
+   `NV_PMC_BOOT_0` through the kernel's mapping, decodes the fields where NVIDIA documents them, reports
+   the negotiated PCIe link, writes no register, and offers no engine operation, so the CPU compositor is
+   unaffected by its presence - and that last clause is measured, not asserted: `tools/tests/
+   test_nvidia_ident.py` boots a stand-in module of the same shape on an emulated Cirrus function and reads
+   the log, the panel and the report, which show the CPU compositor still owning every pixel
+   (`pixels painted: 0 by the GPU's 2D engine, 17312532 by the CPU`).  See `GPU-DRIVER-MODULES.md` for the
+   numbers and for what has to be solved before a copy could be pushed on that hardware.
+
 ## 6. Browser: what it genuinely needs
 
 Checked rather than assumed:

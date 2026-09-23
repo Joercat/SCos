@@ -59,6 +59,20 @@ struct sim_device {
     uint32_t command;
 };
 
+/* A PCI Express capability, laid out the way PCI r3.0 describes it: the capability list is entered at
+ * 0x40, the first entry is id 0x10, and Link Status is the 16-bit register at +0x12 - which the kernel
+ * reads as the 32-bit word at +0x10, so the two fixtures below pack speed and width into that word the
+ * way the bus does.  Held beside the device list rather than inside it, so the many positional
+ * initializers above stay the shape they are. */
+static uint8_t sim_express[MAX_SIM];
+static uint32_t sim_lnksta[MAX_SIM];
+
+static void sim_set_link(int index, int express, uint32_t lnksta)
+{
+    sim_express[index] = (uint8_t)express;
+    sim_lnksta[index] = lnksta;
+}
+
 static struct sim_device sim[MAX_SIM];
 static int sim_count;
 
@@ -90,6 +104,7 @@ static void sim_add(struct sim_device d)
 static void sim_reset(void)
 {
     sim_count = 0;
+    for (unsigned i = 0; i < MAX_SIM; i++) { sim_express[i] = 0; sim_lnksta[i] = 0; }
 }
 
 uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t off)
@@ -105,10 +120,23 @@ uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t off)
         case 0x0c: return 0;                     /* header type 0, latency ignored */
         case 0x10: case 0x14: case 0x18: case 0x1c: case 0x20: case 0x24:
             return d->bar[(off - 0x10) / 4];
+        case 0x40: return sim_express[i] ? 0x10u : 0;    /* cap id 0x10, end of the list */
+        case 0x50: return sim_express[i] ? sim_lnksta[i] : 0;  /* Link Control / Link Status */
         default: return 0;
         }
     }
     return 0xffffffffu;                          /* nothing there: the real bus reads ~0 */
+}
+
+uint8_t pci_read8(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t off)
+{
+    for (int i = 0; i < sim_count; i++) {
+        const struct sim_device *d = &sim[i];
+        if (d->bus != bus || d->dev != dev || d->fn != fn) continue;
+        if (off == 0x34) return sim_express[i] ? 0x40 : 0;
+        return (uint8_t)(pci_read32(bus, dev, fn, (uint8_t)(off & 0xfc)) >> ((off & 3) * 8));
+    }
+    return 0xff;
 }
 
 int pci_find_class(uint8_t cls, uint8_t sub, uint8_t pi, uint8_t *b, uint8_t *d,
@@ -243,8 +271,10 @@ static const struct {
     uint16_t vendor, device;
     const char *family, *name;
 } named_rows[] = {
-    {0x10de, 0x2d83, "nvidia", "GB207 [GeForce RTX 5050] (Blackwell)"},
-    {0x10de, 0x2b85, "nvidia", "GB202 [GeForce RTX 5090] (Blackwell)"},
+    /* GeForce RTX 5050 (0x2d83) and 5090 (0x2b85) were here until drivers/gpu/nvidia existed: the
+     * Blackwell ids are now rows in the `nvidia` binding table, so they name a chip *and* select a
+     * module, and are checked as positive cases below instead.  This row and the two after it stay
+     * naming-only: no driver in this tree, and no SCos module, reads those chips. */
     {0x10de, 0x1b06, "nvidia", "GP102 [GeForce GTX 1080 Ti] (Pascal)"},
     {0x1002, 0x744c, "radeon_hd", "Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M]"},
     {0x8086, 0x56a1, "intel_extreme", "DG2 [Arc A750]"},
@@ -283,6 +313,37 @@ int main(void)
                          m->upstream.vsync == 0 && strstr(m->family, "cirrus") != 0;
         }
         expect(cirrus, "the hand-authored record is Cirrus, and claims only what its module does");
+    }
+    /* The other kind of local content: rows added *inside* an upstream family's array, which is how a
+     * chip moves from "named, nothing binds it" to "bound, and a module is offered for it".  Counted
+     * from the table itself, and checked against the module's own claim list, so the two cannot drift
+     * apart and a regeneration cannot drop the rows without this failing. */
+    {
+        const struct gpu_match *nvidia = NULL;
+        for (int f = 0; f < families; f++) {
+            const struct gpu_match *m = gpu_match_family(f);
+            if (m && strcmp(m->family, "nvidia") == 0) nvidia = m;
+        }
+        expect(nvidia && nvidia->note && strstr(nvidia->note, "id rows added by SCos"),
+               "the nvidia family record says its id list was extended by SCos, not upstream");
+        unsigned blackwell = 0;
+        if (nvidia)
+            for (unsigned k = 0; k < nvidia->id_count; k++)
+                if (nvidia->ids[k].name && strncmp(nvidia->ids[k].name, "GB2", 3) == 0 &&
+                    nvidia->ids[k].device >= 0x2b85 && nvidia->ids[k].device <= 0x2f18)
+                    blackwell++;
+        expect(blackwell == 19, "the 19 hand-authored rows are the Blackwell display ids");
+        if (nvidia) {
+            const struct gpu_pci_id *last = &nvidia->ids[nvidia->id_count - 1];
+            expect(last->device == 0x2f18, "the family's newest row is a Blackwell one, not an old one");
+        }
+        int found_5050 = 0;
+        if (nvidia)
+            for (unsigned k = 0; k < nvidia->id_count; k++)
+                if (nvidia->ids[k].vendor == 0x10de && nvidia->ids[k].device == 0x2d83)
+                    found_5050 = nvidia->ids[k].name &&
+                                 strcmp(nvidia->ids[k].name, "GB207 [GeForce RTX 5050]") == 0;
+        expect(found_5050, "10de:2d83 is bound by a row naming it GB207 [GeForce RTX 5050]");
     }
 
     /* One device per family, at both ends of that family's own table.  Feeding the
@@ -445,11 +506,43 @@ int main(void)
         expect(owner && owner->vendor == 0x10de && owner->device == 0x2d83,
                "a 64-bit BAR above 4 GiB still names the scanout owner");
         expect(owner && owner->bar[1] == high_half, "the upper config word is folded into the BAR");
-        expect(owner && owner->named_only, "the chip is named from the registry, not bound");
-        expect(owner && !gpu_module_eligible(owner), "no module is offered for a naming row");
+        /* This is the state the user's machine is in: the chip is bound to a family by a row SCos
+         * authored, and a module is offered for it, so the kernel's own register probe stands down and
+         * leaves the read to drivers/gpu/nvidia - mapping the same aperture twice to ask the same
+         * question twice would be worse than not asking. */
+        expect(owner && !owner->named_only, "the Blackwell id binds the nvidia family, not just a name");
+        expect(owner && owner->match && strcmp(owner->match->family, "nvidia") == 0,
+               "the binding names the family whose module is on the disk");
+        expect(owner && gpu_module_eligible(owner), "a bound id puts the nvidia module on the table");
+        /* The negotiated link, read out of the function's own capability: what a card can do is in the
+         * tables, what it is actually doing on this board is only in the silicon. */
+        /* Set after the run: registering devices resets the simulated bus, exactly as a real bus
+         * forgets nothing but is only queried when something asks.  The link registers are read by the
+         * report, not by detection, and that ordering is part of what this case pins down. */
+        run_with(pair, 2);
+        owner = gpu_scanout_device();
+        sim_set_link(0, 1, (4u << 16) | (16u << 20));    /* gen4 (16 GT/s per lane), 16 lanes */
+        unsigned generation = 0, lanes = 0;
+        expect(gpu_link_state(0, &generation, &lanes), "the capability is found and decoded");
+        expect(generation == 4 && lanes == 16, "gen4 x16 is what the two fields say");
+        expect(!gpu_link_state(1, &generation, &lanes), "a function with no Express cap reports none");
+        {
+            char text[4096];
+            gpu_report(text, sizeof(text));
+            expect(find_substring(text, "link: PCIe gen4 x16") != NULL,
+                   "the report prints the negotiated link for the card that has one");
+            expect(find_substring(text, "no PCI Express capability on this function") != NULL,
+                   "and says so plainly for the one that does not");
+        }
+        expect(owner && owner->reg_state == 0, "the kernel does not map a BAR the module was loaded for");
+        expect(sim_maps == 0, "no aperture was mapped by the kernel for either function here");
         sim_maps = 0;
         sim_mmio[0] = 0x2b0000a1u;
         sim_mmio[1] = 0x00000000u;
+        /* The same layout at an NVIDIA id that is *named* but bound by nobody - a family match with no
+         * module claim, which is the only shape left where the kernel's own probe is the reader.  That
+         * is where the register read and NVIDIA's documented field decode are verified. */
+        pair[0].device = 0x1b06;
         run_with(pair, 2);
         owner = gpu_scanout_device();
         expect(owner && owner->reg_state == 1, "the unclaimed function's BAR0 was read");
@@ -462,8 +555,10 @@ int main(void)
             gpu_report(text, sizeof(text));
             expect(find_substring(text, "device registers: BAR0 at 0x00000000e0100000 read: first dword 0x2b0000a1") != NULL,
                    "the report quotes the address and the value that were read");
-            expect(find_substring(text, "chip id 0x000002b0, implementation 0x00000000, revision 0x0000000a") != NULL,
-                   "the NVIDIA fields are decoded where nvkm reads them: chip [31:20], impl [11:8], rev [7:4]");
+            expect(find_substring(text, "chip selector 0x000002b0, architecture 0x0000000b, "
+                                        "implementation 0x00000000, revision A.1") != NULL,
+                   "the NVIDIA fields are decoded where NVIDIA documents them: selector [31:20], "
+                   "architecture [28:24], implementation [23:20], revision [7:4].[3:0]");
         }
         /* A device that answers all-ones is a dead function, not a chip id: report it as unreachable. */
         sim_mmio[0] = 0xffffffffu;

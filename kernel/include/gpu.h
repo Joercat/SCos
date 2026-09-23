@@ -106,7 +106,8 @@ int gpu_port_record_count(void);
  * resident and proved to move pixels". */
 struct gpu_module_state {
     int present;                     /* header validated, relocations applied */
-    int bound;                       /* init succeeded and the self-test passed */
+    int bound;                       /* init succeeded and the kernel accepted the module */
+    int identification_only;         /* ... and it exposes no engine, only what the chip said */
     char name[24];
     char family[16];
     char describe[160];
@@ -144,6 +145,10 @@ int gpu_engine_available(void);
  * on a *second* card drives its own aperture only, and painting the desktop there would move pixels
  * nobody can see; the compositor asks this before it hands a rectangle to the GPU. */
 int gpu_engine_drives_output(void);
+/* PCI Express link state of the i'th detected display function, read from its own capability
+ * structure: 1 when generation and lanes hold what the slot negotiated, 0 when the function has no
+ * Express capability at all (which is a real answer for a device behind a conventional slot). */
+int gpu_link_state(int index, unsigned *generation, unsigned *lanes);
 
 /* Every accelerated drawing path reports what the engine did and what the CPU kept for itself, in
  * source pixels.  The two counters exist so "the GPU is doing the drawing" is a measured statement in

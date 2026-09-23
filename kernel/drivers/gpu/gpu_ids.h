@@ -411,6 +411,29 @@ static const struct gpu_pci_id gpu_ids_nvidia[] = {
     {0x12d2, 0xa0, "Nvidia STB/SGS-Thompson Aladdin TNT2"}, /* driver.c:353 */
     {0x1888, 0x3503, "Varisys Geforce4 MX440"}, /* driver.c:358 */
     {0x1888, 0x3505, "Varisys Geforce4 Ti 4200"}, /* driver.c:359 */
+    /* Hand-authored by SCos, and the reason the count above is larger than the upstream family's:
+     * the Blackwell display ids the in-tree registry named while nothing bound them.  A row here is a
+     * matching rule that lets drivers/gpu/nvidia load for this chip and read NV_PMC_BOOT_0; it is not a
+     * claim that anything can be drawn, which is what the capability record below and gpu_ports.c say. */
+    {0x10DE, 0x2B85, "GB202 [GeForce RTX 5090]"},        /* Blackwell, identification only */
+    {0x10DE, 0x2B87, "GB202 [GeForce RTX 5090 D]"},
+    {0x10DE, 0x2B8C, "GB202 [GeForce RTX 5090 D V2]"},
+    {0x10DE, 0x2C02, "GB203 [GeForce RTX 5080]"},
+    {0x10DE, 0x2C05, "GB203 [GeForce RTX 5070 Ti]"},
+    {0x10DE, 0x2C09, "GB203 [GeForce RTX 5070]"},
+    {0x10DE, 0x2C18, "GB203M [GeForce RTX 5090 Max-Q / Mobile]"},
+    {0x10DE, 0x2C19, "GB203M [GeForce RTX 5080 Max-Q / Mobile]"},
+    {0x10DE, 0x2C58, "GB203M-X11 [GeForce RTX 5090 Max-Q / Mobile]"},
+    {0x10DE, 0x2C59, "GB203M-X9 [GeForce RTX 5080 Max-Q / Mobile]"},
+    {0x10DE, 0x2D04, "GB206 [GeForce RTX 5060 Ti]"},
+    {0x10DE, 0x2D05, "GB206 [GeForce RTX 5060]"},
+    {0x10DE, 0x2D18, "GB206M [GeForce RTX 5070 Max-Q / Mobile]"},
+    {0x10DE, 0x2D19, "GB206M [GeForce RTX 5060 Max-Q / Mobile]"},
+    {0x10DE, 0x2D83, "GB207 [GeForce RTX 5050]"},
+    {0x10DE, 0x2D98, "GB207M [GeForce RTX 5050 Max-Q / Mobile]"},
+    {0x10DE, 0x2F04, "GB205 [GeForce RTX 5070]"},
+    {0x10DE, 0x2F06, "GB205 [GeForce RTX 5060]"},
+    {0x10DE, 0x2F18, "GB205M [GeForce RTX 5070 Ti Mobile]"},
 };
 
 /* matrox: 9 device IDs bound by src/add-ons/kernel/drivers/graphics/matrox/driver.c; no class test upstream (vendor + device only). */
@@ -1108,7 +1131,7 @@ static const struct gpu_match gpu_match_table[] = {
     {
         .family = "nvidia", .primary_vendor = 0x10de,
         .class_base = 0xff, .class_sub_a = 0xff, .class_sub_b = 0xff,
-        .ids = gpu_ids_nvidia, .id_count = 249u,
+        .ids = gpu_ids_nvidia, .id_count = 268u,
         .upstream = {
         .engine2d = 1, .vsync = 1, .pan = 1, .cursor = 0, .overlay = 1,
         .fill = 1, .blit = 1, .span = 1, .modeset = 1, .dpms = 1,
@@ -1117,6 +1140,7 @@ static const struct gpu_match gpu_match_table[] = {
         "etrace:direct; pan:direct; cursor:conditional; overlay:direct; fill_rect:direct; screen_blit"
         ":direct; fill_span:direct; set_mode:direct; dpms:direct",
         .source = "src/add-ons/kernel/drivers/graphics/nvidia/driver.c",
+        .note = "19 id rows added by SCos (Blackwell), not from the upstream table",
     },
     {
         .family = "matrox", .primary_vendor = 0x102b,
@@ -1308,8 +1332,9 @@ static const struct gpu_match gpu_match_table[] = {
 };
 
 /* GPU_MATCH_COUNT and GPU_ID_TOTAL include the hand-authored cirrus record: 16 families, and
- * 1020 exact ids that bind a driver (1019 from upstream tables plus the one local row). */
+ * 1039 exact ids that bind a driver (1019 from upstream tables, the one local row, and the
+ * 19 rows SCos added inside 1 upstream family array). */
 #define GPU_MATCH_COUNT 16u
-#define GPU_ID_TOTAL 1020u
+#define GPU_ID_TOTAL 1039u
 
 #endif

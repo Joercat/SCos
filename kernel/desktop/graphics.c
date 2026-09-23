@@ -64,6 +64,8 @@ void graphics_report(char *out, size_t capacity)
     if (engine) put(&w, "CPU software compositor, engine available for selected ops\n");
     else if (ms && ms->bound && gpu_engine_drives_output())
         put(&w, "CPU software compositor, GPU engine painting solid output rectangles\n");
+    else if (ms && ms->bound && ms->identification_only)
+        put(&w, "CPU software compositor, driver module read the chip and offers no engine\n");
     else if (ms && ms->bound)
         put(&w, "CPU software compositor, GPU engine bound on a second PCI function\n");
     else put(&w, "CPU software compositor\n");
@@ -78,14 +80,23 @@ void graphics_report(char *out, size_t capacity)
         put(&w, ms->name);
         put(&w, " (family ");
         put(&w, ms->family);
-        put(&w, ") loaded from storage and verified by device readback, ");
-        fmt_u32(number,(u32)ms->self_test_matches);put(&w,number);
-        put(&w, "/");
-        fmt_u32(number,(u32)ms->self_test_pixels);put(&w,number);
-        put(&w, " pixels; ");
+        put(&w, ") ");
+        if (ms->identification_only) {
+            /* No readback number, because nothing was asked of the card to read back: this module's
+             * whole output is what the chip said about itself. */
+            put(&w, "read this chip's own registers and reports what it found; it offers no engine "
+                    "operation; ");
+        } else {
+            put(&w, "loaded from storage and verified by device readback, ");
+            fmt_u32(number,(u32)ms->self_test_matches);put(&w,number);
+            put(&w, "/");
+            fmt_u32(number,(u32)ms->self_test_pixels);put(&w,number);
+            put(&w, " pixels; ");
+        }
         put(&w, gpu_engine_drives_output()
             ? "used for solid output rectangles"
-            : "not used for output: another PCI function feeds this display");
+            : (ms->identification_only ? "the CPU compositor still paints every pixel of this screen"
+                                       : "not used for output: another PCI function feeds this display"));
         put(&w, "\n  opened \\SCOS\\");
         put(&w, ms->name);
         put(&w, ".MOD (");

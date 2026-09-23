@@ -32,7 +32,7 @@ every boot by the kernel, because "the other families are never loaded" is only 
 number comes with it:
 
 ```
-gpu: module 2 module(s), 25936 B on the boot disk: 13536 B opened for this chip, 12400 B never read
+gpu: module 3 module(s), 27224 B on the boot disk: 13536 B opened for this chip, 13688 B never read
 ```
 
 That line is asserted by `tools/tests/test_gpu_detect.py`, which boots a real guest and checks the
@@ -394,11 +394,88 @@ because Hopper and Blackwell cannot be brought up without them, 61 MB shared by 
 again for GB20x). Nouveau was not doing it unaided; a package nobody noticed had installed made it work.
 
 Under the standing rule that this kernel stays its own and that imports larger than a few thousand lines
-are not shipped, the consequence for a GeForce RTX 5050 is fixed: there is no engine to port. The blob is
-proprietary firmware, the host side of the interface is NVIDIA's Resource Manager, and the userspace that
-would consume the resulting submission queue (NVK, Mesa) is built against kernel DRM buffer management that
-this module ABI has no equivalent of. What is left to do honestly is what has been done here - real register
-access, exact chip identification, and a compositor that stops wasting the CPU it has.
+are not shipped, the consequence for a GeForce RTX 5050 was recorded here as "there is no engine to port".
+That sentence was too strong, and the correction is worth writing down because it is the reason a module of
+any kind is now shipped for that family:
+
+* What *is* published, in MIT-licensed sources, is the vocabulary a submission needs: NVIDIA/open-gpu-doc
+  carries `classes/dma-copy/clc{0,1,3,5,6,7,8,9}b5.h` (the copy engines, Blackwell generation included)
+  and `classes/host/clc{0..c}6f.h` (the FIFO host class), plus `manuals/ampere/ga10{0,2}/*.ref.txt` with
+  the RAMFC/RAMHT channel layout and the NVCE method set.  A 2D copy path for a Blackwell chip is therefore
+  writable from documentation, the same way the Cirrus module was.
+* What is not published is the part that makes those classes reachable on that silicon: the Ampere-and-later
+  register databases (NVIDIA ships short *addenda* for Hopper/Blackwell - `blackwell/gb202/dev_pmc_zb.h`
+  is 36 lines and defines fault bits, not addresses), the display and power bring-up that runs through the
+  chip's system processor, and the GSP image that does it (`gsp-570.144.bin`, 61 MB, not redistributable
+  in a form this tree may embed).
+
+So the honest split is: *identification* is fully available and is what this increment ships; *drawing*
+needs a channel, a minimal GMMU page table and a bring-up path that no public document describes end to
+end.  Claiming the second from the first is the failure mode this file exists to prevent.
+
+## NVIDIA GB20x: the first module for a modern card, and what it refuses to do
+
+`drivers/gpu/nvidia/` is the third module on the disk and the first for a chip younger than 2010.  It is a
+small, deliberately unfinished driver, and it is worth being exact about why that is the right shape:
+
+* It reads `NV_PMC_BOOT_0` at offset 0 of the function's register BAR - one dword, twice, both reads
+  reported - and decodes the fields where NVIDIA's published manual places them (`manuals/ampere/ga100/
+  dev_boot.ref.txt`: MINOR 3:0, MAJOR 7:4, IMPLEMENTATION 23:20, ARCHITECTURE 28:24).  Because the newest
+  published table stops at Ampere, a Blackwell architecture number is **printed as an unnamed number**
+  rather than translated into a guess.
+* It writes nothing, and that is structural: the module never takes the `write32` export, so there is no
+  path from its code to a store.  Its `describe()` says `reads 2, writes 0`, and the host harness fails the
+  run if a store is even attempted.
+* It offers no engine operation at all, which the kernel now understands as a distinct state
+  (`identification_only`).  Every drawing predicate checks the operation pointer, so the CPU compositor
+  keeps painting; the boot log says "a driver read the chip and reported it", never "engine in use".
+* Refusal is the point of half the code: an all-ones or all-zero register block, a value that changes
+  between the two reads, another vendor's function, or a BAR too small to hold the block each end in
+  `init` returning -1 with a line saying which.  A driver that binds to a chip it cannot read produces
+  confident nonsense in a report, which is the thing this whole subsystem has been built to avoid.
+* To exist at all it had to be *allowed* to: the 19 Blackwell device ids were rows of the naming table and
+  are now rows of the `nvidia` binding array, added by the generator that owns both (`LOCAL_EXTRA_ROWS` in
+  `tools/research/gen_gpu_tables.py`) so that a regeneration cannot silently drop them, and so that an id
+  cannot appear in both tables.  That moved the counts the boot prints to **1039 binding ids and 1277
+  naming ids** - the two numbers `test_gpu_detect.py` reads out of a real boot, not out of the headers.
+
+_Measured 2026-09-23._ The module compiles under the same `-Werror -ffreestanding` flags as every other
+module and packs to `OK nvidia.mod: family=nvidia rxe=4304 data=88 bss=240 relocs=103 ids=19 load=4392
+image=4632`.  `tools/tests/test_nvidia_ident.py` compiles `module.c` unchanged against a fake
+`scos_gpu_exports` whose register file is an array and runs 38 checks: the decode of each field, all five
+refusal paths, that exactly one mapping was taken and it was the register BAR rather than the frame buffer,
+that the two reads are two and not one, that a rebind recomputes instead of repeating, and that every
+operation slot but `describe` is null.  The id list the module claims is checked against the generated
+table it is cross-checked by, row for row, and against the naming header, where those ids must now be
+absent.  In a QEMU boot the same image shows the store grew to three files while a Cirrus machine reads
+only its own: `module 3 module(s), 27224 B on the boot disk: 13536 B opened for this chip, 13688 B never
+read` - `nvidia.mod` among the never-read, because a Blackwell driver must not be poked at a GD 5446.
+
+The kernel half was then measured on a booted machine, not only on a host: the suite packs a throwaway
+module of the same shape (only `describe`, no `fill`) for the Cirrus family, boots it, and the guest's
+serial log reads
+
+```
+gpu: bound for identification: it offers no rectangle operation, so there is nothing to paint-verify and
+gpu: module cirrus bound: it read the chip's own registers and describes them; no engine was offered to verify
+gpu: 0:1.0 module GD 5446 (PCI) identified this chip; it offers no engine, so the CPU compositor keeps the screen
+gpu: a driver read the chip and reported it; nothing was asked of the chip, so rendering stays on the CPU compositor
+```
+
+with the panel saying `GPU acceleration: driver module cirrus (family cirrus) read this chip's own registers
+and reports what it found; it offers no engine operation; the CPU compositor still paints every pixel of
+this screen`, the report line `SCos port: driver module bound for this family reads the chip and describes
+it; it offers no engine operation, so nothing about drawing has changed`, and - the number that decides
+whether any of it was a regression - `pixels painted: 0 by the GPU's 2D engine, 17312532 by the CPU
+compositor`, the same figure the boot before the module carried, plus `Renderer: CPU software compositor,
+driver module read the chip and offers no engine` instead of a sentence that would have called it an engine.
+The per-device line `link: no PCI Express capability on this function (conventional PCI slot)` is QEMU's
+Cirrus being honest about the slot it is in; on the real card the same field decodes to what the board
+negotiated, which is why it is read from the capability and never from a table.
+
+_What this does not claim:_ nothing has been read from a Blackwell chip, because there is none here.  The
+first measurement on the real card is the line the module prints, and it will say `NV_PMC_BOOT_0=0x…` with
+a value nobody in this tree predicted - which is exactly why the driver reports instead of asserts.
 
 ## Cirrus CL-GD5446: the second family, and the first that paints the console it is on
 

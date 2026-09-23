@@ -59,14 +59,18 @@ const char *gpu_vendor_name(uint16_t vendor)
 }
 
 /* Reading a device register needs no write, no sizing and no modeset: map the first page of BAR0 and
- * load two dwords.  On an NVIDIA function that is NV_PMC_BOOT_0 (chipset number in [15:8], revision in
- * [7:4]), and NV_PMC_BOOT_4; on an ATI Rage function, CONFIG_CHIP_ID and CONFIG_AMPUS.  Either way the
+ * load two dwords.  On an NVIDIA function that is NV_PMC_BOOT_0 and NV_PMC_BOOT_4; NVIDIA's published
+ * register documentation puts ARCHITECTURE in [28:24], IMPLEMENTATION in [23:20], MAJOR_REVISION in
+ * [7:4] and MINOR_REVISION in [3:0], and the pair ARCHITECTURE:IMPLEMENTATION in [31:20] is what the
+ * chip is named by (GA102 answers 0x168000a1: selector 0x168, revision A.1).  On an ATI Rage function
+ * it is CONFIG_CHIP_ID and CONFIG_AMPUS.  Either way the
  * value comes out of the silicon, which is the point: it turns "we named your chip from a table" into
  * "we read your chip", and it shows whether an aperture the kernel mapped above 4 GiB is reachable on
  * real firmware.  Functions a module could claim are left alone, so an aperture is never mapped twice. */
 void *device_map(uint64_t physical, uint64_t bytes, int write_combine, uint64_t *mapped_bytes);
 
 static int probe_shadows_scanout(const struct gpu_device *g);
+static int identification_only_module_bound(void);
 
 static void probe_registers(struct gpu_device *g)
 {
@@ -250,8 +254,17 @@ void gpu_init(const struct boot_framebuffer *fb)
             if (strncmp(handoff->module_name, g->match->family,
                         strlen(g->match->family)) != 0) continue;
             if (gpu_module_bind(g, handoff) == 0) {
-                klog("gpu: %x:%x.%x %s engine in use from module %s", g->bus, g->slot, g->function,
-                     g->match->family, g->chip ? g->chip : "this family");
+                /* Two different achievements, and the log must not blur them: a module that offered an
+                 * engine and was verified by readback is "in use"; a module that read the chip and
+                 * offered no drawing operation is identification, and saying "engine" there would be a
+                 * claim this kernel has not measured. */
+                if (!g->module_ops->fill)
+                    klog("gpu: %x:%x.%x module %s identified this chip; it offers no engine, so the CPU "
+                         "compositor keeps the screen", g->bus, g->slot, g->function,
+                         g->chip ? g->chip : "this family");
+                else
+                    klog("gpu: %x:%x.%x %s engine in use from module %s", g->bus, g->slot, g->function,
+                         g->match->family, g->chip ? g->chip : "this family");
                 module_bound = 1;
                 break;
             }
@@ -259,6 +272,9 @@ void gpu_init(const struct boot_framebuffer *fb)
     }
     if (!bound && !module_bound)
         klog("gpu: no engine bound, rendering stays on the CPU compositor");
+    else if (identification_only_module_bound())
+        klog("gpu: a driver read the chip and reported it; nothing was asked of the chip, so rendering "
+             "stays on the CPU compositor");
     else if (!gpu_engine_drives_output())
         klog("gpu: engine drives its own aperture only: another function feeds the console, so output "
              "stays on the CPU");
@@ -361,7 +377,42 @@ int gpu_engine_drives_output(void)
      * necessarily the one feeding the screen. */
     if (bound && bound->ops) return 1;
     const struct gpu_device *owner = gpu_scanout_device();
-    return (owner && owner->module_ops) ? 1 : 0;
+    if (!owner || !owner->module_ops) return 0;
+    /* A module bound for identification exposes no rectangle operation at all: saying its engine drives
+     * the output would be false, and every drawing path would ask the card first for nothing. */
+    return owner->module_ops->fill != 0;
+}
+
+/* Whether a loaded module deliberately exposes no engine.  Asked of the device list rather than of
+ * gpu_module.c's status struct, because detection has to link - and be testable - without the loader. */
+static int identification_only_module_bound(void)
+{
+    for (int i = 0; i < device_count; i++)
+        if (devices[i].module_ops && !devices[i].module_ops->fill) return 1;
+    return 0;
+}
+
+/* Link width and speed come out of this function's own PCI Express capability.  The register is defined
+ * by PCI r3.0 7.5.3.15 rather than by any GPU driver, and reading a status field cannot change the
+ * device, which is the rule this whole subsystem is held to.  The answer says what the slot actually
+ * negotiated - a chip can be capable of more than the board it is plugged into will carry - so it is
+ * worth more than anything a table could say, and it costs two config reads. */
+int gpu_link_state(int index, unsigned *generation, unsigned *lanes)
+{
+    if (index < 0 || index >= device_count || !generation || !lanes) return 0;
+    const struct gpu_device *g = &devices[index];
+    u32 ptr = pci_read8(g->bus, g->slot, g->function, 0x34) & 0xfc;
+    for (int hops = 0; hops < 48 && ptr >= 0x40; hops++) {
+        u32 pair = pci_read32(g->bus, g->slot, g->function, (u8)ptr);
+        if ((u8)(pair & 0xff) == 0x10) {              /* PCI Express capability */
+            u32 lnksta = pci_read32(g->bus, g->slot, g->function, (u8)(ptr + 0x10));
+            *generation = (lnksta >> 16) & 0xf;       /* Link Status: 1 = 2.5 GT/s, doubling per gen */
+            *lanes = (lnksta >> 20) & 0x3f;
+            return *generation != 0 && *lanes != 0;
+        }
+        ptr = (u8)((pair >> 8) & 0xfc);
+    }
+    return 0;
 }
 
 /* ------------------------------------------------------------ reporting ---- */
@@ -445,6 +496,21 @@ void gpu_report(char *out, size_t capacity)
         put(&w, number);
         if (g->is_scanout) put(&w, " (scanout)");
         put(&w, "\n");
+        {
+            unsigned generation = 0, lanes = 0;
+            char link[40];
+            put(&w, "  link: ");
+            if (gpu_link_state(i, &generation, &lanes)) {
+                fmt_u32(link, generation);
+                put(&w, "PCIe gen");
+                put(&w, link);
+                put(&w, " x");
+                fmt_u32(link, lanes);
+                put_line(&w, link);
+            } else {
+                put_line(&w, "no PCI Express capability on this function (conventional PCI slot)");
+            }
+        }
         if (!g->match) {
             put(&w, "  match: none - no upstream table binds ");
             put_hex(&w, g->vendor);
@@ -479,15 +545,28 @@ void gpu_report(char *out, size_t capacity)
             put(&w, ", second 0x");
             put_hex8(&w, g->reg_second);
             if (g->vendor == 0x10de) {
-                /* Decoded exactly the way nvkm reads this register: chip id [31:20], implementation
-                 * [11:8], revision [7:4].  GA102 answers 0x168000a1, which is "168, rev a" - the same
-                 * shape as any other vendor's chip id, and the reason the raw dword is also printed. */
-                put(&w, " (NV_PMC_BOOT_0: chip id 0x");
+                /* Fields as NVIDIA publishes them (see the comment on probe_registers): the [31:20]
+                 * selector is the chip, [7:4] and [3:0] are the major and minor revision.  Printed
+                 * beside the raw dword rather than instead of it, because a decode is a claim and the
+                 * word is the measurement. */
+                put(&w, " (NV_PMC_BOOT_0: chip selector 0x");
                 put_hex8(&w, (g->reg_first >> 20) & 0xfff);
+                put(&w, ", architecture 0x");
+                put_hex8(&w, (g->reg_first >> 24) & 0x1f);
                 put(&w, ", implementation 0x");
-                put_hex8(&w, (g->reg_first >> 8) & 0xf);
-                put(&w, ", revision 0x");
-                put_hex8(&w, (g->reg_first >> 4) & 0xf);
+                put_hex8(&w, (g->reg_first >> 20) & 0xf);
+                put(&w, ", revision ");
+                {
+                    static const char major[] = "0123456789ABCDEF";
+                    char tail[8];
+                    int n = 0;
+                    tail[n++] = major[(g->reg_first >> 4) & 0xf];
+                    tail[n++] = '.';
+                    u32 minor = g->reg_first & 0xf;
+                    tail[n++] = (char)('0' + minor);
+                    tail[n] = 0;
+                    put(&w, tail);
+                }
                 put(&w, ")");
             }
             put_line(&w, "");
@@ -511,9 +590,12 @@ void gpu_report(char *out, size_t capacity)
         }
         const struct gpu_driver *port = gpu_port_for(g->match->family);
         put(&w, "  SCos port: ");
-        if (g->module_ops)
+        if (g->module_ops && g->module_ops->fill)
             put_line(&w, "driver module loaded from storage for this family; engine verified by device "
                          "readback");
+        else if (g->module_ops)
+            put_line(&w, "driver module bound for this family reads the chip and describes it; it offers "
+                         "no engine operation, so nothing about drawing has changed");
         else
             put_line(&w, port && port->state != GPU_PORT_NONE ? "bound" : "not ported yet");
         /* The gap text says what was missing before a driver existed.  Once a module is bound for this
@@ -527,7 +609,10 @@ void gpu_report(char *out, size_t capacity)
         /* Which path this function's pixels actually take.  A module bound on a function that does not
          * feed the console is real and verified, but it is not what the user sees, so the line says
          * both halves instead of claiming an acceleration that the display cannot show. */
-        if (g->module_ops)
+        if (g->module_ops && !g->module_ops->fill)
+            put_line(&w, "  path in use: the CPU compositor paints this screen; the module read this "
+                         "function's registers and reported them, and asked the chip for nothing else");
+        else if (g->module_ops)
             put_line(&w, gpu_engine_drives_output()
                 ? "  path in use: module engine paints this function's scanout; solid rectangles skip "
                   "the CPU copy"
