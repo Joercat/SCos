@@ -251,5 +251,22 @@ and Turing documents describe is not answering there, and until it does, an engi
 that cannot be given work - so the panel says so in one clause (`engines are register blocks, not channels:
 no submission window answered, so nothing was submitted`) computed from those same two readings rather than
 written by hand.  `device registers: not read`, which contradicted the module above it, now names whose
-reading is absent.  Paste the `Engine:` line and its window clause together: the pair is what decides the
-next move, and neither alone means anything.
+reading is absent.
+
+The same line now ends with what the chip answered at the three targets a submission would need, and each
+possible ending is a different instruction to whoever reads it.  `GSP engine out of reset, mailboxes
+0x…/0x…` means there is a coprocessor to speak to; `GSP engine in reset` means starting it is the whole next
+step; `GSP block at 0x110000 unreachable (engine reads 0xffffffff)` means the aperture did not answer; and
+`GSP block at 0x110000 refused all five reads (0xbadf4100: a PRIV target locked against this reader, not a
+register value, so no field of it is read)` - what real GB207 silicon produced - means the chip answered with
+an error code, which is a fact about permission rather than about the coprocessor's state, so nothing after
+it claims a state (GPU-DRIVER-MODULES.md quotes the vendor source that names the value).  Beside it, `base
+unit measured on this chip: the GSP entry's field 0x1100 x 256 is the published 0x110000` is the engine
+addresses being derived from the chip's own table by a test that either passes or says it failed - in which
+case `no base unit: … scales to no candidate that reaches the published 0x110000` appears and no engine
+address is printed at all.  Then `the first LCE's block at 0x…` says whether the engine a submission would be
+built for answers, refuses or is silent, with the FSP's four scratch words as a fourth opinion, since that is
+the microcontroller whose release the lock waits for.
+
+Paste the `Engine:` line whole, these clauses included: the window answer, the coprocessor's state and the
+engine block's reply are three different facts, and the next move depends on which of them this machine gave.

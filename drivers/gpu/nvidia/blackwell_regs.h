@@ -71,6 +71,57 @@
 #define NV_PGSP_RISCV_FAULT_SRCSTAT        0x00111700u
 #define NV_PGSP_RISCV_FAULT_GLOBAL(v)               ((v) & 1u)        /* 0:0, 1 = faulted */
 
+/* --------------------------------------------------------- what a read can answer with ----
+ * Not every dword that comes back out of a PRI aperture is a register.  This one can also answer with an
+ * error code from the interconnect, and the number is published not by a manual but by the vendor driver
+ * that has to cope with it: `src/nvidia/src/kernel/gpu/fsp/arch/hopper/kern_fsp_gh100.c` (fetched
+ * 2026-09-23, kept at build/nvdoc/kern_fsp_gh100.c, lines 1096-1121) decides whether the GSP has been
+ * released to the CPU by reading one word of the block above and comparing it against a constant:
+ *
+ *   "there is no HW mechanism for CPU to check if GSP is open other than reading 0xBADF41YY code"
+ *   const NvU32 privErrTargetLocked     = 0xBADF4100U;
+ *   const NvU32 privErrTargetLockedMask = 0xFFFFFF00U; // Ignore LSB - it has extra error information
+ *
+ * with the comment above it saying "Until the programmed BAR0 decoupler settings are cleared, GSP access is
+ * blocked from the CPU".  Three consequences, all of them the reason this block exists:
+ *
+ *   - 0xbadf4100 is not a register value.  Decoding NV_PGSP_FALCON_ENGINE_RESET_STATUS out of it would read
+ *     "reset status 0x1" off a reply that said nothing about resets, which is exactly what the first build
+ *     of this probe printed on real silicon, and a state the chip never reported is worse than no state.
+ *   - The low byte is error detail, so the comparison is masked, and a value the vendor does not name is
+ *     still reported as an error code rather than as content.
+ *   - The lock is per target, not per BAR: the copy engine's own block is a different target from the GSP's,
+ *     which is why the engine probe below is worth making even after the coprocessor declines.  What
+ *     releases it, in the vendor's own code, is the FSP - not a register a stranger to the boot sequence
+ *     may set, and so not something this driver attempts.
+ */
+#define NV_PRI_ERROR_MASK                  0xffffff00u
+#define NV_PRI_ERROR_TARGET_LOCKED         0xbadf4100u
+#define NV_PRI_IS_ERROR(v)                        (((v) & NV_PRI_ERROR_MASK) == NV_PRI_ERROR_TARGET_LOCKED)
+#define NV_PRI_IS_DEAD(v)                         ((v) == 0xffffffffu) /* no reply at all, our bound or the chip's */
+
+/* The FSP: the microcontroller the vendor's own driver waits on to release the GSP, and the one this driver
+ * has no business commanding.  Almost nothing about it is published for this generation - the whole of
+ * swref/published/blackwell/gb100/dev_fsp_pri.h is three registers, kept at build/nvdoc/gb100-dev_fsp_pri.h
+ * - and one of them is write-only (`NV_PFSP_MNOC_RX_FIFO_DATA', the doorbell: named here, never touched).
+ * The four scratch words are read-only and are what the vendor prints as its own debug state when a boot
+ * fails, so they are the cheapest possible second question: is any target in the top of this BAR answering
+ * us, or is the whole aperture decoupled?  Nothing here claims to know what the words mean. */
+#define NV_PFSP_SCRATCH_GROUP_2_0          0x008f0320u   /* NV_PFSP_FALCON_COMMON_SCRATCH_GROUP_2(0), R--4A */
+#define NV_PFSP_SCRATCH_GROUP_2_WORDS      4u            /* __SIZE_1, stride 4 */
+
+/* An engine's own register block, on the generation that publishes no address for it.  The v2 table entry
+ * gives an 18-bit DEVICE_PRI_BASE with no stated unit - neither dev_top.h nor any manual says what one
+ * dword of that field is worth - so this driver does not pick a unit, it asks the chip for one: the GSP
+ * device's own entry is put through each candidate shift and the one that lands on NV_PGSP_BASE, which
+ * dev_gsp.h does publish as an absolute address, is the unit the chip just confirmed.  256 bytes is what
+ * that test returned on the first Blackwell machine this ran on (0x1100 << 8 == 0x110000), which is a
+ * measurement of that chip and not a constant to be trusted about another one.  The shifts are candidates,
+ * in the order a dword-aligned field would plausibly be scaled by, and nothing is probed at all until one
+ * of them matches. */
+#define NV_PTOP2_PRI_UNIT(v, shift)                     ((u32)((v) << (shift)))
+#define NV_PTOP2_PRI_UNIT_CANDIDATES              4u      /* <<0, <<4, <<8, <<12 */
+
 /* The user-mode window: the block a submission is rung through, and the copy of the GPU's own clock that
  * is readable without any privileged setup.  Published for Volta and Turing in
  * manuals/turing/tu104/dev_usermode.ref.txt (offsets inside the register BAR); NVIDIA publishes no

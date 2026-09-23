@@ -115,8 +115,11 @@ struct gpu_module_state {
      * be 512 and the sentence was written to fit it, which is how a real card's report lost its last
      * clause; a panel now wraps, so length costs lines rather than facts, and the bound only has to be
      * generous enough that no driver's whole inventory can reach it.  The kernel copies without truncating,
-     * so the number is a ceiling to check against, not a place where text dies quietly. */
-    char describe[768];
+     * so the number is a ceiling to check against, not a place where text dies quietly.  It went to 1152
+     * when the report grew its per-target clauses: each named block a chip refuses to answer costs about a
+     * hundred and thirty bytes to say so, and how many blocks that is is the chip's decision, not the
+     * driver's - so the fixture seeds its widest case and asserts the length, rather than this note. */
+    char describe[1152];
     uint64_t resident_bytes;         /* image in the executable boot-arena region */
     uint64_t file_bytes;             /* bytes read off the disk */
     uint32_t store_count;            /* modules on the disk, including those never opened */

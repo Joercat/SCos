@@ -68,22 +68,42 @@ struct inventory {
     u32 top_ce_pri, top_ce_inst, top_ce_runlist, top_ce_engine;
     int top_ce_runlist_valid, top_ce_engine_valid;   /* the entry's own valid bits: 0 is a value, "?" is not */
     int top_ce_found;                   /* an LCE device also carried a PRI base: a place to write next */
+    u32 top_gsp_field, top_gsp_reset, top_gsp_inst;   /* the coprocessor's own entry, which is what the base
+                                         * unit below is checked against rather than assumed from */
+    int top_gsp_found;
     u32 top_cfg, top_cfg_devices, top_cfg_rows_per_device, top_cfg_rows;
     u32 gsp_irqstat, gsp_engine;      /* NV_PGSP_FALCON_IRQSTAT / _ENGINE, as read */
     u32 gsp_mailbox0, gsp_mailbox1;   /* the two words a driver and the firmware leave for each other */
     u32 gsp_faultstat;                /* NV_PGSP_RISCV_FAULT_CONTAINMENT_SRCSTAT */
     int gsp_reachable;                /* the block answered at all, rather than every read being all-ones */
+    int gsp_error_reads;              /* how many of the five answered with a PRI error code instead of a register */
+    int gsp_locked;                   /* and all five answered the target-locked one: the block is shut to us */
+    /* The other two targets in the same aperture, asked because the lock above is per target and not per
+     * BAR.  `pri_shift' is the unit the chip confirmed for a v2 PRI base (0 = nothing confirmed, and then
+     * no address is derived and nothing is probed), and `ce_*' is what the first copy engine's own block
+     * said when it was asked - the block a submission would have to be built for. */
+    u32 pri_shift, ce_base, ce_probe[2];
+    int pri_confirmed;
+    int ce_attempted;
+    int ce_locked, ce_dead, ce_replies;   /* what the first copy engine's own block answered: the lock,
+                                           * nothing at all, or a reply that is content */
+    u32 fsp_scratch[4];
+    int fsp_attempted, fsp_error_reads, fsp_locked, fsp_replies;
+    int fsp_direct, fsp_unreachable;      /* reached through the register mapping, or not reached at all */
+    u64 fsp_handle;                       /* its own page, when 0x8f0000 is past the mapping's cap */
     u32 top_cfg1;                     /* the second block's CFG, 0x324fc: asked, and reported if unanswered */
     u32 top_rows;                     /* rows actually read, so an inventory says how much was asked */
     u32 top_engines, top_bus;         /* entries the chip called engines, and the bus blocks it also lists */
     u32 top_ce_raw0, top_ce_raw1, top_ce_raw2;   /* the first copy engine's three rows, as read */
     u32 top_v2_cfg;                   /* the CFG dword of whichever block answered, kept for the report */
-    /* Built once at the end of init, at the kernel's own limit for a description (768, in
+    /* Built once at the end of init, at the kernel's own limit for a description (1152, in
      * gpu_module_state.describe - and the same number again here, because the shorter of the two is what
-     * decides what a user reads).  The size is asserted by the host harness rather than trusted here: a
-     * clipped tail would drop the engine inventory, which is the clause the next increment depends on, and
-     * the number exists to catch that rather than to make the sentence shorter. */
-    char text[768];
+     * decides what a user reads).  The size is asserted by the host harness rather than trusted here: the
+     * fixture seeds the widest report the format can describe and checks the length, which is how 512
+     * became 768 and why 768 became this: every clause that names a target the chip refused costs about a
+     * hundred and thirty bytes, and a clipped tail would drop the very clause the next increment depends
+     * on. */
+    char text[1152];
 };
 
 static struct inventory inv;
@@ -142,6 +162,8 @@ struct top_counts {
     u32 bus;                                /* PTOP's bus-side devices on this generation: PBUS, HSHUB,
                                              * HUBMMU, TMR - named so that the tally adds up */
     u32 lce, graphics, vic, copy, enc, dec, sec, gsp, jpg, other;
+    u32 gsp_field, gsp_reset, gsp_inst;     /* the coprocessor's entry: the field whose unit can be checked */
+    int gsp_found;
     u32 raw[3];                             /* the first copy engine's entry, exactly as the rows read */
     u32 ce_pri, ce_inst, ce_runlist, ce_engine;
     int ce_found, ce_runlist_valid, ce_engine_valid;
@@ -210,7 +232,18 @@ static void top_count_v2(struct top_counts *c, u64 lo, u64 hi)
     case NV_PTOP_TYPE_NVENC0: case NV_PTOP_TYPE_NVENC1: c->enc++; break;
     case NV_PTOP_TYPE_NVDEC: c->dec++; break;
     case NV_PTOP_TYPE_NVJPG: c->jpg++; break;
-    case NV_PTOP_TYPE_GSP: c->gsp++; break;
+    case NV_PTOP_TYPE_GSP:
+        c->gsp++;
+        /* The coprocessor's own entry is kept for a second reason than the copy engine's is: its block's
+         * absolute address *is* published, so this field is the one whose scaling can be tested instead of
+         * assumed, and through it the whole table's unit.  Same one-device-one-tuple rule as above. */
+        if (!c->gsp_found) {
+            c->gsp_found = 1;
+            c->gsp_field = NV_PTOP2_DEVICE_PRI_BASE(lo);
+            c->gsp_reset = NV_PTOP2_RESET_ID(lo);
+            c->gsp_inst = NV_PTOP2_INSTANCE_ID(lo);
+        }
+        break;
     case NV_PTOP_TYPE_PBUS: case NV_PTOP_TYPE_HSHUB:
     case NV_PTOP_TYPE_HUBMMU: case NV_PTOP_TYPE_TMR:
         c->bus++; break;
@@ -392,6 +425,8 @@ static void probe_engines(void)
     inv.top_ce_found = best.ce_found;
     inv.top_engines = best.engines;         inv.top_bus = best.bus;
     inv.top_ce_raw0 = best.raw[0];  inv.top_ce_raw1 = best.raw[1];  inv.top_ce_raw2 = best.raw[2];
+    inv.top_gsp_field = best.gsp_field; inv.top_gsp_reset = best.gsp_reset;
+    inv.top_gsp_inst = best.gsp_inst;   inv.top_gsp_found = best.gsp_found;
 }
 
 /* Is the coprocessor this generation runs its engines through reachable, and is it up?  Five reads of
@@ -408,7 +443,99 @@ static void probe_gsp(void)
     inv.gsp_mailbox1 = reg_read(NV_PGSP_FALCON_MAILBOX1);
     inv.gsp_faultstat = reg_read(NV_PGSP_RISCV_FAULT_SRCSTAT);
     inv.gsp_reachable = !(inv.gsp_engine == 0xffffffffu && inv.gsp_irqstat == 0xffffffffu);
+    /* How many of the five came back as an error code rather than as content.  One would be odd enough to
+     * report on its own; all five, at five offsets whose reset values differ from each other, is the block
+     * refusing the reader, which is a different fact and a different next step. */
+    u32 words[5] = { inv.gsp_irqstat, inv.gsp_engine, inv.gsp_mailbox0, inv.gsp_mailbox1, inv.gsp_faultstat };
+    for (unsigned i = 0; i < 5u; i++)
+        if (NV_PRI_IS_ERROR(words[i])) inv.gsp_error_reads++;
+    inv.gsp_locked = inv.gsp_error_reads == 5;
 }
+
+/* The FSP's scratch words, read from wherever they can be reached: the register mapping covers them on a
+ * chip whose BAR the kernel mapped whole, and on the common 8 MiB-capped case they are given a page of their
+ * own, exactly as the submission window is.  Which of the two it was is recorded, because "no reply at that
+ * address" and "this driver could not reach that address" are different facts and only the first one says
+ * anything about the chip. */
+static u32 fsp_read(u32 offset)
+{
+    if (inv.fsp_direct) return reg_read(offset);
+    inv.reads++;
+    return X->read32(inv.fsp_handle, offset - (NV_PFSP_SCRATCH_GROUP_2_0 & ~0xfffu));
+}
+
+/* The two questions the locked coprocessor leaves open, asked of the two other targets in the same BAR.
+ *
+ * Both exist because the lock above is per PRIV target, not per aperture, and because the table the chip
+ * published can be *checked* rather than interpreted: the GSP entry's PRI base field has no stated unit in
+ * any source, but the address of the GSP's registers is published in absolute terms, so the one field whose
+ * block is known becomes the experiment that measures the other engines' addresses.  If it does not land on
+ * the known base, the unit stays unknown, no address is built from the table, and no read is attempted
+ * below - an unconfirmed scaling is a guess with the confidence of a number, and the reads this driver
+ * counts have to be reads it had a reason to issue. */
+static void probe_targets(void)
+{
+    u32 words[4];
+
+    if (inv.top_layout >= 1u && inv.top_layout <= 2u && inv.top_gsp_found && inv.top_gsp_field) {
+        for (u32 shift = 0u; shift <= 12u; shift += 4u) {
+            if (NV_PTOP2_PRI_UNIT(inv.top_gsp_field, shift) != NV_PGSP_BASE) continue;
+            inv.pri_shift = shift;
+            inv.pri_confirmed = 1;
+            break;
+        }
+    }
+    /* `ce_probe' is asked one question - does the block reply - and is deliberately not decoded: for this
+     * generation the copy engine's register file publishes no offsets at all (gb100's dev_ce_base.h is
+     * four lines about engine sharing), so a field extracted from its first two dwords would be a name
+     * hung on a number nobody can check. */
+    if (inv.pri_confirmed && inv.top_ce_found && inv.top_ce_pri) {
+        inv.ce_base = NV_PTOP2_PRI_UNIT(inv.top_ce_pri, inv.pri_shift);
+        if (inv.ce_base + 8u <= inv.mapping_bytes) {
+            inv.ce_attempted = 1;
+            inv.ce_probe[0] = reg_read(inv.ce_base);
+            inv.ce_probe[1] = reg_read(inv.ce_base + 4u);
+            words[0] = inv.ce_probe[0]; words[1] = inv.ce_probe[1];
+            int errors = 0, dead = 0;
+            for (unsigned i = 0; i < 2u; i++) {
+                if (NV_PRI_IS_ERROR(words[i])) errors++;
+                if (NV_PRI_IS_DEAD(words[i])) dead++;
+            }
+            inv.ce_locked = errors == 2;
+            inv.ce_dead = dead == 2;
+            inv.ce_replies = errors + dead < 2;
+        }
+    }
+    /* The FSP's scratch words, which is as far as this goes: their contents are debug state that only the
+     * firmware's own boot sequence interprets, and nothing published says what a particular value means.
+     * The reply's shape is the whole question - is the block the vendor waits on reachable to us at all? */
+    /* Asked only on a chip that decoded a v2 table, because 0x8f0320 is published for this generation and
+     * no other: pointing it at a Turing BAR would read somebody else's register and call it the FSP's. */
+    if (inv.top_layout >= 1u && inv.top_layout <= 2u) {
+        u64 page = NV_PFSP_SCRATCH_GROUP_2_0 & ~0xfffu;
+        u32 span = (NV_PFSP_SCRATCH_GROUP_2_0 - (u32)page) + NV_PFSP_SCRATCH_GROUP_2_WORDS * 4u;
+        u64 mapped = 0;
+        if (NV_PFSP_SCRATCH_GROUP_2_0 + NV_PFSP_SCRATCH_GROUP_2_WORDS * 4u <= inv.mapping_bytes) {
+            inv.fsp_direct = 1;
+        } else {
+            inv.fsp_handle = X->map(inv.physical + page, 0x1000u, 0, &mapped);
+            if (!inv.fsp_handle || (mapped ? mapped : 0x1000u) < span) {
+                inv.fsp_handle = 0;
+                inv.fsp_unreachable = 1;      /* this driver's bound, and it gets reported as that */
+            }
+        }
+        inv.fsp_attempted = !inv.fsp_unreachable;
+        for (unsigned i = 0u; inv.fsp_attempted && i < NV_PFSP_SCRATCH_GROUP_2_WORDS; i++) {
+            words[i] = fsp_read(NV_PFSP_SCRATCH_GROUP_2_0 + i * 4u);
+            inv.fsp_scratch[i] = words[i];
+            if (NV_PRI_IS_ERROR(words[i])) inv.fsp_error_reads++;
+        }
+        inv.fsp_locked = inv.fsp_error_reads == (int)NV_PFSP_SCRATCH_GROUP_2_WORDS;
+        inv.fsp_replies = inv.fsp_error_reads == 0 &&
+                          !(words[0] == 0xffffffffu && words[1] == 0xffffffffu);
+    }
+}
+
 
 /* What the second measurement is for.  A Blackwell submission needs an addressable channel and a doorbell
  * to ring it through, and nothing published says where that block is on this generation.  So the chip is
@@ -548,7 +675,7 @@ static void build_text(void)
      * the window, because those two decide whether this sentence is about the silicon or about the
      * mapping; and it is phrased in outcomes, since "3 LCE" on a screen the CPU is painting is the fact a
      * reader needs before deciding what to write next.  Length is not a reason to drop any of it: the
-     * kernel's field is 768 bytes and the panel wraps. */
+     * kernel's field is 1152 bytes and the panel wraps. */
     if (!inv.top_layout) {
         put_text(&b, "; engine table not decoded: CFG 0x224fc=0x");
         put_hex(&b, inv.top_cfg, 8);
@@ -594,7 +721,8 @@ static void build_text(void)
              * claim the chip had called nothing an engine, when in fact it never said either way. */
             put_text(&b, ", ");
             put_dec(&b, inv.top_engines);
-            put_text(&b, " engines per its own IS_ENGINE, ");
+            put_text(&b, inv.top_engines == 1u ? " engine per its own IS_ENGINE, "
+                                                : " engines per its own IS_ENGINE, ");
             put_dec(&b, inv.top_bus);
             put_text(&b, " bus");
         }
@@ -641,10 +769,21 @@ static void build_text(void)
         put_text(&b, "block at 0x110000 unreachable (engine reads 0x");
         put_hex(&b, inv.gsp_engine, 8);
         put_text(&b, ")");
+    } else if (inv.gsp_locked) {
+        /* The value is the finding.  Naming it as an error code instead of as register content a mask can
+         * happily slice up is what this branch exists to get right: an earlier build printed "reset status
+         * 0x1" off exactly this reply on exactly this chip, which was a state invented out of a refusal. */
+        /* Compressed on purpose, and the log line below carries the explanation: the panel has to hold the
+         * whole report for a card whose identity line is longer than any the fixture seeds, and a clipped
+         * tail would cut the clauses after this one. */
+        put_text(&b, "block at 0x110000 refused all five reads (0x");
+        put_hex(&b, inv.gsp_engine, 8);
+        put_text(&b, ": a PRIV target locked against this reader, not a register value, so no field of it "
+                     "is read)");
     } else {
-        /* An all-ones read is no answer, and a bit taken out of it is a fact the chip never gave: the
-         * fatal and containment flags are only quoted from registers that actually replied. */
-        u32 st = inv.gsp_engine == 0xffffffffu ? 0xffu
+        /* An all-ones read is no answer, and neither is an error code: the fatal and containment flags are
+         * only quoted from registers that actually replied. */
+        u32 st = NV_PRI_IS_DEAD(inv.gsp_engine) ? 0xffu
                                                 : NV_PGSP_FALCON_ENGINE_RESET_STATUS(inv.gsp_engine);
         put_text(&b, "engine ");
         if (st == NV_PGSP_FALCON_ENGINE_RESET_DEASSERTED) put_text(&b, "out of reset");
@@ -652,10 +791,50 @@ static void build_text(void)
         else { put_text(&b, "reset status 0x"); put_hex(&b, st, 2); }
         put_text(&b, ", mailboxes 0x"); put_hex(&b, inv.gsp_mailbox0, 8);
         put_text(&b, "/0x"); put_hex(&b, inv.gsp_mailbox1, 8);
-        if (inv.gsp_irqstat != 0xffffffffu && NV_PGSP_FALCON_IRQSTAT_FATAL(inv.gsp_irqstat))
+        if (!NV_PRI_IS_DEAD(inv.gsp_irqstat) && !NV_PRI_IS_ERROR(inv.gsp_irqstat) &&
+            NV_PGSP_FALCON_IRQSTAT_FATAL(inv.gsp_irqstat))
             put_text(&b, ", fatal error flagged");
-        if (inv.gsp_faultstat != 0xffffffffu && NV_PGSP_RISCV_FAULT_GLOBAL(inv.gsp_faultstat))
+        if (!NV_PRI_IS_DEAD(inv.gsp_faultstat) && !NV_PRI_IS_ERROR(inv.gsp_faultstat) &&
+            NV_PGSP_RISCV_FAULT_GLOBAL(inv.gsp_faultstat))
             put_text(&b, ", global memory faulted");
+    }
+    /* The unit of the table's PRI bases, decided by the one entry whose block has a published address.
+     * Naming the entry that decided it is the point: it is what separates this number from an assumption
+     * about an 18-bit field no manual documents, and anyone holding dev_gsp.h can check it. */
+    if (inv.pri_confirmed) {
+        put_text(&b, "; base unit measured on this chip: the GSP entry's field 0x");
+        put_hex(&b, inv.top_gsp_field, 6);
+        put_text(&b, " x ");
+        put_dec(&b, 1u << inv.pri_shift);
+        put_text(&b, " is the published 0x110000");
+    } else if (inv.top_gsp_found) {
+        put_text(&b, "; no base unit: the GSP entry's field 0x");
+        put_hex(&b, inv.top_gsp_field, 6);
+        put_text(&b, " scales to no candidate that reaches the published 0x110000");
+    }
+    if (inv.ce_attempted) {
+        put_text(&b, "; the first LCE's block at 0x");
+        put_hex(&b, inv.ce_base, 6);
+        if (inv.ce_locked) put_text(&b, " refused the same way");
+        else if (inv.ce_dead) put_text(&b, " answers nothing");
+        else if (inv.ce_replies) {
+            put_text(&b, " answers 0x"); put_hex(&b, inv.ce_probe[0], 8);
+            put_text(&b, "/0x"); put_hex(&b, inv.ce_probe[1], 8);
+            put_text(&b, ", which is content");
+        }
+    }
+    if (inv.fsp_locked) {
+        put_text(&b, "; the FSP scratch at 0x8f0320 refused too, so the microcontroller that releases the");
+        put_text(&b, " lock is out of reach as well");
+    } else if (inv.fsp_replies) {
+        put_text(&b, "; the FSP scratch at 0x8f0320 answers 0x");
+        for (unsigned i = 0u; i < NV_PFSP_SCRATCH_GROUP_2_WORDS; i++) {
+            if (i) put_text(&b, "/0x");
+            put_hex(&b, inv.fsp_scratch[i], 8);
+        }
+        put_text(&b, " (its own debug words, uninterpreted here)");
+    } else if (inv.fsp_unreachable) {
+        put_text(&b, "; the FSP page at 0x8f0000 could not be mapped, so nothing is claimed about it");
     }
     if (inv.top_lce && !inv.window_live) {
         put_text(&b, "; engines are register blocks, not channels: no submission window answered, so "
@@ -745,6 +924,16 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     inv.top_dec = inv.top_sec = inv.top_gsp = inv.top_jpg = inv.top_other = 0;
     inv.top_ce_pri = inv.top_ce_inst = inv.top_ce_runlist = inv.top_ce_engine = 0;
     inv.top_ce_found = inv.top_ce_runlist_valid = inv.top_ce_engine_valid = 0;
+    inv.top_gsp_field = inv.top_gsp_reset = inv.top_gsp_inst = 0;
+    inv.top_gsp_found = 0;
+    inv.pri_shift = inv.ce_base = inv.ce_probe[0] = inv.ce_probe[1] = 0;
+    inv.pri_confirmed = inv.ce_attempted = 0;
+    inv.ce_locked = inv.ce_dead = inv.ce_replies = 0;
+    inv.gsp_error_reads = inv.gsp_locked = 0;
+    inv.fsp_scratch[0] = inv.fsp_scratch[1] = inv.fsp_scratch[2] = inv.fsp_scratch[3] = 0;
+    inv.fsp_attempted = inv.fsp_error_reads = inv.fsp_locked = inv.fsp_replies = 0;
+    inv.fsp_direct = inv.fsp_unreachable = 0;
+    inv.fsp_handle = 0;
     inv.top_cfg = inv.top_cfg_devices = inv.top_cfg_rows_per_device = inv.top_cfg_rows = 0;
     inv.handle = inv.physical = inv.mapped_bytes = 0;
     inv.text[0] = 0;
@@ -806,10 +995,11 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     probe_usermode();
     probe_engines();
     probe_gsp();
+    probe_targets();
     build_text();
     /* Wide enough for the whole description plus the prefix: the window clause sits at the end of the
      * text, so a narrow log buffer would cut the one part this increment added. */
-    char line[896];   /* the description plus the log prefix, at the wider budget */
+    char line[1280];  /* the description plus the log prefix, at the wider budget */
     struct buf b = { line, line + sizeof(line) - 1 };
     put_text(&b, "nvidia: ");
     put_hex(&b, device->vendor, 4);
@@ -839,11 +1029,18 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     /* The coprocessor gets its own line, because on this generation the work goes through it and a reader
      * deciding what to build next needs its state, not an inference from the mailbox addresses. */
     {
-        static char third[240];
+        static char third[320];
         struct buf u = { third, third + sizeof(third) - 1 };
         put_text(&u, "nvidia: GSP block at BAR0+0x110000 read, nothing written; ");
         if (!inv.gsp_reachable)
             put_text(&u, "the block does not answer, so there is nothing to hand work to yet");
+        else if (inv.gsp_locked) {
+            /* The sentence a reader needs next is not "the coprocessor is down" but "the coprocessor will
+             * not answer this reader", and the difference says what could change it: in the vendor's own
+             * driver the same value is the thing it waits for the FSP to clear. */
+            put_text(&u, "every offset answered 0xbadf4100, the code its own driver waits for the FSP to");
+            put_text(&u, " clear: a door the boot firmware holds, not a processor to talk to");
+        }
         else if (inv.gsp_engine == 0xffffffffu)
             put_text(&u, "and only some of its registers replied, so no state is claimed for it");
         else if (NV_PGSP_FALCON_ENGINE_RESET_STATUS(inv.gsp_engine) ==
@@ -856,6 +1053,45 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
             put_text(&u, "its reset status is a value no published name covers");
         *u.at = 0;
         note(third);
+    }
+    /* One line per target is not enough once the reader is being refused: what a next increment can attempt
+     * depends on whether *any* of the aperture answers, and the three answers only mean anything together. */
+    if (inv.ce_attempted || inv.fsp_attempted || (inv.top_gsp_found && !inv.pri_confirmed)) {
+        static char fourth[448];
+        struct buf w = { fourth, fourth + sizeof(fourth) - 1 };
+        int said = 0;
+        put_text(&w, "nvidia: the other targets in the same aperture: ");
+        if (inv.ce_attempted) {
+            if (inv.ce_locked) put_text(&w, "the first LCE's own block refuses the way the GSP does");
+            else if (inv.ce_dead) put_text(&w, "the first LCE's own block answers nothing");
+            else if (inv.ce_replies) {
+                put_text(&w, "the first LCE's own block replies with content, which is the first live ");
+                put_text(&w, "engine register read on this chip and the one door worth trying next");
+            }
+            said = 1;
+            put_text(&w, "; ");
+        } else if (inv.top_gsp_found && !inv.pri_confirmed) {
+            put_text(&w, "no engine block was asked, because the table's base field scaled to no address ");
+            put_text(&w, "the published blocks agree with");
+            said = 1;
+            put_text(&w, "; ");
+        }
+        if (inv.fsp_attempted) {
+            put_text(&w, said ? "and the FSP" : "the FSP");
+            if (inv.fsp_locked)
+                put_text(&w, " whose release the lock waits for does not answer this reader either");
+            else if (inv.fsp_replies) {
+                put_text(&w, "'s scratch words do reply, though they are its debug state and no conclusion");
+                put_text(&w, " about the lock is drawn from reading them");
+            } else
+                put_text(&w, "'s scratch words answer nothing");
+        } else if (inv.fsp_unreachable) {
+            if (said) put_text(&w, "and ");
+            put_text(&w, "this driver could not map the page the FSP's words live in, so nothing is ");
+            put_text(&w, "claimed about it");
+        }
+        *w.at = 0;
+        note(fourth);
     }
 
     *out_ops = &ops;

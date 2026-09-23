@@ -243,9 +243,11 @@ void graphics_report(char *out, size_t capacity)
          * the coprocessor is the thing a reader needs in order to agree or argue with the next step. */
         const struct gpu_module_state *gsp = gpu_module_state();
         if (gsp && gsp->bound) {
-            put(&w, "GSP path: the management processor's registers above were read, never written; booting "
-                    "work through it needs the vendor firmware image, which this OS neither carries nor "
-                    "downloads, so a card whose GSP is in reset is a card this build cannot give work to.\n");
+            put(&w, "GSP path: the clause above quotes what the chip answered to reads alone; nothing was "
+                    "written to make it answer. Where it answered an error code instead of a register, the "
+                    "door is held by the card's own firmware boot, which this OS neither carries nor "
+                    "speaks to - so an engine whose coprocessor was not started for it is an engine this "
+                    "build cannot give work to.\n");
         }
     }
     put(&w, "Tables: ");

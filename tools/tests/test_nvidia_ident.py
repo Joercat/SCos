@@ -244,8 +244,8 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
             # And the boundary is on the same panel, on a booted machine, not only in the source comment: a
             # reader who sees a coprocessor's registers quoted has to be able to see that nothing was written
             # to them and that no firmware is involved yet.
-            assert 'GSP path: the management processor' in panel, panel[-1400:]
-            assert 'neither carries nor downloads' in panel, panel[-1400:]
+            assert 'GSP path: the clause above quotes' in panel, panel[-1400:]
+            assert 'the door is held by the card' in panel, panel[-1400:]
             # `Device access: none' on its own was read as "nobody has touched my card" on the one machine
             # where a module had read twenty-odd registers of it.  The line has to name whose access is
             # absent, and it is long enough to have been clipped before the wrap: both halves of that are

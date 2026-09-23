@@ -737,15 +737,78 @@ result goes at the end of the same `Engine:` sentence:
     GSP engine out of reset, mailboxes 0x12345678/0x9abcdef0        (coprocessor up, words exchanged)
     GSP engine in reset, mailboxes 0x0/0x0, fatal error flagged     (held in reset; starting it is step one)
     GSP block at 0x110000 unreachable (engine reads 0xffffffff)    (nothing there to hand work to)
+    GSP block at 0x110000 refused all five reads (0xbadf4100: …)   (a target the chip will not let this
+        reader near - the fourth state, and the one a real Blackwell card produced; see the next section)
 
 Two rules kept this honest while it was written.  An all-ones read is *no answer*, so the fatal and
 containment bits are taken only from registers that replied - decoding bit 24 of `0xffffffff` would report a
 fatal error on a block that never spoke, and the fixture now checks that case specifically, because a driver
 that reads zeros out of an absent aperture will happily describe a coprocessor sitting in reset at address
-zero.  And the report states the boundary rather than implying progress: `GSP path: the management
-processor's registers above were read, never written; booting work through it needs the vendor firmware
-image, which this OS neither carries nor downloads, so a card whose GSP is in reset is a card this build
-cannot give work to.`  The next milestone on this path is intake - a firmware image the user stages, checked
-for size and checksum before anything attempts to use it - and it is deliberately not faked by writing to
-the mailboxes first.  Measured in the fixture: 93 checks, 0 failures, four of them about the coprocessor's
-three states and the unmodelled-block case, all of them with `writes 0`.
+zero.  And the report states the boundary rather than implying progress.  The next milestone on this path was
+going to be intake, a firmware image the user stages and the loader verifies before anything uses it; the
+section below is what actually happened to that plan, and why the intake is not the missing piece.  Measured
+in the fixture as written: 93 checks, 0 failures, four of them about the coprocessor's three states and the
+unmodelled-block case, all of them with `writes 0`.
+
+## The coprocessor answered with an error code, which ended that path from this side
+
+The first real card to run the probe above did not report a reset state.  It reported
+
+    GSP engine reset status 0x01, mailboxes 0xbadf4100/0xbadf4100
+
+which is two facts and one invention: five reads, all returning `0xbadf4100`, and a "reset status" decoded
+out of them anyway.  The value is not register content.  NVIDIA's own driver names it, in
+`src/nvidia/src/kernel/gpu/fsp/arch/hopper/kern_fsp_gh100.c` (fetched 2026-09-23, cached at
+`build/nvdoc/kern_fsp_gh100.c`), where the function that decides whether the GSP may be touched at all reads
+one word of `NV_PGSP` and compares it against a masked constant:
+
+    const NvU32 privErrTargetLocked     = 0xBADF4100U;
+    const NvU32 privErrTargetLockedMask = 0xFFFFFF00U; // Ignore LSB - it has extra error information
+
+with the comment above it saying *"there is no HW mechanism for CPU to check if GSP is open other than reading
+0xBADF41YY code"* and *"Until the programmed BAR0 decoupler settings are cleared, GSP access is blocked from
+the CPU so all reads will return 0."*  So `0xbadf4100` is this silicon's answer to *you may not read that
+target yet*, the low byte is error detail rather than data, and the vendor's driver treats it as something to
+wait for rather than something to decode.  Three changes followed, and only the first is about formatting:
+
+* `NV_PRI_IS_ERROR` / `NV_PRI_IS_DEAD` in `blackwell_regs.h`, with that provenance quoted in full, and a
+  probe that counts how many of its five reads came back as refusals.  A block that refused is reported as a
+  block that refused - `GSP block at 0x110000 refused all five reads (0xbadf4100: a PRIV target locked
+  against this reader, not a register value, so no field of it is read)` - and no field of it is sliced up,
+  which also retires the sentence `reset status 0x1` for good.
+* The lock is per PRIV target rather than per BAR, so two more targets were asked the same read-only
+  question: the FSP's four scratch words, which *are* published in absolute terms for this generation
+  (`0x8f0320` in gb100's `dev_fsp_pri.h`, kept at `build/nvdoc/gb100-dev_fsp_pri.h`, and the same four words
+  the vendor dumps when a GSP boot fails), and the first copy engine's own register block.
+* That second one needed the unit of the table's 18-bit `DEV_DEVICE_PRI_BASE` field, which no source gives.
+  It is not guessed: the GSP entry in the same table is scaled by each candidate shift and the unit is
+  accepted only when one of them lands on the address `dev_gsp.h` publishes, which on the card in question
+  means `0x1100 x 256 = 0x110000` and nothing else matches.  The report names the entry that decided it
+  (`base unit measured on this chip: …`), and when no candidate matches it says so and asks the engine block
+  *nothing at all* - the fixture proves that with a counter of reads at the address the unconfirmed scaling
+  would have implied, because an unproven unit is a reason to stop, not a licence to probe.
+
+Two old habits of this driver's reporting stayed mandatory while doing it.  The FSP's page lies past the
+kernel's 8 MiB per-mapping cap, so it is mapped separately, exactly as the submission window is, and *could
+not be mapped* is reported as this build's bound rather than as a chip that answered nothing; and the block
+is only pointed at on a part whose v2 device table decoded, because that address is published for this
+generation and no other.
+
+What this rules out is worth stating as plainly as what it rules in, because it cancels a promise made in the
+previous section.  Staging a firmware image cannot be the next step, and the reason is in the same function:
+the code that releases the lock is the FSP, and the FSP is commanded by the vendor's boot sequence - a signed
+descriptor payload, offsets in system memory, and a doorbell that gb100 publishes as one write-only register
+(`NV_PFSP_MNOC_RX_FIFO_DATA`, `-W-4A`).  A `.bin` on the ESP changes none of that, so the intake was not
+built: it would have been a file, a checksum and a sentence about how far the work got, in front of a card
+that will not answer the door.  The measured ceiling on this generation is therefore that its engines are
+reachable through a resource manager that boots the coprocessor, and that a driver which is not that
+resource manager is told so by an error code.  If a card's `Engine:` line says instead that the LCE block
+*answers*, that conclusion does not hold for that card and the register-level work resumes - the fixture
+carries that case too, with the coprocessor still refusing beside it, so one live target cannot launder
+another's refusal into a mood about the BAR.  The idle-GPU notice was re-worded in the same commit for the
+same reason: it used to point at the panel as if a longer look would find a way in.
+
+Measured: 122 host checks, 0 failures, five of them the refusal replayed as one machine's answers -
+`GSP block … refused all five reads`, the unit cross-check, the engine block refusing the same way, the FSP
+refusing, three mappings and no store - and the widest report the format can now produce is 888 bytes
+against a describe field grown from 768 to 1152 for exactly these clauses.

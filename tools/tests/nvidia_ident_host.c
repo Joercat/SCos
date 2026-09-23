@@ -50,6 +50,27 @@ static u32 *gsp_slot(u32 offset)
 static int checks;                       /* assertions run, so the summary line counts rather than claims */
 static int stores;                       /* every write32 the module attempted: must stay 0 */
 static int maps;
+/* The two other blocks the driver now asks about, modelled the same way and for the same reason: the FSP's
+ * four scratch words live at BAR0+0x8f0320 and the copy engine's own registers at wherever the chip's table
+ * says, both past what `registers' is sized for, and each worth more than one fixed value - a locked block,
+ * a silent one and a live one have to be told apart.  Default: no reply, which the driver has to report as
+ * "unreachable" or "answers nothing" and never as a state of the block. */
+static u32 fsp_regs[4];
+static u32 ce_block[2];
+static int ce_block_reads;                /* so a scenario can prove the driver did not go looking */
+static u32 *far_slot(u32 offset)
+{
+    switch (offset) {
+    case 0x008f0320u: return &fsp_regs[0];
+    case 0x008f0324u: return &fsp_regs[1];
+    case 0x008f0328u: return &fsp_regs[2];
+    case 0x008f032cu: return &fsp_regs[3];
+    case 0x00104000u: ce_block_reads++; return &ce_block[0];
+    case 0x00104004u: ce_block_reads++; return &ce_block[1];
+    default: return 0;
+    }
+}
+
 static int reads_served;                 /* every read the module issued, so its count can be matched */
 static u64 mapped_physical;
 /* One slot per line the module may log, and the module logs three per init now - identity, the doorbell
@@ -95,10 +116,12 @@ static void fake_log(const char *line)
  */
 #define REG_HANDLE 0x1000ull
 #define WINDOW_HANDLE 0x2000ull
+#define FAR_HANDLE    0x3000ull   /* the FSP's page, mapped separately like the window is */
 static u64 low_mapping_bytes = 0x1000000ull;      /* 16 MiB: enough for the window, so no second map */
 static int window_map_fails;
 static u64 window_physical, window_mapping_bytes;
 static u64 first_physical;
+static int far_maps, far_map_fails;
 
 static u64 fake_map(u64 physical, u64 bytes, u32 write_combine, u64 *mapped_bytes)
 {
@@ -111,6 +134,12 @@ static u64 fake_map(u64 physical, u64 bytes, u32 write_combine, u64 *mapped_byte
         if (mapped_bytes) *mapped_bytes = 0x20000ull;
         window_mapping_bytes = 0x20000ull;
         return WINDOW_HANDLE;
+    }
+    if (first_physical && physical == first_physical + 0x008f0000ull) {
+        far_maps++;
+        if (far_map_fails) return 0;
+        if (mapped_bytes) *mapped_bytes = 0x1000ull;
+        return FAR_HANDLE;
     }
     if (!first_physical) first_physical = physical;
     mapped_physical = physical;
@@ -142,6 +171,7 @@ static u32 fake_read32(u64 handle, u32 offset)
 {
     reads_served++;
     if (handle == WINDOW_HANDLE) offset += 0x00810000u;   /* relative to the window's own mapping */
+    else if (handle == FAR_HANDLE) offset += 0x008f0000u; /* the FSP page, mapped on its own */
     else if (handle != REG_HANDLE) { printf("  note: read through an unknown handle\n"); return 0xffffffffu; }
     if (offset == 0x00810000u) return umode_class;
     if (offset == 0x00810084u) return 0;                    /* TIME_1: the high half stays zero */
@@ -155,6 +185,7 @@ static u32 fake_read32(u64 handle, u32 offset)
         if (unstable_reads > 1) return unstable_value;
     }
     { u32 *g = gsp_slot(offset); if (g) return *g; }
+    { u32 *f = far_slot(offset); if (f) return *f; }
     if (offset / 4u >= REG_WORDS) return 0xffffffffu;
     return registers[offset / 4u];
 }
@@ -213,6 +244,9 @@ static void fixture_reset(struct fixture *f, u32 vendor, u32 device_id, u64 fram
     };
     stores = 0;
     maps = 0;
+    far_maps = 0;
+    far_map_fails = 0;
+    ce_block_reads = 0;
     reads_served = 0;
     umode_class = 0xffffffffu;
     timer_frozen = 0;
@@ -227,6 +261,8 @@ static void fixture_reset(struct fixture *f, u32 vendor, u32 device_id, u64 fram
     log_count = 0;
     for (unsigned i = 0; i < REG_WORDS; i++) registers[i] = 0;
     for (unsigned i = 0; i < 5u; i++) gsp_regs[i] = 0xffffffffu;   /* unseeded: the block does not answer */
+    for (unsigned i = 0; i < 4u; i++) fsp_regs[i] = 0xffffffffu;
+    ce_block[0] = ce_block[1] = 0xffffffffu;
 }
 
 extern int scos_module_init(const struct scos_gpu_exports *exports,
@@ -274,11 +310,11 @@ int main(void)
     check(ops && ops->describe, "the one operation it does offer is the description");
     const char *text = ops && ops->describe ? ops->describe(ops->context) : 0;
     check(text && str_len(text) > 40, "the description is non-empty");
-    /* gpu_module.c copies a description into the describe field of gpu_module_state (768 bytes) and the
+    /* gpu_module.c copies a description into the describe field of gpu_module_state (1024 bytes) and the
      * module keeps its own buffer of the same size, so anything longer arrives clipped: the tail is the
      * engine inventory, which is the clause the next increment of this driver reads.  The bound is checked
      * here rather than trusted, because a ceiling nobody measures is a wish. */
-    check(text && str_len(text) < 768, "the description fits the kernel's describe field");
+    check(text && str_len(text) < 1152, "the description fits the kernel's describe field");
 
     char needle[64];
     snprintf(needle, sizeof needle, "NV_PMC_BOOT_0=0x%08x", boot0);
@@ -548,6 +584,7 @@ int main(void)
     fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
     registers[0] = boot0;
     umode_class = 0xc461u;
+    for (unsigned i = 0; i < 4u; i++) fsp_regs[i] = 0u;   /* the init value the header itself publishes */
     registers[0x224fc / 4u] = TOP2_CFG(4u, 3u, 12u);
     registers[TOP_AT(0x22800u, 0)] = TOP2_ROW0(NV_PTOP_TYPE_GRAPHICS, 1u, 2u, 3u);
     registers[TOP_AT(0x22800u, 1)] = TOP2_ROW1(0x40u, 1u);
@@ -567,9 +604,15 @@ int main(void)
     check(has(text, " of 2 devices"), "and only the two devices the table named are counted");
     snprintf(needle, sizeof needle, "reads %d, writes 0", reads_served);
     check(has(text, needle), "the CFG word and every row are in the read count the module reports");
-    check(reads_served == 28,
-          "two boot-register reads, the class, six clock reads, one CFG word per block and the twelve rows "
-          "the chip said exist: nothing is read past the end of the table it decoded");
+    check(reads_served == 32,
+          "two boot-register reads, the class, six clock reads, one CFG word per block, the twelve rows the "
+          "chip said exist and four scratch words: nothing is read past the end of the table it decoded");
+    check(has(text, "FSP scratch at 0x8f0320 answers 0x00000000/0x00000000/0x00000000/0x00000000"),
+          "a block that answers with its published initial values is reported as answering, not as free");
+    check(has(text, "uninterpreted here"), "and the report says out loud that it is not interpreting them");
+    check(!has(text, "base unit"), "no engine address is derived when the table names no GSP entry to "
+                                   "check the field's unit against");
+    check(ce_block_reads == 0, "and the copy engine's own block is therefore never read");
     check(stores == 0, "the v2 table was read, never written");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
@@ -630,15 +673,33 @@ int main(void)
         };
         unsigned n = sizeof kinds / sizeof kinds[0];
         for (unsigned i = 0; i < n; i++) {
+            /* Every entry gets the widest fields the format can hold, except the two the target clauses key
+             * off: the GSP's field is the one the published base agrees with (so the cross-check confirms
+             * and the engine block is asked, which is a clause of its own) and the copy engine's is the
+             * address that question then leads to.  This scenario is the whole report at its longest, so a
+             * ceiling that only the *tallies* fit under would still clip a card that answers. */
+            u32 field = kinds[i] == NV_PTOP_TYPE_GSP ? 0x1100u : 0x3ffffu;
+            if (kinds[i] == NV_PTOP_TYPE_LCE) field = 0x1040u;
             registers[TOP_AT(0x22800u, i * 3u + 0u)] = TOP2_ROW0(kinds[i], 123u, 12u, 1020u);
-            registers[TOP_AT(0x22800u, i * 3u + 1u)] = TOP2_ROW1(0x3ffffu, 1u);
+            registers[TOP_AT(0x22800u, i * 3u + 1u)] = TOP2_ROW1(field, 1u);
             registers[TOP_AT(0x22800u, i * 3u + 2u)] = TOP2_ROW2(63u, 0xffffu);
         }
     }
+    ce_block[0] = 0x12345678u;                      /* both targets answering, in their longest form */
+    ce_block[1] = 0x9abcdef0u;
+    for (unsigned i = 0; i < 4u; i++) fsp_regs[i] = 0xf00dbabeu;
+    /* And the coprocessor refusing, which is the clause a real Blackwell card produces and the longest of
+     * the block's states: a ceiling measured with only the friendly case in it is not a ceiling. */
+    for (unsigned i = 0; i < 5u; i++) gsp_regs[i] = 0xbadf4100u;
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(verdict == 0 && str_len(text) < 768,
-          "the longest inventory this format can describe still fits the kernel's field, unclipped");
+    check(verdict == 0 && str_len(text) < 1152,
+          "the longest inventory this format can describe, with every target clause it can print, still "
+          "fits the kernel's field unclipped");
+    check(has(text, "the first LCE's block at 0x104000 answers 0x12345678/0x9abcdef0") &&
+          has(text, "FSP scratch at 0x8f0320 answers 0xf00dbabe") &&
+          has(text, "GSP block at 0x110000 refused all five reads"),
+          "and every clause that has to be there for the measurement to mean anything is, in its longest form");
     check(has(text, "LCE 3/VIC 1/GFX 2/ENC 2/DEC 1/SEC 1/GSP 2/JPG 1 of 17 devices"),
           "and every device the seeded table named is tallied, including the codec and bus blocks");
     check(has(text, "17 engines per its own IS_ENGINE, 4 bus"),
@@ -700,6 +761,136 @@ int main(void)
           "a held-in-reset processor with its fatal bit set and containment tripped is reported as such");
     check(any_log("held in reset, so starting it is the first thing any GSP path has to do"),
           "and the log names the next step the state implies, no more of it than that");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    /* ---- 1p. the shape a real Blackwell machine's answers take, replayed as one scenario: a v2 table whose
+     * GSP entry names 0x1100 and whose first LCE names 0x1040, a window that answers a class no manual
+     * documents with a clock that does not move, and a BAR0 that replies 0xbadf4100 at every one of the
+     * eleven registers this driver asks.  That value is not register content: NVIDIA's own driver names it
+     * `privErrTargetLocked' and reads for it (src/nvidia/src/kernel/gpu/fsp/arch/hopper/kern_fsp_gh100.c)
+     * to decide whether the FSP has released the coprocessor to the CPU at all.  So the report has to say
+     * "locked against this reader" and must not slice a reset status out of a refusal - which is precisely
+     * what the previous build printed on the card this scenario is modelled on. ---- */
+#define TOP2_WITH_GSP(gsp_field) \
+    do { \
+        registers[0x224fc / 4u] = TOP2_CFG(2u, 3u, 6u); \
+        registers[TOP_AT(0x22800u, 0)] = TOP2_ROW0(NV_PTOP_TYPE_LCE, 0u, 0u, 0x41u); \
+        registers[TOP_AT(0x22800u, 1)] = TOP2_ROW1(0x1040u, 1u); \
+        registers[TOP_AT(0x22800u, 2)] = TOP2_ROW2(1u, 0x340u); \
+        registers[TOP_AT(0x22800u, 3)] = TOP2_ROW0(NV_PTOP_TYPE_GSP, 0u, 1u, 0u); \
+        registers[TOP_AT(0x22800u, 4)] = TOP2_ROW1(gsp_field, 0u); \
+        registers[TOP_AT(0x22800u, 5)] = TOP2_ROW2(0u, 0u); \
+    } while (0)
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0x1100u;
+    timer_frozen = 1;
+    low_mapping_bytes = 0x800000ull;                /* the kernel's cap, as it lands on a 16 MiB BAR */
+    TOP2_WITH_GSP(0x1100u);
+    for (unsigned i = 0; i < 5u; i++) gsp_regs[i] = 0xbadf4100u;
+    for (unsigned i = 0; i < 4u; i++) fsp_regs[i] = 0xbadf4100u;
+    ce_block[0] = ce_block[1] = 0xbadf4100u;
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "GSP block at 0x110000 refused all five reads (0xbadf4100"),
+          "a reply the chip means as a refusal is reported as a refusal");
+    check(!has(text, "reset status") && !has(text, "out of reset") && !has(text, "in reset"),
+          "and no field is decoded out of it - the state the last build invented from this same dword");
+    check(has(text, "base unit measured on this chip: the GSP entry's field 0x001100 x 256 is the published 0x110000"),
+          "the unit of an undocumented 18-bit field is taken from the one entry whose block is published, "
+          "instead of being picked because it looked plausible");
+    check(has(text, "the first LCE's block at 0x104000 refused the same way"),
+          "and the engine a submission would be built for is measured to be shut as well, not assumed to be");
+    check(has(text, "FSP scratch at 0x8f0320 refused too"),
+          "the microcontroller whose release the lock waits for does not answer either, which is the fact "
+          "that says a driver on this side of the boot sequence has nothing to wait on");
+    check(maps == 3 && far_maps == 1,
+          "three mappings taken: the register BAR as far as the kernel caps it, the window's page, the "
+          "FSP's page - and each is a separate mapping because the cap is per mapping, not per BAR");
+    check(ce_block_reads == 2, "the engine block was read, and only after the cross-check agreed on the unit");
+    snprintf(needle, sizeof needle, "reads %d, writes 0", reads_served);
+    check(reads_served == 28 && has(text, needle),
+          "two boot reads, the class, six clock reads, the two CFG words and the six rows they said exist, "
+          "five for the coprocessor, two for the engine block and four for the FSP - eleven of the "
+          "twenty-eight answered with a refusal, and all twenty-eight are in the number the panel prints");
+    check(stores == 0, "with not one store among them");
+    check(any_log("every offset answered 0xbadf4100"), "the log names the value for a serial capture");
+    check(any_log("the other targets in the same aperture") && any_log("refuses the way the GSP does"),
+          "and its second line answers what else was asked, in the same words the panel gets");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    /* ---- 1q. the same refusal at the coprocessor, with one block in the same BAR answering: a driver that
+     * let the copy engine's reply soften the GSP's refusal - or the other way round - would be reporting a
+     * property of the aperture rather than of the target, and the two are different questions here. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0x1100u;
+    timer_frozen = 1;
+    low_mapping_bytes = 0x800000ull;
+    TOP2_WITH_GSP(0x1100u);
+    for (unsigned i = 0; i < 5u; i++) gsp_regs[i] = 0xbadf4100u;
+    for (unsigned i = 0; i < 4u; i++) fsp_regs[i] = 0xbadf4100u;
+    ce_block[0] = 0x00000300u;
+    ce_block[1] = 0x00000001u;
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "the first LCE's block at 0x104000 answers 0x00000300/0x00000001"),
+          "a block that replies is reported as replying, at the address the chip's own table named");
+    check(has(text, "which is content"),
+          "and the claim stops at \"this is a reply and not an error code\": gb100 publishes no register "
+          "names inside a copy engine, so nothing here says what the two words mean");
+    check(has(text, "GSP block at 0x110000 refused all five reads (0xbadf4100"),
+          "and the coprocessor's refusal is still reported next to it, unhedged");
+    check(!has(text, "is locked the same way"),
+          "the engine block is not swept into the coprocessor's answer by a shared prefix");
+    check(any_log("first live engine register read on this chip"),
+          "and the log says which of the two is the one worth pushing work through");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    /* ---- 1r. the cross-check *declining*: a GSP entry whose field scales to no candidate that lands on the
+     * published base.  This is the case the whole unit question turns on, because the tempting failure is to
+     * use the plausible scaling anyway and print an address nobody measured. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xffffffffu;
+    low_mapping_bytes = 0x800000ull;
+    TOP2_WITH_GSP(0x1040u);                         /* an LCE-shaped field where the GSP's base should be */
+    for (unsigned i = 0; i < 5u; i++) gsp_regs[i] = 0xbadf4100u;
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 &&
+          has(text, "no base unit: the GSP entry's field 0x001040 scales to no candidate that reaches the "
+                    "published 0x110000"),
+          "a table whose entry disagrees with the published base is reported as disagreement");
+    check(ce_block_reads == 0,
+          "and no read is issued at the address the unconfirmed scaling would have implied: an unproven "
+          "unit is a reason to stop, not a licence to probe");
+    check(!has(text, "the first LCE's block"), "and the report says nothing about a block it never asked");
+    check(any_log("no engine block was asked"), "and the log gives the reason in the same terms");
+    check(stores == 0, "a declined cross-check still wrote nothing");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    /* ---- 1s. and the driver's own bound, kept separate from the chip's silence: the FSP's page cannot be
+     * mapped, which is a fact about this kernel's mapping table and must not be printed as a reply. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0x1100u;
+    timer_frozen = 1;
+    low_mapping_bytes = 0x800000ull;
+    far_map_fails = 1;
+    TOP2_WITH_GSP(0x1100u);
+    for (unsigned i = 0; i < 5u; i++) gsp_regs[i] = 0xbadf4100u;
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "the FSP page at 0x8f0000 could not be mapped, so nothing is claimed"),
+          "an unmappable page is reported as this driver's bound");
+    check(!has(text, "FSP scratch at 0x8f0320"),
+          "and never as a block that answered nothing, which is a different sentence about a different thing");
+    check(far_maps == 1, "the attempt is recorded even though it failed");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
 

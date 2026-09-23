@@ -22,16 +22,24 @@ void cpu_reboot_8042(void){
  * longer a reason to drop a clause. What is still bounded is the field itself, and `+ 4 + 15' below is
  * "The " plus the longest family name the module state can hold. That bound matters because the clause
  * naming the problem is the last one, and a notice that loses its ending reads as a status line. */
-#define GPU_IDLE_NOTICE                                                      \
-    " module read this chip but implements no drawing engine, so the CPU "   \
-    "paints every pixel. That is a gap in SCos, not in this machine: the "    \
-    "card is resident, its memory was measured, and its own register block "  \
-    "has been read. Run graphics in Terminal: it lists the engines the chip " \
-    "reported and whether a submission window answers, and those two "        \
-    "together say how far this can go today - an engine in a table is a "     \
-    "block of registers until something can be submitted to it."
+/* Re-worded once a real Blackwell card had been read: it used to promise that the engine list and the
+ * window answer "say how far this can go today", which is true but not the binding constraint - on that
+ * machine the chip refuses the reader at the block the engines belong to, and a notice that stopped at
+ * "run graphics" left the impression that a longer look would find a way in.  It says what the refusal
+ * means now, in the same number of lines. */
+#define GPU_IDLE_NOTICE                                                        \
+    " module read this chip but implements no drawing engine, so the CPU "     \
+    "paints every pixel. That is a gap in SCos, not in this machine: its "     \
+    "memory was measured and its register blocks were read. Run graphics in "  \
+    "Terminal for the chip's own answers, including whether the coprocessor "  \
+    "that owns this generation's engines replies to a reader at all: a target " \
+    "the card answers with a locked error is released by its firmware boot, "  \
+    "and by nothing this OS could write."
 _Static_assert(sizeof(GPU_IDLE_NOTICE) - 1 + 4 + 15 <= 511,
                "an idle-GPU notice longer than the notice's own field; shorten it, do not enlarge the box");
+_Static_assert(sizeof(GPU_IDLE_NOTICE) - 1 > 300,
+               "the idle notice shrank to a bare sentence: it has to carry the reason and what would change "
+               "it, and a shorter one is what made this machine's report unreadable");
 
 /* What the user is told about the GPU, in one place, because the three possible states mean very
  * different things: nothing matched, an engine that works but on another function, and an engine
