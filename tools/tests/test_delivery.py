@@ -40,7 +40,9 @@ def prepare(record_edits=None, image_edit=None):
 
 
 def run():
-    return subprocess.run([sys.executable, 'tools/check_delivery.py', '--root', str(SCRATCH)],
+    # --root is the scratch delivery, --repo the real tree: the module set a delivery must carry comes from
+    # drivers/gpu/*/module.c in the repository, which the scratch copy deliberately does not duplicate.
+    return subprocess.run([sys.executable, 'tools/check_delivery.py', '--root', str(SCRATCH), '--repo', str(ROOT)],
                           cwd=ROOT, capture_output=True, text=True)
 
 

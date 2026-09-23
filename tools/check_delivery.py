@@ -52,7 +52,7 @@ def _reader():
     return module
 
 
-def check(root=ROOT):
+def check(root=ROOT, repo=None):
     """Return a list of problems; empty means the delivery is self-consistent."""
     root = Path(root)
     problems = []
@@ -108,8 +108,10 @@ def check(root=ROOT):
     # a module source is, and an image built while build/gpu happened to be empty carries no driver at all.
     # That is a legitimate *development* state and an unacceptable *delivery*, which is why the rule lives
     # here rather than in the packer.
+    # The rule reads the *repository* tree: --root may point at a scratch copy holding nothing but dist/.
+    src = Path(repo) if repo is not None else root
     expected = sorted(str(path.parent.name).upper() + '.MOD'
-                      for path in (root / 'drivers/gpu').glob('*/module.c')) if (root / 'drivers/gpu').is_dir() else []
+                      for path in (src / 'drivers/gpu').glob('*/module.c')) if (src / 'drivers/gpu').is_dir() else []
     if expected:
         for name in expected:
             if name not in packed:
@@ -142,11 +144,13 @@ def check(root=ROOT):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('--root', type=Path, default=ROOT, help='repository root, or a scratch copy of one')
+    ap.add_argument('--root', type=Path, default=ROOT, help='root holding the dist/ directory to check')
+    ap.add_argument('--repo', type=Path, default=None,
+                    help='repository whose driver sources define the expected module set (default: --root)')
     ap.add_argument('--report-only', action='store_true',
                     help='print what is wrong and exit 0 anyway; for a suite checking what is detected')
     args = ap.parse_args()
-    problems = check(args.root)
+    problems = check(args.root, args.repo)
     if not problems:
         meta = json.loads((args.root / RECORD).read_text())
         print('PASS: dist/scos.img, its checksum and its record are one delivery from %s (kernel %d B, %d '
