@@ -44,15 +44,20 @@ struct inventory {
     u64 physical, mapped_bytes;         /* where the block is, as the PCI function reports it */
     u64 handle;                         /* what the kernel's accessors want */
     u32 boot0, boot0_repeat;
-    u32 reads;                          /* register reads issued: two, of one offset, both reported */
+    u32 usermode_class;                 /* NV_USERMODE_CFG0's class number, read from the device */
+    u64 timer_start, timer_end;         /* PTIMER as that window exposes it, in nanoseconds */
+    int window_live;                    /* the class register answered with something other than 0 or -1 */
+    int timer_ticking;                  /* and the clock moved between the two samples */
+    u32 reads;                          /* register reads issued, counted as they are made and printed verbatim */
     u32 writes;                         /* always 0; see reg_read() below, and there is no reg_write() */
     int answered;                       /* the block returned something other than 0 and other than -1 */
     int owns_console;                   /* the firmware's scanout surface sits in one of these BARs */
     u64 console_offset;                 /* and this far into it */
-    /* Built once at the end of init.  160 is the kernel's own limit for a description, and it is
-     * asserted by the host harness rather than trusted here: a clipped tail would drop the clause
-     * that says whose screen this is, which is the part a reader came for. */
-    char text[176];
+    /* Built once at the end of init, at the kernel's own limit for a description (256, in
+     * gpu_device_state.describe).  The size is asserted by the host harness rather than trusted here: a
+     * clipped tail would drop the clause about the submission window, which is the part a reader of the
+     * next increment came for. */
+    char text[256];
 };
 
 static struct inventory inv;
@@ -70,6 +75,45 @@ static u32 reg_read(u32 offset)
 {
     inv.reads++;
     return X->read32(inv.handle, offset);
+}
+
+/* The documented way to read PTIMER (tu104 dev_usermode.ref.txt): TIME_1, TIME_0, then TIME_1 again,
+ * repeating if the high half moved - otherwise a low-half overflow between the two reads could be taken
+ * for a time up to four seconds in the future.  Following the note exactly is not ceremony: it is the
+ * difference between a measured interval and a fabricated one. */
+static int read_gpu_time(u64 *nanoseconds)
+{
+    for (int attempt = 0; attempt < 8; attempt++) {
+        u32 high = reg_read(NV_USERMODE_TIME_1);
+        u32 low = reg_read(NV_USERMODE_TIME_0);
+        u32 high_again = reg_read(NV_USERMODE_TIME_1);
+        if (high == high_again) {
+            *nanoseconds = ((u64)high << 32) | low;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* What the second measurement is for.  A Blackwell submission needs an addressable channel and a doorbell
+ * to ring it through, and nothing published says where that block is on this generation.  So the chip is
+ * asked instead: if the class register answers with a class number and the clock in the same page is
+ * advancing, the window the Volta and Turing documentation describes is present on this silicon, and the
+ * copy-engine work after this is addressable rather than speculative.  If it answers nothing, that is the
+ * ceiling, measured.  Both answers are reported; neither is written to. */
+static void probe_usermode(void)
+{
+    /* Asked explicitly rather than left to the kernel's bounds check answering all-ones: a mapping that
+     * does not contain the window is a fact about this BAR, and saying so is truer than reporting that
+     * the device answered nothing. */
+    if (inv.mapped_bytes < NV_USERMODE_TIME_1 + 4u) return;
+    inv.usermode_class = NV_USERMODE_CFG0_CLASS_ID(reg_read(NV_USERMODE_CFG0));
+    inv.window_live = inv.usermode_class != 0x0000u && inv.usermode_class != 0xffffu;
+    if (!inv.window_live) return;
+    if (!read_gpu_time(&inv.timer_start)) return;
+    if (X->spin) X->spin(4096);
+    if (!read_gpu_time(&inv.timer_end)) return;
+    inv.timer_ticking = inv.timer_end > inv.timer_start;
 }
 
 /* ------------------------------------------------------------------ formatting ----
@@ -134,7 +178,7 @@ static void build_text(void)
     }
     put_text(&b, " arch 0x");
     put_hex(&b, architecture, 2);
-    /* Short on purpose: the kernel keeps 160 characters, and a sentence clipped at the end would hide
+    /* Short on purpose: the kernel keeps 256 characters, and a sentence clipped at the end would hide
      * the one clause a user most needs - whose screen this is. */
     put_char(&b, ' ');
     put_text(&b, name ? name : "(arch not in the published table)");
@@ -149,6 +193,23 @@ static void build_text(void)
     put_text(&b, ", writes ");
     put_dec(&b, inv.writes);
     put_text(&b, inv.owns_console ? " feeds the console" : " not the console owner");
+    put_text(&b, "; window ");
+    if (!inv.window_live) {
+        put_text(&b, "silent");
+    } else {
+        put_text(&b, "class 0x");
+        put_hex(&b, inv.usermode_class, 4);
+        put_text(&b, inv.usermode_class == NV_USERMODE_CLASS_ID_VOLTA_TURING ? "=published" : "");
+        if (inv.timer_ticking) {
+            u64 delta = inv.timer_end - inv.timer_start;
+            u32 us = (u32)(delta / 1000u);
+            put_text(&b, " clock +");
+            put_dec(&b, us);
+            put_text(&b, "us");
+        } else {
+            put_text(&b, " clock frozen");
+        }
+    }
     *b.at = 0;
 }
 
@@ -218,6 +279,9 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     inv.boot0 = inv.boot0_repeat = 0;
     inv.reads = inv.writes = 0;
     inv.answered = inv.owns_console = 0;
+    inv.usermode_class = 0;
+    inv.window_live = inv.timer_ticking = 0;
+    inv.timer_start = inv.timer_end = 0;
     inv.console_offset = 0;
     inv.handle = inv.physical = inv.mapped_bytes = 0;
     inv.text[0] = 0;
@@ -275,8 +339,11 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
         }
     }
 
+    probe_usermode();
     build_text();
-    char line[192];
+    /* Wide enough for the whole description plus the prefix: the window clause sits at the end of the
+     * text, so a narrow log buffer would cut the one part this increment added. */
+    char line[288];
     struct buf b = { line, line + sizeof(line) - 1 };
     put_text(&b, "nvidia: ");
     put_hex(&b, device->vendor, 4);
@@ -292,6 +359,17 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     put_text(&b, inv.text);
     *b.at = 0;
     note(line);
+    if (inv.window_live) {
+        /* A second line for whoever reads the log to decide what to build next: it states the inference
+         * and its limit, rather than leaving a reader to conclude that the doorbell had been tried. */
+        static char second[208];
+        struct buf t = { second, second + sizeof(second) - 1 };
+        put_text(&t, "nvidia: doorbell at BAR0+0x810090 named, not written; ");
+        put_text(&t, inv.timer_ticking ? "with a live clock in that page a channel can be attempted next"
+                                       : "with the clock frozen no submission is attempted");
+        *t.at = 0;
+        note(second);
+    }
 
     *out_ops = &ops;
     return 0;

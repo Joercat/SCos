@@ -49,7 +49,7 @@ struct module_record {
     int bound;                   /* init succeeded and the self-test passed */
     char name[24];
     char family[SCOS_GPU_FAMILY_NAME];
-    char describe[160];
+    char describe[256];
     u64 region, region_bytes;
     u64 file_bytes, load_bytes, image_bytes, resident_bytes;
     u32 header_crc, computed_crc;

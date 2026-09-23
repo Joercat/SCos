@@ -27,6 +27,7 @@
 static u32 registers[REG_WORDS];
 static int stores;                       /* every write32 the module attempted: must stay 0 */
 static int maps;
+static int reads_served;                 /* every read the module issued, so its count can be matched */
 static u64 mapped_physical;
 static const char *logs[24];
 static int log_count;
@@ -71,6 +72,15 @@ static u64 fake_map(u64 physical, u64 bytes, u32 write_combine, u64 *mapped_byte
     return 0x1000ull;                    /* any non-zero handle: reads below ignore it */
 }
 
+/* The user-mode window, modelled separately from the low registers because it lives 8 MiB into BAR0:
+ * `umode_class' is what NV_USERMODE_CFG0 returns (0xffffffff for a function with no window at that
+ * address at all) and the TIME registers are served by a counter, which is how a ticking clock and a
+ * frozen one are told apart without a chip that does either. */
+static u32 umode_class = 0xffffffffu;
+static int timer_frozen;
+static u64 timer_tick;
+#define TIMER_STEP 2097152u                 /* 2097 us between samples, 32 ns aligned */
+
 /* One device that answers differently the second time it is asked: the only way to test a driver's
  * "I do not believe this" path without a chip that is actually misbehaving. */
 static int unstable, unstable_reads;
@@ -79,6 +89,14 @@ static u32 unstable_value;
 static u32 fake_read32(u64 handle, u32 offset)
 {
     (void)handle;
+    reads_served++;
+    if (offset == 0x00810000u) return umode_class;
+    if (offset == 0x00810084u) return 0;                    /* TIME_1: the high half stays zero */
+    if (offset == 0x00810080u) {                            /* TIME_0: the nanosecond counter */
+        if (timer_frozen) return 0x200000u;
+        timer_tick += TIMER_STEP;
+        return (u32)timer_tick;
+    }
     if (unstable && offset == 0) {
         unstable_reads++;
         if (unstable_reads > 1) return unstable_value;
@@ -141,6 +159,10 @@ static void fixture_reset(struct fixture *f, u32 vendor, u32 device_id, u64 fram
     };
     stores = 0;
     maps = 0;
+    reads_served = 0;
+    umode_class = 0xffffffffu;
+    timer_frozen = 0;
+    timer_tick = 0;
     unstable = 0;
     unstable_reads = 0;
     unstable_value = 0xffffffffu;
@@ -195,7 +217,11 @@ int main(void)
           "an architecture the published table does not name is reported as unnamed, not refused");
     check(has(text, "impl 0x8"), "IMPLEMENTATION is taken from 23:20, where NVIDIA documents it");
     check(has(text, "rev A.1"), "MAJOR_REVISION 7:4 and MINOR_REVISION 3:0 are read as separate fields");
-    check(has(text, "reads 2, writes 0"), "the read count is reported, and the write count is zero");
+    check(has(text, "reads 3, writes 0"),
+          "with no window at the documented address it read the boot register twice, the class register "
+          "once, and nothing else");
+    check(reads_served == 3, "the count it reports is the count it issued");
+    check(has(text, "window silent"), "and it says the submission window was silent");
     check(has(text, "feeds the console"),
           "the function whose BAR holds the firmware's surface says it feeds the console");
     check(has(text, "at BAR 0xe0100000"), "the aperture it read is the one it reports");
@@ -208,10 +234,48 @@ int main(void)
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
 
+    /* ---- 1b. a live user-mode window: the doorbell's page, read and reported, never written. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xc461u;                      /* the class NVIDIA documents for Volta and Turing */
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && has(text, "window class 0xc461=published"),
+          "a class register answering with the published number is reported as matching it");
+    check(has(text, "clock +2097us"), "and the clock in that page is measured, not assumed");
+    check(reads_served == 9 && has(text, "reads 9, writes 0"),
+          "two boot-register reads, one class read, six reads of the time pair, and no more");
+    check(stores == 0, "the doorbell page was read and never written");
+    check(log_count >= 2 && has(logs[1], "doorbell at BAR0+0x810090 named, not written"),
+          "the second log line states what was not attempted, so the log cannot be misread as a submission");
+    check(has(logs[1], "a channel can be attempted next"), "and what a live clock makes possible");
+
+    /* ---- 1c. the same window answering a class no published document names. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xc761u;                      /* a Blackwell-shaped answer nobody here has seen */
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(has(text, "window class 0xc761 clock +2097us"),
+          "an unpublished class number is reported as a number, and is not refused");
+    check(!has(text, "=published"),
+          "and it is not labelled as a generation nobody documented for this chip");
+
+    /* ---- 1d. a window whose clock does not move. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xc461u;
+    timer_frozen = 1;
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(has(text, "clock frozen"), "a clock that does not advance is reported as frozen");
+    check(has(logs[1], "no submission is attempted"), "and that answer decides against the channel");
+
     /* ---- 2. the same chip with the console behind another function. ---- */
     fixture_reset(&f, 0x10de, 0x2d83, 0);
     registers[0] = boot0;
     verdict = scos_module_init(&f.exports, &ops);
+    check(reads_served == 3, "a second run asks the chip again rather than reusing the last answer");
     check(verdict == 0 && has(ops->describe(ops->context), "not the console owner"),
           "with no firmware surface in its BARs it says another function feeds the console");
     check(stores == 0, "the second run still wrote nothing");
@@ -266,7 +330,7 @@ int main(void)
     text = ops->describe(ops->context);
     check(verdict == 0 && has(text, "not the console owner") && !has(text, "feeds the console"),
           "a rebind recomputes the inventory instead of repeating the previous one");
-    check(has(text, "reads 2, writes 0"), "and the read counter restarted, as a measurement must");
+    check(has(text, "reads 3, writes 0"), "and the read counter restarted, as a measurement must");
 
     printf("%s: nvidia identification module, %d scenario(s), %d failure(s)\n",
            failures ? "FAIL" : "PASS", 8, failures);

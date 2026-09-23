@@ -44,4 +44,19 @@
 #define NV_PMC_BOOT_0_ARCHITECTURE_TU100  0x16u   /* Turing  */
 #define NV_PMC_BOOT_0_ARCHITECTURE_GA100  0x17u   /* Ampere  */
 
+/* The user-mode window: the block a submission is rung through, and the copy of the GPU's own clock that
+ * is readable without any privileged setup.  Published for Volta and Turing in
+ * manuals/turing/tu104/dev_usermode.ref.txt (offsets inside the register BAR); NVIDIA publishes no
+ * equivalent for Blackwell, which is why everything below is read and reported rather than assumed - the
+ * class register says from the device whether this window exists on this chip and under what class number,
+ * and the clock in the same page says whether the block is live.  Nothing here is ever written:
+ * NV_USERMODE_NOTIFY_CHANNEL_PENDING is the doorbell, and ringing it with no channel set up is one way to
+ * hang a card, so the address is named for the reader and left alone by the code. */
+#define NV_USERMODE_CFG0                       0x00810000u   /* R--4R, USERMODE_CLASS_ID 15:0 */
+#define NV_USERMODE_CFG0_CLASS_ID(v)                ((v) & 0xffffu)
+#define NV_USERMODE_CLASS_ID_VOLTA_TURING           0xc461u   /* the documented reset value */
+#define NV_USERMODE_TIME_0                     0x00810080u   /* R--4R, low 32 bits, 32 ns granularity */
+#define NV_USERMODE_TIME_1                     0x00810084u   /* R--4R, upper 29 bits */
+#define NV_USERMODE_NOTIFY_CHANNEL_PENDING     0x00810090u   /* -W-4R: named, never written here */
+
 #endif

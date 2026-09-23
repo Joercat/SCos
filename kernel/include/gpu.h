@@ -110,7 +110,7 @@ struct gpu_module_state {
     int identification_only;         /* ... and it exposes no engine, only what the chip said */
     char name[24];
     char family[16];
-    char describe[160];
+    char describe[256];
     uint64_t resident_bytes;         /* image in the executable boot-arena region */
     uint64_t file_bytes;             /* bytes read off the disk */
     uint32_t store_count;            /* modules on the disk, including those never opened */

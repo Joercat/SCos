@@ -413,6 +413,18 @@ So the honest split is: *identification* is fully available and is what this inc
 needs a channel, a minimal GMMU page table and a bring-up path that no public document describes end to
 end.  Claiming the second from the first is the failure mode this file exists to prevent.
 
+Two facts pinned down for that next step, because "where is it" and "what does it mean" are separate
+questions with separate answers.  Turing publishes the engine inventory as a readable array -
+`manuals/turing/tu104/dev_top.ref.txt`: `NV_PTOP_DEVICE_INFO(i) = 0x00022700 + i*4`, 64 entries, `R--4A`,
+where each entry carries `CHAIN 31:31`, `ENGINE_ENUM 29:26`, `RUNLIST_ENUM 24:21`, `INTR_ENUM 19:15`,
+`RESET_ENUM 13:9` and valid bits 5:2, with `TYPE_ENUM 30:2` naming the unit (LCE = 19, NVDEC = 16,
+NVENC = 14, GSP = 20).  Blackwell republishes *the enum* and only the enum:
+`open-gpu-kernel-modules/src/common/inc/swref/published/blackwell/gb202/dev_top_zb.h` is one `#define`,
+`NV_PTOP_ZB_DEVICE_INFO_DEV_TYPE_ENUM_LCE 0x13` - the same number as Turing's, which is evidence the entry
+format survived and no evidence at all about where the array starts.  There is no `gb207` directory at all.
+So a walk of that table on a GB207 has to establish the address from the device before it decodes anything,
+and until it does, the offsets in this paragraph are documentation, not inputs.
+
 ## NVIDIA GB20x: the first module for a modern card, and what it refuses to do
 
 `drivers/gpu/nvidia/` is the third module on the disk and the first for a chip younger than 2010.  It is a
@@ -423,9 +435,25 @@ small, deliberately unfinished driver, and it is worth being exact about why tha
   dev_boot.ref.txt`: MINOR 3:0, MAJOR 7:4, IMPLEMENTATION 23:20, ARCHITECTURE 28:24).  Because the newest
   published table stops at Ampere, a Blackwell architecture number is **printed as an unnamed number**
   rather than translated into a guess.
+* It then asks the chip whether the *submission window* exists at all, because that question is answerable
+  by reading.  NVIDIA documents the window in `manuals/turing/tu104/dev_usermode.ref.txt`: a 128 KiB page at
+  BAR0+0x810000, `NV_USERMODE_CFG0` holding a 16-bit class id (`0xc461`, the `volta_usermode_a` class, on
+  Volta and Turing), and `NV_USERMODE_TIME_0`/`TIME_1` at +0x810080/+0x810084 carrying PTIMER in nanoseconds
+  at 32 ns granularity - the low five bits of `TIME_0` are always zero, and the manual specifies the read
+  order TIME_1, TIME_0, TIME_1, repeat on mismatch, so a rollover of the low half cannot be reported as a
+  jump of seconds.  `probe_usermode()` follows exactly that sequence (retries bounded at eight) and reports
+  one of three *measured* answers: `window class 0x…=published clock +Nus`, `clock frozen`, or `window
+  silent`.  Blackwell's own manual is not published, so a class number that is not `0xc461` is printed as a
+  number and not translated into a generation, and no `GA10X`-style naming is invented for it.
+* The same document names the doorbell, `NV_USERMODE_NOTIFY_CHANNEL_PENDING` at +0x810090.  With no channel in
+  the run queue, ringing it hangs the submission path, so **it is defined and never written**: the define is
+  there so that the next step is anchored to an address NVIDIA published rather than one guessed here.  The
+  module's second log line says `doorbell at BAR0+0x810090 named, not written` and then states which way the
+  clock answer pointed, because "we know where submission begins" and "we submitted" must not read the same.
 * It writes nothing, and that is structural: the module never takes the `write32` export, so there is no
-  path from its code to a store.  Its `describe()` says `reads 2, writes 0`, and the host harness fails the
-  run if a store is even attempted.
+  path from its code to a store.  Its `describe()` reports the exact read count it issued - three reads when
+  the window is silent, nine when the clock was sampled - and the host harness fails the run if a store is
+  even attempted, or if the count in the string and the count the fake device served disagree.
 * It offers no engine operation at all, which the kernel now understands as a distinct state
   (`identification_only`).  Every drawing predicate checks the operation pointer, so the CPU compositor
   keeps painting; the boot log says "a driver read the chip and reported it", never "engine in use".
@@ -440,12 +468,15 @@ small, deliberately unfinished driver, and it is worth being exact about why tha
   naming ids** - the two numbers `test_gpu_detect.py` reads out of a real boot, not out of the headers.
 
 _Measured 2026-09-23._ The module compiles under the same `-Werror -ffreestanding` flags as every other
-module and packs to `OK nvidia.mod: family=nvidia rxe=4304 data=88 bss=240 relocs=103 ids=19 load=4392
-image=4632`.  `tools/tests/test_nvidia_ident.py` compiles `module.c` unchanged against a fake
-`scos_gpu_exports` whose register file is an array and runs 38 checks: the decode of each field, all five
-refusal paths, that exactly one mapping was taken and it was the register BAR rather than the frame buffer,
-that the two reads are two and not one, that a rebind recomputes instead of repeating, and that every
-operation slot but `describe` is null.  The id list the module claims is checked against the generated
+module and packs to `OK nvidia.mod: family=nvidia rxe=5728 data=88 bss=576 relocs=153 ids=19 load=5816
+image=6392` - the growth over the first version being the time-window probe and a 256-byte `describe` field
+in the kernel's device record, which both the panel and the store line read.  `tools/tests/test_nvidia_ident.py`
+compiles `module.c` unchanged against a fake
+`scos_gpu_exports` whose register file is an array and runs 51 checks: the decode of each field, all five
+refusal paths, the three window answers (a clock that advanced, a clock that did not, a window that answered
+all ones), that exactly one mapping was taken and it was the register BAR rather than the frame buffer, that
+the read count in the string equals the number of reads the fixture actually served, that a rebind
+recomputes instead of repeating, and that every operation slot but `describe` is null.  The id list the module claims is checked against the generated
 table it is cross-checked by, row for row, and against the naming header, where those ids must now be
 absent.  In a QEMU boot the same image shows the store grew to three files while a Cirrus machine reads
 only its own: `module 3 module(s), 27224 B on the boot disk: 13536 B opened for this chip, 13688 B never

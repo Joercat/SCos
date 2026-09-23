@@ -25,6 +25,7 @@ Four things are checked, all against the emulated device's own state:
 The second guest in this file is `-vga std`, which is what every other suite boots; running both keeps
 "the GPU is used when it exists" and "nothing breaks when it does not" tied to the same image.
 """
+import os
 import re
 import struct
 import sys
@@ -123,11 +124,14 @@ def test_engine_paints_the_console():
         panel = g.string(g.scratch, 4096)
         assert 'driver module cirrus (family cirrus) loaded from storage and verified by device ' \
                'readback, 225/225 pixels; used for solid output rectangles' in panel, panel[-1800:]
-        # Three files are on the disk now, and the two that are not Cirrus stay unopened: ati.mod is
-        # 13536 B and nvidia.mod is 6472 B, so 20008 B were never read on this boot.  That the NVIDIA
-        # file is *not* opened for a Cirrus machine is the per-family loading rule, and it is measured
-        # here rather than asserted in a comment.
-        assert 'the other families\' 20008 B were never read' in panel, panel[-1800:]
+        # Three files are on the disk now, and the two that are not Cirrus stay unopened.  The expected
+        # figure is read out of the packed files themselves rather than written down here, because the
+        # number is a property of the disk image and a literal in a test goes stale the moment a module
+        # changes - which is exactly what happened once.  That the NVIDIA file is *not* opened for a
+        # Cirrus machine is the per-family loading rule, and it is measured, not asserted in a comment.
+        unopened = sum(os.path.getsize(f'build/gpu/{m}.mod') for m in ('ati', 'nvidia'))
+        assert f'the other families\' {unopened} B were never read' in panel, \
+            (panel[-1800:], f'{unopened} B expected from the files on disk')
         assert 'of 3 module file(s) on the disk' in panel, panel[-1800:]
 
         # --- the compositor's whole-screen repaint goes through the card --------------------------

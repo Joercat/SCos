@@ -7,7 +7,8 @@ module is compiled exactly as `make gpu-modules` compiles it, linked against a f
 `struct scos_gpu_exports`, and run: the decode has to come out of the fixture word, every refusal path
 has to refuse, and any store the module attempts is a failure of this run.  That is a real measurement
 of the driver's logic; what it does not do is claim the chip was touched, which is the claim the report
-text makes only after `reads 2, writes 0`.
+text makes only after the read and write counts it prints, which are matched against what the device
+served, not against what the driver meant to do.
 
 The second half of the suite is the part that a C harness cannot see: the list of device ids the module
 claims must be a subset of the family table the loader cross-checks it against, byte-for-byte equal to
