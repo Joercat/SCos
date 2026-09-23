@@ -104,6 +104,22 @@ def check(root=ROOT):
                         % (meta.get('kernel_bytes'), len(kernel)))
     elif hashlib.sha256(kernel).hexdigest() != meta.get('kernel_sha256'):
         problems.append('KERNEL.ELF inside the image is not the hash the record carries')
+    # The module set is derived from the tree, not from the record: `drivers/gpu/<family>/module.c' is what
+    # a module source is, and an image built while build/gpu happened to be empty carries no driver at all.
+    # That is a legitimate *development* state and an unacceptable *delivery*, which is why the rule lives
+    # here rather than in the packer.
+    expected = sorted(str(path.parent.name).upper() + '.MOD'
+                      for path in (root / 'drivers/gpu').glob('*/module.c')) if (root / 'drivers/gpu').is_dir() else []
+    if expected:
+        for name in expected:
+            if name not in packed:
+                problems.append('%s has a driver source in the tree and is not in the image: the module '
+                                'objects were not built when the image was packed (make gpu-modules)' % name)
+        listed = {m['name'] for m in meta.get('modules', [])}
+        if listed != set(expected):
+            problems.append('the record lists %s; the tree builds %s'
+                            % (', '.join(sorted(listed)) or 'nothing', ', '.join(expected)))
+
     for name, blob_for_name in packed.items():
         want = next(m for m in meta.get('modules', []) if m['name'] == name)
         if blob_for_name is None:

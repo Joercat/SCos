@@ -73,6 +73,15 @@ def test_a_stale_image_for_the_record_is_refused():
     expect_problem('a record that does not match the packed kernel', 'not the hash the record carries')
 
 
+def test_a_record_missing_a_built_driver_is_refused():
+    """The state `make dist' reaches when build/gpu was never populated: an image with no drivers in it."""
+    if not (ROOT / 'dist/scos.img').is_file():
+        print('skip: dist/scos.img is not built')
+        return
+    prepare(record_edits={'modules': []})
+    expect_problem('a delivery whose record left the driver modules out', 'the tree builds')
+
+
 def test_a_record_from_before_an_image_input_change_is_refused():
     """The state a branch reaches by committing kernel work without running make dist."""
     if not (ROOT / 'dist/scos.img').is_file():
