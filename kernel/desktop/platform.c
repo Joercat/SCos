@@ -17,15 +17,18 @@ void cpu_reboot_8042(void){
     for(unsigned i=0;i<100000;i++)__asm__ volatile("pause");
     panic("reset controller did not restart the machine");
 }
-/* A notification has 191 bytes of text (wm_notify copies into a field of exactly that size) and 108
- * pixels of height, so the sentence below is sized to arrive whole: `+ 4 + 15' is "The " and the longest
- * family name the module state can hold.  Being clipped is not cosmetic here - the clause that names the
- * problem is the last one, and a notice that loses it reads as a status line. */
+/* A notification holds 512 bytes of text, and it is now laid out with the same word wrap the terminal
+ * and the boot log use, so the box grows to whatever number of lines the sentence needs: length is no
+ * longer a reason to drop a clause. What is still bounded is the field itself, and `+ 4 + 15' below is
+ * "The " plus the longest family name the module state can hold. That bound matters because the clause
+ * naming the problem is the last one, and a notice that loses its ending reads as a status line. */
 #define GPU_IDLE_NOTICE                                                      \
     " module read this chip but implements no drawing engine, so the CPU "   \
-    "paints every pixel. That is a gap in SCos, not in this machine. "       \
-    "Run graphics in Terminal."
-_Static_assert(sizeof(GPU_IDLE_NOTICE) - 1 + 4 + 15 <= 191,
+    "paints every pixel. That is a gap in SCos, not in this machine: the "    \
+    "card is resident, its memory was measured, and the report in Terminal "  \
+    "says which engines it has. Run graphics in Terminal - if that report "   \
+    "lists an engine, driving the screen with it is the next step."
+_Static_assert(sizeof(GPU_IDLE_NOTICE) - 1 + 4 + 15 <= 511,
                "an idle-GPU notice longer than the notice's own field; shorten it, do not enlarge the box");
 
 /* What the user is told about the GPU, in one place, because the three possible states mean very
@@ -55,9 +58,10 @@ static void gpu_boot_notice(void)
          * false, while "the GPU renders nothing" is true.  Saying it as a warning is not pessimism -
          * a screen that describes an idle GPU as an identified one is how a machine ends up reported as
          * working.  The gap is named as SCos's own, because it is: nothing about this chip is missing. */
-        /* The long form of the reason lives in `graphics'; what fits here is the outcome, and the size is
-         * the `_Static_assert' above rather than a counted promise. */
-        char text[224], *at = text, *end = text + sizeof(text) - 1;
+        /* The long form of the reason lives in `graphics'; what goes here is the outcome, and the size is
+         * the `_Static_assert' above rather than a counted promise.  It is generous because the notice
+         * wraps: the whole sentence arrives, on as many lines as it needs. */
+        char text[544], *at = text, *end = text + sizeof(text) - 1;
         const char *parts[] = { "The ", ms->family, GPU_IDLE_NOTICE, 0 };
         for (int i = 0; parts[i]; i++)
             for (const char *c = parts[i]; *c && at < end; *at++ = *c++);
@@ -67,7 +71,8 @@ static void gpu_boot_notice(void)
     }
     wm_notify("No 2D engine bound",
               "No supported 2D engine was matched on this machine, so the console is drawn by the CPU. "
-              "Run graphics in Terminal for the adapters that were detected and why.", 1);
+              "Run graphics in Terminal for the adapters that were detected and why - the list names each "
+              "one by vendor and device id, and says what SCos does with it today.", 1);
 }
 
 void kernel_panic(const char *reason){panic(reason);}

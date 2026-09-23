@@ -635,8 +635,11 @@ operations table, since that is how it is described, so the predicate measured w
 rather than whether it could draw. It now tests the `fill` pointer, the same pointer every drawing path
 tests before calling it, and `gpu_boot_notice()` gained the branch that machine was entitled to: title
 `GPU is not rendering`, warning, named as a gap in SCos rather than as a fault in the hardware. The notice
-text is bounded by a `_Static_assert` against the 191 bytes `wm_notify()` copies, because a notice clipped
-mid-clause loses exactly the clause that says what is wrong.
+text is bounded by a `_Static_assert` against the field `wm_notify()` copies into, because a notice clipped
+mid-clause loses exactly the clause that says what is wrong. That field is 512 bytes and the notice wraps
+onto as many rows as it needs (`docs/migration/PC-TEST.md`), which is what let the sentence say the whole
+outcome: that the card is resident and measured, that `graphics` lists its engines, and that a listed engine
+is the next thing to drive the screen with.
 
 Measured on a booted image whose Cirrus module is replaced with one that binds, describes and offers no
 fill (`tools/tests/test_nvidia_ident.py`): `notification: GPU is not rendering` in the serial log, `No 2D

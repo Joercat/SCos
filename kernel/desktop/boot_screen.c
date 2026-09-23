@@ -37,12 +37,16 @@ void boot_screen_step(const char *msg, int progress_pct)
     if(progress_pct<0)progress_pct=0;
     if(progress_pct>100)progress_pct=100;
     /* Keep later statuses visible even at the minimum GOP height. */
-    if(msg_y+(msg_line+1)*18>screen_h-12){s_fill(&screen,msg_x,msg_y,screen_w-msg_x,screen_h-msg_y,0);msg_line=0;}
+    if(msg_y+(msg_line+2)*18>screen_h-12){s_fill(&screen,msg_x,msg_y,screen_w-msg_x,screen_h-msg_y,0);msg_line=0;}  /* +2: the next status may wrap onto two rows */
     klog("boot: %s",msg);
     /* every line is produced by the real init step that just completed */
     s_text(&screen, msg_x, msg_y + msg_line * 18, "[done]", t->main);
-    s_clip_text(&screen, msg_x + 56, msg_y + msg_line * 18, msg, t->text, screen_w-msg_x-64);
-    msg_line++;
+    /* A status longer than the panel continues on the lines under it instead of ending in three dots -
+       the long ones (the GPU inventory, a module load, a device path) are exactly the ones a person
+       needs to read, and this screen is the only place some of them are ever written.  The return value
+       is the number of rows it drew, so the next status starts below the last of them. */
+    msg_line += s_text_wrap(&screen, msg_x + 56, msg_y + msg_line * 18, screen_w - msg_x - 64,
+                            msg, t->text);
     s_fill(&screen, bar_x + 2, bar_y + 2, (296 * progress_pct) / 100, 16, t->main);
     if (progress_pct >= 100) {
         /* the one ceremonial step: brief spinner, like the old simulation */

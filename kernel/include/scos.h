@@ -204,8 +204,8 @@ void s_circle(struct surface *s, int cx, int cy, int r, u32 c);
 void s_disc(struct surface *s, int cx, int cy, int r, u32 c);
 void s_vgrad(struct surface *s, int x, int y, int w, int h, u32 top, u32 bot);
 
-#define FONT_W 8
-#define FONT_H 16
+#include "text.h"
+
 extern const u8 font8x16[256][16];
 
 void s_char(struct surface *s, int x, int y, char ch, u32 fg);
@@ -220,6 +220,14 @@ void s_scos_logo(struct surface *s, int x, int y, u32 color, int scale, int phas
 void s_text_scaled(struct surface *s, int x, int y, const char *str, u32 fg, int scale);
 int  s_text_width(const char *str);
 void s_clip_text(struct surface *s, int x, int y, const char *str, u32 fg, int max_w);
+
+/* Flowing text: word-wrapped rows, and the row count every sizing caller needs.  See
+ * kernel/desktop/textwrap.c - a label in a fixed cell clips, anything a person reads does not. */
+int  s_text_cols(int width);
+int  s_wrap_next(const char *text, int cols, int *rowlen, int *advance);
+int  s_wrap_rows(const char *text, int cols);
+const char *s_wrap_row(const char *text, int cols, char *out, int out_size);
+int  s_text_wrap(struct surface *s, int x, int y, int width, const char *text, u32 fg);
 void s_blit(struct surface *d, struct surface *s, int dx, int dy);
 
 /* shared single-line text editor helper (returns 1 if buffer changed) */

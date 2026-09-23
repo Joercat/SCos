@@ -70,14 +70,18 @@ void error_screen(const char *subsys, const char *msg,
     s_text(&screen, 420, 150, head, t->text);
 
     y = 200;
-    s_text(&screen, 60, y, msg ? msg : "unspecified error", 0xFFFFFF);
-    y += 30;
+    /* Wrapped, not run off the edge: a panic that says where it stopped is the entire reason this screen
+       exists, and the message used to be drawn with no bound at all - past a screen width it left the
+       display and was simply gone. */
+    y += s_text_wrap(&screen, 60, y, screen_w - 120, msg ? msg : "unspecified error", 0xFFFFFF) * FONT_H;
+    y += 14;
     if (dump && ndump > 0) {
         s_text(&screen, 60, y, "related state:", 0xFFCC33);
         y += 20;
+        /* The state lines wrap for the same reason: they carry addresses, and an address cut in half is
+           worse than no address at all. */
         for (int i = 0; i < ndump && y < screen_h - 220; i++) {
-            s_text(&screen, 60, y, dump[i], 0xCCCCCC);
-            y += 18;
+            y += s_text_wrap(&screen, 60, y, screen_w - 120, dump[i], 0xCCCCCC) * FONT_H + 2;
         }
         y += 12;
     }

@@ -262,6 +262,30 @@ void s_clip_text(struct surface *s, int x, int y, const char *str, u32 fg, int m
     tmp[len]=0;s_text(s,x,y,tmp,fg);
 }
 
+/* Draw flowing text as wrapped rows, and report how many were painted.  `max_rows' bounds the work for a
+ * caller whose space is finite (0 means no bound).  A row that no longer fits the surface stops the loop:
+ * writing below a surface is not clipping, it is corruption, and the count returned says so by being short.
+ */
+/* Draw flowing text as wrapped rows and report how many were painted.  The row pitch is the text cell
+ * itself, and the surface is the only bound: a caller that wants the text to stop at the bottom of its box
+ * hands over a surface whose height *is* the box, which is also how a disagreement between the two becomes
+ * visible instead of silent.  A row that would fall outside the surface is not painted, and a surface
+ * painted short of the string is the caller's cue that it reserved too little. */
+int s_text_wrap(struct surface *s, int x, int y, int width, const char *text, u32 fg)
+{
+    char row[256];
+    int cols = s_text_cols(width), rows = 0;
+
+    if (cols > (int)sizeof(row) - 1) cols = (int)sizeof(row) - 1;
+    const char *p = text;
+    while (p && y + rows * FONT_H + FONT_H <= s->h) {
+        p = s_wrap_row(p, cols, row, sizeof row);
+        if (row[0]) s_text(s, x, y + rows * FONT_H, row, fg);
+        rows++;
+    }
+    return rows;
+}
+
 /* -------------------------------------------------------------- icons ---- */
 void s_icon(struct surface *s, int id, int x, int y, u32 c)
 {

@@ -141,31 +141,62 @@ static void pin_menu_answer(int item,void *ud){(void)ud;
 }
 
 #define NOTICE_MAX 3
-struct notice {char title[48],text[192];u32 until;int warning;};
+/* The text a notification can carry is bounded because it is stored, not because the box is: the box is as
+ * tall as the text needs (`notice_height'), so the only limit worth having is the storage, and a message
+ * that needs five rows gets five rows. */
+#define NOTICE_W 320
+#define NOTICE_PAD 10
+#define NOTICE_GAP 6
+#define NOTICE_HEAD 26            /* title row, and the gap below it */
+#define NOTICE_FOOT 22            /* the dismiss line and its padding */
+struct notice {char title[48],text[512];u32 until;int warning;};
 static struct notice notices[NOTICE_MAX];
 static int notice_count;
 void wm_notify(const char *title,const char *text,int warning){
     if(notice_count==NOTICE_MAX){for(int i=1;i<NOTICE_MAX;i++)notices[i-1]=notices[i];notice_count--;}
-    struct notice *n=&notices[notice_count++];memset(n,0,sizeof(*n));strncpy(n->title,title,47);strncpy(n->text,text,191);n->warning=!!warning;n->until=warning?0:(u32)tick_count+1000;wm_full();
+    struct notice *n=&notices[notice_count++];memset(n,0,sizeof(*n));strncpy(n->title,title,47);strncpy(n->text,text,sizeof(n->text)-1);n->text[sizeof(n->text)-1]=0;n->warning=!!warning;n->until=warning?0:(u32)tick_count+1000;wm_full();
     klog("notification: %s: %s",n->title,n->text);
 }
+/* The box is sized by the same layout the painter uses, from the same shared word wrap: a height computed a
+ * second way is a height that can disagree with the text inside it, which is how a box ends up with a row
+ * drawn outside its own frame. */
+static int notice_cols(void){return s_text_cols(NOTICE_W-2*NOTICE_PAD);}
+static int notice_rows(const struct notice *n)
+{
+    int r=s_wrap_rows(n->text,notice_cols());
+    return r<1?1:r;
+}
+static int notice_height(const struct notice *n){return NOTICE_HEAD+notice_rows(n)*FONT_H+NOTICE_FOOT;}
+static int notice_top(int index)
+{
+    int y=10;
+    for(int i=0;i<index&&i<notice_count;i++)y+=notice_height(&notices[i])+NOTICE_GAP;
+    return y;
+}
+
 static void notice_remove(int i){if(i<0||i>=notice_count)return;for(int j=i;j<notice_count-1;j++)notices[j]=notices[j+1];notice_count--;wm_full();}
-static int notice_at(int x,int y){if(x<screen_w-330||x>=screen_w-10||y<10)return -1;int i=(y-10)/114;return i<notice_count&&(y-10)%114<108?i:-1;}
+/* Hit-testing walks the same heights, so a click lands on the notice the user can see rather than on the
+ * fourth box in a stack of shorter ones. */
+static int notice_at(int x,int y){
+    if(x<screen_w-NOTICE_W-10||x>=screen_w-10||y<10)return -1;
+    for(int i=0;i<notice_count;i++){int top=notice_top(i);if(y>=top&&y<top+notice_height(&notices[i]))return i;}
+    return -1;
+}
 static void paint_notices(void){
-    const struct theme *t=theme_current();int x=screen_w-330;
+    const struct theme *t=theme_current();int x=screen_w-NOTICE_W-10;
     for(int i=0;i<notice_count;i++){
-        int y=10+i*114;struct notice *n=&notices[i];u32 accent=n->warning?0xffbb55:t->main;
-        s_fill(&screen,x,y,320,108,t->win_bg);s_frame_rect(&screen,x,y,320,108,accent);s_clip_text(&screen,x+10,y+6,n->title,accent,296);
-        const char *p=n->text;
-        for(int row=0;row<4&&*p;row++){
-            char line[38];int len=0,space=-1;
-            while(p[len]&&p[len]!='\n'&&len<37){if(p[len]==' ')space=len;len++;}
-            if(len==37&&p[len]&&p[len]!='\n'&&p[len]!=' '&&space>0)len=space;
-            memcpy(line,p,len);p+=len;while(*p==' ')p++;if(*p=='\n')p++;
-            if(row==3&&*p){if(len>34)len=34;memcpy(line+len,"...",3);len+=3;}
-            line[len]=0;s_text(&screen,x+10,y+26+row*16,line,t->text);
-        }
-        s_text(&screen,x+10,y+90,"Click to dismiss",t->main);
+        struct notice *n=&notices[i];int y=notice_top(i),h=notice_height(n),rows=notice_rows(n);
+        u32 accent=n->warning?0xffbb55:t->main;
+        s_fill(&screen,x,y,NOTICE_W,h,t->win_bg);s_frame_rect(&screen,x,y,NOTICE_W,h,accent);
+        s_clip_text(&screen,x+NOTICE_PAD,y+6,n->title,accent,NOTICE_W-2*NOTICE_PAD);
+        /* One surface, one layout: the box was sized by notice_rows() and the text is painted by the
+         * shared paragraph painter, both of them wrapping at the same width.  A sub-surface clipped to the
+         * text area would be the tidy thing to do and cannot be - `struct surface' has no stride, so a
+         * region of the screen is not a surface - which leaves the guarantee where it should be: the two
+         * callers agree because they call the same function, and if they ever stop agreeing, a row is drawn
+         * past the frame in a screenshot rather than being silently cut. */
+        s_text_wrap(&screen,x+NOTICE_PAD,y+NOTICE_HEAD,NOTICE_W-2*NOTICE_PAD,n->text,t->text);
+        s_text(&screen,x+NOTICE_PAD,y+NOTICE_HEAD+rows*FONT_H+4,"Click to dismiss",t->main);
     }
 }
 

@@ -22,7 +22,15 @@ struct term {
     struct shell_confirm confirmation;
     char lines[TERM_LINES][TERM_LINE];
     int nlines;
-    int scroll;              /* first visible line */
+    /* Display rows, not lines: a line the window is too narrow for becomes two rows, and everything that
+     * scrolls has to count rows or the second half of a wrapped report is unreachable.  Cached per line
+     * because recomputing it from the text on every frame would scan half a megabyte to paint a screen;
+     * `rows_dirty' is set whenever the buffer changes and `rows_cols' records the width the counts belong
+     * to, so a resize re-wraps everything at once. */
+    short lrows[TERM_LINES];
+    int rows_cols, rows_dirty;
+    int total_rows;
+    int scroll;              /* first visible display row */
     int follow;              /* stick to bottom while new output arrives */
     char input[TERM_LINE];
     int ipos;
@@ -66,25 +74,40 @@ static void term_close_tab(struct window *w, int i);
 
 static void term_push_line(struct term *t, const char *s)
 {
-    /* split on \n */
+    /* Split on \n, and split anything longer than one entry at a word boundary as well.  The second split is
+     * what changed here: a 260-character report line used to have its tail dropped in silence - no mark that
+     * anything had been lost - and the dropped part was the last clause of a diagnostic line.  A break the
+     * terminal chose keeps the information; a truncation loses it.  The display re-wraps these rows to the
+     * window's width anyway, so all this costs is a place to put text that has to go somewhere. */
     const char *p = s;
     while (*p) {
         const char *nl = p;
         while (*nl && *nl != '\n') nl++;
         int len = (int)(nl - p);
-        if (len >= TERM_LINE) len = TERM_LINE - 1;
+        char over[TERM_LINE];
+        const char *entry = p;
+        int whole = 1;                    /* 0 while one long line is still arriving row by row */
+        if (len >= TERM_LINE) {
+            const char *after = s_wrap_row(p, TERM_LINE - 1, over, sizeof over);
+            entry = over;
+            len = (int)strlen(over);
+            if (after) { p = after; whole = 0; } else { p = nl; }
+        }
         if (t->nlines < TERM_LINES) {
-            memcpy(t->lines[t->nlines], p, len);
+            memcpy(t->lines[t->nlines], entry, len);
             t->lines[t->nlines][len] = 0;
             t->nlines++;
         } else {
             for (int i = 1; i < TERM_LINES; i++)
                 memcpy(t->lines[i - 1], t->lines[i], TERM_LINE);
-            memcpy(t->lines[TERM_LINES - 1], p, len);
+            memcpy(t->lines[TERM_LINES - 1], entry, len);
             t->lines[TERM_LINES - 1][len] = 0;
         }
-        if (!*nl) break;
-        p = nl + 1;
+        t->rows_dirty = 1;
+        if (whole) {
+            if (!*nl) break;
+            p = nl + 1;
+        } else if (!*p) break;
     }
     if (t->follow) t->scroll = 1000000;      /* stay glued to the new output */
 }
@@ -456,6 +479,10 @@ static void run_command(struct term *t, const char *command)
     }
     else if (!strcmp(cmd, "clear")) {
         t->nlines = 0;
+        /* The row cache belongs to the buffer, so emptying the buffer empties it: a stale total_rows would
+         * leave the scroll range pointing at rows that no longer exist. */
+        t->total_rows = 0;
+        t->rows_dirty = 1;
         t->scroll = -1;
     t->follow = 1;
         t->follow = 1;
@@ -1317,6 +1344,48 @@ static int term_visible_rows(struct window *w)
     return (wm_content_h(w) - 24 - TERM_TAB_H) / (FONT_H + 2);
 }
 
+/* How many characters a row of this window holds, and the row count that goes with them. */
+static int term_cols(struct window *w)
+{
+    return s_text_cols(w->surf.w - 12);
+}
+
+static void term_rows_sync(struct term *t, int cols)
+{
+    if (!t->rows_dirty && t->rows_cols == cols) return;
+    t->rows_dirty = 0;
+    t->rows_cols = cols;
+    t->total_rows = 0;
+    for (int i = 0; i < t->nlines; i++) {
+        int n = s_wrap_rows(t->lines[i], cols);
+        /* An empty entry still occupies a row: `echo ""' prints a blank line, and a terminal that ate it
+         * would make the output above and below it look adjacent. */
+        if (n < 1) n = 1;
+        t->lrows[i] = (short)n;
+        t->total_rows += n;
+    }
+}
+
+static int term_display_rows(struct term *t, struct window *w)
+{
+    term_rows_sync(t, term_cols(w));
+    return t->total_rows + 1;                 /* +1 for the prompt row, which never wraps */
+}
+
+/* The `index'th wrapped row of `text', painted at (x,y).  Each row is found by walking the line from its
+ * start instead of carrying a cursor between rows, so painting stays idempotent under resize, scroll and
+ * partial damage - three things that change independently here. */
+static void term_paint_row(struct surface *s, const char *text, int cols, int index, u32 color,
+                           int x, int y)
+{
+    char row[TERM_LINE];
+    const char *p = text;
+
+    row[0] = 0;
+    for (int i = 0; i <= index && p; i++) p = s_wrap_row(p, cols, row, sizeof row);
+    if (row[0]) s_text(s, x, y, row, color);
+}
+
 static void ed_clamp_cursor(struct term *t)
 {
     if (t->ed_row < 0) t->ed_row = 0;
@@ -1501,29 +1570,28 @@ static void term_paint(struct window *w)
         plines = 1;
         for (int i = 0; i < n; i++) if (pbuf[i] == '\n') plines++;
     }
-    int total = t->nlines + plines + 1;
+    int cols = term_cols(w);
+    term_rows_sync(t, cols);
+    int total = t->total_rows + (t->pending_active ? s_wrap_rows(pbuf, cols) : 0) + 1;
     if (t->scroll < 0 || t->scroll > total - rows) t->scroll = total - rows;
     if (t->scroll < 0) t->scroll = 0;
     t->follow = (t->scroll >= total - rows);
 
     int y = TERM_TAB_H + 4;
+    int li = 0, line_base = 0;             /* display row where t->lines[li] begins */
+    while (li < t->nlines && line_base + t->lrows[li] <= t->scroll) {
+        line_base += t->lrows[li];
+        li++;
+    }
     for (int r = t->scroll; r < total && r < t->scroll + rows; r++, y += FONT_H + 2) {
-        if (r < t->nlines) {
-            s_clip_text(s, 6, y, t->lines[r], th->text, s->w - 12);
-        } else if (t->pending_active && r < t->nlines + plines) {
-            const char *l = pbuf;
-            for (int k = 0; k < r - t->nlines; k++) {
-                l = str_chr(l, '\n');
-                if (!l) break;
-                l++;
+        if (li < t->nlines) {
+            term_paint_row(s, t->lines[li], cols, r - line_base, th->text, 6, y);
+            if (r + 1 >= line_base + t->lrows[li]) {
+                line_base += t->lrows[li];
+                li++;
             }
-            char one[160];
-            const char *nl = str_chr(l, '\n');
-            int ln = nl ? (int)(nl - l) : (int)strlen(l);
-            if (ln > (int)sizeof(one) - 1) ln = sizeof(one) - 1;
-            memcpy(one, l, ln);
-            one[ln] = 0;
-            s_clip_text(s, 6, y, one, th->main, s->w - 12);
+        } else if (t->pending_active && r < t->total_rows + plines) {
+            term_paint_row(s, pbuf, cols, r - t->total_rows, th->main, 6, y);
         } else {
             char prompt[160];
             prompt_str(t, prompt);
@@ -1586,7 +1654,7 @@ static void term_key(struct window *w, struct key_event *e)
      * and hedges mice whose reports never carry a wheel byte */
     if (e->keycode == KEY_PGUP || e->keycode == KEY_PGDN) {
         int rows = term_visible_rows(w);
-        int total = t->nlines + (t->pending_active ? 1 : 0) + 1;
+        int total = term_display_rows(t, w);
         t->scroll += (e->keycode == KEY_PGUP) ? -(rows - 1) : (rows - 1);
         if (t->scroll > total - rows) t->scroll = total - rows;
         if (t->scroll < 0) t->scroll = 0;
@@ -1645,7 +1713,7 @@ static void term_mouse(struct window *w, struct mouse_event *e, int x, int y)
         int rows = term_visible_rows(w);
         t->scroll -= e->wheel;
         if (t->scroll < 0) t->scroll = 0;
-        int total = t->nlines + (t->pending_active ? 1 : 0) + 1;
+        int total = term_display_rows(t, w);
         if (t->scroll > total - rows) t->scroll = total - rows;
         if (t->scroll < 0) t->scroll = 0;
         t->follow = (t->scroll >= total - rows);

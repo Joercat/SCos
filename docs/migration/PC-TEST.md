@@ -199,3 +199,35 @@ build that introduced this, the notice for such a machine read `GPU engine verif
 the words were produced by a predicate that tested whether a driver's operation *table* existed instead of
 whether it contained a drawing operation. If a paste shows that sentence alongside `pixels painted: 0 by
 the GPU's 2D engine`, the build predates the fix.
+
+## Text that does not fit goes on the next line
+
+Everything above was clipped by a `...`, and clipping is how this machine's report arrived with its last
+clause missing. That is fixed at the layout, not per panel: `kernel/desktop/textwrap.c` walks a string into
+rows at a fixed font width, breaking at spaces, and a word longer than a row is split so that a row is never
+empty and no character is dropped. `s_text_wrap()` paints those rows and returns how many there were;
+`s_wrap_rows()` answers the same question without painting, which is what makes a box able to size itself to
+its text. `s_clip_text()` remains for the places with no next line to go to - a taskbar button, a table
+cell, a window title.
+
+The four places that were fixed are the four a person reads: a **notification** (its height is now
+`26 + rows * 16 + 22` instead of a fixed 108 pixels, and the box under it stacks by that height, so a long
+notice pushes the stack down rather than eating its own text); the **terminal** (a line longer than the
+window continues on the next row, and the line store no longer truncates the *stored* line either - it
+splits it into as many entries as the window needs, so scrolling back finds the tail); the **boot log** (a
+status longer than the panel takes the lines under it, and the next status starts after them); and the
+**panic screen** (the message used to be drawn with no bound at all, so past a screen width it left the
+display).
+
+Measured by `tools/tests/test_textwrap.py`, at the levels that matter separately: the layout alone, over
+every width from 1 to 40 columns, checked for *losslessness* rather than for having wrapped somewhere; a
+booted guest's painted rows on a scratch surface counted from their pixels against the same kernel's row
+count; and on the real screen, a 500-character notice measuring 272 pixels against 64 for a one-line one,
+and a 339-character terminal line producing 5 inked bands where the kernel's layout promises 5. The first
+of those three has caught two real bugs while being written - a row that returned a pointer at the string's
+end instead of zero, which made every caller count one empty row and inflate every scroll range, and an
+`8`-argument painter whose tail arguments a debugger cannot pass were garbage.
+
+The consequence for this machine: the GPU notice is no longer sized to a byte budget that forced a short
+sentence. Its field is 512 bytes, `_Static_assert` checks the sentence against that, and the whole
+explanation - including what to run and what each answer would mean - arrives and wraps.
