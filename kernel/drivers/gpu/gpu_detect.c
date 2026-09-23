@@ -632,7 +632,14 @@ void gpu_report(char *out, size_t capacity)
             put_line(&w, "not read: BAR0 is the frame buffer aperture the kernel already maps for scanout");
             break;
         default:
-            put_line(&w, "not read (a driver module may claim this function, or no BAR0 was reported)");
+            /* The kernel read nothing here, which used to be printed as though nobody had: on a machine
+             * whose module had read a hundred-odd registers of that very chip, the line contradicted the
+             * paragraph above it.  Say whose reading is absent. */
+            if (g->module_ops)
+                put_line(&w, "not read by the kernel: the driver module bound for this function reads the "
+                             "chip itself, and quotes its own read and write counts on the panel above");
+            else
+                put_line(&w, "not read (a driver module may claim this function, or no BAR0 was reported)");
             break;
         }
         const struct gpu_driver *port = gpu_port_for(g->match->family);

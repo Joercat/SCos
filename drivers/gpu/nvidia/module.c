@@ -71,12 +71,15 @@ struct inventory {
     u32 top_cfg, top_cfg_devices, top_cfg_rows_per_device, top_cfg_rows;
     u32 top_cfg1;                     /* the second block's CFG, 0x324fc: asked, and reported if unanswered */
     u32 top_rows;                     /* rows actually read, so an inventory says how much was asked */
+    u32 top_engines, top_bus;         /* entries the chip called engines, and the bus blocks it also lists */
+    u32 top_ce_raw0, top_ce_raw1, top_ce_raw2;   /* the first copy engine's three rows, as read */
     u32 top_v2_cfg;                   /* the CFG dword of whichever block answered, kept for the report */
-    /* Built once at the end of init, at the kernel's own limit for a description (512, in
+    /* Built once at the end of init, at the kernel's own limit for a description (768, in
      * gpu_module_state.describe - and the same number again here, because the shorter of the two is what
      * decides what a user reads).  The size is asserted by the host harness rather than trusted here: a
-     * clipped tail would drop the engine inventory, which is the clause the next increment depends on. */
-    char text[512];
+     * clipped tail would drop the engine inventory, which is the clause the next increment depends on, and
+     * the number exists to catch that rather than to make the sentence shorter. */
+    char text[768];
 };
 
 static struct inventory inv;
@@ -129,7 +132,13 @@ static int read_gpu_time(u64 *nanoseconds)
 struct top_counts {
     u32 devices, decoded;
     u32 rows;                               /* rows read, the v2 format's own measure of effort */
+    u32 engines;                            /* entries whose own IS_ENGINE bit is set: a device is not an
+                                             * engine, and printing one as the other is how a chip gets
+                                             * credit for blocks it cannot be given work on */
+    u32 bus;                                /* PTOP's bus-side devices on this generation: PBUS, HSHUB,
+                                             * HUBMMU, TMR - named so that the tally adds up */
     u32 lce, graphics, vic, copy, enc, dec, sec, gsp, jpg, other;
+    u32 raw[3];                             /* the first copy engine's entry, exactly as the rows read */
     u32 ce_pri, ce_inst, ce_runlist, ce_engine;
     int ce_found, ce_runlist_valid, ce_engine_valid;
 };
@@ -188,6 +197,7 @@ static void top_count_v2(struct top_counts *c, u64 lo, u64 hi)
 
     if (!lo) return;          /* ROW_VALUE_INVALID: a slot that says nothing is not a device of type 0 */
     c->devices++;
+    if (NV_PTOP2_IS_ENGINE(lo)) c->engines++;   /* the entry's own word for "this can be runlisted" */
     switch (type) {
     case NV_PTOP_TYPE_GRAPHICS: c->graphics++; break;
     case NV_PTOP_TYPE_COPY0: case NV_PTOP_TYPE_COPY1: case NV_PTOP_TYPE_COPY2: c->copy++; break;
@@ -197,11 +207,20 @@ static void top_count_v2(struct top_counts *c, u64 lo, u64 hi)
     case NV_PTOP_TYPE_NVDEC: c->dec++; break;
     case NV_PTOP_TYPE_NVJPG: c->jpg++; break;
     case NV_PTOP_TYPE_GSP: c->gsp++; break;
+    case NV_PTOP_TYPE_PBUS: case NV_PTOP_TYPE_HSHUB:
+    case NV_PTOP_TYPE_HUBMMU: case NV_PTOP_TYPE_TMR:
+        c->bus++; break;
     case NV_PTOP_TYPE_LCE:
         c->lce++;
         /* Same rule as the legacy walk: one device, one tuple, taken whole or not at all. */
         if (!c->ce_found) {
             c->ce_found = 1;
+            /* And the entry itself, uninterpreted, kept for the report: the field positions for this
+             * format come from a header, not from a manual, so the raw rows are the only way a reader can
+             * check the decode without owning the same chip. */
+            c->raw[0] = (u32)lo;
+            c->raw[1] = (u32)(lo >> 32);
+            c->raw[2] = (u32)hi;
             c->ce_pri = NV_PTOP2_DEVICE_PRI_BASE(lo);
             c->ce_inst = NV_PTOP2_INSTANCE_ID(lo);
             c->ce_runlist = NV_PTOP2_RUNLIST_PRI_BASE(hi);
@@ -367,6 +386,8 @@ static void probe_engines(void)
     inv.top_ce_runlist = best.ce_runlist;   inv.top_ce_engine = best.ce_engine;
     inv.top_ce_runlist_valid = best.ce_runlist_valid;   inv.top_ce_engine_valid = best.ce_engine_valid;
     inv.top_ce_found = best.ce_found;
+    inv.top_engines = best.engines;         inv.top_bus = best.bus;
+    inv.top_ce_raw0 = best.raw[0];  inv.top_ce_raw1 = best.raw[1];  inv.top_ce_raw2 = best.raw[2];
 }
 
 /* What the second measurement is for.  A Blackwell submission needs an addressable channel and a doorbell
@@ -507,7 +528,7 @@ static void build_text(void)
      * the window, because those two decide whether this sentence is about the silicon or about the
      * mapping; and it is phrased in outcomes, since "3 LCE" on a screen the CPU is painting is the fact a
      * reader needs before deciding what to write next.  Length is not a reason to drop any of it: the
-     * kernel's field is 512 bytes and the panel wraps. */
+     * kernel's field is 768 bytes and the panel wraps. */
     if (!inv.top_layout) {
         put_text(&b, "; engine table not decoded: CFG 0x224fc=0x");
         put_hex(&b, inv.top_cfg, 8);
@@ -545,8 +566,27 @@ static void build_text(void)
         put_text(&b, "/DEC ");    put_dec(&b, inv.top_dec);
         put_text(&b, "/SEC ");    put_dec(&b, inv.top_sec);
         put_text(&b, "/GSP ");    put_dec(&b, inv.top_gsp);
+        put_text(&b, "/JPG ");    put_dec(&b, inv.top_jpg);
         put_text(&b, " of ");     put_dec(&b, inv.top_devices);
         put_text(&b, " devices");
+        if (inv.top_layout <= 2u) {
+            /* Only the v2 format has an IS_ENGINE bit to quote.  Printing a zero for the older ones would
+             * claim the chip had called nothing an engine, when in fact it never said either way. */
+            put_text(&b, ", ");
+            put_dec(&b, inv.top_engines);
+            put_text(&b, " engines per its own IS_ENGINE, ");
+            put_dec(&b, inv.top_bus);
+            put_text(&b, " bus");
+        }
+        if (inv.top_layout <= 2u && inv.top_ce_found) {
+            /* The first copy engine's three rows, exactly as read.  The field positions above come from a
+             * header and not from a manual, so the words alone could be a decode that flatters itself:
+             * with the rows printed, anyone holding the same header can check the extraction without
+             * owning the card. */
+            put_text(&b, "; LCE rows 0x"); put_hex(&b, inv.top_ce_raw0, 8);
+            put_text(&b, "/0x"); put_hex(&b, inv.top_ce_raw1, 8);
+            put_text(&b, "/0x"); put_hex(&b, inv.top_ce_raw2, 8);
+        }
         /* A copy engine present but unaddressed is a real answer, so the clause is printed for it with a
          * question mark rather than dropped: "no LCE" and "LCE, no PRI base in its entry" are different
          * things to find out, and only one of them ends the channel work before it starts. */
@@ -568,6 +608,16 @@ static void build_text(void)
             put_text(&b, " engine ");
             if (inv.top_ce_engine_valid) put_dec(&b, inv.top_ce_engine); else put_text(&b, "?");
         }
+    }
+    /* What the measurements above mean for the pixels on this screen, stated from the same numbers so it
+     * cannot outlive them.  Naming engines and reaching them are different things: a Blackwell part takes
+     * work through a channel in a window it lets a driver ring, and whether that window answered is a
+     * reading, not an opinion. */
+    if (inv.top_lce && !inv.window_live) {
+        put_text(&b, "; engines are register blocks, not channels: no submission window answered, so "
+                     "nothing was submitted");
+    } else if (inv.top_lce && inv.window_live && !inv.timer_ticking) {
+        put_text(&b, "; the window answered but its clock did not tick, so nothing was submitted through it");
     }
     *b.at = 0;
 }
@@ -714,7 +764,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     build_text();
     /* Wide enough for the whole description plus the prefix: the window clause sits at the end of the
      * text, so a narrow log buffer would cut the one part this increment added. */
-    char line[608];
+    char line[896];   /* the description plus the log prefix, at the wider budget */
     struct buf b = { line, line + sizeof(line) - 1 };
     put_text(&b, "nvidia: ");
     put_hex(&b, device->vendor, 4);

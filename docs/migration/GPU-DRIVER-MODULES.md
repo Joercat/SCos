@@ -688,3 +688,35 @@ another version read as no permission to decode - with `writes 0` in every case.
 `arch 0x1b (arch not in the published table)` stays as it is on purpose: `dev_pmc_zb.h` for this generation
 does not publish an architecture enum, and a mapping invented here would be a guess wearing a fact's
 clothes.  The number is printed so it can be checked against whatever NVIDIA publishes next.
+
+## The v2 table decoded on real silicon, and what it said
+
+The first Blackwell machine to run this probe came back with an inventory instead of a shrug:
+
+    Engine: NV_PMC_BOOT_0=0x1b7000a1 at BAR 0xa4000000 arch 0x1b (arch not in the published table),
+            impl 0x7 rev A.1; reads 163, writes 0 feeds the console; window class 0x1100 clock frozen;
+            engines at 0x22800 v2 (60 devices x 3 rows of 152, 152 read): LCE 3/VIC 0/GFX 2/ENC 1/DEC 1/
+            SEC 1/GSP 2 of 39 devices, LCE pri-field 0x001040 inst 0 runlist 0x03400 engine 1
+
+That is GB100's `dev_top.h` format read out of a GB207: the CFG word answered `version 2` with its own
+geometry (60 device slots, 3 rows each, 152 rows total - not the published defaults of 153 and 353, which is
+why the walk is bounded by the chip rather than by the header), and 39 of those slots named something.  The
+chip has three logical copy engines, two graphics devices, one encoder, one decoder, one secure engine and
+two GSP entries, and no VIC at all - which is what the reports about this generation say, and here it is a
+reading rather than a report.
+
+What it is *not* is a place to submit work yet, and the same line says why: `window class 0x1100 clock
+frozen` means the user-mode page the Volta and Turing manuals put at `BAR0+0x810000` answers with something
+that is not a user-mode class and its clock does not advance, so there is no doorbell to ring and no
+evidence a channel could exist.  `device registers: not read` on the detection half of the panel also
+contradicted the module's 163 reads and now says whose reading is absent.  And because a decode whose field
+positions came from a header and not a manual should not be taken on trust from a number, the report carries
+the first copy engine's three rows verbatim (`LCE rows 0x…/0x…/0x…`), the count of entries the chip itself
+flagged `IS_ENGINE`, and the bus-side devices (PBUS, HSHUB, HUBMMU, TMR) so that the tally adds up: devices,
+engines and bus blocks are three different claims and only one of them is "this can be given work".
+
+Those additions made the ordinary case longer than the 512-byte describe field on a populated chip, so the
+field became 768 on both sides rather than the sentence being shortened until it stopped saying something -
+the same choice made for notifications.  The host fixture now measures the *widest* report the format can
+produce (153 slots, 353 rows, three copy engines, every named type, silent window) against that ceiling,
+because a bound that only the friendly case stays under is a bound that clips a real card's worst day.

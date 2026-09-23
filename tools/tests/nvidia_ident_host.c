@@ -242,10 +242,12 @@ int main(void)
     check(ops && ops->describe, "the one operation it does offer is the description");
     const char *text = ops && ops->describe ? ops->describe(ops->context) : 0;
     check(text && str_len(text) > 40, "the description is non-empty");
-    /* gpu_module.c copies a description into a 512-byte field and gpu_module_state mirrors it, so
-     * anything longer arrives clipped: the tail is the engine inventory, which is the clause the next
-     * increment of this driver reads. */
-    check(text && str_len(text) < 512, "the description fits the kernel's describe field");
+    /* gpu_module.c copies a description into the describe field of gpu_module_state (768 bytes) and the
+     * module keeps its own buffer of the same size, so anything longer arrives clipped: the tail is the
+     * engine inventory, which is the clause the next increment of this driver reads.  The bound is checked
+     * here rather than trusted, because a ceiling nobody measures is a wish. */
+    check(text && str_len(text) < 768, "the description fits the kernel's describe field");
+
     char needle[64];
     snprintf(needle, sizeof needle, "NV_PMC_BOOT_0=0x%08x", boot0);
     check(has(text, needle), "the description quotes the raw dword, so the decode can be re-checked");
@@ -366,7 +368,7 @@ int main(void)
           "the table that decodes to more devices is the one reported, and its offset is named");
     check(has(text, "LCE 2/VIC 0/GFX 1"),
           "the engine types are counted from the chip's own entries, two copy engines and one graphics");
-    check(has(text, "GSP 1 of 4 devices"),
+    check(has(text, "GSP 1/JPG 0 of 4 devices"),
           "a GSP entry is reported as what it is: this chip has the management engine attached");
     check(has(text, "LCE pri 0x100000 inst 1 runlist 1 engine 5"),
           "the first copy engine's PRI base, runlist and engine number come out of DATA and ENUM, "
@@ -573,6 +575,44 @@ int main(void)
     check(verdict == 0 && has(text, "CFG 0x224fc=0x00c30040 (v0x0)"),
           "a table whose CFG reports another version is quoted with that CFG rather than decoded anyway");
     check(!has(text, "LCE 1"), "and nothing is counted as an engine from a format nobody established");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    /* ---- 1m. the longest report the format can produce, measured rather than reasoned about: three-digit
+     * device and engine counts, three copy engines, every engine type the published list names, and a
+     * window that stays silent so the closing clause is part of the text too.  A ceiling that only the
+     * fixture's ordinary case stays under is a ceiling that clips a real card's worst day. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0xffffffffu;                      /* silent: the blocking clause belongs in the text */
+    registers[0x224fc / 4u] = TOP2_CFG(153u, 3u, 353u);
+    {
+        static const u32 kinds[] = {
+            NV_PTOP_TYPE_LCE, NV_PTOP_TYPE_LCE, NV_PTOP_TYPE_LCE,
+            NV_PTOP_TYPE_GRAPHICS, NV_PTOP_TYPE_GRAPHICS, NV_PTOP_TYPE_VIC,
+            NV_PTOP_TYPE_NVENC0, NV_PTOP_TYPE_NVENC1, NV_PTOP_TYPE_NVDEC,
+            NV_PTOP_TYPE_SEC, NV_PTOP_TYPE_GSP, NV_PTOP_TYPE_GSP, NV_PTOP_TYPE_NVJPG,
+            NV_PTOP_TYPE_PBUS, NV_PTOP_TYPE_HSHUB, NV_PTOP_TYPE_HUBMMU, NV_PTOP_TYPE_TMR,
+        };
+        unsigned n = sizeof kinds / sizeof kinds[0];
+        for (unsigned i = 0; i < n; i++) {
+            registers[TOP_AT(0x22800u, i * 3u + 0u)] = TOP2_ROW0(kinds[i], 123u, 12u, 1020u);
+            registers[TOP_AT(0x22800u, i * 3u + 1u)] = TOP2_ROW1(0x3ffffu, 1u);
+            registers[TOP_AT(0x22800u, i * 3u + 2u)] = TOP2_ROW2(63u, 0xffffu);
+        }
+    }
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && str_len(text) < 768,
+          "the longest inventory this format can describe still fits the kernel's field, unclipped");
+    check(has(text, "LCE 3/VIC 1/GFX 2/ENC 2/DEC 1/SEC 1/GSP 2/JPG 1 of 17 devices"),
+          "and every device the seeded table named is tallied, including the codec and bus blocks");
+    check(has(text, "17 engines per its own IS_ENGINE, 4 bus"),
+          "the chip's own engine flag and the bus count are both reported, so devices and engines cannot "
+          "be confused for each other by a reader or by this driver");
+    check(has(text, "engines are register blocks, not channels: no submission window answered"),
+          "and a report that names engines without a window to ring them says what follows from that");
+    check(!has(text, "clock +"), "a silent window is not reported as a ticking one");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
 

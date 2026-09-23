@@ -25,9 +25,11 @@ void cpu_reboot_8042(void){
 #define GPU_IDLE_NOTICE                                                      \
     " module read this chip but implements no drawing engine, so the CPU "   \
     "paints every pixel. That is a gap in SCos, not in this machine: the "    \
-    "card is resident, its memory was measured, and the report in Terminal "  \
-    "says which engines it has. Run graphics in Terminal - if that report "   \
-    "lists an engine, driving the screen with it is the next step."
+    "card is resident, its memory was measured, and its own register block "  \
+    "has been read. Run graphics in Terminal: it lists the engines the chip " \
+    "reported and whether a submission window answers, and those two "        \
+    "together say how far this can go today - an engine in a table is a "     \
+    "block of registers until something can be submitted to it."
 _Static_assert(sizeof(GPU_IDLE_NOTICE) - 1 + 4 + 15 <= 511,
                "an idle-GPU notice longer than the notice's own field; shorten it, do not enlarge the box");
 

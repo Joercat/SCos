@@ -241,11 +241,15 @@ the invariant for whatever a configuration produces - a `Device access` line say
 the kernel" - because QEMU's own adapters take the branch where the kernel *did* read the block, and the state
 being described here is a Blackwell function under a module, which no guest on this host can present.
 
-The `Engine:` line that gets pasted now ends in the chip's own engine inventory on a Blackwell part, because
-the format Blackwell publishes was implemented: `engines at 0x22800 v2 (153 devices x 3 rows of 353, N
-read): LCE …/VIC …/GFX … of D devices, LCE pri-field 0x… inst n runlist 0x… engine n`, or, if the block does
-not answer as a v2 table, the two CFG dwords it answered with.  Both are results.  What is *not* a result is
-`window class 0x… clock frozen` - that says the doorbell page is not where the Volta and Turing documents
-put it, and until a submission window is found on this silicon, an engine listed in a table is an engine that
-cannot yet be addressed.  A paste with a decoded inventory and a frozen clock is the accurate description of
-"found it, cannot ring it yet", and that is where this machine currently sits.
+The `Engine:` line that gets pasted ends in the chip's own engine inventory on a Blackwell part, because the
+format Blackwell publishes was implemented, and it has now been read off real silicon: `engines at 0x22800
+v2 (60 devices x 3 rows of 152, 152 read): LCE 3/VIC 0/GFX 2/ENC 1/DEC 1/SEC 1/GSP 2/JPG 0 of 39 devices,
+… engines per its own IS_ENGINE, … bus; LCE rows 0x…/0x…/0x…, LCE pri-field 0x… inst n runlist 0x… engine
+n`.  If the block does not answer as a v2 table, the line quotes the two CFG dwords instead, which is also a
+result.  What is not yet a result is the *window*: `window class 0x1100 clock frozen` says the page the Volta
+and Turing documents describe is not answering there, and until it does, an engine in a table is an engine
+that cannot be given work - so the panel says so in one clause (`engines are register blocks, not channels:
+no submission window answered, so nothing was submitted`) computed from those same two readings rather than
+written by hand.  `device registers: not read`, which contradicted the module above it, now names whose
+reading is absent.  Paste the `Engine:` line and its window clause together: the pair is what decides the
+next move, and neither alone means anything.
