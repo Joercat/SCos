@@ -77,6 +77,13 @@ host-side tools may move freely without invalidating an image.  `tools/tests/tes
 of those states on a scratch copy to prove the check fires.  A stick, rather than a repository, is dated by
 `tools/verify-stick.py`, which reads the same record from the device without mounting or booting it.
 
+A delivery must also *contain* the drivers the tree can build.  `drivers/gpu/<family>/module.c' defines that
+set, so an image packed while `build/gpu/' happened to be empty is refused instead of shipping as a slimmer
+build.  That is a state `make' reaches quite easily and size-and-hash comparison cannot see - there is no
+module in the image to compare against, and a record with an empty `modules' list is self-consistent with it.
+`--root' says which `dist/' to check and `--repo' which tree defines the expected set, because a scratch copy
+containing only `dist/' has no driver sources to read.
+
 The second commit changes no source, so its kernel still carries the first commit's id — which is the
 commit that contains the code being judged. `dist/scos.img.sha256` is written as
 `<hash>  dist/scos.img` by `sha256sum` from the repository root, the format `sha256sum -c` expects.
