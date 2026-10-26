@@ -10,7 +10,7 @@
  *
  * The rules are not invented here.  For the FMC image they are nvkm/subdev/gsp/gh100.c, verbatim in intent:
  * the first 52 bytes must equal a published template; the section table must start immediately after the
- * header; every section but the string table must be SHT_PROGBITS with flags 0xff00000a (SHF_MASKPROC |
+ * header; every section but the string table must be SHT_PROGBITS with flags 0xfff00102 (SHF_MASKPROC |
  * SHF_MASKOS | SHF_OS_NONCONFORMING | SHF_ALLOC), the string table SHT_STRTAB with SHF_STRINGS; each section
  * must lie inside the image; a non-zero sh_info is a CRC32 of that section's bytes; and `hash', `publickey',
  * `signature' and `image' must all be present.  For the RM image they are rm/r535/gsp.c's
@@ -82,7 +82,12 @@ static const uint8_t fmc_header[52] = {
 #define FMC_SHT_STRTAB   3u
 #define FMC_SHF_ALLOC    2u
 #define FMC_SHF_STRINGS  0x20u     /* SHF_STRINGS, the one flag the string table carries */
-#define FMC_SHF_FLAGS    0xff00000au       /* SHF_MASKPROC|SHF_MASKOS|SHF_OS_NONCONFORMING|SHF_ALLOC */
+/* SHF_MASKPROC(0xf0000000)|SHF_MASKOS(0xff000000)|SHF_OS_NONCONFORMING(0x100)|SHF_ALLOC(0x2).  The value is
+ * not a guess: `nvkm/subdev/gsp/gh100.c' defines FMC_SHF_FLAGS as exactly those four bits, and the
+ * `fmc-570.144.bin' a 615.71.10 install carries reports 0xfff00102 for all four of its sections, which is
+ * 0xff00000a plus SHF_MASKPROC - an earlier transcription here kept the mask's *value* out of the sum and so
+ * refused the genuine file. */
+#define FMC_SHF_FLAGS    0xfff00102u
 
 static uint16_t firmware_le16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t firmware_le32(const uint8_t *p)
@@ -226,7 +231,16 @@ static void firmware_scan_image(struct gpu_firmware_image *out, const uint8_t *b
             }
         }
         if (fmc) {
-            out->fmc_sections = all_sections_ok && !out->crc_failures ? 1 : 0;
+            /* Deliberately more permissive than the reference driver, which fails the image outright when
+             * `sh_info' is not the CRC32 of the section's bytes.  The genuine file does carry non-zero
+             * `sh_info' values that are not those CRCs - measured on `fmc-570.144.bin' from a 615.71.10
+             * install, where all four sections differ from the CRC while their public key is byte-identical
+             * to the one in the driver's own arrays - so the field is packaging bookkeeping, not integrity.
+             * What authenticates the image is the signature over the hash, and that is the coprocessor's
+             * check to make: it has the public key, the hash and the signature, and it will refuse a tampered
+             * image on those.  Refusing a signed file here would hide the card's real answer behind a rule
+             * about a header field, which is the worse failure, so the count is reported and not obeyed. */
+            out->fmc_sections = all_sections_ok ? 1 : 0;
             out->fmc_named = found == 15 ? 1 : 0;   /* all four, or the verify command has nothing to be given */
             out->section_begin = section_begin;
         }

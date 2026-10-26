@@ -506,7 +506,8 @@ static uint32_t build_fmc(uint8_t *p, uint32_t capacity, uint32_t hash, uint32_t
         if (unnamed == (int)i + 2) name = strings_size - 1;   /* a header pointing at the table's last NUL */
         h_put32(shdr, name);
         h_put32(shdr + 4, 1);                                 /* SHT_PROGBITS */
-        h_put32(shdr + 8, 0xff00000au);                       /* the flags the FMC contract asks for */
+        h_put32(shdr + 8, 0xfff00102u);                       /* SHF_MASKPROC|SHF_MASKOS|SHF_OS_NONCONFORMING|SHF_ALLOC,
+                                                             exactly what a real fmc-*.bin carries */
         h_put32(shdr + 16, at);
         h_put32(shdr + 20, size[i]);
         memset(p + at, (uint8_t)(0x11 * (i + 1)), size[i]);

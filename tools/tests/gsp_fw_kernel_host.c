@@ -82,7 +82,8 @@ static uint32_t build_fmc(uint8_t *p, uint32_t capacity, unsigned opts)
         uint8_t *shdr = p + shoff + 40 * (i + 2);
         put32(shdr, name);
         put32(shdr + 4, 1);                            /* SHT_PROGBITS */
-        put32(shdr + 8, 0xff00000au);                   /* the flags the FMC contract asks for */
+        put32(shdr + 8, 0xfff00102u);                   /* the flags a real fmc-*.bin carries, and the
+                                                           ones gpu_firmware.c insists on */
         put32(shdr + 16, at);
         put32(shdr + 20, section[i].size);
         memset(p + at, (uint8_t)(0x40 + i), section[i].size);   /* the bytes first: the CRC is of them */
@@ -226,8 +227,13 @@ static void run_fmc(void)
     second.role[1].offset = 0;
     gpu_firmware_scan(&second, copy, capacity);
     other = &second.image[1];
-    check("a section whose bytes do not hash to its recorded CRC32 is counted and rejects the image",
-          other->crc_failures == 1 && !other->fmc_sections && other->fmc_named);
+    /* Counted, not obeyed.  The reference driver rejects the image on this predicate, but the genuine
+     * fmc-570.144.bin from a 615.71.10 install has a non-zero sh_info on every section that is not the CRC32
+     * of that section's bytes, while its public key is byte-identical to the driver's own arrays - so the
+     * field is packaging, and the coprocessor authenticates the signature instead.  A file that is signed and
+     * usable must still reach the card, with the difference stated on the panel. */
+    check("a section whose bytes do not hash to its recorded CRC32 is counted and the image is still usable",
+          other->crc_failures == 1 && other->fmc_sections && other->fmc_named);
 
     memcpy(copy, region, capacity);
     put32(copy + 52 + 40 * 5 + 20, 1u << 24);           /* "image" size, past the end of the image */

@@ -138,7 +138,7 @@ def container(parts, order):
     rows += struct.pack('<10I', 0, 3, 0x20, 0, shoff + shentsize * count, len(strings), 0, 0, 1, 0)
     for index, name in enumerate(order):
         off, size = offsets[name]
-        rows += struct.pack('<10I', 1 + sum(len(n) + 1 for n in order[:index]), 1, 0xff00000a, 0, off, size,
+        rows += struct.pack('<10I', 1 + sum(len(n) + 1 for n in order[:index]), 1, 0xfff00102, 0, off, size,
                             0, (zlib.crc32(parts[name]) ^ 0xffffffff) & 0xffffffff, 1, 0)
     blob[shoff:shoff + len(rows)] = rows
     blob[shoff + shentsize * count:shoff + shentsize * count + len(strings)] = strings
@@ -209,13 +209,15 @@ def build(src_dir, version, chip, out_dir, kinds=('GspRmFmcGfwProdSigned',)):
         report['notes'].append('the 48-byte hash is not SHA-384 of the image as stored here, so this tool does '
                                'not claim to know what the coprocessor hashes; the bytes are still the driver\'s')
     blob = container(parts, order)
-    os.makedirs(out_dir, exist_ok=True)
-    dest = os.path.join(out_dir, 'fmc-%s.bin' % version)
+    # `--out' names either a directory to write fmc-<version>.bin into (what `make gsp-firmware' passes) or the
+    # file itself.  Both readings are unambiguous, and refusing one of them would only mean a second flag.
+    dest = out_dir if out_dir.endswith('.bin') else out_dir + '/fmc-%s.bin' % version
+    os.makedirs(os.path.dirname(dest) or '.', exist_ok=True)
     with open(dest, 'wb') as handle:
         handle.write(blob)
     report['container'] = {'path': dest, 'bytes': len(blob), 'crc32': '0x%08x' % ((zlib.crc32(blob) ^
                                                                                  0xffffffff) & 0xffffffff)}
-    pieces = os.path.join(out_dir, 'pieces')
+    pieces = os.path.join(os.path.dirname(dest) or '.', 'pieces')
     os.makedirs(pieces, exist_ok=True)
     for name in order:
         with open(os.path.join(pieces, '%s-%s.bin' % (name, version)), 'wb') as handle:

@@ -434,3 +434,48 @@ is reported as `bit13=1 locked` or `bit13=0 released`, which is the bit the driv
 register looked non-zero.  Waits are printed in milliseconds against the reference driver's own budgets (1500
 ms for a reply, 4000 ms for the FSP's boot) because a wait counted in reads was tens of times shorter than the
 chip needs, and a too-short wait shows up on a panel as "silent" - the most misleading thing a report can say.
+
+`gspcheck` refused the vendor's own signed file, and the reason was my transcription
+--------------------------------------------------------------------------------------------
+
+`python3 tools/gspcheck.py /lib/firmware/nvidia/gb207/gsp` on their box - read-only, no root, one paste - came
+back REFUSED, and the file was fine. Three facts came out of it, and two of them are bugs in this repository.
+
+| fact, as measured on their machine | value |
+| --- | --- |
+| `fmc-570.144.bin` | 199820 bytes, 52-byte header accepted, six sections |
+| its sections | `hash` 48, `image` 199240, `publickey` 97, `signature` 96 |
+| its section flags | `0xfff00102` on all four |
+| its `sh_info` values | `0x5f963b4f`, `0x7ed85d13`, `0x704dae4b`, `0x877bdef9` |
+| the CRC32 of those same bytes | `0xa069c4b0`, `0x8127a2ec`, `0x8fb251b4`, `0x78842106` |
+| `gsp-570.144.bin` | 63571696 bytes, ELF64 with `.fwimage` and `.fwsignature_gb20x`, accepted |
+| `bootloader-570.144.bin` | 200812 bytes, flat, accepted as a Falcon image; 1572 bytes longer than the `image` section of the FMC file, which the FMC file itself leaves 580 bytes of container around |
+| `booter_*.bin` | absent |
+
+The first bug is the section flags. The kernel and both tools required `0xff00000a`, in a comment naming
+`SHF_MASKPROC | SHF_MASKOS | SHF_OS_NONCONFORMING | SHF_ALLOC`; that sum is `0xfff00102`, and the mask values had
+been dropped from the total while their names were kept. Their file reports `0xfff00102` on every section, so the
+constant is now `0xfff00102` in `kernel/drivers/gpu/gpu_firmware.c`, `tools/gspcheck.py`, `tools/gsp-firmware.py`
+and both host harnesses, with a test that reads the value in each of them: a rule kept in four places is only
+fixed when all four are checked.
+
+The second is the `sh_info` rule. The reference driver refuses a container whose recorded CRC does not match the
+section's bytes, and a genuine signed file fails that test on all four sections - while the CRC of its public key
+is `0x8fb251b4`, which is the CRC of the key extracted from the driver's own GB202 arrays, so the bytes are read
+correctly and the field is packaging, not integrity. The kernel counts the mismatches and builds the handover
+regardless, and `gspcheck` says each one as a note instead of a refusal. What authenticates the image is the
+signature over the hash, and the coprocessor - which has the key, the hash and the signature - is the one that
+checks it; refusing a signed file here would hide the card's answer behind a header field. Divergence from the
+reference driver, stated in both files, with the reason. `tools/tests/test_gspcheck.py` now carries their file's
+measurements as a fixture, so accepting the genuine thing is a tested property.
+
+The third fact is a design limit, not a mistake: their resource-manager image is 63571696 bytes, this OS caps one
+staged image at 8 MiB and the whole disk at 64 MiB, so `GSP.BIN` cannot be carried on the stick as designed. The
+FMC image - the file the handover is built from - is 199820 bytes and fits with room to spare, so the next
+card-facing step is unaffected; putting the resource manager's image somewhere the boot can read it needs a
+decision about the volume before it is implemented. Their kernel module is 615.71.10 and the firmware its package
+installed is 570.144, so both version strings are in the intake path and nothing may assume they match.
+
+For any other machine, `python3 tools/gspcheck.py <dir> --dump` prints each file's own header hex and every
+section row as the file states it - name, type, flags, offset, size, `sh_info`, and the first sixteen bytes of
+each section - which is the difference between a corrupt file and a file read wrongly, in one paste.

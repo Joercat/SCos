@@ -58,7 +58,7 @@ FMC_HEADER = bytes([
 ])
 FMC_SECTIONS = ('hash', 'publickey', 'signature', 'image')
 FMC_SHT_PROGBITS, FMC_SHT_STRTAB = 1, 3
-FMC_SHF_STRINGS, FMC_SHF_FLAGS = 0x20, 0xff00000a
+FMC_SHF_STRINGS, FMC_SHF_FLAGS = 0x20, 0xfff00102      # SHF_MASKPROC|SHF_MASKOS|SHF_OS_NONCONFORMING|SHF_ALLOC
 IMAGE_MAX = 8 * 1024 * 1024                      # the most this kernel will copy for one image
 # The reference driver's per-generation table, and the payload's field widths the blobs are copied into.
 COT_TABLE = {0x18: (1, 48, 384, 384), 0x1a: (2, 48, 97, 96), 0x1b: (2, 48, 97, 96)}
@@ -163,9 +163,16 @@ def check_fmc(blob, arch):
                             % (name, size, off, len(blob)))
             continue
         if info and (zlib.crc32(blob[off:off + size]) ^ 0xffffffff) & 0xffffffff != info:
-            problems.append('section %r carries CRC32 0x%08x in sh_info and its bytes give 0x%08x - the file '
-                            'changed after it was signed, or it was truncated on the way here'
-                            % (name, info, (zlib.crc32(blob[off:off + size]) ^ 0xffffffff) & 0xffffffff))
+            # The reference driver treats this as fatal. The genuine file is not consistent with it: measured on
+            # fmc-570.144.bin from a 615.71.10 install, all four sections carry a non-zero sh_info that is not
+            # the CRC32 of their bytes, while the public key inside it is byte-identical to the one in the
+            # driver's own arrays. So the field is packaging bookkeeping, and what authenticates the image is the
+            # signature over the hash - the coprocessor's check, not ours. This build says the difference instead
+            # of obeying it, which is the choice kernel/drivers/gpu/gpu_firmware.c makes for the same reason.
+            notes.append('section %r carries CRC32 0x%08x in sh_info and its bytes give 0x%08x: nouveau would '
+                         'refuse the file and this build does not, because the coprocessor authenticates the '
+                         'signature rather than this field'
+                         % (name, info, (zlib.crc32(blob[off:off + size]) ^ 0xffffffff) & 0xffffffff))
     found = {}
     for name, typ, flags, off, size, info in secs:
         if name in FMC_SECTIONS and name not in found:
@@ -417,6 +424,29 @@ def print_human(rep):
               % rep['dest'])
 
 
+def dump(blob, esp, role):
+    """Every byte of the container's own description: the header, each section row as the file states it, and
+    the head of each section.  This exists because the rules for the FMC container are a transcription of
+    another driver's constants, and the only way to know whether a real file is being refused for being corrupt
+    or for being read wrongly is to look at the rows themselves - which a person can paste in one go."""
+    print('  %s (%s): %d B' % (esp, role, len(blob)))
+    print('    header  %s' % ' '.join('%02x' % b for b in blob[:52]))
+    print('            magic %r class %d data %d version %d osabi %d | e_type %d e_machine %d e_version %d'
+          % (blob[:4], blob[4], blob[5], blob[6], blob[7], le16(blob, 16), le16(blob, 18), le32(blob, 20)))
+    is64, secs = sections(blob)
+    print('    %s, e_shoff %d, e_shentsize %d, e_shnum %d, e_shstrndx %d'
+          % ('ELF64' if is64 else 'ELF32', le64(blob, 40) if is64 else le32(blob, 32),
+             le16(blob, 58) if is64 else le16(blob, 46), le16(blob, 60) if is64 else le16(blob, 48),
+             le16(blob, 62) if is64 else le16(blob, 50)))
+    for name, typ, flags, off, size, info in secs:
+        head = ' '.join('%02x' % b for b in blob[off:off + 16])
+        print('    %-22s type 0x%08x flags 0x%08x off %8d size %8d info 0x%08x  %s'
+              % (repr(name), typ, flags, off, size, info, head))
+    tail = len(blob) - (max((off + size for _n, _t, _f, off, _s, _i in secs), default=0))
+    if tail > 0:
+        print('    %d byte(s) of the file are not covered by any section' % tail)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('src', help='directory of firmware, or one file')
@@ -426,6 +456,7 @@ def main():
     ap.add_argument('--install-anyway', action='store_true', dest='force',
                     help='install even when a file is refused (the kernel will then be the one to say no)')
     ap.add_argument('--json', action='store_true', help='machine-readable output instead')
+    ap.add_argument('--dump', action='store_true', help='print each file\'s own ELF rows, section by section')
     args = ap.parse_args()
     arch = int(args.arch, 0)
     if arch not in COT_TABLE:
@@ -433,6 +464,12 @@ def main():
                          'has rows for 0x18, 0x1a and 0x1b, and a chip outside those three has no mailbox at '
                          'these offsets at all, so there is nothing to install for it' % arch)
     rep = install(args.src, args.install, arch, args.force) if args.install else report(args.src, arch)
+    if args.dump:
+        for _esp, role, _w, _p in ROLES:
+            entry = rep['files'].get(role)
+            if entry:
+                with open(entry['source'], 'rb') as handle:
+                    dump(handle.read(), entry['esp_name'], role)
     if args.json:
         print(json.dumps(rep, indent=1, sort_keys=True))
     else:

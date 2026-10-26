@@ -123,7 +123,7 @@ def fmc_template_from_kernel():
 
 
 def build_fmc_image(hash_bytes=32, publickey_bytes=4, signature_bytes=256, image_bytes=512, with_crc=True,
-                    section_flags=0xff00000a, strtab_type=3, image_at=None):
+                    section_flags=0xfff00102, strtab_type=3, image_at=None):
     """An FMC image laid out the way nvkm/subdev/gsp/gh100.c requires one: the published header verbatim, six
     40-byte section headers, then the string table and the four sections it names, each carrying in sh_info the
     standard CRC32 of its own bytes.  One knob per rule, so a failure says which rule caught it."""

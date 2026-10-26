@@ -61,7 +61,7 @@ def fmc_blob(hash_bytes=48, pkey_bytes=97, sig_bytes=96, image_bytes=0x2000, nam
         crc = (zlib.crc32(bytes(blob[off:off + size])) ^ 0xffffffff) & 0xffffffff
         if break_crc:
             crc ^= 0xa5a5a5a5
-        rows += struct.pack('<10I', 1 + sum(len(n) + 1 for n in names[:index]), 1, 0xff00000a, 0, off, size,
+        rows += struct.pack('<10I', 1 + sum(len(n) + 1 for n in names[:index]), 1, gspcheck.FMC_SHF_FLAGS, 0, off, size,
                             0, crc, 1, 0)
     blob[shoff:shoff + len(rows)] = rows
     blob[shoff + shentsize * count:shoff + shentsize * count + len(strings)] = strings
@@ -144,6 +144,20 @@ def test_the_checker_and_the_kernel_read_the_same_contract():
     assert kernel_bytes == gspcheck.FMC_HEADER, \
         'the kernel compares %s and the checker compares %s - one rule kept in two places, disagreeing' % (
             kernel_bytes.hex(), gspcheck.FMC_HEADER.hex())
+    # The section flags, in all three places the rule is written down.  This number was wrong in the kernel
+    # until a real fmc-570.144.bin from a 615.71.10 install said 0xfff00102 for every one of its sections,
+    # which is 0xff00000a plus SHF_MASKPROC: the mask's value had been left out of the sum, so the genuine file
+    # was refused.  A rule kept in three files needs all three checked, or the fix only lands in one of them.
+    for where in ('kernel/drivers/gpu/gpu_firmware.c', 'tools/tests/gpu_fsp_host.c',
+                  'tools/tests/gsp_fw_kernel_host.c'):
+        text = (ROOT / where).read_text()
+        assert '0xfff00102' in text, '%s still carries a section-flags value of its own' % where
+    kernel = (ROOT / 'kernel/drivers/gpu/gpu_firmware.c').read_text()
+    assert re.search(r'#define\s+FMC_SHF_FLAGS\s+0xfff00102u', kernel), \
+        'the kernel no longer defines the flag mask the real file carries'
+    assert '0xff00000a' not in fsp, 'the wrong mask survived in a place that has no comment to explain it'
+    assert gspcheck.FMC_SHF_FLAGS == 0xfff00102
+
     for name in gspcheck.FMC_SECTIONS:
         assert '"%s"' % name in kernel, \
             'the kernel no longer looks for the %r section the checker insists on' % name
@@ -219,8 +233,11 @@ def test_each_way_a_file_can_be_wrong_gets_its_own_words():
     with tempfile.TemporaryDirectory() as tmp:
         cases = [
             ('header', 'fmc-1.bin', fmc_blob(header=bytes(52)), 'not the FMC header'),
-            ('signed-bytes', 'fmc-2.bin', fmc_blob(corrupt=-1), 'changed after it was signed, or it was truncated'),
-            ('crc-field', 'fmc-3.bin', fmc_blob(break_crc=True), 'changed after it was signed'),
+            # A sh_info that is not the section's CRC32 is said, not obeyed - the genuine fmc-570.144.bin
+            # measured on a 615.71.10 install fails that rule on all four sections while its bytes match the
+            # driver's own arrays, so refusing here would hide the card's answer behind a header field.
+            ('signed-bytes', 'fmc-2.bin', fmc_blob(corrupt=-1), None),
+            ('crc-field', 'fmc-3.bin', fmc_blob(break_crc=True), None),
             ('too-big', 'fmc-4.bin', fmc_blob(image_bytes=gspcheck.IMAGE_MAX + 0x1000),
              'past the 8 MiB this kernel will copy'),
             ('empty-image', 'fmc-6.bin', fmc_blob(image_bytes=0), 'the image section is empty'),
@@ -228,6 +245,13 @@ def test_each_way_a_file_can_be_wrong_gets_its_own_words():
         for name, filename, blob, needle in cases:
             one = write(os.path.join(tmp, name), filename, blob)
             rep, status = tool_report(one)
+            if needle is None:
+                assert status == 0, (name, rep['problems'])
+                assert any('nouveau would refuse the file and this build does not' in n for n in rep['notes']), \
+                    (name, rep['notes'])
+                assert rep['panel']['handover_buildable'] is True, \
+                    'a file whose sections still carry a signature was vetoed by a bookkeeping field'
+                continue
             assert status == 1, (name, rep)
             assert any(needle in p for p in rep['problems']), (name, rep['problems'])
         # A section name gone missing is the container's own problem, not a truncation.
@@ -374,6 +398,44 @@ def test_the_paste_a_person_sends_carries_the_verdict():
         assert 'the panel will say fw 1/5 and refuse to build one' in text, text
         assert 'the FMC image is the only file the handover is read from' in text, text
         assert 'REFUSED' in text, text
+
+
+def real_shaped_fmc():
+    """A file with the measurements of `fmc-570.144.bin' as a 615.71.10 install carries it: four sections of 48,
+    199240, 97 and 96 bytes, flags 0xfff00102, and `sh_info' values that are not the CRC32 of the bytes they
+    describe (0x5f963b4f / 0x7ed85d13 / 0x704dae4b / 0x877bdef9 measured in that file, against 0xa069c4b0 /
+    0x8127a2ec / 0x8fb251b4 / 0x78842106 computed over those same lengths).  That the key's own CRC is
+    0x8fb251b4 - the CRC of the public key extracted from the driver's GB202 arrays - is what shows the bytes are
+    read correctly and the field is packaging rather than integrity.  The fixture exists so that accepting a
+    genuine file is a tested property, and so that nobody reinstates the stricter rule without noticing that it
+    rejects the real thing.  It is built from this suite's own container, because that part is already known
+    good, and then has the four measured `sh_info' values and the measured length written over it."""
+    blob = bytearray(fmc_blob(image_bytes=199240))
+    measured = {'hash': 0x5f963b4f, 'publickey': 0x704dae4b, 'signature': 0x877bdef9, 'image': 0x7ed85d13}
+    for index, name in enumerate(('hash', 'publickey', 'signature', 'image'), start=2):
+        struct.pack_into('<I', blob, 52 + 40 * index + 28, measured[name])    # sh_info, 28 in an ELF32 row
+    blob += bytearray(199820 - len(blob))          # the length the real file reports, padding and all
+    return bytes(blob)
+
+
+def test_a_file_shaped_like_the_vendor_is_accepted_with_the_difference_spoken():
+    """The whole point of the two constants: a genuine file comes through usable, and the one rule the
+    reference driver adds on top is reported rather than obeyed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        write(tmp, 'fmc-570.144.bin', real_shaped_fmc())
+        rep, status = tool_report(tmp)
+        assert status == 0, rep['problems']
+        entry = rep['files']['fmc']
+        assert entry['ok'] and entry['bytes'] == 199820, rep['problems']
+        assert {n: s['bytes'] for n, s in entry['sections'].items()} == {'hash': 48, 'image': 199240,
+                                                                        'publickey': 97,
+                                                                        'signature': 96}, entry['sections']
+        said = [n for n in rep['notes'] if 'nouveau would refuse the file and this build does not' in n]
+        assert len(said) == 4, 'all four sections trip the CRC rule in a real file, so all four are said: %r' % rep['notes']
+        assert rep['panel']['handover_buildable'] is True, rep['panel']
+        assert (rep['panel']['fw_staged'], rep['panel']['fw_total']) == (1, 5), rep['panel']
+        # The flags this fixture carries are the flags the kernel asks for, so the two cannot drift apart again.
+        assert gspcheck.FMC_SHF_FLAGS == 0xfff00102, 'a real fmc-*.bin reports 0xfff00102 on every section'
 
 
 def main():

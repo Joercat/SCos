@@ -840,7 +840,7 @@ What the stub does with them is a *shape* check, and the check is the loader's o
 payload out of the image with `r535_gsp_elf_section()`, which walks the section table from `e_shoff` and
 resolves names through the string table at `e_shstrndx`; the FMC image next to it in the same package is not
 ELF64 at all, and `nvkm/subdev/gsp/gh100.c` validates that one by `memcmp` against a published 52-byte
-ELFCLASS32 template and then by a rule per section - type `SHT_PROGBITS`, flags exactly `0xff00000a`, data
+ELFCLASS32 template and then by a rule per section - type `SHT_PROGBITS`, flags exactly `0xfff00102`
 beginning after the section-header table, and `sh_info` holding the standard CRC32 of the section's own bytes.
 `boot/uefi/gsp_fw.c` walks either class with its own field offsets, with a bound on every read, and reports the
 section count, the `.fwimage` size and the name an RM image gives its own signature section; it recognises an
