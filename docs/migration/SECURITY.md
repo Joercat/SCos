@@ -210,6 +210,8 @@ New passwords: at least 12 characters, 3 of 4 character classes, ~50 bits minimu
 [Tab] next field   [Enter] sign in   [F1] policy
 ```
 
+![The plain tty login console with the default-credential hint](login-console.png)
+
 The same renderer handles first-run setup, sign-in, screen lock, password
 change, re-authentication and recovery. Masked fields paint only `*`; input
 buffers are scrubbed; input uses the same `kbd_poll`/`usb_poll` path as the WM;
