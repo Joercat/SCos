@@ -15,6 +15,9 @@
  */
 #include "scos.h"
 #include "security.h"
+#include "process.h"
+
+static void user_dir_create(const char *name);   /* per-account private VFS tree */
 
 #define DB_MAGIC   "SCos-accounts-v1"
 #define DB_PATH    "system/security/users.db"
@@ -894,6 +897,7 @@ int security_api_create_user(const char *name, int role, const char *pw)
     derive(pw, a->salt, a->iters, a->hash);
     a->used = 1;
     S.count++;
+    user_dir_create(a->name);
     audit("user-created", a->name);
     db_save();
     return 1;
@@ -1110,6 +1114,27 @@ int security_is_admin(void)
     return S.users[S.session].role == SC_ROLE_ADMIN;
 }
 
+/* ---------------------------------------------------- per-account private files --- */
+/* Each account gets home/users/<name>/, which no other account can read or
+ * write.  The vault still uses one volume key (offline access with a valid
+ * password can read the whole ciphertext), but inside the running OS this is
+ * an enforced boundary checked on every VFS lookup/read/write. */
+static void user_dir_create(const char *name)
+{
+    char p[64];
+    int saved = S.bypass;
+    S.bypass = 1;
+    vfs_mkdir("home/users");
+    sc_copy(p, sizeof(p), "home/users/");
+    sc_cat(p, sizeof(p), name);
+    vfs_mkdir(p);
+    S.bypass = saved;
+}
+static void user_dirs_init(void)
+{
+    for (int i = 0; i < S.count; i++) user_dir_create(S.users[i].name);
+}
+
 /* --------------------------------------------------- default account (Linux-like) --- */
 /* At boot verification Linux asks for a login and password on a text console.
  * SCos does the same, and ships with one normal account so a fresh machine is
@@ -1195,6 +1220,7 @@ void security_init(int have_disk)
     if (!vfs_lookup(SC_CHOICES_PATH)) security_choices_save();
     if (!S.count) create_default_account();
     else S.default_pw = default_pw_active();
+    user_dirs_init();
     audit("boot", S.db_loaded ? "accounts loaded" : "default account created");
     audit_file_sync();
 }
@@ -1322,7 +1348,7 @@ void security_run_pending(void)
                 "Write this one-time recovery code down and keep it offline:\n\n    ");
         sc_cat(text, sizeof(text), S.rec_code);
         sc_cat(text, sizeof(text),
-               "\n\nIt resets the administrator password from the sign-in screen (F8). "
+               "\n\nIt resets an account password from the sign-in screen (F8). "
                "It is valid once and is stored only as a salted hash.");
         security_ui_info("Recovery code", text);
         security_api_ack_recovery();
@@ -1394,7 +1420,7 @@ int security_command_allowed(const char *line, char *out, size_t cap)
         "scinfo", "graphics", "dmesg", "klog", "free", "cpu", "uptime", "df",
         "disks", "procs", "history", "clear", "echo", "cal", "calc", "about",
         "whoami", "id", "security", "users", "audit", "policy", "passwd",
-        "lock", "logout", "su", "reauth", "choices", 0
+        "lock", "logout", "su", "reauth", "choices", "isolation", 0
     };
     char cmd[64], arg[64];
     int role, n;
@@ -1486,6 +1512,9 @@ static void shell_status(struct outbuf *b)
     ob(b, "  recovery code  : "); ob(b, S.rec_valid ? "active (one use)" : "not active"); ob(b, "\n");
     ob(b, "  user choices   : "); ob_num(b, (uint64_t)security_choice_count());
     ob(b, " switches (see 'choices'); isolation is a per-app user choice\n");
+    ob(b, "  processes      : "); ob_num(b, (uint64_t)proc_count());
+    ob(b, " registered, "); ob_num(b, (uint64_t)proc_isolation_count());
+    ob(b, " isolated with private page-table domains (see 'isolation')\n");
     ob(b, "  scope          : console authentication and disk encryption; no forced ");
     ob(b, "process isolation. See docs/migration/SECURITY.md.\n");
 }
@@ -1670,6 +1699,21 @@ int security_shell(const char *line, char *out, size_t cap)
     if (!argc) return 0;
     if (sc_eq(args[0], "choices")) {
         shell_choices(&b, argc, args);
+        return 1;
+    }
+    if (sc_eq(args[0], "isolation")) {
+        ob(&b, "pid  app                  owner       isolated  domain  capabilities\n");
+        for (int i = 1; i <= PROC_MAX; i++) {
+            const char *id = proc_pid_app_id(i);
+            if (!id || !id[0]) continue;
+            ob(&b, "  "); ob_num(&b, i); ob(&b, "   "); ob(&b, id);
+            for (int k = (int)sc_len(id); k < 22; k++) ob(&b, " ");
+            ob(&b, proc_owner(i));
+            for (int k = (int)sc_len(proc_owner(i)); k < 12; k++) ob(&b, " ");
+            ob(&b, proc_pid_isolated(i) ? "yes       " : "no        ");
+            ob_num(&b, (uint64_t)proc_domain(i)); ob(&b, "       ");
+            ob_num(&b, (uint64_t)proc_pid_caps(i)); ob(&b, "\n");
+        }
         return 1;
     }
     if (sc_eq(args[0], "whoami")) {

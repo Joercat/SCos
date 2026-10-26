@@ -263,3 +263,220 @@ int memory_read_u64(uint64_t address,uint64_t *out){
  if(!ram||!mapped_leaf(address)||!mapped_leaf(address+7))return 0;
  memcpy(out,(const void*)(uintptr_t)address,8);return 1;
 }
+
+/* ---------------------------------------------------------- identity-map surgery for domains --- */
+/* A domain's private pages must not ALSO be reachable through the kernel's
+ * identity map, or a ring-0 app could simply read the physical address.  Split
+ * the covering 1 GiB / 2 MiB huge leaves into finer tables (preserving every
+ * other mapping) and clear just the frames owned by a domain.  The only
+ * remaining mapping is that domain's private high-VA slot. */
+static uint64_t *split_1g(uint64_t *pdpt, int idx)
+{
+    uint64_t e = pdpt[idx];
+    uint64_t *pd;
+    if (!(e & 128)) return (uint64_t *)(uintptr_t)(e & ADDRESS);
+    pd = new_table();
+    uint64_t base = e & ADDRESS, f = e & (0xfffULL | NX);
+    for (int i = 0; i < 512; i++)
+        pd[i] = (base + (uint64_t)i * HUGE) | f;
+    pdpt[idx] = (uintptr_t)pd | 3;
+    return pd;
+}
+static uint64_t *split_2m(uint64_t *pd, int idx)
+{
+    uint64_t e = pd[idx];
+    uint64_t *pt;
+    if (!(e & 128)) return (uint64_t *)(uintptr_t)(e & ADDRESS);
+    pt = new_table();
+    uint64_t base = e & ADDRESS, f = (e & (0xfffULL | NX)) & ~128ULL;
+    for (int i = 0; i < 512; i++)
+        pt[i] = (base + (uint64_t)i * PAGE) | f;
+    pd[idx] = (uintptr_t)pt | 3;
+    return pt;
+}
+static uint64_t *identity_pt(uintptr_t phys, int *index)
+{
+    uint64_t *pdpt, *pd;
+    if (!(root[(phys >> 39) & 511] & 1)) return 0;
+    pdpt = (uint64_t *)(uintptr_t)(root[(phys >> 39) & 511] & ADDRESS);
+    pd = split_1g(pdpt, (phys >> 30) & 511);
+    *index = (phys >> 12) & 511;
+    return split_2m(pd, (phys >> 21) & 511);
+}
+static void identity_hide(uintptr_t phys)
+{
+    int i = 0;
+    uint64_t *pt = identity_pt(phys, &i);
+    if (!pt) return;
+    pt[i] = 0;
+    __asm__ volatile("invlpg (%0)"::"r"(phys):"memory");
+}
+static void identity_restore(uintptr_t phys)
+{
+    uint64_t *pt;
+    int i = 0;
+    uint64_t e = root[(phys >> 39) & 511];
+    if (!(e & 1)) return;
+    uint64_t *pdpt = (uint64_t *)(uintptr_t)(e & ADDRESS);
+    e = pdpt[(phys >> 30) & 511]; if (!(e & 1)) return;
+    uint64_t *pd = (uint64_t *)(uintptr_t)(e & ADDRESS);
+    e = pd[(phys >> 21) & 511];   if (!(e & 1) || (e & 128)) return;
+    pt = (uint64_t *)(uintptr_t)(e & ADDRESS);
+    i = (phys >> 12) & 511;
+    pt[i] = (phys & ~(uintptr_t)(PAGE - 1)) | 3 | NX;
+    __asm__ volatile("invlpg (%0)"::"r"(phys):"memory");
+}
+
+/* ------------------------------------------------------------------ process memory domains --- */
+/* Each isolated app gets its own PML4.  The kernel keeps ONE identity-mapped
+ * root; a domain root shares every kernel mapping but replaces the single PML4
+ * slot used for app-private arenas with a private PDPT/PD pair that contains
+ * only that process's 2 MiB slot.  Pages belonging to another process are
+ * therefore NOT PRESENT in this address space - an access raises #PF even
+ * though all of this code runs at ring 0.  CR0.WP is already set, so kernel
+ * text/rodata stay read-only too.  Physical pages are allocated on demand, so
+ * an unisolated desktop pays nothing. */
+#define DOMAIN_SLOT   192
+#define DOMAIN_BASE   0x0000600000000000ULL
+#define DOMAIN_STRIDE 0x0000000000400000ULL   /* two PD entries = 4 MiB */
+#define DOMAIN_PAGES  1024
+#define DOMAIN_MAX    24
+
+struct domain {
+    uint64_t *pml4, *pdpt, *pd, *pt[2];
+    int used, pages;
+};
+static struct domain domains[DOMAIN_MAX];
+static uint64_t *kernel_dpdpt, *kernel_dpd;
+
+static uint64_t *domain_table(void)
+{
+    uintptr_t p = pages_allocate(1);
+    return p ? (uint64_t *)p : 0;
+}
+
+static void domain_flush(void)
+{
+    __asm__ volatile("mov %%cr3,%0; mov %0,%%cr3"::"r"((uintptr_t)root):"memory");
+}
+
+uint64_t *memory_kernel_root(void) { return root; }
+uint64_t memory_current_root(void) { return read_cr3() & ADDRESS; }
+uintptr_t memory_domain_base(void) { return (uintptr_t)DOMAIN_BASE; }
+uintptr_t memory_domain_stride(void) { return (uintptr_t)DOMAIN_STRIDE; }
+
+int memory_domain_create(void)
+{
+    int i;
+    if (!initialized) return 0;
+    for (i = 0; i < DOMAIN_MAX; i++) if (!domains[i].used) break;
+    if (i == DOMAIN_MAX) return 0;
+    if (!kernel_dpdpt) {
+        kernel_dpdpt = domain_table();
+        kernel_dpd = domain_table();
+        if (!kernel_dpdpt || !kernel_dpd) return 0;
+        if (root[DOMAIN_SLOT]) panic("app domain PML4 slot already mapped");
+        root[DOMAIN_SLOT] = (uintptr_t)kernel_dpdpt | 3;
+        kernel_dpdpt[0] = (uintptr_t)kernel_dpd | 3;
+    }
+    struct domain *d = &domains[i];
+    d->pml4 = domain_table(); d->pdpt = domain_table();
+    d->pd = domain_table();   d->pt[0] = domain_table(); d->pt[1] = domain_table();
+    if (!d->pml4 || !d->pdpt || !d->pd || !d->pt[0] || !d->pt[1]) {
+        if (d->pml4)  pages_release((uintptr_t)d->pml4, 1);
+        if (d->pdpt)  pages_release((uintptr_t)d->pdpt, 1);
+        if (d->pd)    pages_release((uintptr_t)d->pd, 1);
+        if (d->pt[0]) pages_release((uintptr_t)d->pt[0], 1);
+        if (d->pt[1]) pages_release((uintptr_t)d->pt[1], 1);
+        memset(d, 0, sizeof(*d));
+        return 0;
+    }
+    d->pdpt[0] = (uintptr_t)d->pd | 3;
+    d->pd[i * 2]     = (uintptr_t)d->pt[0] | 3;
+    d->pd[i * 2 + 1] = (uintptr_t)d->pt[1] | 3;
+    kernel_dpd[i * 2]     = (uintptr_t)d->pt[0] | 3;  /* kernel manages arenas */
+    kernel_dpd[i * 2 + 1] = (uintptr_t)d->pt[1] | 3;
+    d->pages = 0;
+    d->used = 1;
+    domain_flush();
+    return i + 1;                          /* pid: 0 is the kernel */
+}
+
+/* Map `pages` 4 KiB frames into this domain's private virtual slot.  Both the
+ * kernel root and the domain root reference the SAME page table, so one write
+ * serves both; no other domain references it. */
+int memory_domain_map(int pid, int pages)
+{
+    if (pid < 1 || pid > DOMAIN_MAX || pages < 1 || pages > DOMAIN_PAGES) return 0;
+    struct domain *d = &domains[pid - 1];
+    if (!d->used) return 0;
+    for (int i = d->pages; i < pages; i++) {
+        uintptr_t p = pages_allocate(1);
+        if (!p) return 0;
+        d->pt[i / 512][i % 512] = p | 3 | NX;
+        identity_hide(p);              /* no identity-map alias survives */
+        d->pages++;
+    }
+    domain_flush();
+    return 1;
+}
+
+void memory_domain_destroy(int pid)
+{
+    if (pid < 1 || pid > DOMAIN_MAX) return;
+    struct domain *d = &domains[pid - 1];
+    if (!d->used) return;
+    for (int i = 0; i < DOMAIN_PAGES; i++) {
+        uint64_t e = d->pt[i / 512][i % 512];
+        if (e & 1) {
+            uintptr_t p = (uintptr_t)(e & ADDRESS);
+            identity_restore(p);
+            pages_release(p, 1);
+        }
+    }
+    kernel_dpd[(pid - 1) * 2] = 0;
+    kernel_dpd[(pid - 1) * 2 + 1] = 0;
+    pages_release((uintptr_t)d->pt[0], 1);
+    pages_release((uintptr_t)d->pt[1], 1);
+    pages_release((uintptr_t)d->pd, 1);
+    pages_release((uintptr_t)d->pdpt, 1);
+    pages_release((uintptr_t)d->pml4, 1);
+    memset(d, 0, sizeof(*d));
+    domain_flush();
+}
+
+/* 1 when `va` resolves to a present leaf in this domain's page tables.  This
+ * is the observable proof that another process's arena is genuinely absent. */
+int memory_domain_mapped(int pid, uintptr_t va)
+{
+    uint64_t *pml4;
+    if (pid < 0 || pid > DOMAIN_MAX) return 0;
+    if (!pid) pml4 = root;
+    else {
+        if (!domains[pid - 1].used) return 0;
+        pml4 = domains[pid - 1].pml4;
+        memcpy(pml4, root, 4096);
+        pml4[DOMAIN_SLOT] = (uintptr_t)domains[pid - 1].pdpt | 3;
+    }
+    uint64_t e = pml4[(va >> 39) & 511];
+    if (!(e & 1)) return 0;
+    uint64_t *pdpt = (uint64_t *)(uintptr_t)(e & ADDRESS);
+    e = pdpt[(va >> 30) & 511]; if (!(e & 1)) return 0;
+    uint64_t *pd = (uint64_t *)(uintptr_t)(e & ADDRESS);
+    e = pd[(va >> 21) & 511];   if (!(e & 1)) return 0;
+    if (e & 128) return 1;
+    uint64_t *pt = (uint64_t *)(uintptr_t)(e & ADDRESS);
+    return (pt[(va >> 12) & 511] & 1) != 0;
+}
+
+void memory_domain_switch(int pid)
+{
+    uint64_t *r = root;
+    if (pid > 0 && pid <= DOMAIN_MAX && domains[pid - 1].used) {
+        struct domain *d = &domains[pid - 1];
+        memcpy(d->pml4, root, 4096);
+        d->pml4[DOMAIN_SLOT] = (uintptr_t)d->pdpt | 3;
+        r = d->pml4;
+    }
+    __asm__ volatile("mov %0,%%cr3"::"r"((uintptr_t)r):"memory");
+}

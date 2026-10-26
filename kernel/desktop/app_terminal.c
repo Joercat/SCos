@@ -201,6 +201,7 @@ static const char *help_text =
     "policy    - Show or set password/lockout policy (administrator)\n"
     "audit     - Show or clear the security audit ring (administrator)\n"
     "choices   - Show or change security choices / per-app isolation (admin)\n"
+    "isolation - List running processes, private domains and capabilities\n"
     "lock/logout - Lock the screen / sign out and switch user\n"
     "su        - Switch identity to another account\n"
     "reauth/recovery - Confirm identity / issue a one-time recovery code\n"

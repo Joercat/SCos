@@ -6,6 +6,7 @@
  */
 #include "scos.h"
 #include "security.h"
+#include "process.h"
 #include "lua_examples.h"
 
 /* system/security/ belongs to the account subsystem.  Reads, writes, deletes
@@ -13,10 +14,56 @@
  * short-lived bypass flag), so a shell `rm -s`, a Notepad "save as" or a Lua
  * app cannot quietly replace the password database.  Guest accounts are also
  * refused every mutating call. */
+/* Per-account private tree.  home/users/<name>/ belongs to that signed-in
+ * account only; another account (or an app running for it) gets no lookup, no
+ * read and no write.  Kernel metadata I/O bypasses this intentionally. */
+static int vfs_user_private(const char *path)
+{
+    const char *p, *name, *slash, *me;
+    size_t n;
+    if (!path || !security_initialized() || security_bypass_active()) return 0;
+    /* The saved tree is replayed BEFORE sign-in (image_apply), when there is
+     * no session yet.  Kernel metadata I/O must not be blocked there. */
+    if (security_api_session() < 0) return 0;
+    p = path;
+    while (*p == '/') p++;
+    if (sc_neq(p, "home/users/", 11)) return 0;
+    name = p + 11;
+    slash = name;
+    while (*slash && *slash != '/') slash++;
+    n = (size_t)(slash - name);
+    if (!n) return 0;                   /* the parent directory itself */
+    me = security_current_user();
+    if (!me || !*me) return 0;
+    return n != sc_len(me) || sc_neq(name, me, n) != 0;
+}
+
+static int vfs_denied(const char *path);
+static int vfs_read_denied(const char *path);
+
+/* POSIX-like access(2): the ONE place that combines protected metadata,
+ * account permissions, the process namespace and per-account private files.
+ * Exported so a process can be queried without letting app code forge a pid. */
+int vfs_access(const char *path, int write)
+{
+    if (!path) return 0;
+    return write ? !vfs_denied(path) : !vfs_read_denied(path);
+}
+
+/* Mutating calls.  Isolation is checked here, at the one boundary both native
+ * C apps and Lua CAT packages must cross - not in an app-facing helper. */
 static int vfs_denied(const char *path)
 {
     if (security_protected_path(path) && !security_bypass_active()) return 1;
-    return security_write_denied();
+    if (security_write_denied()) return 1;
+    if (!proc_path_allowed(path, 1)) return 1;
+    return vfs_user_private(path);
+}
+static int vfs_read_denied(const char *path)
+{
+    if (security_protected_path(path) && !security_bypass_active()) return 1;
+    if (!proc_path_allowed(path, 0)) return 1;
+    return vfs_user_private(path);
 }
 
 struct vfs_node *vfs_root;
@@ -97,6 +144,10 @@ int vfs_init_defaults(void)
 
 struct vfs_node *vfs_lookup(const char *path)
 {
+    /* Only app-originated lookups are namespace-filtered; kernel callers run
+     * with proc_current() == 0 and keep their existing view of the tree. */
+    if (proc_current() && (!proc_path_allowed(path, 0) || vfs_user_private(path)))
+        return NULL;
     if (!path) return NULL;
     struct vfs_node *cur = vfs_root;
     const char *p = path;
@@ -142,7 +193,7 @@ int vfs_list(struct vfs_node *dir, char names[][VFS_NAME], int max)
 char *vfs_read(const char *path, u32 *len)
 {
     struct vfs_node *n;
-    if (security_protected_path(path) && !security_bypass_active()) return NULL;
+    if (vfs_read_denied(path)) return NULL;
     n = vfs_lookup(path);
     if (!n || n->is_dir) return NULL;
     if (len) *len = n->size;

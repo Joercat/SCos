@@ -136,8 +136,10 @@ this driver inventory and records startup/diagnostic omissions found and restore
 ## Explicit remaining limits
 
 * No physical i5-11400/GPU/USB-device acceptance yet; QEMU is not that hardware.
-  No new release number. Existing app windows still share one cooperative ring-0
-  execution context: no process isolation, preemptive scheduling or SMP.
+  No new release number. App windows still share one cooperative ring-0
+  execution context, but isolated windows now have separate page tables,
+  private arenas and capability-gated kernel APIs (see `SECURITY.md` §5).
+  There is still no CPL3 user mode, preemptive scheduling or SMP.
 * Original xHCI scope is retained: first matching controller, up to 15 root ports,
   12 slots, three HID endpoints per device, 64-byte receive buffers; USB2 hub
   walking is bounded (eight ports, limited depth). No OHCI/EHCI/UHCI, USB mass

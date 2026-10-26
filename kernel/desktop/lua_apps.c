@@ -1,7 +1,11 @@
 /* Lua apps are file-backed clients of the ordinary window/app interface.
- * This is a bounded language runtime, NOT a ring-3 security boundary. */
+ * Third-party bytecode stays inside a bounded 2 MiB language runtime.  When the
+ * owner isolates the app, that arena is ALSO a private hardware memory domain:
+ * its pages exist only in this process's PML4 (process.c / memory.c), so no
+ * other app can read them.  Non-isolated apps keep the ordinary shared heap. */
 #include "scos.h"
 #include "cat.h"
+#include "process.h"
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
@@ -24,6 +28,9 @@ struct lua_window {
     int mouse_x,mouse_y,mouse_buttons;
     int interval;
     int theme_used,message_used;u32 theme_at,message_at;
+    /* Append new fields here: SysMon and the guest tests read failed/error at
+     * fixed offsets, so the layout above must not shift. */
+    int private_arena;          /* arena lives in this process's private PML4 */
 };
 static struct lua_window *context(lua_State *L) {
     return *(struct lua_window **)lua_getextraspace(L);
@@ -119,14 +126,19 @@ static void data_path(lua_State *L,char *out) {
     vfs_mkdir("home/appdata");vfs_mkdir(out);strcat(out,"/");strcat(out,name);
 }
 static int api_read(lua_State *L){char path[128];data_path(L,path);u32 n;char *s=vfs_read(path,&n);if(!s)lua_pushnil(L);else if(n>SCRIPT_MAX)return luaL_error(L,"data file too large");else lua_pushlstring(L,s,n);return 1;}
-/* Per-app isolation is the OWNER'S choice, carried on the window.  When set,
- * a Lua CAT package keeps its drawing/query API but loses filesystem writes
- * and global theme changes.  Native C apps are cooperative and not sandboxed. */
-static void cat_isolation_guard(lua_State *L)
+/* Per-app isolation is the OWNER'S choice.  The check is against the
+ * kernel-held capability token, not a value the package can change: the same
+ * token also gates the VFS and theme entry points used by native C apps. */
+static void cat_capability_guard(lua_State *L, u32 cap)
 {
-    if (context(L)->w->isolated)
+    if (!proc_cap_allowed(cap))
         luaL_error(L, "isolated app: this operation is disabled by the owner");
 }
+static void cat_isolation_guard(lua_State *L)
+{
+    cat_capability_guard(L, PROC_CAP_VFS_WRITE);
+}
+void cat_global_guard(lua_State *L, u32 cap) { cat_capability_guard(L, cap); }
 static int api_write(lua_State *L){
     cat_isolation_guard(L);
     char path[128];data_path(L,path);size_t n;const char *s=luaL_checklstring(L,2,&n);
@@ -203,7 +215,10 @@ static int load_app(lua_State *L) {
 static void script_open(struct window *w,void *arg) {
     (void)arg;struct lua_window *d=palloc(sizeof(*d));if(!d)return;
     memset(d,0,sizeof(*d));w->data=d;d->w=w;d->ref=LUA_NOREF;d->interval=10;
-    d->arena=palloc(ARENA_SIZE);if(!d->arena){fail(d,"Not enough memory for Lua arena");return;}
+    if (proc_isolated() && proc_domain(proc_current()))
+        { d->arena=proc_private_alloc(ARENA_SIZE); d->private_arena=d->arena?1:0; }
+    if(!d->arena){d->arena=palloc(ARENA_SIZE);d->private_arena=0;}
+    if(!d->arena){fail(d,"Not enough memory for Lua arena");return;}
     *(struct block *)d->arena=(struct block){ARENA_SIZE-sizeof(struct block),NULL,1,0};
     d->L=lua_newstate(allocate,d);if(!d->L){fail(d,"Unable to create Lua state");return;}
     *(struct lua_window **)lua_getextraspace(d->L)=d;budget(d);
@@ -226,7 +241,10 @@ static void script_close(struct window *w){
     struct lua_window *d=w->data;if(!d)return;
     /* The arena owns everything, and the API creates no external handles.
      * Do not execute user __gc/__close code while destroying a window. */
-    if(d->arena)pfree(d->arena,ARENA_SIZE);
+    /* A private arena is released with its memory domain by proc_destroy().
+     * Never pfree() a pointer that only exists in this process's PML4. */
+    if(d->arena&&!d->private_arena)pfree(d->arena,ARENA_SIZE);
+    d->arena=NULL;
     pfree(d,sizeof(*d));w->data=NULL;
 }
 static const char *script_failure(struct window *w) {

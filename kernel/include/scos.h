@@ -102,6 +102,11 @@ void usb_status(char *,int);
 void usb_kbd_leds_off(void);
 int ata_init(void);
 int fs_image_load(void);
+/* Anti-rollback anchor persisted outside the vault image (see ata.c). */
+int  rollback_valid(void);
+u32  rollback_high_water(void);
+int  rollback_check(u32 gen);
+int  rollback_bump(u32 gen);
 /* usb (xHCI + HID boot) */
 void input_status(char *out, int max);
 void error_screen(const char *subsys, const char *msg,

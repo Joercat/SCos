@@ -8,6 +8,7 @@
  */
 #include "scos.h"
 #include "security.h"
+#include "process.h"
 
 #define MAX_WINDOWS 48
 #define TASKBAR_H 40
@@ -36,8 +37,11 @@ static int dirty = 1;
 static u64 app_cyc[MAX_WINDOWS];
 static u32 app_pct[MAX_WINDOWS];
 static int cyc_ok;                     /* TSC usable (set in wm_run) */
-#define APP_T0(w) u64 cyc_t0 = cyc_ok ? cpu_busy_cycles() : 0; int cyc_id = (w)->id; uintptr_t prior_owner=heap_set_owner((uintptr_t)(w))
-#define APP_T1(w) do { heap_set_owner(prior_owner); if (cyc_ok) { \
+/* Every app callback runs inside its process: separate CR3 + kernel-held
+ * capability token.  Native C apps and Lua CAT packages use the same path. */
+#define APP_T0(w) u64 cyc_t0 = cyc_ok ? cpu_busy_cycles() : 0; int cyc_id = (w)->id; \
+    uintptr_t prior_owner=heap_set_owner((uintptr_t)(w)); int proc_tok=proc_enter((w))
+#define APP_T1(w) do { proc_leave(proc_tok); heap_set_owner(prior_owner); if (cyc_ok) { \
     u64 elapsed = cpu_busy_cycles() - cyc_t0; \
     for (int ci = 0; ci < win_count; ci++) \
         if (wins[ci]->id == cyc_id) { app_cyc[ci] += elapsed; break; } \
@@ -154,6 +158,9 @@ struct notice {char title[48],text[512];u32 until;int warning;};
 static struct notice notices[NOTICE_MAX];
 static int notice_count;
 void wm_notify(const char *title,const char *text,int warning){
+    /* Global notifications are an IPC capability.  Kernel callers (proc_current
+     * == 0) and unisolated apps hold it; isolated apps do not. */
+    if (!proc_cap_allowed(PROC_CAP_IPC)) return;
     if(notice_count==NOTICE_MAX){for(int i=1;i<NOTICE_MAX;i++)notices[i-1]=notices[i];notice_count--;}
     struct notice *n=&notices[notice_count++];memset(n,0,sizeof(*n));strncpy(n->title,title,47);strncpy(n->text,text,sizeof(n->text)-1);n->text[sizeof(n->text)-1]=0;n->warning=!!warning;n->until=warning?0:(u32)tick_count+1000;wm_full();
     klog("notification: %s: %s",n->title,n->text);
@@ -392,7 +399,8 @@ void wm_close_window(struct window *w)
     w->closing = 1;
     if (w->console && w->app)
         term_console_exit(w->console, w->app->id);
-    if (w->app && w->app->close) w->app->close(w);
+    if (w->app && w->app->close) { APP_T0(w); w->app->close(w); APP_T1(w); }
+    proc_destroy(w);
     win_free_buf(w);
     int idx = -1;
     for (int i = 0; i < win_count; i++) if (wins[i] == w) idx = i;
@@ -511,8 +519,10 @@ struct window *wm_open_app(const char *app_id, void *arg)
         return NULL;
     }
     w->dirty = 1;
+    proc_create(w);
     if (app->open) { APP_T0(w);app->open(w, arg);APP_T1(w); }
     if (app->uses_data && !w->data) {
+        proc_destroy(w);
         win_count--;             /* app could not allocate its state */
         win_free_buf(w);w->app=NULL;
         err_notify(app->id,
@@ -527,6 +537,7 @@ struct window *wm_open_app(const char *app_id, void *arg)
 
 void wm_init(void)
 {
+    proc_init();
     win_count = 0;
     focused_w = NULL;
     modal_w = NULL;

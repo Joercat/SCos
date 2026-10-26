@@ -1,5 +1,6 @@
 /* SCos native - theme palettes (same four themes as the web simulation) */
 #include "scos.h"
+#include "process.h"
 
 /* tiny json helpers */
 static char *strstr_safe(const char *hay, const char *needle)
@@ -35,6 +36,9 @@ const struct theme *theme_get(int i) { return i>=4?theme_custom_get(i-4):(i>=0?&
 const struct theme *theme_current(void) { return theme_get(current); }
 void theme_set_index(int i)
 {
+    /* Global theme edits are a capability, not something any app can do.
+     * Kernel/boot callers hold all capabilities. */
+    if (!proc_cap_allowed(PROC_CAP_THEME)) return;
     if (i >= 0 && i < theme_count()) current = i;
     wm_wallpaper_invalidate();
 }

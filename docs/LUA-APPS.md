@@ -237,10 +237,14 @@ also charge/check C-library work; expensive calls can fail even without a long
 Lua loop. These are conservative responsiveness limits, not hard real-time
 scheduling guarantees or a proof that arbitrary code can never expose a bug.
 
-**This is not ring-3 isolation.** Apps still run inside the cooperative kernel.
-The Lua API limits language-level access and catches tested failures; an
-implementation bug in the interpreter/adapter can still affect the OS. Do not
-use the first port as a security boundary for hostile downloaded code.
+**This is not ring-3 isolation.** Apps still run at CPL0 inside the cooperative
+kernel. When the owner isolates an app, its Lua heap lives in a private PML4
+domain, its files are restricted to `home/appdata/<id>/`, and global theme /
+notification / icon operations are refused by the kernel-held capability set
+(`docs/migration/SECURITY.md` §5). That is real page-table and capability
+isolation, but an interpreter/adapter bug is still a CPL0 bug, and a deliberately
+malicious native C app could execute privileged instructions. Do not treat an
+isolated package as a boundary against hostile code that can escape the VM.
 
 ## Native C app registration
 

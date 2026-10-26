@@ -12,6 +12,12 @@
 #define IMG_LBA 129024          /* Dedicated GPT SCos-data partition, NOT ESP */
 #define DISK_SECTORS 131072
 #define IMG_MAX_SECTORS 256     /* 128 KB image budget */
+/* Anti-rollback anchor.  This sector is in the GPT-reserved gap (before the
+ * ESP at LBA 2048) and OUTSIDE the 256-sector vault image.  Restoring only the
+ * saved image - the usual replay attack - therefore cannot roll the anchor
+ * back.  It is not a TPM: cloning the entire disk still clones the anchor. */
+#define EPOCH_LBA 64
+#define EPOCH_MAGIC "SCOSEPOCH1"
 
 struct ata_dev {
     char model[41];
@@ -309,6 +315,57 @@ static int walk_serialize(u8 *p, u32 limit, u32 *off, struct vfs_node *n, const 
     }
     return 1;
 }
+/* ------------------------------------------------------------- anti-rollback --- */
+static u32 epoch_high_water;
+static int epoch_loaded, epoch_valid;
+static u8 epoch_buf[SECTOR];
+
+static void rollback_epoch_init(void)
+{
+    u8 b[SECTOR];
+    u32 gen, crc;
+    if (epoch_loaded) return;
+    epoch_loaded = 1;
+    epoch_valid = 0;
+    epoch_high_water = 0;
+    if (storage_dev < 0 || !ata_read_sectors(EPOCH_LBA, 1, b)) return;
+    if (memcmp(b, EPOCH_MAGIC, 10)) return;
+    gen = (u32)b[16] | (u32)b[17] << 8 | (u32)b[18] << 16 | (u32)b[19] << 24;
+    crc = (u32)b[20] | (u32)b[21] << 8 | (u32)b[22] << 16 | (u32)b[23] << 24;
+    if (!gen || crc != image_crc(b, 20)) return;
+    epoch_high_water = gen;
+    epoch_valid = 1;
+}
+int  rollback_valid(void) { rollback_epoch_init(); return epoch_valid; }
+u32  rollback_high_water(void) { rollback_epoch_init(); return epoch_high_water; }
+int  rollback_check(u32 gen)
+{
+    rollback_epoch_init();
+    if (!epoch_valid) return 1;
+    return gen >= epoch_high_water;
+}
+int  rollback_bump(u32 gen)
+{
+    u8 verify[SECTOR];
+    rollback_epoch_init();
+    if (!gen || storage_dev < 0) return 0;
+    if (epoch_valid && gen <= epoch_high_water) return 1;
+    memset(epoch_buf, 0, sizeof(epoch_buf));
+    memcpy(epoch_buf, EPOCH_MAGIC, 10);
+    for (int i = 0; i < 4; i++) epoch_buf[16 + i] = (u8)(gen >> (8 * i));
+    {
+        u32 c = image_crc(epoch_buf, 20);
+        for (int i = 0; i < 4; i++) epoch_buf[20 + i] = (u8)(c >> (8 * i));
+    }
+    if (!ata_pio_transfer(&devs[storage_dev], EPOCH_LBA, 1, epoch_buf, 1)) return 0;
+    memset(verify, 0, sizeof(verify));
+    if (!ata_read_sectors(EPOCH_LBA, 1, verify) ||
+        memcmp(verify, epoch_buf, 24)) return 0;
+    epoch_high_water = gen;
+    epoch_valid = 1;
+    return 1;
+}
+
 int fs_image_save(void)
 {
     if (storage_dev < 0) return image_error("no unique verified SCos disk; no write attempted");
@@ -364,6 +421,10 @@ int fs_image_save(void)
         if (!ata_read_sectors(IMG_LBA+i,1,verify) || memcmp(verify,img_buf+i*512,512))
             return image_error("disk readback verification failed");
     vault_mark_applied();
+    /* Record the new generation only AFTER the image is committed and read
+     * back, so a failed save never strands the anchor ahead of the data. */
+    if (!rollback_bump(vault_generation()))
+        klog_raw("filesystem: warning - could not advance the anti-rollback anchor");
     image_state="encrypted vault saved";
     return 1;
 }
@@ -425,6 +486,12 @@ int fs_image_load(void)
         if (!vault_stage(img_buf,IMAGE_BYTES)) {
             err_notify("filesystem","encrypted vault header rejected; sign-in disabled",NULL,0);
             return image_error("encrypted vault header invalid");
+        }
+        /* The header is AEAD-authenticated, so its generation cannot be forged;
+         * compare it with the anchor that lives outside this image. */
+        if (!rollback_check(vault_generation())) {
+            err_notify("filesystem","older saved image rejected (rollback detected)",NULL,0);
+            return image_error("saved image rolled back; generation is older than the recorded anchor");
         }
         if (!vfs_lookup("system/security")) vfs_mkdir("system/security");
         int staged = vfs_write("system/security/users.db",

@@ -34,6 +34,16 @@ uint64_t memory_table_pages(int from_arena);   /* pool vs allocator table frames
 uintptr_t page_allocate(void);
 void page_release(uintptr_t);
 uint64_t memory_free_pages(void);
+/* Per-app hardware memory domains (separate PML4 + private arena slot). */
+uint64_t *memory_kernel_root(void);
+uint64_t  memory_current_root(void);
+uintptr_t memory_domain_base(void);
+uintptr_t memory_domain_stride(void);
+int  memory_domain_create(void);
+int  memory_domain_map(int pid, int pages);
+void memory_domain_destroy(int pid);
+int  memory_domain_mapped(int pid, uintptr_t va);
+void memory_domain_switch(int pid);
 extern char _relro_start[],_relro_end[];
 extern char _kernel_start[],_kernel_end[],_text_start[],_text_end[],_rodata_start[],_rodata_end[],_file_end[];
 extern char stack_guard[],stack_top[],df_guard[],df_top[],nmi_guard[],nmi_top[],mc_guard[],mc_top[];

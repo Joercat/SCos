@@ -213,6 +213,7 @@ int  vault_header_valid(void);
 int  vault_image_pending(void);
 void vault_mark_applied(void);
 uint32_t vault_db_len(void);
+uint32_t vault_generation(void);   /* monotonic save counter in the AEAD header */
 uint32_t vault_audit_len(void);
 uint32_t vault_choices_len(void);
 int  vault_stage(const uint8_t *image, uint32_t len);   /* pre-auth: parse + bound-check */

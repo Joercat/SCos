@@ -139,6 +139,8 @@ int vault_open(uint8_t *image, uint32_t len)
     return 1;
 }
 
+uint32_t vault_generation(void) { return hdr_valid ? get32(hdr + 20) : 0; }
+
 int vault_seal(uint8_t *image, uint32_t len)
 {
     uint32_t gen;
