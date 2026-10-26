@@ -321,8 +321,17 @@ the real thing it said this, which is the first measurement of its kind in this 
 Those four sizes are the driver's own confirmation of what the handover is built to - 48, 97 and 96 for
 architectures 0x1a and 0x1b, 48, 384 and 384 for Hopper - so they are no longer a reading of a reference
 driver's source but the width of NVIDIA's signed image.  The last line is the one that says the extraction was
-faithful: a single wrong byte would stop the digest matching.  `make dist` then packs the file as
-`GSPFMC.BIN` and the panel says `fw 1/5`.  `python3 tools/gsp-firmware.py --notice` prints the provenance
+faithful: a single wrong byte would stop the digest matching.  `make dist` would then pack the file as `GSPFMC.BIN` and the panel would say `fw 1/5` - and this build does
+not do that yet, because putting a valid FMC image on the disk costs the desktop.  Measured here on QEMU with a
+Cirrus display and no NVIDIA device of any kind: with the file in the image, `test_compositor` fails its 1.2 s
+expectation of the window manager; with the same image minus that one file, the same suite passes, and with 8 s
+of patience the desktop comes up normally on both.  So a staged image is not inert: something past the point
+where a valid container is accepted waits for a coprocessor that is not there, and the fix is to gate that path
+on the device being present rather than on the file being good.  Until it is fixed, `make gsp-firmware` leaves
+the result in `build/gsp/` for the checker and for your own experiment, and `make dist` ships without it -
+which is also how you can try it on the real card: `python3 tools/gspcheck.py build/gsp --install
+/mnt/esp/SCOS` puts the same genuine bytes on the stick, and if the boot then takes several seconds longer,
+you will know why and can say so.  `python3 tools/gsp-firmware.py --notice` prints the provenance
 sentence, and the image bytes are the vendor's, unmodified, with only the container around them built here.
 
 What this does not do is worth stating before a flash: a genuine FMC image makes the handover real, and it does

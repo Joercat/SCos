@@ -1107,6 +1107,15 @@ named, not held to the FMC contract, by `tools/gspcheck.py`.  And the SHA-384 re
 `tools/gsp-firmware.py` prints it: it is the check that the bytes it put in the container are the bytes the
 driver boots.
 
+**Open defect, measured the day this was written.** A valid FMC image on the boot disk is not inert.  With
+`GSPFMC.BIN` (287869 B) packed into the image, `tools/tests/test_compositor.py` fails in QEMU - a Cirrus
+display, no NVIDIA device present - at its 1.2 s expectation that the window manager has taken the screen; with
+that one file removed from the same image the same suite passes, and given 8 s the desktop appears either way.
+The boot path therefore waits for something after the point where a staged container is accepted, on a machine
+with no coprocessor to answer.  Until the FSP attempt is gated on the device being there, not merely on the
+image being good, `make dist` ships without staged firmware and `make gsp-firmware` writes into `build/gsp/`
+for the checker and for deliberate experiments only.
+
 The big resource-manager image is *not* among these arrays, so `GSP.BIN` still has to come off a machine with
 the driver installed - `build/gsp/` or the ESP, either way.  What is here is enough to make the handover real,
 and nothing more: the vidmem WPR2 and FRTS reservation, the radix-3 page table and `GSP_FMC_BOOT_PARAMS` are the
