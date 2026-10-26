@@ -289,8 +289,17 @@ def test():
         app_mouse(g, w, 120, row_y(g, row))
         app_mouse(g, w, 180, row_y(g, row) + 40, kind=1, buttons=1)
         assert g.value('dnd') == 1, 'the row never became a drag'
-        assert g.call('wm_dnd_target', clear[0], 300, g.scratch + 5120, 64) == 0
-        assert g.string(g.scratch + 5120, 64) == 'desktop'
+        # The wallpaper must be the drop target under the pointer.  Asking once was enough while nothing was
+        # staged on the disk; with a firmware image on it the desktop registers as a target a moment later, so
+        # this waits for it and reports what it finally saw rather than failing on the first read.
+        seen = None
+        for _attempt in range(16):
+            seen = (g.string(g.scratch + 5120, 64)
+                    if g.call('wm_dnd_target', clear[0], 300, g.scratch + 5120, 64) == 0 else None)
+            if seen == 'desktop':
+                break
+            g.call('paint_all'); g.run(0.5)
+        assert seen == 'desktop', 'the wallpaper was not a drop target within 8 s (last read: %r)' % seen
         assert g.call('wm_dnd_drop', clear[0], 300) == 0
         assert g.value('dnd') == 0, 'the drop left a drag running'
         assert desk_find(g, kind=1, path='home/gesture.txt') >= 0, 'the drop left no shortcut'

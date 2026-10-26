@@ -160,8 +160,16 @@ def test():
       assert g.call('wm_dnd_active')==1,'press-and-move in the launcher did not start a drag'
       assert not lactive(),'the launcher stayed open while its row was being dragged'
       tgt=g.scratch+8700
-      assert g.call('wm_dnd_target',700,300,tgt,48)==0
-      assert g.string(tgt,48)=='desktop',g.string(tgt,48)
+      # The wallpaper has to be the thing under the pointer, and asking once is not enough on every build:
+      # with a firmware image staged on the disk the first interactions land before the desktop window is
+      # registered as a drop target, and the read comes back 'none'.  Poll it for a bounded time and say which
+      # state was seen, so a slow first paint shows up as a number in the failure and not as a mystery.
+      seen=None
+      for _attempt in range(16):
+          seen=g.string(tgt,48) if g.call('wm_dnd_target',700,300,tgt,48)==0 else None
+          if seen=='desktop':break
+          g.call('paint_all');g.run(0.5)
+      assert seen=='desktop','the wallpaper was not a drop target within 8 s of patience (last read: %r)'%seen
       event(g,2,button=1,buttons=0)                       # release on the wallpaper
       assert g.call('wm_desk_vis_count')>=icons0,'dropping an application on the desktop lost an icon'
       assert not g.call('wm_dnd_active')

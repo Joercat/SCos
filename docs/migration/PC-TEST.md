@@ -337,6 +337,21 @@ driver) being entered because a staged file says the path is worth trying.  That
 not on the file, and until it is in, `make dist` ships without staged firmware while `make gsp-firmware` leaves
 the result in `build/gsp/` for the checker and for your own experiment.
 
+This build **does** ship the staged FMC image: `make dist` packs `GSPFMC.BIN` (287,869 B, the vendor's own
+bytes with the container rebuilt here), the panel says `fw 1/5`, and a handover is built from it - which is what
+the measurements above price at 0.03 s of boot and what the two desktop suites needed before they could agree.
+`test_compositor` and `test_affordances` both ask the compositor who owns a point on the screen and expect the
+answer `desktop`, and both were single-shot reads with no patience in them: with a firmware image staged, the
+desktop registers as a drop target a moment later and they read `none`.  They now poll for up to 8 s and name the
+last thing they saw, so a first paint that arrives late is a number in the failure rather than a mystery, and all
+19 suites pass with the real container on the disk.  What was NOT the cause is worth stating because it was the
+suspect: the FSP's 1500 ms and 4000 ms wait budgets are not being burned on a QEMU boot - `gpu_fsp_note()`
+returns at the vendor check for anything that is not 0x10de, before a single MMIO read - so the time went into
+the boot volume's own work, not into asking a coprocessor that is not there.  On your machine the picture differs
+in the only way that matters: the vendor check passes, so the waits become reachable, and a card that answers
+nothing costs up to 5.5 s before the desktop settles.  That is the price of attempting the handover, and the
+panel names each wait in milliseconds so it can be told apart from a hang.
+
 Two facts about the stub came out of the same measurements, and they are the reason for a commit and its revert.
 The firmware reader caps one file at 16 MiB and the resident region at 32 MiB, so the resource-manager image a
 working Linux install carries is four times the file limit and cannot be read or kept at any price - it arrives
