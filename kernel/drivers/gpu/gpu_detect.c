@@ -288,10 +288,19 @@ void gpu_init(const struct boot_framebuffer *fb)
         /* The card this machine displays on, or the first one this OS has a name for.  Not `gpu_module_eligible':
          * a chip the naming table knows but no driver claims is exactly the case where asking the security
          * processor is worth doing, and it is also the case where no module will ever be bound. */
-        for (int i = 0; i < device_count; i++)
-            if (devices[i].is_scanout) { gpu_fsp_note(&devices[i], handoff); break; }
-        for (int i = 0; i < device_count && !gpu_fsp_state(); i++)
-            gpu_fsp_note(&devices[i], handoff);
+        {
+            int pick = -1;
+            for (int i = 0; i < device_count; i++)
+                if (devices[i].is_scanout) { pick = i; break; }
+            if (pick < 0 && device_count > 0) pick = 0;      /* nothing owns the screen: ask the first anyway,
+                                                                  * because on a card it is the answer about the
+                                                                  * card that matters, not which of its functions
+                                                                  * happened to be wired to the console */
+            if (pick >= 0) gpu_fsp_note(&devices[pick], handoff);   /* once, and of one function: two asks of
+                                                                        * two functions of one chip would be two
+                                                                        * reports of the same mailbox, and a
+                                                                        * panel cannot say which one to believe */
+        }
     }
     /* A family being *named* is not a driver.  The one module the firmware read for this machine's
      * chip is validated and exercised here; every other family's file stays on the disk. */

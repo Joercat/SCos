@@ -260,6 +260,15 @@ void gpu_firmware_note(const struct boot_handoff *handoff)
     unsigned i, staged = 0, complete = 1;
     uint32_t bytes = 0, flags = 0;
 
+    /* Cleared before anything is read, so that a record for a boot where the images were *not* kept cannot
+     * carry the per-image findings of one where they were.  In the kernel this runs exactly once per boot, and
+     * the only thing that reads the record more than once is a test, which is precisely the case in which a
+     * field left over from an earlier scenario would be believed as a measurement. */
+    for (i = 0; i < GPU_FIRMWARE_ROLES; i++) f->image[i] = (struct gpu_firmware_image){0};
+    f->resident = 0;
+    f->resident_bytes = 0;
+    f->parsed = 0;
+
     for (i = 0; i < GPU_FIRMWARE_ROLES; i++) {
         const struct boot_firmware_role *r = &fw->role[i];
         f->role[i].state = r->state;

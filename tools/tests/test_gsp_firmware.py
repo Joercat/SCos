@@ -478,6 +478,13 @@ def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
             assert ', ELF32 6s' in panel, 'the boot stub did not recognise the FMC image as a container'
             # What this kernel read out of the bytes it was given, in memory it is holding.
             assert 'GSP firmware image: 5 of 5 held read-only at 0x' in panel, panel[-1800:]
+            # The card's own security processor, on a machine whose display function is not the one these
+            # offsets decode inside.  The paragraph's whole job on such a boot is to say so by name - which
+            # vendor's card this turned out to be, and that nothing of it was touched - because a panel that
+            # simply omitted the paragraph could not be told apart from a kernel that forgot to look.
+            assert 'FSP mailbox: not asked, and not because anything failed' in panel, panel[-2400:]
+            assert 'vendor 0x00001013' in panel, 'the paragraph never names whose card this is: ' + panel[-2400:]
+            assert "so no byte of this function's BAR was read, and none was written" in panel, panel[-2400:]
             assert ('fmc: ELF32 %d B, 6 sections, FMC header exact, every section legal and its CRC32 '
                     'verified, 0 CRC32 mismatch(es); image 512 B at 0x' % len(fmc)) in panel, panel[-1800:]
             assert 'hash 32, publickey 4, signature 256 B - the four numbers the FSP verify command is given' \

@@ -96,9 +96,18 @@
 #define COT_OFF_BOOT_ARGS                 852u      /* (uint64_t)-1 on a cold boot: nothing to reuse */
 #define COT_PAYLOAD_VERSION                 2u      /* the version this chip family's HAL sets */
 
+/* One mapping, its base inside BAR0, and how long it is.  All three of the file's register accesses go
+ * through a window, and the length is what makes an access to a register the window does not contain an
+ * answer of "not there" rather than a read of whatever the next device's registers are: the mailbox page this
+ * OS asks for is 16 KiB, because the queue pointers sit 11 KiB into it, and a check hardcoded to one page
+ * would silently drop every write to them. */
+struct fsp_window {
+    volatile uint32_t *page;
+    uint64_t base, length;
+};
+
 static struct gpu_fsp_state fsp_state;
-static volatile uint32_t *therm_page, *fsp_page, *gsp_page;
-static uint64_t therm_base, fsp_base, gsp_base;
+static struct fsp_window w_therm, w_fsp, w_gsp;
 
 const struct gpu_fsp_state *gpu_fsp_state(void)
 {
@@ -124,33 +133,34 @@ static uint64_t fsp_ticks(void)
     return (uint64_t)high << 32 | low;
 }
 
-static uint32_t read32(volatile uint32_t *base, uint64_t page, uint32_t offset)
+static uint32_t read32(const struct fsp_window *w, uint32_t offset)
 {
     uint64_t within;
     uint32_t value;
-    if (!base) return 0xffffffffu;
-    within = offset - page;
-    if (within + 4 > 0x1000u) return 0xffffffffu;      /* outside the page this mapping is: no guess */
-    value = base[within >> 2];
+    if (!w->page || offset < w->base) return 0xffffffffu;
+    within = offset - w->base;
+    if (within + 4 > w->length) return 0xffffffffu;      /* outside the mapping this window is: no guess */
+    value = gpu_io_read32(w->page, within);
     fsp_state.reads++;
     if (FSP_REFUSED(value)) fsp_state.refusal_reads++;
     return value;
 }
 
-static void write32(volatile uint32_t *base, uint64_t page, uint32_t offset, uint32_t value)
+static void write32(struct fsp_window *w, uint32_t offset, uint32_t value)
 {
     uint64_t within;
-    if (!base) return;
-    within = offset - page;
-    if (within + 4 > 0x1000u) return;
-    base[within >> 2] = value;
+    if (!w->page || offset < w->base) return;
+    within = offset - w->base;
+    if (within + 4 > w->length) return;
+    gpu_io_write32(w->page, within, value);
     fsp_state.writes++;
 }
 
 /* The FSP's registers sit 14 MiB into BAR0 and the therm scratch 128 KiB in, so each is reached through its
- * own page mapping rather than by asking the kernel for a 14 MiB window it would refuse.  device_map reuses
- * leaves that already exist, so mapping a page the driver module also maps is a shared window, not a second
- * set of attributes on the same memory. */
+ * own window rather than by asking the kernel for a 14 MiB mapping it would refuse.  The FSP's window is four
+ * pages, because its queue pointers are 11 KiB past its scratch registers; the other two are one page each.
+ * device_map reuses leaves that already exist, so mapping a page a driver module also maps is a shared window,
+ * not a second set of attributes on the same memory - which is why none of these ask for write combining. */
 static void map_mailbox_pages(uint64_t bar0)
 {
     uint64_t mapped;
@@ -158,14 +168,14 @@ static void map_mailbox_pages(uint64_t bar0)
 
     mapped = 0;
     page = device_map(bar0 + 0x20000u, 0x1000u, 0, &mapped);
-    if (page && mapped >= 0x1000u) { therm_page = page; therm_base = 0x20000u; }
+    if (page && mapped >= 0x1000u) { w_therm.page = page; w_therm.base = 0x20000u; w_therm.length = mapped; }
     mapped = 0;
     page = device_map(bar0 + 0x8f0000u, 0x4000u, 0, &mapped);
-    if (page && mapped >= 0x4000u) { fsp_page = page; fsp_base = 0x8f0000u; }
+    if (page && mapped >= 0x4000u) { w_fsp.page = page; w_fsp.base = 0x8f0000u; w_fsp.length = mapped; }
     mapped = 0;
     page = device_map(bar0 + 0x110000u, 0x1000u, 0, &mapped);
-    if (page && mapped >= 0x1000u) { gsp_page = page; gsp_base = 0x110000u; }
-    fsp_state.mapped = therm_page && fsp_page;
+    if (page && mapped >= 0x1000u) { w_gsp.page = page; w_gsp.base = 0x110000u; w_gsp.length = mapped; }
+    fsp_state.mapped = w_therm.page && w_fsp.page;
     /* The GSP page is a bonus rather than a requirement: it is the page that has answered 0xbadf4100 to
      * every reader so far, and the first thing that changes if a boot ever succeeds is that it stops.  Not
      * having it mapped says nothing about the mailbox, so nothing below depends on it. */
@@ -173,7 +183,7 @@ static void map_mailbox_pages(uint64_t bar0)
 
 static uint32_t emem_offset_dwords(void)
 {
-    uint32_t v = read32(fsp_page, fsp_base, NV_PFSP_EMEMC);
+    uint32_t v = read32(&w_fsp, NV_PFSP_EMEMC);
     return ((v >> 2) & 0x3fu) + ((v >> 8) & 0xffu) * FSP_EMEM_DWORDS_PER_BLOCK;
 }
 
@@ -183,17 +193,17 @@ static void emem_seek(uint32_t dwords, int auto_write, int auto_read)
                  ((dwords / FSP_EMEM_DWORDS_PER_BLOCK) << 8);
     if (auto_write) v |= 1u << 24;
     if (auto_read) v |= 1u << 25;
-    write32(fsp_page, fsp_base, NV_PFSP_EMEMC, v);
+    write32(&w_fsp, NV_PFSP_EMEMC, v);
 }
 
 /* All four pointers, in one place, because "may I send" is the same question as "is there a reply": the FSP
  * sets head to tail on both queues as it consumes and as it produces. */
 static int queues(int *idle)
 {
-    fsp_state.queue_head = read32(fsp_page, fsp_base, NV_PFSP_QUEUE_HEAD);
-    fsp_state.queue_tail = read32(fsp_page, fsp_base, NV_PFSP_QUEUE_TAIL);
-    fsp_state.msgq_head = read32(fsp_page, fsp_base, NV_PFSP_MSGQ_HEAD);
-    fsp_state.msgq_tail = read32(fsp_page, fsp_base, NV_PFSP_MSGQ_TAIL);
+    fsp_state.queue_head = read32(&w_fsp, NV_PFSP_QUEUE_HEAD);
+    fsp_state.queue_tail = read32(&w_fsp, NV_PFSP_QUEUE_TAIL);
+    fsp_state.msgq_head = read32(&w_fsp, NV_PFSP_MSGQ_HEAD);
+    fsp_state.msgq_tail = read32(&w_fsp, NV_PFSP_MSGQ_TAIL);
     if (FSP_REFUSED(fsp_state.queue_head) || FSP_REFUSED(fsp_state.queue_tail) ||
         FSP_REFUSED(fsp_state.msgq_head) || FSP_REFUSED(fsp_state.msgq_tail)) {
         *idle = -1;
@@ -205,8 +215,8 @@ static int queues(int *idle)
 
 static int reply_waiting(void)
 {
-    uint32_t head = read32(fsp_page, fsp_base, NV_PFSP_MSGQ_HEAD);
-    uint32_t tail = read32(fsp_page, fsp_base, NV_PFSP_MSGQ_TAIL);
+    uint32_t head = read32(&w_fsp, NV_PFSP_MSGQ_HEAD);
+    uint32_t tail = read32(&w_fsp, NV_PFSP_MSGQ_TAIL);
     if (FSP_REFUSED(head) || FSP_REFUSED(tail)) return 0;
     if (head == tail) return 0;
     fsp_state.msgq_head = head;
@@ -218,8 +228,12 @@ static int wait_for(int (*condition)(void))
 {
     uint64_t deadline = fsp_ticks() + 4000000ull;      /* a few milliseconds, bounded twice over: the limit
                                                         * on iterations means a machine with a dead counter
-                                                        * still stops */
+                                                        * still stops, and a machine with a live one does not
+                                                        * spend 200,000 looks finding out */
     for (unsigned i = 0; i < FSP_POLL_LIMIT; i++) {
+        fsp_state.reply_polls++;                        /* the panel quotes this for the reply, and `polled'
+                                                           * above for the send, because they are two different
+                                                           * waits and one number would be either vague or wrong */
         if (condition()) return 1;
         if (fsp_ticks() > deadline) return 0;
         for (volatile int spin = 0; spin < 32; spin++) __asm__ volatile("pause");
@@ -255,12 +269,12 @@ static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type
      * too: the seek itself must not move it, and if it did, the count below would be a complaint about the
      * seek rather than about the writes. */
     before = emem_offset_dwords();
-    write32(fsp_page, fsp_base, NV_PFSP_EMEMD, header[0]);
-    write32(fsp_page, fsp_base, NV_PFSP_EMEMD, header[1]);
+    write32(&w_fsp, NV_PFSP_EMEMD, header[0]);
+    write32(&w_fsp, NV_PFSP_EMEMD, header[1]);
     for (uint32_t i = 0; i < padded; i += 4) {
         uint32_t word = 0;
         for (uint32_t b = 0; b < 4 && i + b < size; b++) word |= (uint32_t)payload[i + b] << (b * 8);
-        write32(fsp_page, fsp_base, NV_PFSP_EMEMD, word);
+        write32(&w_fsp, NV_PFSP_EMEMD, word);
     }
     after = emem_offset_dwords();
     /* The vendor driver asserts exactly this, and for the same reason: every byte of the packet is written
@@ -271,8 +285,8 @@ static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type
 
     fsp_state.packet_bytes = padded + FSP_HEADER_BYTES;
     fsp_state.doorbell = padded + 4u;        /* the tail is the last dword written, not the one after it */
-    write32(fsp_page, fsp_base, NV_PFSP_QUEUE_TAIL, fsp_state.doorbell);
-    write32(fsp_page, fsp_base, NV_PFSP_QUEUE_HEAD, 0);
+    write32(&w_fsp, NV_PFSP_QUEUE_TAIL, fsp_state.doorbell);
+    write32(&w_fsp, NV_PFSP_QUEUE_HEAD, 0);
     return 1;
 }
 
@@ -289,7 +303,7 @@ static int read_reply(uint8_t *buffer, uint32_t capacity)
     if (size > capacity) { fsp_state.reply_oversize = (int)size; return 0; }
 
     emem_seek(0, 0, 1);
-    for (uint32_t i = 0; i + 4 <= size; i += 4) store32(buffer + i, read32(fsp_page, fsp_base, NV_PFSP_EMEMD));
+    for (uint32_t i = 0; i + 4 <= size; i += 4) store32(buffer + i, read32(&w_fsp, NV_PFSP_EMEMD));
     fsp_state.reply_bytes = size;
     /* The read has to have walked as many dwords as it claims to have returned, for the same reason the
      * write does: the packet came out of one register, and only the offset proves they were different dwords
@@ -298,8 +312,8 @@ static int read_reply(uint8_t *buffer, uint32_t capacity)
     /* Acknowledge by pulling the tail up to the head, which is the FSP's cue that the channel is free
      * again.  The head is written back unchanged because the reference driver writes both: a mailbox this
      * unforgiving is not where saving one register write is worth the argument. */
-    write32(fsp_page, fsp_base, NV_PFSP_MSGQ_TAIL, fsp_state.msgq_head);
-    write32(fsp_page, fsp_base, NV_PFSP_MSGQ_HEAD, fsp_state.msgq_head);
+    write32(&w_fsp, NV_PFSP_MSGQ_TAIL, fsp_state.msgq_head);
+    write32(&w_fsp, NV_PFSP_MSGQ_HEAD, fsp_state.msgq_head);
 
     transport = load32(buffer);
     message = load32(buffer + 4);
@@ -341,7 +355,10 @@ static void stage_fmc(void)
     if (!image->fmc_named) { fsp_state.cot_defect = 8; return; }
     if (image->hash_bytes != 48u) { fsp_state.cot_defect = 1; return; }
     if (image->publickey_bytes != 384u) { fsp_state.cot_defect = 2; return; }
-    if (image->signature_bytes != 384u) { fsp_state.cot_defect = 3; return; }
+    /* The FMC image's own signature section, which is a different field from the resource manager image's:
+     * the two files name their authentication data differently, and the handover wants the FMC's, because the
+     * FMC is what the FSP verifies before it will load anything. */
+    if (image->fmc_signature_bytes != 384u) { fsp_state.cot_defect = 3; return; }
     if (!image->image_bytes || image->image_bytes > FSP_IMAGE_MAX) { fsp_state.cot_defect = 4; return; }
     if (!image->fmc_sections) { fsp_state.cot_defect = 5; return; }
 
@@ -374,12 +391,12 @@ static void probe_mailbox(void)
 {
     int idle;
 
-    fsp_state.boot_scratch = read32(therm_page, therm_base, NV_THERM_FSP_BOOT_COMPLETE);
+    fsp_state.boot_scratch = read32(&w_therm, NV_THERM_FSP_BOOT_COMPLETE);
     fsp_state.booted = (fsp_state.boot_scratch & 0xffu) == 0xffu;
-    fsp_state.ucode_version = read32(fsp_page, fsp_base, NV_PFSP_UCODE_VERSION) & 0x7ffu;
-    fsp_state.fuse_check = read32(fsp_page, fsp_base, NV_PFSP_FUSE_ERROR_CHECK);
-    fsp_state.hwcfg2 = read32(gsp_page, gsp_base, NV_PGSP_HWCFG2);
-    fsp_state.gsp_readable = gsp_page && !FSP_REFUSED(fsp_state.hwcfg2) && fsp_state.hwcfg2 != 0xffffffffu;
+    fsp_state.ucode_version = read32(&w_fsp, NV_PFSP_UCODE_VERSION) & 0x7ffu;
+    fsp_state.fuse_check = read32(&w_fsp, NV_PFSP_FUSE_ERROR_CHECK);
+    fsp_state.hwcfg2 = read32(&w_gsp, NV_PGSP_HWCFG2);
+    fsp_state.gsp_readable = w_gsp.page && !FSP_REFUSED(fsp_state.hwcfg2) && fsp_state.hwcfg2 != 0xffffffffu;
     if (!queues(&idle)) return;                        /* refused: there is no mailbox to send through */
     fsp_state.mailbox_readable = 1;
     if (!fsp_state.booted) return;        /* until the FSP says it is up, nothing on the other end is reading */

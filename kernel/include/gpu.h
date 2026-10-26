@@ -191,6 +191,15 @@ uint32_t gpu_firmware_crc32(const uint8_t *data, uint32_t length);
 
 #define GPU_FSP_PAYLOAD_BYTES 860              /* one NVDM_PAYLOAD_COT, exactly, padded by the sender
                                                   * to a whole number of dwords before it is written */
+/* The kernel's only raw access to a device register: `window' is what device_map() returned, `within' a byte
+ * offset inside it.  Two functions and no policy - bounds, counting and the decision to stop belong to the
+ * caller, where they can be tested with the logic that needs them - so that a caller whose registers have
+ * behaviour (this card's channel offset walks as it is read, and its queue pointers move when the firmware
+ * consumes a packet) can be run against a model of the register file instead of against an array.
+ * kernel/drivers/gpu/gpu_io.c is the production pair; tools/tests/gpu_fsp_host.c supplies its own. */
+uint32_t gpu_io_read32(const volatile uint32_t *window, uint64_t within);
+void gpu_io_write32(volatile uint32_t *window, uint64_t within, uint32_t value);
+
 /* What the card's flight security processor said when this OS asked.  Every field is a register read, a byte
  * count or a staging decision; nothing here is inferred, and a zero `reads' means the file never got as far as
  * touching the hardware.  See kernel/drivers/gpu/gpu_fsp.c for what each number is and who published it. */
@@ -209,7 +218,7 @@ struct gpu_fsp_state {
     uint32_t hwcfg2;                         /* the capability word whose refusal was the blocker */
     uint32_t queue_head, queue_tail, msgq_head, msgq_tail;
     int queried, send_blocked;               /* a request went into the channel; why one could not */
-    int polled;                              /* how many looks the queues took to fall idle */
+    int polled, reply_polls;                  /* how many looks each of the two waits took */
     uint32_t packet_bytes, doorbell;
     int responded, framed_ok, reply_som, reply_eom, reply_oversize, reply_delta_ok;
     uint32_t reply_bytes;

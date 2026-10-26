@@ -336,7 +336,7 @@ static void put_fsp_mailbox(struct writer *w, const struct gpu_fsp_state *f)
         } else if (f->queried) {
             put(w, "was put in the channel and no reply came back: the reply queue's two pointers never "
                    "separated within ");
-            put_number(w, (unsigned)f->polled);
+            put_number(w, (unsigned)f->reply_polls);
             put(w, " looks at them.  A refusal to answer is a result - it says the mailbox is there and the "
                    "thing behind it is not reading, which is what a boot that never reached the FSP looks "
                    "like from outside");
@@ -388,7 +388,7 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
         put_hex(w, f->vendor);
         put(w, ", whose aperture holds different things at the same addresses.  Reading them would be a "
                "guess about somebody else's hardware and writing them would not be a guess at all, so no "
-               "byte of this card's memory was touched and the counts below are zero by design.\n");
+               "byte of this function's BAR was read, and none was written.\n");
         return;
     }
     if (!f->attempted) {
