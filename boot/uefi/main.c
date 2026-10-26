@@ -77,6 +77,44 @@ static void family_file_name(const char *family,char16 *out){
 }
 static uint64_t ticks(void){uint32_t a,d;__asm__ volatile("lfence; rdtsc":"=a"(a),"=d"(d)::"memory");return ((uint64_t)d<<32)|a;}
 static uint32_t crc32(const uint8_t *p,size_t n){uint32_t c=~0u;while(n--){c^=*p++;for(unsigned i=0;i<8;i++)c=(c>>1)^(0xedb88320u&-(c&1));}return ~c;}
+/* \SCOS\<ROLE>.BIN, the name the volume holds this image under.  Both passes ask for the file by this one
+ * function, because a name assembled twice is a name that can differ between sizing it and reading it. */
+static void firmware_path(unsigned role,char16 *path,size_t capacity){
+ const char16 *prefix=u"\\SCOS\\";const char *file=gsp_fw_role_file(role);size_t i=0;
+ while(*prefix&&i+1<capacity)path[i++]=*prefix++;
+ while(*file&&i+1<(capacity<24?capacity:24)-1&&i<22)path[i++]=(char16)*file++;
+ path[i]=0;
+}
+/* Read a whole file into memory the caller already owns, in the chunks the firmware hands back.  This exists
+ * because the resident region is where the bytes belong: reading a file into a pool and then copying it was a
+ * second pass over 63 MB of resource-manager image to verify a memcpy, and it doubled the peak as well.
+ * The volume's stated length bounds the read, so a file that grew or shrank under us is a failure and not an
+ * overflow, and a short read is a failure rather than a partially-staged image. */
+static status read_into(struct file *root,const char16 *name,uint8_t *dest,size_t length){
+ struct file *f=0;status s=root->open(root,&f,name,1,0);if(FAILED(s))return s;
+ if(!FAILED(s))s=f->set_position(f,0);
+ size_t done=0;
+ while(!FAILED(s)&&done<length){
+  size_t part=length-done;s=f->read(f,&part,dest+done);
+  if(FAILED(s)||!part||part>length-done){s=ERROR(7);break;}
+  done+=part;
+ }
+ uint64_t beyond=0;
+ if(!FAILED(s)&&!FAILED(f->get_position(f,&beyond))&&beyond>length)s=ERROR(7);   /* grew while we read it */
+ status close=f->close(f);return FAILED(s)?s:close;
+}
+/* The length the volume states for a file, without reading it: enough to size the resident region, to name a
+ * file that is too big as too big, and to leave a file that is absent absent. */
+static status file_size(struct file *root,const char16 *name,uint64_t *size){
+ struct file *f=0;status s=root->open(root,&f,name,1,0);if(FAILED(s))return s;
+ uint64_t end=0;
+ if(!FAILED(s))s=f->set_position(f,UINT64_MAX);
+ if(!FAILED(s))s=f->get_position(f,&end);
+ status close=f->close(f);
+ if(FAILED(s))return s;
+ if(FAILED(close))return close;
+ *size=end;return 0;
+}
 /* Read from the loaded image's own filesystem only; never search other disks. */
 static status read_file(struct file *root,const char16 *name,void **data,size_t *length){
  struct file *f=0;status s=root->open(root,&f,name,1,0);if(FAILED(s))return s;
@@ -261,85 +299,86 @@ status EFIAPI efi_main(handle image,struct system_table *table){
     if(bytes>BOOT_INDEX_MAX)bytes=BOOT_INDEX_MAX;
     index_data=index;index_size=bytes;store_count=*(uint32_t*)index;
    }else if(index)bs->free_pool(index);}
-  /* The five images, one role at a time.  A role that is not on the disk leaves zeros behind and is
-   * reported as absent; one the firmware could not open is reported as unreadable, because "too big for
-   * the stub to read" and "not there" are different things a person can act on differently. */
+  /* The five images, one role at a time.  A role that is not on the disk leaves zeros behind and is reported
+   * as absent; one the stub could not open is reported as unreadable; one bigger than BOOT_FIRMWARE_ROLE_MAX
+   * is named as too big without being read.  Those are three different things a person can act on
+   * differently, which is why they are three different states.
+   *
+   * This used to read every file twice: once into a pool to be sized, examined and checksummed, then again
+   * into the resident region so the copy could be compared with the first read.  With the 288 kB FMC image
+   * that was free.  A real install carries a 63571696-byte resource-manager image - measured by
+   * tools/gspcheck.py in /lib/firmware/nvidia/gb207/gsp on the machine that matters - and the same design
+   * would put 121 MB through the firmware's file reader before the kernel starts, to verify a memcpy whose
+   * source no longer exists: the reader now fills the region itself, the checksum is taken over the bytes
+   * that arrived in it, and the kernel compares the region against this record before the image reaches the
+   * card, which is the check worth having because it covers the memory the boot sequence will actually read. */
+  uint64_t length[BOOT_FIRMWARE_ROLES];
   for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
-   const char *file=gsp_fw_role_file(role);
-   char16 path[24];unsigned i=0;
-   const char16 *prefix=u"\\SCOS\\";while(*prefix)path[i++]=*prefix++;
-   while(i<22&&*file)path[i++]=(char16)*file++;
-   path[i]=0;
-   void *blob=0;size_t bytes=0;
-   status got=read_file(root,path,&blob,&bytes);
+   char16 path[24];firmware_path(role,path,sizeof path);
+   uint64_t size=0;
+   status known=file_size(root,path,&size);
    struct boot_firmware_role *slot=&gsp_fw.role[role];
-   if(FAILED(got)){
-    if((uint64_t)(int64_t)got!=0x800000000000000Eull)slot->state=BOOT_FIRMWARE_STATE_UNREADABLE;
+   length[role]=0;
+   if(FAILED(known)){
+    if((uint64_t)(int64_t)known!=0x800000000000000Eull)slot->state=BOOT_FIRMWARE_STATE_UNREADABLE;
     continue;
    }
-   slot->state=BOOT_FIRMWARE_STATE_STAGED;
-   slot->bytes=(uint32_t)bytes;
-   slot->crc32=gsp_fw_crc32((const uint8_t*)blob,bytes);
-   /* The signature-section name is a fact about the payload image, which is role 0: the other four are
-    * passed a null destination, because the examiner clears its output buffer on every call and letting a
-    * signatureless bootloader overwrite the RM image's name is how the panel ended up saying "(name
-    * unreadable)" for a file that said perfectly well what it was called. */
-   gsp_fw_examine(blob,bytes,slot,role==0?gsp_fw.signature_name:0,role==0?sizeof(gsp_fw.signature_name):0);
-   bs->free_pool(blob);
+   if(!size||size>BOOT_FIRMWARE_ROLE_MAX){
+    slot->state=size>BOOT_FIRMWARE_ROLE_MAX?BOOT_FIRMWARE_STATE_TOO_BIG:BOOT_FIRMWARE_STATE_UNREADABLE;
+    continue;
+   }
+   length[role]=size;slot->bytes=(uint32_t)size;
   }
+  /* Keep the bytes.  The region is sized to what the volume actually holds - the same reasoning that made the
+   * boot arena 2 MiB instead of the 128 MiB it used to reserve - and each image starts on its own page
+   * boundary, because the boot sequence hands the FSP physical addresses, not offsets in a blob.  A role that
+   * does not fit in the region is left with offset ~0u and said so: on a 128 MiB machine the resource-manager
+   * image is larger than the memory the OS can spare for it, and "we kept what fit" is a truer report than an
+   * out-of-memory boot. */
+  uint32_t want=0;
   for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
-   const struct boot_firmware_role *e=&gsp_fw.role[role];
-   if(e->state==BOOT_FIRMWARE_STATE_ABSENT)continue;
-   gsp_fw.staged++;gsp_fw.total_bytes+=e->bytes;gsp_fw.flags|=e->flags;
+   struct boot_firmware_role *e=&gsp_fw.role[role];
+   e->offset=~0u;
+   if(!length[role])continue;
+   e->offset=want;                                       /* tentative, revised below if the region is smaller */
+   want+=(uint32_t)((length[role]+4095u)&~4095ull);
   }
-  /* Keep the bytes.  The region is sized to what the volume actually holds - the same reasoning that made
-   * the boot arena 2 MiB instead of the 128 MiB it used to reserve - and each image is placed on its own
-   * page boundary, because the boot sequence hands the FSP physical addresses, not offsets in a blob.  The
-   * files are read a second time rather than held in pools between the two allocations: on a small machine
-   * the peak would otherwise be the sum of the files plus the copy of them, which is how a firmware
-   * *report* ends up costing memory nobody can spare. */
-  {
-   uint32_t want=0;
-   for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
-    struct boot_firmware_role *e=&gsp_fw.role[role];
-    e->offset=~0u;
-    if(e->state!=BOOT_FIRMWARE_STATE_STAGED||!e->bytes)continue;
-    e->offset=want;                       /* tentative; revised down below if the region ends up smaller */
-    want+=(e->bytes+4095u)&~4095u;
-   }
-   if(want>BOOT_FIRMWARE_RESIDENT_MAX)want=BOOT_FIRMWARE_RESIDENT_MAX;
-   if(want){
-    uint64_t base=0xffffffff;size_t pages=want/4096;
-    if(!FAILED(bs->allocate_pages(1,2,pages,&base))&&base&&base+want<=0xffffffffull){
-     memset((void*)(uintptr_t)base,0,want);
-     gsp_fw.address=base;gsp_fw.resident_bytes=want;
-     unsigned kept=0;
-     for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
-      struct boot_firmware_role *e=&gsp_fw.role[role];
-      if(e->state!=BOOT_FIRMWARE_STATE_STAGED||!e->bytes){e->offset=~0u;continue;}
-      if(e->offset+((e->bytes+4095u)&~4095u)>want){e->offset=~0u;continue;}   /* no room left: kept=n */
-      void *blob=0;size_t bytes=0;
-      char16 path[24];unsigned i=0;const char16 *prefix=u"\\SCOS\\";
-      while(*prefix)path[i++]=*prefix++;
-      const char *file=gsp_fw_role_file(role);
-      while(i<22&&*file)path[i++]=(char16)*file++;
-      path[i]=0;
-      if(FAILED(read_file(root,path,&blob,&bytes))||!blob||bytes!=e->bytes){
-       if(blob)bs->free_pool(blob);
-       e->offset=~0u;
-       continue;
-      }
-      memcpy((void*)(uintptr_t)(base+e->offset),blob,bytes);
-      bs->free_pool(blob);
-      /* Re-check the copy against the checksum taken off the disk: a page that came back wrong is a fault
-       * in the copy or the allocation, and it is cheaper to know that now than to read a tampered image
-       * into the card's boot sequence later. */
-      if(crc32((const uint8_t*)(uintptr_t)(base+e->offset),bytes)!=e->crc32){e->offset=~0u;continue;}
-      kept++;
+  if(want>BOOT_FIRMWARE_RESIDENT_MAX)want=BOOT_FIRMWARE_RESIDENT_MAX;
+  gsp_fw.total_bytes=0;gsp_fw.staged=0;
+  for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
+   struct boot_firmware_role *e=&gsp_fw.role[role];
+   if(!length[role])continue;
+   gsp_fw.staged++;gsp_fw.total_bytes+=length[role];
+   if(e->offset+((length[role]+4095u)&~4095ull)>want){e->offset=~0u;continue;}
+   e->state=BOOT_FIRMWARE_STATE_STAGED;
+  }
+  if(want){
+   uint64_t base=0xffffffff;size_t pages=want/4096;
+   if(!FAILED(bs->allocate_pages(1,2,pages,&base))&&base&&base+want<=0xffffffffull){
+    memset((void*)(uintptr_t)base,0,want);
+    gsp_fw.address=base;gsp_fw.resident_bytes=want;
+    unsigned kept=0;
+    for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
+     struct boot_firmware_role *e=&gsp_fw.role[role];
+     if(e->offset==~0u||!length[role])continue;
+     uint8_t *where=(uint8_t*)(uintptr_t)(base+e->offset);
+     char16 path[24];firmware_path(role,path,sizeof path);
+     /* The image is read into the region the kernel will be pointed at, and examined there: one pass, and the
+      * bytes the examiner judged are the bytes the card is handed. */
+     if(FAILED(read_into(root,path,where,(size_t)length[role]))){
+      e->state=BOOT_FIRMWARE_STATE_UNREADABLE;e->offset=~0u;gsp_fw.staged--;continue;
      }
-     log(kept?"GSP firmware kept in memory for the kernel\r\n":"GSP firmware read; no room to keep it\r\n");
-    }else log("GSP firmware read and checked; no memory to keep it\r\n");
-   }
+     e->crc32=gsp_fw_crc32(where,(size_t)length[role]);
+     /* The signature-section name is a fact about the payload image, which is role 0: the other four are passed
+      * a null destination, because letting a signatureless bootloader write over the RM image's name is how
+      * the panel ended up saying "(name unreadable)" for a file that said perfectly well what it was. */
+     gsp_fw_examine(where,(size_t)length[role],e,role==0?gsp_fw.signature_name:0,role==0?sizeof gsp_fw.signature_name:0);
+     gsp_fw.flags|=e->flags;
+     kept++;
+    }
+    if(kept!=gsp_fw.staged)log("GSP firmware staged where it fits; a role the region cannot hold is not kept\r\n");
+    else log(kept?"GSP firmware kept in memory for the kernel\r\n":"GSP firmware read; no room to keep it\r\n");
+   }else log("GSP firmware sized; no memory to keep it in\r\n");
   }
   /* "Complete" is the whole five-file set with the first file carrying both sections the boot sequence
    * reads out of it.  Anything less is a disk that cannot be booted from, and says so role by role. */

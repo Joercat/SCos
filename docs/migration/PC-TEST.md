@@ -315,23 +315,46 @@ the real thing it said this, which is the first measurement of its kind in this 
     image       287304 B  crc32 0x3bbbe37c  UCODE_IMAGE
     publickey       97 B  crc32 0x8fb251b4  UCODE_PKEY
     signature       96 B  crc32 0x71cc5283  UCODE_SIG
-    container   287869 B  crc32 0xaeaa97e7 -> build/gsp/fmc-615.71.10.bin
+    container   287869 B  crc32 0x36a06238 -> build/gsp/fmc-615.71.10.bin
     the hash section is sha384 of the image section, byte for byte
 
 Those four sizes are the driver's own confirmation of what the handover is built to - 48, 97 and 96 for
 architectures 0x1a and 0x1b, 48, 384 and 384 for Hopper - so they are no longer a reading of a reference
 driver's source but the width of NVIDIA's signed image.  The last line is the one that says the extraction was
-faithful: a single wrong byte would stop the digest matching.  `make dist` would then pack the file as `GSPFMC.BIN` and the panel would say `fw 1/5` - and this build does
-not do that yet, because putting a valid FMC image on the disk costs the desktop.  Measured here on QEMU with a
-Cirrus display and no NVIDIA device of any kind: with the file in the image, `test_compositor` fails its 1.2 s
-expectation of the window manager; with the same image minus that one file, the same suite passes, and with 8 s
-of patience the desktop comes up normally on both.  So a staged image is not inert: something past the point
-where a valid container is accepted waits for a coprocessor that is not there, and the fix is to gate that path
-on the device being present rather than on the file being good.  Until it is fixed, `make gsp-firmware` leaves
-the result in `build/gsp/` for the checker and for your own experiment, and `make dist` ships without it -
-which is also how you can try it on the real card: `python3 tools/gspcheck.py build/gsp --install
-/mnt/esp/SCOS` puts the same genuine bytes on the stick, and if the boot then takes several seconds longer,
-you will know why and can say so.  `python3 tools/gsp-firmware.py --notice` prints the provenance
+faithful: a single wrong byte would stop the digest matching.  `make dist` would then pack the file as `GSPFMC.BIN` and the panel would say `fw 1/5`.  This build does not do
+that yet, and the reason moved during this change, so here are both measurements and what each one rules out.
+
+Putting a valid FMC image on the disk costs the desktop: with the file in the QEMU image `test_compositor` fails
+its 1.2 s expectation of the window manager (the window is still `none`), and the same image minus that one file
+passes.  What that cost actually was is now known to be two different things.  The boot stub's own share of it is
+gone: the stub used to read every firmware file twice - once into a pool to size, examine and checksum it, then
+again into the resident region to verify the copy - and reading a 287 kB image twice through the pre-boot file
+reader is what the earlier note blamed.  The intake now reads each file once, straight into the region, and the
+wall-clock boot to `wm: entering main loop` measures 5.23 s with no firmware on the disk against 5.26 s with the
+FMC image on it: 0.03 s, which is not a stall, and the copy the second pass used to verify no longer exists, so
+nothing was given up to get that.  The compositor's failure did not move with it, so what remains is past the
+main loop, in the kernel's own firmware path, on a machine with a Cirrus display and no NVIDIA device - the
+prime suspect is the FSP's boot and reply waits (1500 ms and 4000 ms budgets, taken from the reference driver)
+being entered because a staged file says the path is worth trying, which is a gate to put on the *device* rather
+than on the file.  That is the open defect, and `make dist` ships without staged firmware until it is closed.
+
+The size of a real resource-manager image was also measured, because it decides whether the file can be on the
+stick at all: adding a 12582912-byte file to the same image took the boot from 5.26 s to 5.91 s, so one pass of
+pre-boot reading runs at roughly 20 MB/s, and the 63571696-byte `gsp-570.144.bin` their install carries costs
+about three seconds of boot time, once.  That is affordable; what is not affordable is the limit beside it - the
+stub capped one file at 16 MiB and the region at 32 MiB, so their genuine image could not be read or kept at any
+price.  The cap is `BOOT_FIRMWARE_ROLE_MAX` (72 MiB per file) and `BOOT_FIRMWARE_RESIDENT_MAX` (96 MiB total)
+now, a file larger than that is reported as `too big` rather than as an I/O failure, and a role the region cannot
+hold is named role by role instead of being read and then dropped.  The disk image itself is still 64 MiB, which
+cannot contain a 60 MB file: growing it is the next change and it moves a size that about ten suites pin, so it
+is done deliberately rather than as a side effect.
+
+`python3 tools/gspcheck.py build/gsp --install /mnt/esp/SCOS` puts genuine bytes on the stick, and
+`python3 tools/gsp-firmware.py --fetch 615.71.10 --chip GB202 --version 615.71.10 --out build/gsp` now does the
+whole extraction from the driver tag with nothing installed: its fetch path handed a str to `base64 -d` and read
+the contents API, which answers a 4 MB file with empty content and exit status 0, so both are replaced by the
+blob API and bytes.  `python3 tools/gsp-firmware.py --notice` prints the provenance sentence, and the image bytes
+are the vendor's, unmodified, with only the container around them built here.  `python3 tools/gsp-firmware.py --notice` prints the provenance
 sentence, and the image bytes are the vendor's, unmodified, with only the container around them built here.
 
 What this does not do is worth stating before a flash: a genuine FMC image makes the handover real, and it does

@@ -157,15 +157,27 @@ def fetch(ref, chip, into):
         if os.path.exists(dest) and os.path.getsize(dest):
             written.append(dest)
             continue
+        # The blob API, always, and never the contents API's inline base64: the contents endpoint answers a
+        # request for a file above about a megabyte with a `.content' that is empty or cut short, and it does so
+        # with exit status 0, which is how a 4 MB array became a "not the generated file" complaint here once
+        # already.  Asking for the object id and then the object is one call slower and cannot trunc
+        # an answer, and these files are 1 to 4 MB each.
         api = 'repos/NVIDIA/open-gpu-kernel-modules/contents/src/nvidia/generated/%s?ref=%s' % (path, ref)
         try:
-            out = subprocess.run(['gh', 'api', api, '--jq', '.content'], capture_output=True, text=True)
-            blob = subprocess.run(['base64', '-d'], input=out.stdout, capture_output=True)
-            if not blob.stdout.strip():
-                raise Refused('%s: gh api returned nothing (%s)' % (path, (out.stderr or '').strip()[:200]))
-            data = blob.stdout
-            if 'g_bindata_' not in data.decode('latin1')[:2000]:
-                raise Refused('%s: the response is not the generated file' % path)
+            sha = subprocess.run(['gh', 'api', api, '--jq', '.sha'], capture_output=True, text=True)
+            sha = sha.stdout.strip()
+            if not re.fullmatch(r'[0-9a-f]{40}', sha):
+                raise Refused('%s: gh api gave no object id (%s)' % (path, sha[:120]))
+            blob = subprocess.run(['gh', 'api', 'repos/NVIDIA/open-gpu-kernel-modules/git/blobs/' + sha,
+                                   '--jq', '.content'], capture_output=True, text=True)
+            # base64 -d takes bytes, and gh hands back text: passing a str through was a TypeError that only this
+            # --fetch path could reach, which is how it survived a suite that reads --dir.
+            data = subprocess.run(['base64', '-d'], input=blob.stdout.encode(), capture_output=True).stdout
+            if not data.strip():
+                raise Refused('%s: the blob came back empty' % path)
+            if b'BINDATA_CONST' not in data and b'g_bindata_' not in data:
+                raise Refused('%s: %d bytes came back and none of them look like a generated bindata array'
+                              % (path, len(data)))
         except FileNotFoundError:
             # No gh: the public raw URL works anywhere with network.
             url = ('https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/%s/src/nvidia/generated/%s'
