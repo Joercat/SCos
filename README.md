@@ -31,10 +31,10 @@ For the first physical boot, use the [PC test guide and final USB-boot checks](d
 **The owner is in control.** Every security restriction that could get in the
 way is a user choice — on by default where it has a clear benefit, off the
 moment you turn it off. **No Secure Boot and no signed boot**: the boot-signing
-stack was removed at the owner's request as unnecessary friction. Boot integrity
-is the plain `KERNEL.CRC` accidental-corruption check only; there is no
-cryptographic verification of the boot files. Do not describe this image as
-"secure boot".
+stack was removed at the owner's request as unnecessary friction. Boot
+verification is **the same as a stock Linux PC without Secure Boot**: the plain
+`KERNEL.CRC` CRC32 catches a damaged kernel file, but nothing authenticates the
+loader, kernel or modules. Do not describe this image as "secure boot".
 
 **Login and lock are a plain TTY console**, not a graphical screen. Before
 authentication the framebuffer is a black monospace text console, like a Linux
@@ -43,18 +43,25 @@ sign-in, screen lock, password changes, re-authentication and recovery. No
 lock-screen app is shipped; `security_set_lock_screen()` is a documented API so
 you can write one. See [the security design](docs/migration/SECURITY.md).
 
+**Default account:** a fresh machine signs in with `root` / `scos` (shown on the
+console until you change it). This is a **normal account, not a privileged root
+account**: all accounts have the same permissions until the owner turns
+`roles.enabled` on. Run `passwd` to replace the weak default password.
+
 Accounts store only random 128-bit salts and PBKDF2-HMAC-SHA256 verifiers in
 `system/security/users.db`, with a SHA-256 checksum, a last-known-good backup
-and a bounded audit ring. Roles are administrator, standard user and read-only
-guest (an explicit command allow-list). Passwords never appear in command
-arguments, history, scrollback or logs.
+and a bounded audit ring. Roles (administrator, standard user, read-only guest)
+are only enforced if `roles.enabled` is on; by default permission checks are
+neutralized and everyone is equal. Passwords never appear in command arguments,
+history, scrollback or logs.
 
-**User choices:** `choices` in Terminal or TTY lists 14 switches; `choices set
-<key> on|off` changes one (admin); `choices default` restores defaults. They
+**User choices:** `choices` in Terminal or TTY lists 16 switches; `choices set
+<key> on|off` changes one; `choices default` restores defaults. They
 control `login.required`, `lock.enabled`, `lock.idle`, `password.policy`,
 `password.history`, `password.age`, `lockout`, `guest.restrict`, `audit.enabled`,
 `vault.encryption`, `recovery.enabled`, `isolation.prompt`, `isolation.default`
-and `confirm.destructive`. Choices are persisted in the AEAD-authenticated
+and `confirm.destructive`, plus `roles.enabled` (off = equal permissions) and
+`login.hint` (the default-credential hint). Choices are persisted in the AEAD-authenticated
 vault header, so they survive reboot and an offline edit is detected. A
 Settings app can be built on `security_choice*()` in `security.h` — no app is
 shipped, by design.
@@ -77,7 +84,8 @@ the disk; signing out burns the key and `save` fails closed. With
 `vault.encryption` off, saves are plain `SCOSFS2` — the owner's choice.
 
 On a machine without the unique verified ATA SCos-data partition, accounts and
-choices are **session-only** and first-run setup repeats at each boot. See
+choices are **session-only** and the default `root`/`scos` account is recreated
+at each boot. See
 [the full security design](docs/migration/SECURITY.md) for formats, commands,
 the lock-screen app contract, verification and the honest limitations: SCos is
 still a cooperative single-address-space kernel with no ring-3 isolation, no

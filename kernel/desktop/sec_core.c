@@ -570,8 +570,10 @@ void sc_username_normal(const char *in, char out[SC_NAME_MAX])
 
 int sc_username_valid(const char *name)
 {
+    /* "root" is deliberately NOT reserved: the owner asked for a default
+     * account named root with no special privileges.  It is just a username. */
     static const char *reserved[] = {
-        "root", "nobody", "system", "security", "kernel", "daemon", "guest",
+        "nobody", "system", "security", "kernel", "daemon", "guest",
         "default", "scos", "operator", "superuser", "sys", "bin", 0
     };
     char norm[SC_NAME_MAX];
@@ -675,7 +677,7 @@ void sc_policy_hint(const struct sc_policy *p, char *out, size_t cap)
     sc_fmt(n1, sizeof(n1), p->min_len);
     sc_fmt(n2, sizeof(n2), p->min_classes);
     sc_fmt(n3, sizeof(n3), p->min_bits);
-    sc_copy(out, cap, "Password: at least ");
+    sc_copy(out, cap, "New passwords: at least ");
     sc_cat(out, cap, n1); sc_cat(out, cap, " characters, ");
     sc_cat(out, cap, n2); sc_cat(out, cap, " of 4 character classes, ~");
     sc_cat(out, cap, n3); sc_cat(out, cap, " bits minimum.");

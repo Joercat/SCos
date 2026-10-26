@@ -266,8 +266,10 @@ Temporary harnesses, mutated images and screenshots are retired after recording
 results. Legitimate build/packaging/QEMU tools remain. No physical i5-11400,
 motherboard, USB controller or dedicated-GPU boot has been verified. Boot
 verification (signed manifests, firmware Secure Boot enrolment) is deliberately
-out of scope at the owner's request: `KERNEL.CRC` is an accidental-corruption
-check, not authentication, and the image is unsigned. Firmware/GOP requirements,
+out of scope at the owner's request - the same as Linux booted without Secure
+Boot. `KERNEL.CRC` is a CRC32 accidental-corruption check, not authentication,
+and the image is unsigned. The loader logs `Kernel image integrity: CRC32 OK`
+after the check; that line means the file is intact, not trusted. Firmware/GOP requirements,
 bounded resources and platform IRQ requirements are real limitations, not hidden
 behind “fully working OS” language.
 

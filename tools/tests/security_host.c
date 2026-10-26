@@ -141,7 +141,7 @@ static void test_usernames(void)
     check(!sc_username_valid("ab"), "two-character username rejected");
     check(!sc_username_valid("has space"), "whitespace rejected");
     check(!sc_username_valid("../etc"), "path traversal rejected");
-    check(!sc_username_valid("root"), "reserved name 'root' rejected");
+    check(sc_username_valid("root"), "'root' is a normal username, not reserved");
     check(!sc_username_valid("System"), "reserved name is case-insensitive");
     check(!sc_username_valid("123"), "purely numeric name rejected");
     check(!sc_username_valid("bad..name"), "double dot rejected");

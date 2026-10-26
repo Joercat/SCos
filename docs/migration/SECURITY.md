@@ -8,8 +8,21 @@ here is a Linux port, and the frozen 32-bit milestone image is untouched.
 owner, it does not protect the machine *from* the owner. Every protection that
 could get in the way is a user choice, on by default where it has a clear
 benefit, and off the moment you turn it off. No app is forced into isolation.
-No Secure Boot, no signed boot, no firmware enrolment: the boot chain check was
-removed as unnecessary friction for a machine whose owner controls the medium.
+No Secure Boot, no signed boot, no firmware enrolment: boot verification is the
+same as a stock Linux PC without Secure Boot - none cryptographically, just a
+CRC32 that catches a damaged kernel file.
+
+A fresh machine signs in like Linux does, with one **normal** account:
+
+```
+login: root
+Password: scos
+```
+
+`root` is only a username here. There is **no special root account** and no
+privileged superuser: all accounts have identical permissions until the owner
+turns `roles.enabled` on. Change the default password with `passwd` as soon as
+you can (see §6).
 
 Read §2 before treating any of this as a boundary against a determined attacker.
 
@@ -66,8 +79,10 @@ check only. **Nothing verifies the boot files cryptographically, by design.**
 
 **It does NOT defend:**
 
-* **No boot verification of any kind.** There is no Secure Boot, no signed
-  manifest, no measured boot. Anyone who can write the ESP can replace
+* **No cryptographic boot verification, exactly like Linux without Secure
+  Boot.** The loader checks `KERNEL.CRC` with CRC32, which detects a truncated
+  or corrupted kernel file, not a malicious one. There is no signed manifest,
+  no measured boot, no keys. Anyone who can write the ESP can replace
   `BOOTX64.EFI`, `KERNEL.ELF` or any `.MOD`. The owner asked for this; do not
   describe the image as "secure boot" or "verified boot".
 * **No process isolation engine.** SCos is a cooperative, single-address-space,
@@ -78,12 +93,21 @@ check only. **Nothing verifies the boot files cryptographically, by design.**
 * **No per-user file isolation inside the vault.** One volume key encrypts the
   whole tree; every account that can unwrap it can read all saved files.
 * **No TPM / rollback protection.** An older valid vault can be restored.
+* **The shipped default password.** `root` / `scos` is deliberately weak and is
+  shown on the login console while it is active. It is a convenience for a
+  first boot, not a secret; `passwd` clears the hint and re-wraps the vault
+  key. `login.hint` can hide the hint.
+* **No privileged account.** `security_is_admin()` reports everybody as an
+  administrator while `roles.enabled` is off, because permission checks are
+  neutralized - this is not a hidden superuser, there is nothing to escalate
+  to. A real attacker with local code execution already owns ring 0.
 * **Physical access wins.** A hardware debugger, JTAG/ICE, or the QEMU GDB stub
   used by tests can call any kernel function. The test harness calls the
   *production* setup/authentication entry points; there is no `#ifdef`
   backdoor.
 * **RAM-only machines.** Without a verified ATA SCos-data partition, accounts,
-  choices and files are session-only and first-run setup repeats each boot.
+  choices and files are session-only and the `root`/`scos` account is recreated
+  at each boot.
 * **Legacy plaintext images.** A `SCOSFS2` image is loaded once and re-saved
   encrypted at first sign-in (when `vault.encryption` is on). With it off,
   plaintext is written deliberately.
@@ -117,6 +141,8 @@ unlock. On RAM-only machines they are session-only, like accounts.
 | `isolation.prompt` | on | Ask how to launch an app the first time. |
 | `isolation.default` | **off** | Isolate apps by default when no per-app choice exists. Off by design: nothing is forced. |
 | `confirm.destructive` | on | Ask before destructive shell commands. |
+| `roles.enabled` | **off** | Enforce admin/user/guest privileges. Off = **all accounts have the same permissions** (`root` included). |
+| `login.hint` | on | Show the `root` / `scos` hint on the console while default credentials are active. |
 
 Shell interface (Terminal and TTY, help text updated in both):
 
@@ -127,7 +153,9 @@ choices app <id> always|never|ask   change a per-app isolation choice (admin)
 choices default               restore all defaults (admin)
 ```
 
-A guest can *read* `choices`; only an administrator can change them. Changing
+A guest can *read* `choices`; only an administrator can change them. With
+`roles.enabled` off (the default) every account can change them, because all
+accounts have equal permissions. Changing
 `vault.encryption` from off to on while no volume key is held requires signing
 out and back in (that is when the password-derived key is created); the shell
 prints that hint. Turning it off writes a plain image immediately and keeps the
@@ -172,12 +200,13 @@ starts:
 SCos x64-dev  ttyS0  2026-10-26 18:58  RAM-only accounts
 SCos unnumbered development (native x64 UEFI)
 
-SCos sign-in
-Authenticate to start the desktop
+SCos tty1
+SCos 1.0  x86_64 UEFI
 
-login: _
-Password:
-...
+scos login: root
+Password: ****
+Default login: root   Password: scos   (weak default - change with passwd)
+New passwords: at least 12 characters, 3 of 4 character classes, ~50 bits minimum.
 [Tab] next field   [Enter] sign in   [F1] policy
 ```
 
@@ -249,6 +278,31 @@ Related APIs: `security_app_isolation()`, `security_app_isolation_set()`,
 ---
 
 ## 6. Accounts, database and encrypted vault
+
+### Default account and equal permissions
+
+On a machine with no account database, `security_init()` creates exactly one
+account: name `root`, password `scos`, role recorded as a plain user, uid 1000,
+no `SC_FLAG_MUSTCHANGE`. It is written through the normal checksummed database
+path and the vault volume key is wrapped to that password, so the encrypted
+filesystem works from the first sign-in. No recovery code is generated (there
+is no setup screen to display it); `security recovery` in the shell creates one
+later. The first-run setup console is still present as a fallback if the
+database is rejected, but a fresh boot no longer stops to ask you to invent a
+password.
+
+`root` is **not** a superuser. `security_is_admin()`,
+`security_command_allowed()`, `security_write_denied()` and the account-shell
+guards consult `roles.enabled`; with it off (the default) all of them grant the
+same permissions to admin, user and guest accounts. Set
+`choices set roles.enabled on` to restore the old role distinctions. The
+`security` command prints `user (all accounts equal)` in this mode.
+
+`passwd` clears `security_api_default_credentials()` (which is what removes the
+login hint), rebinds the vault key slot and adds the old password to history.
+Deleting the `root` account also clears the hint; no account is required to
+have that name. On a RAM-only machine the default account is recreated at every
+boot, just like the old first-run setup.
 
 The account database is unchanged from the first security phase: strict parsing,
 `SCos-accounts-v1` magic, `P|` policy, `R|` recovery, `U|` accounts, `C|`

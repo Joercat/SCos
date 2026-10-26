@@ -256,6 +256,9 @@ status EFIAPI efi_main(handle image,struct system_table *table){
  {status close=root->close(root);root=0;if(!FAILED(s)&&FAILED(close)){phase="close boot volume";s=close;}}
  if(FAILED(s))goto fail;
  if(checksum_size!=4||crc32(elf,elf_size)!=*(uint32_t*)checksum){log("Kernel file CRC mismatch\r\n");s=ERROR(27);goto fail;}
+ /* Linux-style boot: a CRC detects a damaged kernel file.  Nothing here
+  * authenticates the firmware or the loader, and there are no keys. */
+ log("Kernel image integrity: CRC32 OK\r\n");
  phase="validate/load ELF";s=load_kernel(elf,elf_size,&kernel_base,&end,&entry);if(FAILED(s))goto fail;
  bs->free_pool(elf);elf=0;bs->free_pool(checksum);checksum=0;
  phase="GOP framebuffer";struct boot_framebuffer fb;s=graphics(&fb);if(FAILED(s))goto fail;

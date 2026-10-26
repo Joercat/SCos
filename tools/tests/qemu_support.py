@@ -49,8 +49,11 @@ class Guest:
     # already exist, so authenticate first and create it only on a fresh boot.
     AUTH_MARKER='security: sign-in required'
     WM_MARKER='wm: entering main loop'
-    TEST_USER=b'admin'
-    TEST_PASSWORD=b'Scos-Test-2026!x7Q'
+    # The shipped default account: a normal account named root, password scos.
+    # No test-only account needs to be created any more.
+    TEST_USER=b'root'
+    TEST_PASSWORD=b'scos'
+    provision_password=b'scos'   # updated by suites that change it before rebooting
     def _wait(self,marker,baseline=0):
         for _ in range(2400):
             if self.serial().count(marker)>baseline:return
@@ -62,10 +65,15 @@ class Guest:
         d.write(self.scratch+64,self.TEST_PASSWORD+b'\0')
         d.write(self.scratch+128,self.TEST_PASSWORD+b'\0')
         d.write(self.scratch+256,b'\0'*192)
-        if self.call('security_api_authenticate',self.scratch,self.scratch+64,self.scratch+256,192):return
+        # A fresh image always has the shipped root/scos account.  A reboot that
+        # follows a password change is handled by the test that changed it.
+        for pw in (self.TEST_PASSWORD, self.provision_password):
+            d.write(self.scratch+64,pw+b'\0')
+            d.write(self.scratch+256,b'\0'*192)
+            if self.call('security_api_authenticate',self.scratch,self.scratch+64,self.scratch+256,192):return
         reason=self.string(self.scratch+256,192) or self.string(self.call('security_api_last_error'),192)
-        assert self.call('security_create_admin',self.scratch,self.scratch+64,self.scratch+128),\
-            'the production sign-in/setup API refused the test account (%s): %s'%(reason,self.serial()[-2000:])
+        raise AssertionError('could not sign in as the default account: %s\n%s'%\
+                             (reason,self.serial()[-2000:]))
     def connect(self,wm_baseline=0):
         self._wait(self.AUTH_MARKER,getattr(self,'_auth_marker',0))
         self.base=int(re.findall(r'Kernel physical span: (0x[0-9a-f]+)',self.serial())[-1],16)

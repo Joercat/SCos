@@ -35,6 +35,8 @@ static const struct choice_def defs[] = {
     { "isolation.prompt",    1, "ask how to launch an app the first time" },
     { "isolation.default",   0, "isolate apps by default when no choice was made" },
     { "confirm.destructive", 1, "ask before destructive shell commands" },
+    { "roles.enabled",       0, "enforce admin/user/guest roles (off = all accounts equal)" },
+    { "login.hint",          1, "show the default login hint while default credentials are active" },
 };
 #define NDEFS ((int)(sizeof(defs) / sizeof(defs[0])))
 

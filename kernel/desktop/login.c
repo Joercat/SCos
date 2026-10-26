@@ -398,7 +398,7 @@ void security_ui_setup(void)
             sc_cat(text, sizeof(text), security_api_recovery_code());
             sc_cat(text, sizeof(text),
                    "\n\nFrom the sign-in screen press F8 to use it to reset the "
-                   "administrator password. It works once, is stored only as a "
+                   "account password. It works once, is stored only as a "
                    "salted hash, and cannot be shown again. Press Enter when you "
                    "have saved it.");
             security_ui_info("Save your recovery code", text);
@@ -410,12 +410,23 @@ void security_ui_setup(void)
 
 void security_ui_login(void)
 {
-    char hint[192];
+    char hint[256], policy_hint[192];
     struct ui_screen s;
     for (;;) {
-        security_api_build_hint(hint, sizeof(hint));
-        screen_init(&s, "SCos sign-in", "Authenticate to start the desktop");
-        field(&s, 0, "Username", 1, SC_NAME_MAX);
+        int default_shown = security_choice("login.hint") &&
+                            security_api_default_credentials();
+        security_api_build_hint(policy_hint, sizeof(policy_hint));
+        if (default_shown) {
+            sc_copy(hint, sizeof(hint),
+                    "Default login: root   Password: scos   (weak default - change with passwd)\n");
+            sc_cat(hint, sizeof(hint), policy_hint);
+        } else {
+            sc_copy(hint, sizeof(hint), policy_hint);
+        }
+        /* A Linux-like text console: no desktop, no wallpaper, no fancy UI. */
+        screen_init(&s, "SCos tty1", "SCos 1.0  x86_64 UEFI");
+        s.show_help = default_shown;      /* a first boot must be usable */
+        field(&s, 0, "scos login", 1, SC_NAME_MAX);
         field(&s, 1, "Password", 0, SC_PASS_MAX + 1);
         s.hint = hint;
         s.footer = security_api_recovery_active() ?

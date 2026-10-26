@@ -70,6 +70,7 @@ def test_the_gate_and_protection_are_wired():
         assert needle in header, '%s disappeared from the account API' % needle
     core = (ROOT / 'kernel/desktop/sec_core.c').read_text()
     assert 'trailing separator' in core, 'the empty-history reboot regression was removed'
+    assert '"root", "nobody"' not in core, 'the default username root is reserved again'
     account = (ROOT / 'kernel/desktop/security.c').read_text()
     assert 'vault_unlock_password' in account and 'fs_image_unlock_apply' in account, \
         'sign-in no longer unlocks the encrypted disk'
@@ -98,6 +99,16 @@ def test_the_gate_and_protection_are_wired():
         'the per-app isolation flag is not honoured anywhere'
     assert 'int  isolated;' in (ROOT / 'kernel/include/scos.h').read_text()
     assert 'confirm.destructive' in (ROOT / 'kernel/desktop/confirm.c').read_text()
+    # Default account, equal permissions and a Linux-like TTY login prompt.
+    assert 'SC_DEFAULT_USER "root"' in header and 'SC_DEFAULT_PASS "scos"' in header
+    account_src = (ROOT / 'kernel/desktop/security.c').read_text()
+    assert 'create_default_account' in account_src and 'a->role = SC_ROLE_USER' in account_src, \
+        'the default account is privileged again'
+    assert '!security_choice("roles.enabled")' in account_src, \
+        'accounts do not have equal permissions by default'
+    assert 'scos login' in loginui and 'SCos tty1' in loginui, \
+        'the login prompt is not a plain Linux-style tty'
+    assert 'roles.enabled' in choices and 'login.hint' in choices
     # No Secure Boot / signed boot anywhere in the tree.
     for path in ('boot/uefi/main.c', 'tools/makedisk.py', 'Makefile',
                  'kernel/include/security.h', 'kernel/desktop/security.c'):
@@ -111,7 +122,7 @@ def test_the_gate_and_protection_are_wired():
 def test_a_booted_guest_enforces_accounts():
     from qemu_support import Guest  # noqa: E402
 
-    pw = b'Scos-Test-2026!x7Q'
+    pw = b'scos'
     with Guest('security') as g:
         d, s = g.debug, g.scratch
 
@@ -138,13 +149,18 @@ def test_a_booted_guest_enforces_accounts():
         assert 'wm: entering main loop' in serial, serial[-2000:]
         assert g.call('security_api_gate_satisfied') == 1
         assert g.call('security_api_user_count') == 1
-        assert g.string(g.call('security_current_user'), 64) == 'admin'
-        assert g.call('security_is_admin') == 1
+        assert g.string(g.call('security_current_user'), 64) == 'root'
+        assert g.call('security_api_default_credentials') == 1, \
+            'the shipped root/scos default credentials were not provisioned'
+        assert g.call('security_is_admin') == 1       # equal permissions, not a superuser
+        d.write(s, b'roles.enabled\0')
+        assert g.call('security_choice', s) == 0, 'role privileges are forced on by default'
+        assert 'all accounts equal' in shell('security')[1]
 
         # A wrong password and an unknown user both fail with the same message.
-        assert auth('admin', b'wrong') == 0
+        assert auth('root', b'wrong') == 0
         assert auth('ghost', b'wrong') == 0
-        assert auth('admin', pw) == 1
+        assert auth('root', pw) == 1
         assert b'PBKDF2-HMAC-SHA256' in shell('security')[1].encode()
 
         # Credentials and audit data are not readable, writable or removable.
@@ -161,14 +177,19 @@ def test_a_booted_guest_enforces_accounts():
         d.write(s + 8192, p1 + b'\0')
         d.write(s + 16384, b'\0' * 192)
         assert g.call('security_api_change_password', 0, 0, s + 8192, 0, s + 16384, 192) == 1
-        assert auth('admin', pw) == 0 and auth('admin', p1) == 1
+        assert g.call('security_api_default_credentials') == 0, \
+            'the default-credential hint is still active after passwd'
+        assert auth('root', pw) == 0 and auth('root', p1) == 1
         d.write(s + 8192, weak + b'\0')
         assert g.call('security_api_change_password', 0, 0, s + 8192, 0, s + 16384, 192) == 0
 
-        # Guest accounts are read-only in the shell and at the VFS boundary.
+        # Guest accounts are read-only in the shell and at the VFS boundary
+        # when (and only when) the owner opts into role differences.
         d.write(s + 8192, b'viewer\0')
         d.write(s + 16384, b'Km4!dV9#pLq2Xz7%' + b'\0')
         assert g.call('security_api_create_user', s + 8192, 2, s + 16384) == 1
+        d.write(s, b'roles.enabled\0')
+        assert g.call('security_choice_set', s, 1) == 1
         assert auth('viewer', b'Km4!dV9#pLq2Xz7%') == 1
         assert g.call('security_api_force_change') == 1          # admin-created accounts must change
         assert allowed('ls')[0] == 1
@@ -176,7 +197,10 @@ def test_a_booted_guest_enforces_accounts():
         d.write(s + 8192, b'guest.txt\0')
         d.write(s + 16384, b'data\0')
         assert g.call('vfs_write', s + 8192, s + 16384, 4) == 0
-        assert auth('admin', p1) == 1
+        assert auth('root', p1) == 1
+        d.write(s, b'roles.enabled\0')
+        assert g.call('security_choice_set', s, 0) == 1
+        assert allowed('save')[0] == 1, 'equal permissions do not apply to all commands'
 
         assert 'panic' not in g.serial().lower(), g.serial()[-2000:]
     print('PASS: booted guest authenticates, protects its database, changes passwords, '
@@ -186,14 +210,14 @@ def test_a_booted_guest_enforces_accounts():
 def test_a_persistent_account_survives_a_reboot():
     from qemu_support import Guest  # noqa: E402
 
-    pw = b'Scos-Test-2026!x7Q'
+    pw = b'scos'
     with Guest('security-ata', ide=True) as g:
         assert g.call('security_api_persistent') == 1
         assert g.call('fs_image_save') == 1
         g.run(0.8)
         g.reboot()
         assert g.call('security_api_user_count') == 1
-        g.debug.write(g.scratch, b'admin\0')
+        g.debug.write(g.scratch, b'root\0')
         g.debug.write(g.scratch + 64, pw + b'\0')
         g.debug.write(g.scratch + 128, b'\0' * 192)
         assert g.call('security_api_authenticate', g.scratch, g.scratch + 64,
@@ -239,8 +263,8 @@ def test_a_booted_vault_is_encrypted_and_tamper_evident():
 
         g.call('vault_lock')
         assert g.call('fs_image_save') == 0, 'a locked vault still wrote an image'
-        d.write(s, b'admin\0')
-        d.write(s + 64, b'Scos-Test-2026!x7Q\0')
+        d.write(s, b'root\0')
+        d.write(s + 64, b'scos\0')
         d.write(s + 128, b'\0' * 192)
         assert g.call('security_api_authenticate', s, s + 64, s + 128, 192) == 1
         assert g.call('vault_unlocked') == 1, 're-authentication did not re-wrap the volume key'
@@ -280,6 +304,8 @@ def test_security_are_user_choices_and_isolation_is_per_app():
                     'vault.encryption', 'isolation.prompt', 'confirm.destructive'):
             assert choice(key) == 1, '%s is not enabled by default' % key
         assert choice('isolation.default') == 0, 'isolation is forced by default'
+        assert choice('roles.enabled') == 0, 'all accounts are not equal by default'
+        assert choice('login.hint') == 1
         assert 'ALL are the owner' in shell('choices'), 'choices command does not list switches'
 
         # Turning a protection off really changes behaviour (not just a flag).

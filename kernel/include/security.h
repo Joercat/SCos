@@ -311,6 +311,11 @@ int  security_api_session(void);
 const char *security_api_session_name(void);
 int  security_api_user_count(void);
 int  security_api_persistent(void);
+/* True while the shipped default account still uses its initial password.
+ * The console may show a hint; `passwd` clears it. */
+int  security_api_default_credentials(void);
+#define SC_DEFAULT_USER "root"
+#define SC_DEFAULT_PASS "scos"
 int  security_api_denied(void);
 uint32_t security_api_deny_remaining(void);
 int  security_api_verify(int idx, const char *pw, char *msg, size_t cap);

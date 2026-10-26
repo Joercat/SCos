@@ -21,7 +21,10 @@ AES-256 encrypted filesystem vault — is documented in
 [SECURITY.md](SECURITY.md). It is authentication, access control and encryption
 at rest, explicitly **not** the ring-3 isolation described as future work in the
 table below. Boot verification / Secure Boot was deliberately left out at the
-owner's request, as were a TPM and rollback protection.
+owner's request - like Linux without Secure Boot, only a CRC32 integrity check
+remains. A TPM and rollback protection are also out of scope. The shipped
+default login is the normal account `root` / `scos` with no special privileges;
+all accounts have equal permissions unless `roles.enabled` is turned on.
 
 ## Baseline and boundaries
 

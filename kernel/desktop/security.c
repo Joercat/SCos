@@ -30,6 +30,7 @@ enum {
 
 struct sec_state {
     int ready, have_disk, corrupt, db_loaded, bypass;
+    int default_pw;               /* shipped root/scos credentials still active */
     int meta_io;                  /* scoped protected-metadata I/O (choices module) */
     int disk_dirty, last_save_try;
     struct sc_policy policy;
@@ -286,6 +287,7 @@ void security_mark_dirty(void)
 int security_write_denied(void)
 {
     if (!S.ready || S.bypass || S.meta_io) return 0;
+    if (!security_choice("roles.enabled")) return 0;
     if (S.session >= 0 && S.session < SC_USERS_MAX &&
         S.users[S.session].role == SC_ROLE_GUEST) return 1;
     return 0;
@@ -435,11 +437,15 @@ static int db_parse(const char *data, size_t len)
     }
     if (!have_magic || !have_policy || !nusers) return 0;
     {
-        int admins = 0;
+        int enabled = 0;
         for (int i = 0; i < nusers; i++)
-            if (S.scratch[i].role == SC_ROLE_ADMIN &&
-                !(S.scratch[i].flags & SC_FLAG_DISABLED)) admins++;
-        if (!admins) return 0;           /* a database that locks everyone out is rejected */
+            if (!(S.scratch[i].flags & SC_FLAG_DISABLED)) enabled++;
+        if (!enabled) return 0;         /* a database with nobody able to sign in */
+        /* With equal permissions there is no such thing as a required admin:
+         * the shipped root/scos account is a plain SC_ROLE_USER.  Roles can be
+         * turned on later; security_is_admin() then falls back to equal rights
+         * if no administrator exists, instead of rejecting this database and
+         * resetting the vault (which would lose the owner's files). */
     }
     S.policy = pol;
     memcpy(S.users, S.scratch, sizeof(S.users));
@@ -488,15 +494,21 @@ static void db_serialize(void)
         if (n <= 0) return;
         add(db_buf, sizeof(db_buf), &at, line_buf);
     }
-    sc_hex(hex_salt, sizeof(hex_salt), S.rec_salt, SC_SALT_BYTES);
-    sc_hex(hex_hash, sizeof(hex_hash), S.rec_hash, SC_HASH_BYTES);
-    sc_fmt(num, sizeof(num), S.rec_iters);
-    sc_fmt(valid, sizeof(valid), S.rec_valid ? 1 : 0);
-    add(db_buf, sizeof(db_buf), &at, "R|");
-    add(db_buf, sizeof(db_buf), &at, num);   add(db_buf, sizeof(db_buf), &at, "|");
-    add(db_buf, sizeof(db_buf), &at, hex_salt); add(db_buf, sizeof(db_buf), &at, "|");
-    add(db_buf, sizeof(db_buf), &at, hex_hash); add(db_buf, sizeof(db_buf), &at, "|");
-    add(db_buf, sizeof(db_buf), &at, valid); add(db_buf, sizeof(db_buf), &at, "\n");
+    /* No recovery code is generated for the shipped default account (there is
+     * no setup screen to show it on), so do not emit an R| line with zero
+     * iterations - db_parse correctly rejects that.  `security recovery`
+     * generates one later. */
+    if (S.rec_iters) {
+        sc_hex(hex_salt, sizeof(hex_salt), S.rec_salt, SC_SALT_BYTES);
+        sc_hex(hex_hash, sizeof(hex_hash), S.rec_hash, SC_HASH_BYTES);
+        sc_fmt(num, sizeof(num), S.rec_iters);
+        sc_fmt(valid, sizeof(valid), S.rec_valid ? 1 : 0);
+        add(db_buf, sizeof(db_buf), &at, "R|");
+        add(db_buf, sizeof(db_buf), &at, num);   add(db_buf, sizeof(db_buf), &at, "|");
+        add(db_buf, sizeof(db_buf), &at, hex_salt); add(db_buf, sizeof(db_buf), &at, "|");
+        add(db_buf, sizeof(db_buf), &at, hex_hash); add(db_buf, sizeof(db_buf), &at, "|");
+        add(db_buf, sizeof(db_buf), &at, valid); add(db_buf, sizeof(db_buf), &at, "\n");
+    }
     for (int i = 0; i < S.count; i++) {
         int n = sc_account_encode(&S.users[i], line_buf, sizeof(line_buf));
         if (n <= 0) break;
@@ -794,6 +806,7 @@ int security_api_change_password(int idx, const char *oldpw, const char *newpw,
     rng_bytes(a->salt, sizeof(a->salt));
     derive(newpw, a->salt, a->iters, a->hash);
     a->pw_changed = now_epoch();
+    if (sc_eq(a->name, SC_DEFAULT_USER)) S.default_pw = 0;
     a->flags &= ~SC_FLAG_MUSTCHANGE;
     a->fails = 0; a->lock_until = 0;
     S.force_change = 0;
@@ -897,6 +910,7 @@ int security_api_delete_user(const char *name)
             !(S.users[i].flags & SC_FLAG_DISABLED)) admins++;
     if (!admins) { set_error("Cannot delete the last administrator."); return 0; }
     audit("user-deleted", S.users[idx].name);
+    if (sc_eq(S.users[idx].name, SC_DEFAULT_USER)) S.default_pw = 0;
     vault_unbind(S.users[idx].name);
     for (int i = idx; i < S.count - 1; i++) S.users[i] = S.users[i+1];
     S.count--;
@@ -987,9 +1001,11 @@ int security_api_redeem_recovery(const char *code, const char *newpw, char *msg,
     }
     sc_burn(got, sizeof(got));
     for (int i = 0; i < S.count; i++)
-        if (S.users[i].role == SC_ROLE_ADMIN && !(S.users[i].flags & SC_FLAG_DISABLED))
+        if (!(S.users[i].flags & SC_FLAG_DISABLED) &&
+            (!security_choice("roles.enabled") ||
+             S.users[i].role == SC_ROLE_ADMIN))
             if (admin < 0 || S.users[i].uid < S.users[admin].uid) admin = i;
-    if (admin < 0) { sc_copy(msg, cap, "No enabled administrator to recover."); return 0; }
+    if (admin < 0) { sc_copy(msg, cap, "No enabled account to recover."); return 0; }
     /* The one-time code also unwraps the volume key; without this step a
      * recovery would reset the password and destroy access to saved data. */
     if (security_choice("vault.encryption") &&
@@ -1011,7 +1027,7 @@ int security_api_redeem_recovery(const char *code, const char *newpw, char *msg,
     S.force_change = 0;
     audit("recovery-used", S.users[admin].name);
     db_save();
-    sc_copy(msg, cap, "Administrator password reset. You are now signed in as ");
+    sc_copy(msg, cap, "Account password reset. You are now signed in as ");
     sc_cat(msg, cap, S.users[admin].name);
     sc_cat(msg, cap, ".");
     return 1;
@@ -1078,9 +1094,62 @@ const char *security_current_user(void) { return security_api_session_name(); }
 
 int security_is_admin(void)
 {
-    return S.session >= 0 && S.session < S.count &&
-           S.users[S.session].role == SC_ROLE_ADMIN;
+    int any_admin = 0;
+    if (S.session < 0 || S.session >= S.count) return 0;
+    /* All accounts are equal unless the owner explicitly enables roles. */
+    if (!security_choice("roles.enabled")) return 1;
+    for (int i = 0; i < S.count; i++)
+        if (!(S.users[i].flags & SC_FLAG_DISABLED) &&
+            S.users[i].role == SC_ROLE_ADMIN) { any_admin = 1; break; }
+    /* Never let a role edit lock the owner out of the choices switch. */
+    if (!any_admin) return 1;
+    return S.users[S.session].role == SC_ROLE_ADMIN;
 }
+
+/* --------------------------------------------------- default account (Linux-like) --- */
+/* At boot verification Linux asks for a login and password on a text console.
+ * SCos does the same, and ships with one normal account so a fresh machine is
+ * usable immediately: username `root`, password `scos`.  `root` is NOT a
+ * superuser here - it is just a name, and all accounts have equal permissions
+ * unless the owner turns `roles.enabled` on.  The password is deliberately a
+ * weak default; the console hints at it and `passwd` clears the hint. */
+static int default_pw_active(void)
+{
+    int idx = find_user(SC_DEFAULT_USER);
+    return idx >= 0 && verify_user(idx, SC_DEFAULT_PASS);
+}
+
+static void create_default_account(void)
+{
+    struct sc_account *a = &S.users[0];
+    S.policy.iters = calibrate_iters();
+    memset(a, 0, sizeof(*a));
+    sc_copy(a->name, sizeof(a->name), SC_DEFAULT_USER);
+    sc_copy(a->display, sizeof(a->display), SC_DEFAULT_USER);
+    a->uid = 1000;
+    a->role = SC_ROLE_USER;              /* no special account */
+    a->flags = 0;
+    a->iters = S.policy.iters;
+    a->created = a->pw_changed = a->last_login = now_epoch();
+    rng_bytes(a->salt, sizeof(a->salt));
+    derive(SC_DEFAULT_PASS, a->salt, a->iters, a->hash);
+    a->used = 1;
+    S.count = 1;
+    S.db_loaded = 1;
+    S.default_pw = 1;
+    /* Like first-run setup, an empty account database means the old volume key
+     * is gone.  Create a fresh vault and wrap its key to scos so sign-in works
+     * and the saved filesystem is not silently discarded. */
+    if (security_choice("vault.encryption")) {
+        vault_reset();
+        vault_unlock_password(SC_DEFAULT_USER, SC_DEFAULT_PASS, a->iters, 0, 0);
+    }
+    db_save();
+    audit("default-account", "root/scos created; change it with passwd");
+    klog_raw("security: default account root/scos created (normal account)");
+}
+
+int security_api_default_credentials(void) { return S.default_pw; }
 
 /* ---------------------------------------------------------- initialization --- */
 void security_init(int have_disk)
@@ -1098,6 +1167,9 @@ void security_init(int have_disk)
         S.bypass = saved;
     }
     S.ready = 1;
+    /* Load choices first: the account database parser needs to know whether
+     * role privileges are enabled before it validates the admin invariant. */
+    security_choices_load();
     if (db_load(DB_PATH)) {
         S.db_loaded = 1;
     } else if (db_load(DB_BAK)) {
@@ -1116,9 +1188,10 @@ void security_init(int have_disk)
     /* The header's audit log is AEAD-authenticated; load it before adding the
      * boot event so history survives a reboot and cannot be silently reset. */
     audit_file_load();
-    security_choices_load();
     if (!vfs_lookup(SC_CHOICES_PATH)) security_choices_save();
-    audit("boot", S.db_loaded ? "accounts loaded" : "first-run setup required");
+    if (!S.count) create_default_account();
+    else S.default_pw = default_pw_active();
+    audit("boot", S.db_loaded ? "accounts loaded" : "default account created");
     audit_file_sync();
 }
 
@@ -1128,12 +1201,14 @@ void security_login_gate(void)
     klog_raw("security: sign-in required");
     if (!S.count) security_ui_setup();
     else if (!security_choice("login.required")) {
-        /* Owner's choice: no login prompt.  Use the lowest-uid enabled admin
-         * as an implicit session.  First-run setup still happens above, since
-         * an account has to exist before one can be skipped. */
+        /* Owner's choice: no login prompt.  With equal permissions the
+         * lowest-uid enabled account is the implicit session; with roles on it
+         * has to be an administrator.  A default account always exists. */
         int best = -1;
         for (int i = 0; i < S.count; i++)
             if (!(S.users[i].flags & SC_FLAG_DISABLED) &&
+                (!security_choice("roles.enabled") ||
+                 S.users[i].role == SC_ROLE_ADMIN) &&
                 (best < 0 || S.users[i].uid < S.users[best].uid)) best = i;
         if (best >= 0) {
             begin_session(best);
@@ -1334,13 +1409,13 @@ int security_command_allowed(const char *line, char *out, size_t cap)
     role = (int)S.users[S.session].role;
     n = first_tokens(line, cmd, sizeof(cmd), arg, sizeof(arg));
     if (!n) return 1;
-    if (role == SC_ROLE_GUEST && security_choice("guest.restrict") &&
-        !in_list(cmd, guest_allow)) {
+    if (security_choice("roles.enabled") && role == SC_ROLE_GUEST &&
+        security_choice("guest.restrict") && !in_list(cmd, guest_allow)) {
         sc_copy(out, cap, "Permission denied: the guest command allow-list is read-only. "
                           "Ask an administrator for a standard account.");
         return 0;
     }
-    if (role != SC_ROLE_ADMIN) {
+    if (security_choice("roles.enabled") && role != SC_ROLE_ADMIN) {
         if (in_list(cmd, admin_cmds) ||
             (sc_eq(cmd, "kill") && sc_eq(arg, "--system")) ||
             (sc_eq(cmd, "rm") && (sc_eq(arg, "-s") || sc_eq(arg, "-f"))) ||
@@ -1380,7 +1455,9 @@ static void shell_status(struct outbuf *b)
     ob(b, "SCos security status\n");
     ob(b, "  signed in      : "); ob(b, security_api_session_name());
     ob(b, " (uid "); ob_num(b, a ? a->uid : 0); ob(b, ", ");
-    ob(b, a ? role_name(a->role) : "none"); ob(b, ")\n");
+    ob(b, security_choice("roles.enabled") ? (a ? role_name(a->role) : "none")
+                                           : "user (all accounts equal)");
+    ob(b, ")\n");
     ob(b, "  session start  : epoch "); ob_num(b, S.session_epoch); ob(b, "\n");
     ob(b, "  accounts       : "); ob_num(b, (uint64_t)S.count);
     ob(b, " in "); ob(b, S.db_loaded ? "verified database" : "first-run setup"); ob(b, "\n");
