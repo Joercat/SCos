@@ -136,6 +136,21 @@ GOT-relative references that the linker already resolved, and refuses anything i
 generated table, so `make gpu-modules` fails the build if a module claims a chip the kernel's detection
 would not name for it. `--report` prints the sizes.
 
+A packed module certifies only itself — its header checksum covers its header and its payload CRC covers its
+payload — so a module that was packed from a truncated, stale or half-written object passes every predicate
+above, loads, and does nothing. That is the one failure a boot component must not be allowed to be quiet about,
+and the objects are the only other witness to what a family's driver weighs, so `--verify` also weighs each
+`.mod` against `build/gpu/<family>.o` (the file the Makefile hands the packer), section by section: a block
+smaller than the object's `.text`/`.rodata`/`.data`/`.bss` totals, or larger than those totals plus the 16-byte
+alignment slack the packer is allowed, is a refusal that names both numbers and the `make -B` that settles it.
+`tools/tests/test_module_audit.py` builds the mismatch on purpose and demands those words.
+
+The case it was written for is real: the identification suite swaps in a throwaway Cirrus module, boots it, and
+restores the real one. When the swap-out happened and the repack died before the restore, the 600-byte stub sat
+in `build/gpu/` newer than its object, `make` found nothing to redo, and the next `make dist` would have shipped
+an image whose Cirrus driver was the throwaway. `--verify` now stops that build, and the suite keeps every step
+that can raise inside the `try` that restores, so the tree does not reach that state at all.
+
 ## 6. Verification by readback, and the aperture that is not the console
 
 `engine_self_test()` saves a small rectangle with the CPU, asks the engine to fill it, waits, reads the

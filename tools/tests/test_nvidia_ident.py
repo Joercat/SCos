@@ -204,13 +204,19 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
     real.unlink(missing_ok=True)
     run(['make', 'gpu-modules'])
     shutil.copyfile(real, backup)
-    obj = scratch / 'scratch.o'
-    run(['gcc'] + ['-Ibuild'] + MODULE_FLAGS + ['-Ikernel/include', '-c', str(source), '-o', str(obj)])
-    run(['ld', '-r', '-m', 'elf_x86_64', '-o', str(scratch / 'scratch.linked.o'), str(obj)])
-    run(['python3', 'tools/build_gpu_module.py', '--input', str(scratch / 'scratch.linked.o'),
-         '--family', 'cirrus', '--out', str(real), '--report'])
-    run(['python3', 'tools/makedisk.py', 'build'])
+    # Everything that can raise goes inside the try below, because from this line on the build tree holds a
+    # module that is not the family's driver.  When the pack and repack sat outside it, a failure there left
+    # the throwaway 600-byte module in build/gpu/ with a newer timestamp than its object, `make' found nothing
+    # to redo, and the next `make dist' shipped an image whose Cirrus driver was the stub - which its own
+    # header checksum and payload CRC certify as perfect.  `--verify' weighs each module against the objects
+    # now, and this is what keeps the tree from getting into that state in the first place.
     try:
+        obj = scratch / 'scratch.o'
+        run(['gcc'] + ['-Ibuild'] + MODULE_FLAGS + ['-Ikernel/include', '-c', str(source), '-o', str(obj)])
+        run(['ld', '-r', '-m', 'elf_x86_64', '-o', str(scratch / 'scratch.linked.o'), str(obj)])
+        run(['python3', 'tools/build_gpu_module.py', '--input', str(scratch / 'scratch.linked.o'),
+             '--family', 'cirrus', '--out', str(real), '--report'])
+        run(['python3', 'tools/makedisk.py', 'build'])
         with Guest(name='identification', vga='cirrus') as g:
             g.run(1.2)
             lines = [l for l in g.serial().splitlines() if l.startswith('gpu:')]

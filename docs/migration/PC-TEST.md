@@ -279,9 +279,26 @@ and running `python3 tools/makedisk.py build` with those files (or that whole tr
 them for you.  `GSP firmware: none of the images the open driver loads` is therefore a statement about the disk
 and not a refusal.
 
-To copy them off a machine where the open driver already works, mount the ESP and take the three the FMC
-path loads - the file names come from `NVKM_GSP_FIRMWARE_FMC(gb207, 570.144)` and `nvkm_firmware_get()` in the
-kernel's nouveau driver, which is where this OS's intake contract came from:
+The shorter route, and the one worth trying first, is the checker this repo ships.  It reads the blobs where
+the open driver left them and applies this kernel's own rules to each: the byte-exact 52-byte FMC header, the
+four sections the coprocessor asks for by name and their per-generation widths, the CRC32 each section carries
+in `sh_info`, the `.fwimage` and signature pair in the resource-manager image, and the 8 MiB the boot stub will
+copy.  With `--install` it also renames them, writes them into the directory you point at, and reads every byte
+back before it reports:
+
+    python3 tools/gspcheck.py /lib/firmware/nvidia/gb207/gsp --install /mnt/esp/SCOS
+
+A file it refuses never reaches the disk, and every refusal is a sentence about the one thing wrong with it -
+`the publickey section is 384 bytes and architecture 0x1b asks its FSP for 97`, not `invalid` - because telling
+a wrong file apart from a right file checked against the wrong generation is the difference between hunting for
+another download and passing `--arch`.  It ends by printing what the panel will then say (`fw 2/5`, and whether
+a handover can be built at all), so the paste and the check can be compared without guessing.  Its constants are
+pinned against `kernel/drivers/gpu/gpu_firmware.c`, `gpu_fsp.c` and `boot.h` by `tools/tests/test_gspcheck.py`:
+the checker refuses what the kernel would refuse, and nothing else.
+
+By hand, the same three files come off a machine where the open driver already works - the names come from
+`NVKM_GSP_FIRMWARE_FMC(gb207, 570.144)` and `nvkm_firmware_get()` in the kernel's nouveau driver, which is
+where this OS's intake contract came from:
 
     sudo mkdir -p /mnt/esp/SCOS
     sudo cp /lib/firmware/nvidia/gb207/gsp/fmc-570.144.bin        /mnt/esp/SCOS/GSPFMC.BIN
