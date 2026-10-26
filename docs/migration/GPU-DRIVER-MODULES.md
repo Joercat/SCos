@@ -821,26 +821,77 @@ to version **570.144** with signature section `.fwsignature_gb20x`.  A FAT32 ESP
 (`build/gsp/`, searched recursively, with an ambiguous or oversized set refused at image time instead of
 arriving as a mystery on a panel).
 
-What the stub does with them is a *shape* check, and the check is the loader's own: `r535_gsp.c` takes the
-payload out of the image with `r535_gsp_elf_section()`, which walks the ELF64 section table from `e_shoff` and
-resolves names through the string table at `e_shstrndx`.  `boot/uefi/gsp_fw.c` walks the same table the same
-way, with a bound on every read, and reports the section count, the `.fwimage` size, and the name the image
-gives its own signature section - so a file that is an HTML login page, a tar member, or a copy interrupted
-halfway is named as that, on the panel, before anything is asked of the card.  It is not a signature check and
-nothing claims it is: the blobs inside the signature section are verified by the hardware, which is the only
-party able to do that.  The record reaches the kernel through the boot handoff, whose ABI went to v5 by
-*appending* 200 bytes (asserted, so no field a previous kernel read at some offset moved - and the record
-lands in what used to be four bytes of tail padding, which is why the size is pinned rather than derived), and
-the kernel re-adds the stub's arithmetic before repeating it: where the two disagree the panel says so instead
-of smoothing it over.
+What the stub does with them is a *shape* check, and the check is the loader's own.  `r535_gsp.c` takes the
+payload out of the image with `r535_gsp_elf_section()`, which walks the section table from `e_shoff` and
+resolves names through the string table at `e_shstrndx`; the FMC image next to it in the same package is not
+ELF64 at all, and `nvkm/subdev/gsp/gh100.c` validates that one by `memcmp` against a published 52-byte
+ELFCLASS32 template and then by a rule per section - type `SHT_PROGBITS`, flags exactly `0xff00000a`, data
+beginning after the section-header table, and `sh_info` holding the standard CRC32 of the section's own bytes.
+`boot/uefi/gsp_fw.c` walks either class with its own field offsets, with a bound on every read, and reports the
+section count, the `.fwimage` size and the name an RM image gives its own signature section; it recognises an
+FMC image as a 32-bit container rather than as "not a container", which is what an earlier revision of this
+file asserted and what cost an afternoon of believing a report about a file nobody had misread.  So a file that
+is an HTML login page, a tar member, or a copy interrupted halfway is named as that, on the panel, before
+anything is asked of the card.  It is not a signature check and nothing claims it is: the blobs inside a
+signature section are verified by the hardware, which is the only party able to do that.
+
+The bytes are then kept.  The first version of the intake read a file, described it, and released it, on the
+reasoning that megabytes parked in memory nothing consumes are memory the kernel loses - which was true and
+was also a wall, because nothing can validate an image, hand one to a microcontroller, or prove to a person
+that the copy in RAM is still the file on the disk out of a size and a checksum.  So handoff **v6** appends a
+resident window to the record (asserted at 216 bytes, with the `struct boot_firmware` growing from 200 to 216
+because a `uint64_t` has to start on an eight-byte boundary and pulled the whole structure's alignment with
+it: 408 to 424, measured with a compiled probe rather than arithmetic, and pinned in both
+`kernel/include/boot.h` and `tools/tests/test_pci_scan.py`): the stub allocates one page-aligned region, gives
+each role a window inside it, copies the file into that window and re-checks the copy's CRC32 against the one
+the disk copy earned, and each role's record ends with the offset it was given - `~0u` meaning "read,
+described, not kept", which is what happens when the allocation is refused or the region will not hold the set.
+The cap is 32 MiB rather than the 64 MiB the five files could reach, so that a 128 MiB machine still has room
+for its own heap; a refused copy is a line on a panel, not a failed boot.  The copy happens in a second pass
+over the volume for the same reason: holding every pool and then allocating the region would ask a small VM
+for files plus a copy of them at once.
+
+`kernel/drivers/gpu/gpu_firmware.c` then reads what is there.  It maps nothing new by itself - `memory_init()`
+maps the region read-only and non-executable, refuses to let it overlap the kernel image, the boot arena or the
+framebuffer, and counts its pages as reserved so the memory report adds up - and the parser applies the
+contract above inside each role's own window, so a lying section header in one image cannot make this code read
+its neighbour's bytes and call the result a fact.  What comes out is the panel's third firmware line, verbatim
+from a booted VM whose five files are the synthetic containers `tools/tests/test_gsp_firmware.py` builds (that
+is what they are: sizes 1896 and 1128, not a 570.144 blob):
+
+    GSP firmware image: 5 of 5 held read-only at 0x061e3000 (20480 B); gsp: ELF64 1896 B, 4 sections,
+    .fwimage 1024 B at 0x00000040, .fwsignature_gb20x 512 B at 0x00000440; fmc: ELF32 1128 B, 6 sections, FMC
+    header exact, every section legal and its CRC32 verified, 0 CRC32 mismatch(es); image 512 B at 0x00000268,
+    hash 32, publickey 4, signature 256 B - the four numbers the FSP verify command is given; bootloader:
+    held, not a container either way; ...; every image the boot sequence kept was parsed. Nothing was written
+    to the card: the command that would consume these images is not implemented in this OS, so what this line
+    describes is memory SCos is holding, not a coprocessor that was told anything.
+
+Those last four numbers - hash, publickey, signature and image - are the arguments `nvkm_fsp_verify_gsp_fmc()`
+is handed, and the offsets are what its `boot_gsp_fmc()` pair then copies into the FSP's mailbox.  Having them
+in a record the kernel owns is the point: the next increment is the handover itself, ported from
+`r535_gsp.c:2235` onward and `rm/r570/`, and it cannot be written against a `kfree`'d pool.
 
 What is still not done is the whole of what stands between this and a screen the GPU paints: nothing hands the
-staged image to the coprocessor.  The boot stub reads a file, checks it and lets it go, because parking
-megabytes in the boot arena would take that memory from the kernel for an image nothing consumes yet; the
-FSP's single read-back register (`NV_PFSP_MNOC_RX_FIFO_DATA`, write-only as gb100 publishes it) and the RPC
-sequence behind it are the next increment, ported from the two published trees above.  The panel says all of
-this in its own words - `GSP firmware:` for what the disk holds, `GSP firmware intake:` for what this build
-does with it - because the panel is the only channel a machine like this has.
+staged image to the coprocessor, and no byte has been written to the card in any build of this OS.  The FSP's
+single read-back register (`NV_PFSP_MNOC_RX_FIFO_DATA`, write-only as gb100 publishes it) and the RPC sequence
+behind it are the increment after this one, ported from the two published trees named above - 20 906 lines,
+counted, which is also the honest answer to "why is this not one commit".
+
+Measured: 122 host checks of the boot stub's examiner (`tools/tests/gsp_fw_host.c`, under ASan and UBSan, five
+of them a second mode that examines the same container the python test builds, and the newest eight of them the
+32-bit class), plus 25 host checks of the kernel's own parser (`tools/tests/gsp_fw_kernel_host.c`, same
+sanitizers, driving `kernel/drivers/gpu/gpu_firmware.c` itself: a header that differs from the published
+template, a section whose CRC32 disagrees, a section reaching outside its image, a string table that is not
+one, an image shorter than a header, a role the stub could not keep, and an RM image whose `.fwimage` runs past
+the end), plus three booted machines - one with a complete staged set held and parsed, one with a text file
+where the payload image belongs, and the tests' own pair of refusal replays.  The report buffer is sized from
+those boots: 4582 bytes with everything staged and parsed against 8192 provided, the size raised this commit
+because the parse paragraph pushed the worst case to 4582 and the test requires room for the longest engine
+inventory (1152 bytes) on top of it; the cost is stack and was measured with `-fstack-usage` (13440 bytes for
+the terminal's command dispatcher, 8768 for the tty's executor, against the 64 KiB the boot stack entry gives
+them).  Before this commit: 114 host checks, the report at 3719 bytes against 5120, and a panel that could
+only say a real FMC image was not a container.
 
 Measured: 114 host checks of the examiner alone (`tools/tests/gsp_fw_host.c`, under ASan and UBSan, six of
 them in a second mode that examines the same container the python test builds - two builders describing

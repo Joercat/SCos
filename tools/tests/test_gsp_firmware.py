@@ -19,6 +19,7 @@ here, and no image is handed to the card by this build, which is what the panel 
 """
 import importlib.util
 import re
+import zlib
 import shutil
 import struct
 import subprocess
@@ -35,7 +36,8 @@ REPORT_CAP = int(re.search(r'#define SCOS_GRAPHICS_REPORT (\d+)',
 
 HOST_CFLAGS = ['-m64', '-O1', '-std=c11', '-Wall', '-Wextra', '-Werror',
                '-fsanitize=address,undefined', '-fno-sanitize-recover=all']
-CHECKS = 114                      # the harness's own count, pinned: a dropped case is a silent loosening
+CHECKS = 122                      # the boot stub's examiner, pinned: a dropped case is a silent loosening
+KERNEL_CHECKS = 25                # the kernel's own reading of the bytes, same reason
 
 
 def run(cmd, **kwargs):
@@ -97,6 +99,64 @@ def build_container(payload_bytes=1024, signature=True, sections=None, shentsize
         offset, size, blob = data[name]
         image[offset:offset + size] = blob
     image[at:at + len(headers)] = headers
+    return bytes(image)
+
+
+def fmc_template_from_kernel():
+    """The 52 bytes the kernel's parser compares an FMC image against, read out of the C source they are
+    written in.  Copying them into this file would let the two drift and the test agree with itself, which is
+    the failure this whole suite exists to avoid."""
+    text = (ROOT / 'kernel' / 'drivers' / 'gpu' / 'gpu_firmware.c').read_text()
+    start = text.index('fmc_header[52] = {')
+    body = text[start + len('fmc_header[52] = {'):text.index('};', start)]
+    body = re.sub(r'/\*.*?\*/', '', body, flags=re.S)
+    out = []
+    for token in body.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        out.append(ord(token[1]) if token.startswith("'") else int(token, 0))
+    assert len(out) == 52, 'the template in the kernel source is not 52 bytes: %d' % len(out)
+    return bytes(out)
+
+
+def build_fmc_image(hash_bytes=32, publickey_bytes=4, signature_bytes=256, image_bytes=512, with_crc=True,
+                    section_flags=0xff00000a, strtab_type=3, image_at=None):
+    """An FMC image laid out the way nvkm/subdev/gsp/gh100.c requires one: the published header verbatim, six
+    40-byte section headers, then the string table and the four sections it names, each carrying in sh_info the
+    standard CRC32 of its own bytes.  One knob per rule, so a failure says which rule caught it."""
+    header = fmc_template_from_kernel()
+    assert struct.unpack_from('<HHHHH', header, 40)[0:0] == () and len(header) == 52
+    names = b'\0hash\0publickey\0signature\0image\0'
+    strings_at = 52 + 6 * 40
+    order = [('hash', hash_bytes), ('publickey', publickey_bytes), ('signature', signature_bytes),
+             ('image', image_bytes)]
+    at = strings_at + len(names)
+    where = {}
+    blobs = []
+    for name, size in order:
+        offset = image_at if (name == 'image' and image_at is not None) else at
+        blobs.append((name, offset, size, bytes((i * 11) & 0xff for i in range(size))))
+        if name == 'image' and image_at is not None:
+            where[name] = (offset, size)
+            continue
+        where[name] = (offset, size)
+        at = offset + size
+    total = max(offset + size for _n, offset, size, _b in blobs)
+
+    def shdr(name_off=0, type_=0, flags=0, offset=0, size=0, info=0):
+        return struct.pack('<IIIIIIIIII', name_off, type_, flags, 0, offset, size, 0, info, 0, 0)
+
+    table = [shdr(), shdr(1, strtab_type, 0x20, strings_at, len(names))]
+    for name, offset, size, blob in blobs:
+        table.append(shdr(names.index(b'\0' + name.encode()) + 1, 1, section_flags, offset, size,
+                          zlib.crc32(blob) if with_crc else 0))
+    image = bytearray(total)
+    image[0:52] = header
+    image[52:52 + 6 * 40] = b''.join(table)
+    image[strings_at:strings_at + len(names)] = names
+    for _name, offset, size, blob in blobs:
+        image[offset:offset + size] = blob
     return bytes(image)
 
 
@@ -175,24 +235,76 @@ def test_the_handoff_grew_by_appending_and_says_so():
     """A firmware record added to the boot handoff is only safe if nothing a v4 kernel read moved.  The
     assertions in the header are the proof; this test refuses their removal or softening."""
     text = (ROOT / 'kernel' / 'include' / 'boot.h').read_text()
-    assert re.search(r'#define BOOT_VERSION 5', text), 'the handoff version did not move with the ABI'
-    for size, want, why in ((r'sizeof\(struct boot_handoff\)', '408', 'handoff ABI v5'),
+    assert re.search(r'#define BOOT_VERSION 6', text), 'the handoff version did not move with the ABI'
+    for size, want, why in ((r'sizeof\(struct boot_handoff\)', '424', 'handoff ABI v6'),
                             (r'sizeof\(struct boot_firmware_role\)', '32', 'firmware record entry ABI'),
-                            (r'sizeof\(struct boot_firmware\)', '200', 'firmware record ABI'),
-                            (r'offsetof\(struct boot_handoff,firmware\)', '204',
+                            (r'sizeof\(struct boot_firmware\)', '216', 'firmware record ABI'),
+                            (r'offsetof\(struct boot_handoff,firmware\)', '208',
                              'firmware record follows v4 fields unchanged')):
         m = re.search(r'_Static_assert\(' + size + r'==' + want + r',"([^"]*)"\)', text)
         assert m and not m.group(0).lstrip().startswith('//'), \
             'the assertion "%s" is missing or commented out: %s' % (why, why)
     assert '_Static_assert(offsetof(struct boot_handoff,framebuffer)==88' in text, \
            'the framebuffer offset the whole panel is written against lost its assertion'
+    # v6 appended the copy the kernel is to read the bytes from, which is where `offset' in each role came
+    # from; the record grew from 200 to 216 and pulled the whole structure with it because a uint64_t has to
+    # start on an 8-byte boundary.  Pinned here as well as in the header, because that growth is the one way
+    # this append could have silently moved something a v5 reader was already counting on.
+    assert 'BOOT_FIRMWARE_RESIDENT_MAX' in text and 'uint32_t offset' in text, \
+        'the resident window lost its cap or its per-role offset, which is what keeps a lying size field from ' \
+        'turning into a copy past the end of the allocation'
     # The record has to be the last field, or "appended" stops meaning what the comment claims.
     body = text[text.index('struct boot_handoff {'):text.index('_Static_assert')]
     assert body.rstrip().endswith('};') and 'firmware;' in body and body.rindex('firmware;') > \
         body.rindex('module_name'), 'the firmware record is not the tail of the handoff'
 
 
-def test_the_stub_reads_the_files_while_the_volume_is_still_open():
+def test_the_kernel_reads_the_fmc_contract_the_loader_writes():
+    """The kernel half, on a host: the shape rules from gh100.c applied to bytes somebody could tamper with.
+    Compiled against kernel/drivers/gpu/gpu_firmware.c itself under ASan and UBSan, so a section header that
+    points past the end of its image is caught as a read out of bounds rather than as a wrong answer.  The two
+    files the python builders above produce are run through the same parser, which is what keeps the C harness
+    and this one describing the same container."""
+    with tempfile.TemporaryDirectory() as tmp:
+        binary = Path(tmp) / 'gsp_fw_kernel_host'
+        run(['gcc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-ffreestanding', '-fno-builtin',
+             '-fno-stack-protector', '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+             '-Ikernel/include', 'tools/tests/gsp_fw_kernel_host.c', '-o', str(binary)])
+        result = subprocess.run([str(binary)], cwd=ROOT, capture_output=True, text=True)
+        assert not result.stderr.strip(), 'the sanitizers said something: ' + result.stderr
+        m = re.match(r'^(\d+) check\(s\), (\d+) failure\(s\)$', result.stdout.strip())
+        assert m, 'the kernel harness did not report its count: ' + result.stdout[-400:]
+        assert int(m.group(1)) == KERNEL_CHECKS, \
+            'the kernel harness reports %s checks, pinned at %d' % (m.group(1), KERNEL_CHECKS)
+        assert int(m.group(2)) == 0, result.stdout
+
+        # Each mode then has to refuse a damaged file, or the checks above only prove the parser is
+        # permissive.  The damage differs by container because the two are judged by different rules: an FMC
+        # image by the CRC32 each section carries, the RM image by nothing of the kind - so for that one the
+        # byte changed is the class byte, which is what both halves agree has to say ELF64.
+        for mode, blob, poke, what in (
+                ('--fmc', build_fmc_image(), lambda b: b.__setitem__(330, b[330] ^ 0xff),
+                 'an FMC image as the driver builds one'),
+                ('--rm', build_container(), lambda b: b.__setitem__(4, 3),
+                 'the RM image, with .fwimage and a signature')):
+            for expect_ok, mutate in ((True, None), (False, poke)):
+                image = bytearray(blob)
+                if mutate:
+                    mutate(image)
+                path = Path(tmp) / 'image.bin'
+                path.write_bytes(bytes(image))
+                result = subprocess.run([str(binary), mode, str(path)], cwd=ROOT, capture_output=True,
+                                        text=True)
+                if expect_ok:
+                    assert result.returncode == 0, '%s (%s) did not parse as the format says it should: %s' % (
+                        mode, what, result.stdout + result.stderr)
+                else:
+                    assert result.returncode != 0, 'a one-byte change inside %s was accepted by %s, so %s is ' \
+                        'not being checked: %s' % (what, mode, 'the section CRC32' if mode == '--fmc'
+                                                   else 'the class byte', result.stdout)
+
+
+def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
     """The order is not stylistic: the boot volume handle is closed before the kernel exists, and a read
     attempted afterwards is a use-after-close in code with no fault handler."""
     main = (ROOT / 'boot' / 'uefi' / 'main.c').read_text()
@@ -308,9 +420,10 @@ def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
         raise AssertionError('build/gsp already exists: refusing to overwrite firmware someone staged')
     nested = gsp / 'nvidia' / 'gb207' / 'gsp'
     good = build_container()
+    fmc = build_fmc_image()
     others = {name: bytes((i * 3) & 0xff for i in range(4096))
-              for name in ('fmc-570.144.bin', 'bootloader-570.144.bin', 'booter_load-570.144.bin',
-                           'booter_unload-570.144.bin')}
+              for name in ('bootloader-570.144.bin', 'booter_load-570.144.bin', 'booter_unload-570.144.bin')}
+    others['fmc-570.144.bin'] = fmc
     try:
         nested.mkdir(parents=True)
         (nested / 'gsp-570.144.bin').write_bytes(good)
@@ -359,6 +472,21 @@ def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
             assert 'nothing here claims to have approved one.' in panel, \
                    'the intake paragraph is clipped inside the report buffer: ' + panel[-400:]
             assert 'notification: GSP firmware read from the boot disk' in serial, serial[-900:]
+            # The stub saw a 32-bit container in the fmc role and said so, rather than reporting the real
+            # FMC image as no container at all because a 64-bit check was pointed at it.
+            assert 'fmc %d B crc32 0x' % len(fmc) in panel, panel[-1600:]
+            assert ', ELF32 6s' in panel, 'the boot stub did not recognise the FMC image as a container'
+            # What this kernel read out of the bytes it was given, in memory it is holding.
+            assert 'GSP firmware image: 5 of 5 held read-only at 0x' in panel, panel[-1800:]
+            assert ('fmc: ELF32 %d B, 6 sections, FMC header exact, every section legal and its CRC32 '
+                    'verified, 0 CRC32 mismatch(es); image 512 B at 0x' % len(fmc)) in panel, panel[-1800:]
+            assert 'hash 32, publickey 4, signature 256 B - the four numbers the FSP verify command is given' \
+                in panel, panel[-1800:]
+            assert 'gsp: ELF64 %d B, 4 sections, .fwimage 1024 B at 0x' % len(good) in panel, panel[-1800:]
+            assert '.fwsignature_gb20x 512 B at 0x' in panel, panel[-1800:]
+            assert 'every image the boot sequence kept was parsed' in panel, panel[-1800:]
+            assert 'Nothing was written to the card' in panel, panel[-1800:]
+            assert 'image(s) held at 0x' in serial, 'the kernel log never says the bytes were kept: ' + serial[-900:]
             print('   measured report length with a complete set staged: %d bytes' % len(panel))
     finally:
         shutil.rmtree(gsp, ignore_errors=True)

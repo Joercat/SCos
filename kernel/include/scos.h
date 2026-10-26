@@ -563,15 +563,17 @@ void gpu_init(const struct boot_framebuffer *fb);
  * coprocessor's firmware - and with all three present on a booted machine the report measured 2559 bytes
  * into a 2560 buffer, i.e. it was clipped by one byte of headroom.
  *
- * It is 5120 for the measured reason in the test rather than a comfortable-looking one: with a complete
- * firmware set staged the report came to 3719 bytes on a booted machine, and
- * tools/tests/test_gsp_firmware.py requires the buffer to hold that *plus* the longest inventory a driver
- * module can print (1152 bytes, struct gpu_module_state's describe), because a card with both is the machine
- * this ships for.  The cost is stack and it was measured too: the terminal's command dispatcher went from a
- * 9344-byte frame to a 10880-byte one against the 64 KiB kernel stack entry.S gives it.  The buffers stay
+ * It is 8192 for the measured reason in the test rather than a comfortable-looking one: the longest report
+ * ever printed here was 4582 bytes - a complete firmware set staged, every image held and parsed, the module
+ * inventory and all five adapter listings - and tools/tests/test_gsp_firmware.py requires the buffer to hold
+ * that *plus* the headroom a driver module's own inventory needs (1152 bytes, struct gpu_module_state's
+ * describe), because a card with both is the machine this ships for.  The number below is what leaves both
+ * room, and the cost of it is stack, measured with -fstack-usage: a 13440-byte frame for the terminal's
+ * command dispatcher and 8768 for the tty's command executor, each of which holds one of these buffers,
+ * against the 64 KiB kernel stack entry.S sets up.  The buffers stay
  * locals rather than statics because six consoles and a window manager share this path, and a static report
  * buffer would be shared the same way. */
-#define SCOS_GRAPHICS_REPORT 5120
+#define SCOS_GRAPHICS_REPORT 8192
 void graphics_report(char *out,size_t capacity);
 
 #endif /* SCOS_H */

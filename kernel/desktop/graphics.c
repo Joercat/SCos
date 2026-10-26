@@ -80,15 +80,19 @@ static void put_firmware_role(struct writer *w, const struct gpu_firmware_state 
     if (r->state == BOOT_FIRMWARE_STATE_UNREADABLE) { put(w, ", unreadable"); return; }
     put(w, " crc32 0x");
     put_hex(w, r->crc32);
-    if (!(r->flags & BOOT_FIRMWARE_ELF64)) {
+    if (!(r->flags & (BOOT_FIRMWARE_ELF64 | BOOT_FIRMWARE_ELF32))) {
         put(w, ", no container");
         if (r->flags & BOOT_FIRMWARE_TRUNCATED) put(w, ", truncated");
         return;
     }
-    put(w, ", ELF64 ");
+    put(w, (r->flags & BOOT_FIRMWARE_ELF32) ? ", ELF32 " : ", ELF64 ");
     fmt_u32(number, r->sections);
     put(w, number);
     put(w, "s");
+    if (r->flags & BOOT_FIRMWARE_TRUNCATED) put(w, ", truncated");
+    /* A 32-bit image is the FMC one, whose names and CRCs are this kernel's own check, not the boot stub's
+     * two-name walk, so the RM image's .fwimage/.fwsignature expectations are not this clause's business. */
+    if (r->flags & BOOT_FIRMWARE_ELF32) return;
     if (r->flags & BOOT_FIRMWARE_PAYLOAD) {
         put(w, " +.fwimage ");
         fmt_u32(number, r->payload_bytes);
@@ -103,6 +107,111 @@ static void put_firmware_role(struct writer *w, const struct gpu_firmware_state 
         put(w, number);
     } else
         put(w, " no signature section");
+}
+
+/* What the held bytes contain, as this kernel read them.  Kept beside the paragraph above rather than folded
+ * into it because they answer different questions: that one is about the disk, this one about memory this
+ * machine is currently spending, and a card can be diagnosed from either without the other. */
+static void put_firmware_image(struct writer *w, const struct gpu_firmware_state *fw)
+{
+    char number[24];
+    unsigned held = 0, skipped = 0;
+
+    if (!fw) return;
+    if (!fw->parsed) {
+        if (fw->staged)
+            put(w, "GSP firmware image: the sizes and checksums above came from files the boot stub read and "
+                   "then released, so nothing is held to read contents out of - either the volume offered "
+                   "nothing worth keeping, or the allocation was refused, which is the firmware's answer and "
+                   "not this OS choosing to forget.\n");
+        return;
+    }
+    put(w, "GSP firmware image: ");
+    put_number(w, fw->resident);
+    put(w, " of ");
+    put_number(w, (unsigned)GPU_FIRMWARE_ROLES);
+    put(w, " held read-only at 0x");
+    put_hex(w, (uint32_t)fw->address);
+    put(w, " (");
+    fmt_u32(number, fw->resident_bytes);
+    put(w, number);
+    put(w, " B); ");
+    for (unsigned i = 0; i < GPU_FIRMWARE_ROLES; i++) {
+        const struct gpu_firmware_image *image = &fw->image[i];
+        if (!image->resident) { skipped++; continue; }
+        held++;
+        put(w, i ? "; " : "");        /* the clause for one image already uses commas; between them, a semicolon */
+        put(w, gpu_firmware_role_name(i));
+        put(w, ": ");
+        if (!image->checksum_matches) {
+            put(w, "the bytes in memory do not hash to the checksum the disk copy carried, so nothing below "
+                   "is claimed about them");
+            continue;
+        }
+        if (!image->elf64 && !image->elf32) { put(w, "held, not a container either way"); continue; }
+        fmt_u32(number, image->bytes);
+        put(w, image->elf64 ? "ELF64 " : "ELF32 ");
+        put(w, number);
+        put(w, " B, ");
+        fmt_u32(number, image->sections);
+        put(w, number);
+        put(w, " sections");
+        if (image->elf64) {
+            if (image->payload_bytes) {
+                put(w, ", .fwimage ");
+                fmt_u32(number, image->payload_bytes);
+                put(w, number);
+                put(w, " B at 0x");
+                put_hex(w, image->payload_offset);
+            } else
+                put(w, ", no .fwimage");
+            if (image->signature_bytes) {
+                put(w, ", ");
+                put(w, image->signature_name[0] ? image->signature_name : "signature section (unnamed)");
+                put(w, " ");
+                fmt_u32(number, image->signature_bytes);
+                put(w, number);
+                put(w, " B at 0x");
+                put_hex(w, image->signature_offset);
+            }
+        } else {
+            put(w, image->fmc_template ? ", FMC header exact" : ", FMC header mismatched");
+            put(w, image->fmc_sections ? ", every section legal and its CRC32 verified"
+                                       : ", sections rejected");
+            fmt_u32(number, image->crc_failures);
+            put(w, ", ");
+            put(w, number);
+            put(w, " CRC32 mismatch(es)");
+            if (image->fmc_named) {
+                put(w, "; image ");
+                fmt_u32(number, image->image_bytes);
+                put(w, number);
+                put(w, " B at 0x");
+                put_hex(w, image->image_offset);
+                put(w, ", hash ");
+                fmt_u32(number, image->hash_bytes);
+                put(w, number);
+                put(w, ", publickey ");
+                fmt_u32(number, image->publickey_bytes);
+                put(w, number);
+                put(w, ", signature ");
+                fmt_u32(number, image->fmc_signature_bytes);
+                put(w, number);
+                put(w, " B - the four numbers the FSP verify command is given");
+            } else
+                put(w, "; not all four of image, hash, publickey and signature are present");
+        }
+    }
+    if (held && !skipped) put(w, "; every image the boot sequence kept was parsed");
+    if (skipped) {
+        put(w, "; ");
+        fmt_u32(number, skipped);
+        put(w, number);
+        put(w, " more on the disk than the boot allocation could keep");
+    }
+    put(w, ". Nothing was written to the card: the command that would consume these images is not implemented "
+           "in this OS, so what this line describes is memory SCos is holding, not a coprocessor that was "
+           "told anything.\n");
 }
 
 /* The firmware paragraph of the report, kept out of graphics_report()'s body because it has two states
@@ -135,7 +244,13 @@ static void put_firmware_report(struct writer *w, const struct gpu_firmware_stat
     put(w, " image(s) staged by the boot stub, ");
     put_number(w, fw->total_bytes);
     put(w, " B read in total, set ");
-    put(w, fw->complete ? "complete for the boot sequence to ask for" : "incomplete");
+    if (fw->complete)
+        put(w, "complete for the boot sequence to ask for");
+    else if (fw->staged == (unsigned)GPU_FIRMWARE_ROLES)
+        put(w, "present and not accepted: all five are on the volume, and the reason is stated per image "
+               "below");
+    else
+        put(w, "incomplete: this volume carries fewer of the five than the boot sequence asks for");
     if (!fw->consistent)
         put(w, " and inconsistent: the summary the stub sent disagrees with its own per-file records, so "
                "the numbers below are the ones this kernel re-added from those records");
@@ -153,13 +268,17 @@ static void put_firmware_report(struct writer *w, const struct gpu_firmware_stat
             put(w, gpu_firmware_role_name(i));
         }
     }
-    put(w, "\nGSP firmware intake: every byte above was read, checked, and let go - this build has no code "
-           "that hands an image to the coprocessor, so staging firmware changes what the OS can tell you "
-           "about the disk and not yet what it can do to the card. What was checked is shape, not "
-           "signature: a role reading no container means the file is not the ELF64 image the boot sequence "
-           "takes .fwimage out of (a text file, an HTML download page, or a copy interrupted halfway), and an "
+    put(w, "\nGSP firmware intake: every byte above was read and checked");
+    put(w, fw->resident ? ", and the copies this kernel was given are still held - the paragraph below "
+                         "says what is in them"
+                       : ", then let go: the boot stub releases the pool it read a file into as soon as it "
+                         "has examined it");
+    put(w, ". This build has no code that hands an image to the coprocessor, so staging firmware changes what "
+           "the OS can tell you about the disk and not yet what it can do to the card. What was checked is "
+           "shape, not signature: a role reading no container means the file is neither of the two ELF images "
+           "the driver names - a text file, an HTML download page, or a copy interrupted halfway - and an "
            "unreadable one means the firmware could not open it at all, which its read caps at 16 MiB. The "
-           "blobs inside the signature section are verified by the hardware, which is the only party able to, "
+           "blobs inside a signature section are verified by the hardware, which is the only party able to, "
            "and nothing here claims to have approved one.\n");
 }
 
@@ -360,6 +479,7 @@ void graphics_report(char *out, size_t capacity)
          * about it.  Printed beside the numbers rather than in prose somewhere else, because the state of
          * the coprocessor is the thing a reader needs in order to agree or argue with the next step. */
         put_firmware_report(&w, gpu_firmware_state());
+        put_firmware_image(&w, gpu_firmware_state());
         const struct gpu_module_state *gsp = gpu_module_state();
         if (gsp && gsp->bound) {
             put(&w, "GSP path: the clause above quotes what the chip answered to reads alone; nothing was "

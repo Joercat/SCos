@@ -87,22 +87,36 @@ void gsp_fw_examine(const void *data, size_t length, struct boot_firmware_role *
     }
     /* Class and byte order are the two things that make the rest of the walk meaningful; the machine field
      * is deliberately not checked, because the firmware image is not an x86 binary and the driver this
-     * mirrors does not look at it either. */
-    if (base[4] != 2 || base[5] != 1) { out->flags |= BOOT_FIRMWARE_BAD_MAGIC; return; }
+     * mirrors does not look at it either.  Both classes are accepted, because the package mixes them: the RM
+     * image is 64-bit and the FMC image the same card is booted with is 32-bit (nvkm/subdev/gsp/gh100.c
+     * compares it against a 52-byte ELFCLASS32 template), and calling a real FMC "not a container" because a
+     * check written for one of the two was pointed at the other is the kind of thing a report says once and a
+     * reader believes forever. */
+    int sixty_four;
+    if (base[4] == 2 && base[5] == 1) sixty_four = 1;
+    else if (base[4] == 1 && base[5] == 1) sixty_four = 0;
+    else { out->flags |= BOOT_FIRMWARE_BAD_MAGIC; return; }
 
-    uint64_t shoff = le64(base + 40);
-    uint32_t shentsize = le16(base + 58), shnum = le16(base + 60), strndx = le16(base + 62);
-    if (shentsize != 64 || !shnum) { out->flags |= BOOT_FIRMWARE_TRUNCATED; return; }
-    if (shoff > (uint64_t)length || shnum > (uint64_t)(length - (size_t)shoff) / 64ull) {
+    const uint32_t shent_want = (uint32_t)(sixty_four ? 64 : 40);
+    uint64_t shoff = sixty_four ? le64(base + 40) : (uint64_t)le32(base + 32);
+    uint32_t shentsize = sixty_four ? le16(base + 58) : le16(base + 46);
+    uint32_t shnum = sixty_four ? le16(base + 60) : le16(base + 48);
+    uint32_t strndx = sixty_four ? le16(base + 62) : le16(base + 50);
+    /* The class is a fact about the file whatever the rest of it turns out to be, and it is worth reporting
+     * even for an image the walk then refuses: "a 32-bit image with a table that lies about its entry size"
+     * and "not a container" are different things to whoever is reading the panel about a stick they copied. */
+    out->flags |= sixty_four ? BOOT_FIRMWARE_ELF64 : BOOT_FIRMWARE_ELF32;
+    if (shentsize != shent_want || !shnum) { out->flags |= BOOT_FIRMWARE_TRUNCATED; return; }
+    if (shoff > (uint64_t)length || shnum > (uint64_t)(length - (size_t)shoff) / shent_want) {
         out->flags |= BOOT_FIRMWARE_TRUNCATED;
         return;
     }
-    out->flags |= BOOT_FIRMWARE_ELF64;
     if (strndx >= shnum) { out->flags |= BOOT_FIRMWARE_NO_STRINGS; return; }
 
     const uint8_t *table = base + (size_t)shoff;
-    const uint8_t *string_header = table + (size_t)strndx * 64ull;
-    uint64_t string_offset = le64(string_header + 24), string_size = le64(string_header + 32);
+    const uint8_t *string_header = table + (uint64_t)strndx * shent_want;
+    uint64_t string_offset = sixty_four ? le64(string_header + 24) : (uint64_t)le32(string_header + 16);
+    uint64_t string_size = sixty_four ? le64(string_header + 32) : (uint64_t)le32(string_header + 20);
     if (string_offset > (uint64_t)length || string_size > (uint64_t)length - string_offset) {
         out->flags |= BOOT_FIRMWARE_NO_STRINGS;
         return;
@@ -113,14 +127,19 @@ void gsp_fw_examine(const void *data, size_t length, struct boot_firmware_role *
      * sections at all" and "a container whose sections did not include the one we need" are different
      * answers in the panel, and on a card where the next step depends on which it is they have to be. */
     for (uint32_t i = 0; i < shnum; i++) {
-        const uint8_t *shdr = table + (uint64_t)i * 64ull;
+        const uint8_t *shdr = table + (uint64_t)i * shent_want;
         uint32_t name = le32(shdr);
-        uint64_t offset = le64(shdr + 24), size = le64(shdr + 32);
+        uint64_t offset = sixty_four ? le64(shdr + 24) : (uint64_t)le32(shdr + 16);
+        uint64_t size = sixty_four ? le64(shdr + 32) : (uint64_t)le32(shdr + 20);
         out->sections++;
         if (offset > (uint64_t)length || size > (uint64_t)length - offset) {
             out->flags |= BOOT_FIRMWARE_TRUNCATED;         /* a section the file cannot hold: stop trusting it */
             continue;
         }
+        /* The two names the RM image must carry.  A 32-bit image is not expected to have them: its own
+         * contract is different and is checked where that contract is read, so nothing is reported as
+         * missing that was never meant to be here. */
+        if (!sixty_four) continue;
         if (name_is(strings, (size_t)string_size, name, ".fwimage")) {
             out->flags |= BOOT_FIRMWARE_PAYLOAD;
             out->payload_bytes = (uint32_t)size;

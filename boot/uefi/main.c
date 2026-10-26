@@ -292,6 +292,55 @@ status EFIAPI efi_main(handle image,struct system_table *table){
    if(e->state==BOOT_FIRMWARE_STATE_ABSENT)continue;
    gsp_fw.staged++;gsp_fw.total_bytes+=e->bytes;gsp_fw.flags|=e->flags;
   }
+  /* Keep the bytes.  The region is sized to what the volume actually holds - the same reasoning that made
+   * the boot arena 2 MiB instead of the 128 MiB it used to reserve - and each image is placed on its own
+   * page boundary, because the boot sequence hands the FSP physical addresses, not offsets in a blob.  The
+   * files are read a second time rather than held in pools between the two allocations: on a small machine
+   * the peak would otherwise be the sum of the files plus the copy of them, which is how a firmware
+   * *report* ends up costing memory nobody can spare. */
+  {
+   uint32_t want=0;
+   for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
+    struct boot_firmware_role *e=&gsp_fw.role[role];
+    e->offset=~0u;
+    if(e->state!=BOOT_FIRMWARE_STATE_STAGED||!e->bytes)continue;
+    e->offset=want;                       /* tentative; revised down below if the region ends up smaller */
+    want+=(e->bytes+4095u)&~4095u;
+   }
+   if(want>BOOT_FIRMWARE_RESIDENT_MAX)want=BOOT_FIRMWARE_RESIDENT_MAX;
+   if(want){
+    uint64_t base=0xffffffff;size_t pages=want/4096;
+    if(!FAILED(bs->allocate_pages(1,2,pages,&base))&&base&&base+want<=0xffffffffull){
+     memset((void*)(uintptr_t)base,0,want);
+     gsp_fw.address=base;gsp_fw.resident_bytes=want;
+     unsigned kept=0;
+     for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
+      struct boot_firmware_role *e=&gsp_fw.role[role];
+      if(e->state!=BOOT_FIRMWARE_STATE_STAGED||!e->bytes){e->offset=~0u;continue;}
+      if(e->offset+((e->bytes+4095u)&~4095u)>want){e->offset=~0u;continue;}   /* no room left: kept=n */
+      void *blob=0;size_t bytes=0;
+      char16 path[24];unsigned i=0;const char16 *prefix=u"\\SCOS\\";
+      while(*prefix)path[i++]=*prefix++;
+      const char *file=gsp_fw_role_file(role);
+      while(i<22&&*file)path[i++]=(char16)*file++;
+      path[i]=0;
+      if(FAILED(read_file(root,path,&blob,&bytes))||!blob||bytes!=e->bytes){
+       if(blob)bs->free_pool(blob);
+       e->offset=~0u;
+       continue;
+      }
+      memcpy((void*)(uintptr_t)(base+e->offset),blob,bytes);
+      bs->free_pool(blob);
+      /* Re-check the copy against the checksum taken off the disk: a page that came back wrong is a fault
+       * in the copy or the allocation, and it is cheaper to know that now than to read a tampered image
+       * into the card's boot sequence later. */
+      if(crc32((const uint8_t*)(uintptr_t)(base+e->offset),bytes)!=e->crc32){e->offset=~0u;continue;}
+      kept++;
+     }
+     log(kept?"GSP firmware kept in memory for the kernel\r\n":"GSP firmware read; no room to keep it\r\n");
+    }else log("GSP firmware read and checked; no memory to keep it\r\n");
+   }
+  }
   /* "Complete" is the whole five-file set with the first file carrying both sections the boot sequence
    * reads out of it.  Anything less is a disk that cannot be booted from, and says so role by role. */
   {const struct boot_firmware_role *rm=&gsp_fw.role[0];

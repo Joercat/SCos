@@ -16,12 +16,17 @@
  * below.  Nothing is renamed by accident: the role decides which file has to be which, and the report says
  * which role is missing.
  *
- * What "checked" means here, and what it does not: the driver reads the RM image as an ELF64 and pulls two
- * named sections out of it (r535_gsp.c's `r535_gsp_elf_section': the section table walked from e_shoff, the
- * names from the string table at e_shstrndx), taking `.fwimage' as the payload and the chip's signature
- * section as the thing the falcon verifies.  So that is exactly what this checks - that the file is a
- * container of the kind that loader accepts, that a payload section is in it, and what it calls its
- * signature section.
+ * What "checked" means here, and what it does not.  The package holds two container shapes, and this reads
+ * both, because a check written for one of them and pointed at the other reports a legitimate file as garbage.
+ * The RM image is ELF64: r535_gsp.c's `r535_gsp_elf_section' walks the section table from e_shoff, resolves
+ * the names through the string table at e_shstrndx, and takes `.fwimage' as the payload plus the chip's
+ * signature section as the thing the falcon verifies.  The FMC image is ELF32 and is judged by other rules
+ * (gh100.c's `elf_validate_sections': a 52-byte header compared byte for byte against a published template,
+ * then a rule per section).  So this checks that a file is a container of the class its role implies and, for
+ * a 64-bit one, that a payload section is in it and what it calls its signature section; the 32-bit image's
+ * own contract - template, per-section CRC32s, the four names - is read in the kernel, where the bytes are
+ * kept, and not here.  An earlier revision required ELF64 of every role and reported a real FMC image as
+ * "no container"; that sentence was believed for a day before it was measured.
  * It is not a signature check, and no claim of one is made anywhere in SCos: the AES/ECDSA blobs inside
  * those sections are verified *by the card*, which is the only party that can.  A file that passes here is
  * "shaped like what the boot sequence asks for", which is a weaker and more honest statement than "valid".
@@ -34,8 +39,8 @@
                           * different things by the same bit - and the host test reads the same header */
 
 /* The record each role produces is `struct boot_firmware_role' in kernel/include/boot.h, along with its
- * states (ABSENT / STAGED / TOO_BIG / UNREADABLE) and its flags (ELF64, PAYLOAD, SIGNATURE and the three
- * failure bits).  Those names appear nowhere in this header on purpose: the kernel reads the same numbers
+ * states (ABSENT / STAGED / TOO_BIG / UNREADABLE) and its flags (ELF64, ELF32, PAYLOAD, SIGNATURE, the four
+ * FMC bits and the three failure bits).  Those names appear nowhere in this header on purpose: the kernel reads the same numbers
  * out of the handoff, and one vocabulary is the only way the two sides cannot drift apart. */
 
 /* The five roles, in the order the report names them.  Both the stub and tools/makedisk.py use these

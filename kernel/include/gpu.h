@@ -145,8 +145,35 @@ struct gpu_firmware_role {
     uint32_t payload_bytes;          /* .fwimage, the payload the falcon is started from */
     uint32_t signature_bytes;        /* whatever the image calls its signature section */
     uint32_t sections;               /* section headers walked: 0 of them is a different fact from "missing one" */
+    uint32_t offset;                 /* where its bytes were copied in the staged region, ~0u when kept=n */
+};
+/* What one staged image turned out to contain, read by this kernel out of the bytes the boot stub kept.
+ * `resident' says the window exists; `checksum_matches' says it is still the file that was on the disk; the
+ * offsets are inside the image, not inside the region, because the boot sequence is handed a physical address
+ * per image and needs the section relative to it. */
+struct gpu_firmware_image {
+    unsigned resident;
+    unsigned checksum_matches;
+    uint32_t offset, bytes;
+    unsigned elf32, elf64;
+    unsigned fmc_template;             /* the first 52 bytes equal the published FMC header */
+    unsigned fmc_sections;             /* type, flags, bounds and CRC32 of every section check out */
+    unsigned fmc_named;                /* image, hash, publickey and signature are all present */
+    unsigned sections;
+    unsigned crc_failures;             /* sections whose sh_info CRC32 disagrees with their bytes */
+    uint32_t section_begin;            /* where the FMC format says the first section's data starts */
+    uint32_t payload_offset, payload_bytes;           /* .fwimage, from the RM image */
+    uint32_t signature_offset, signature_bytes;       /* its .fwsignature_* section */
+    uint32_t image_offset, image_bytes;               /* "image", from the FMC image */
+    uint32_t hash_bytes, publickey_bytes, fmc_signature_bytes;
+    char signature_name[24];
 };
 struct gpu_firmware_state {
+    int resident;                      /* images whose bytes this kernel can read */
+    unsigned parsed;                   /* gpu_firmware_scan() ran over them */
+    uint32_t resident_bytes;
+    uint64_t address;                  /* where in physical memory, as the stub allocated it */
+    struct gpu_firmware_image image[GPU_FIRMWARE_ROLES];
     int present;                     /* any role at all was found on the volume */
     unsigned staged;                 /* roles the stub could open, whatever the outcome */
     unsigned complete;               /* all five, and the first holds both sections the boot sequence reads */
@@ -155,6 +182,8 @@ struct gpu_firmware_state {
     char signature_name[24];         /* the name the staged image gives its signature section */
     struct gpu_firmware_role role[GPU_FIRMWARE_ROLES];
 };
+void gpu_firmware_note(const struct boot_handoff *handoff);
+void gpu_firmware_scan(struct gpu_firmware_state *f, const uint8_t *base, uint32_t total);
 const struct gpu_firmware_state *gpu_firmware_state(void);
 const char *gpu_firmware_role_name(unsigned role);
 const struct gpu_module_state *gpu_module_state(void);

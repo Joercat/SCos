@@ -55,7 +55,15 @@ static int guard(uintptr_t p){return p==(uintptr_t)stack_guard||p==(uintptr_t)df
 static int overlaps(uint64_t a,uint64_t b,uint64_t c,uint64_t d){return a<d&&b>c;}
 void memory_init(const struct boot_handoff *b,const struct efi_memory *map){
  if(initialized)panic("memory initialized twice");
- reserved_pages=(b->kernel_end-b->kernel_start+b->arena_size)/PAGE;
+ /* The coprocessor's firmware, when the boot volume carried it: pages the firmware allocated for a copy of
+  * images this kernel reads but never writes, so they are counted as reserved here, excluded from the
+  * allocator by not being conventional memory in the firmware's own map, and mapped read-only below.
+  * Counted, not just mapped, because the memory report has to add up: pages holding somebody else's
+  * data and invisible to the accounting are how a machine reports more free RAM than it has. */
+ uint64_t firmware_start=b->firmware.address&~4095ULL;
+ uint64_t firmware_end=b->firmware.resident_bytes?(firmware_start+b->firmware.resident_bytes+4095)&~4095ULL:0;
+ if(firmware_end&&b->firmware.address!=firmware_start)panic("staged firmware is not page aligned");
+ reserved_pages=(b->kernel_end-b->kernel_start+b->arena_size+b->firmware.resident_bytes)/PAGE;
  owned_count=b->map_size/b->map_stride;
  memcpy(owned_map,map,owned_count*sizeof(*map));
  /* Reserve handoff/map prefix; table arena was explicitly allocated by UEFI,
@@ -71,6 +79,7 @@ void memory_init(const struct boot_handoff *b,const struct efi_memory *map){
  uint64_t fb_start=b->framebuffer.base&~4095ULL;
  uint64_t fb_end=(b->framebuffer.base+b->framebuffer.size+4095)&~4095ULL;
  if(overlaps(fb_start,fb_end,b->kernel_start,b->kernel_end)||overlaps(fb_start,fb_end,b->arena_start,arena_end))panic("framebuffer overlaps owned RAM");
+ if(firmware_end&&(overlaps(firmware_start,firmware_end,b->kernel_start,b->kernel_end)||overlaps(firmware_start,firmware_end,b->arena_start,arena_end)||overlaps(firmware_start,firmware_end,fb_start,fb_end)))panic("staged firmware overlaps owned RAM");
  for(size_t i=0;i<owned_count;i++)if(boot_memory_usable(&map[i])){
   uintptr_t start=map[i].physical,end=start+map[i].pages*PAGE;
   if(!start)start=PAGE; /* Never allocate or map address zero. */
@@ -89,6 +98,11 @@ void memory_init(const struct boot_handoff *b,const struct efi_memory *map){
   map_leaf(p,flags,0);
  }
  map_range(b->arena_start,table_end,3|NX);
+ /* Read-only and non-executable, and only for this: the firmware images are input to a boot sequence, not
+  * a buffer anything in SCos writes.  Nothing consumes them yet, which is the point of mapping them
+  * this way before the code that would hand them over exists - the pages cannot be quietly repurposed
+  * as scratch space by whoever notices them next. */
+ if(firmware_end)map_range(firmware_start,firmware_end,1|NX);
  /* RWX by necessity, and only here: a module is code the kernel jumps into after validating it, and
   * map_leaf() refuses to place a second mapping over the same pages, so the region cannot be
   * mapped NX for the allocator and executable for the loader separately.  It is never writable data

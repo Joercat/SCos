@@ -183,7 +183,45 @@ int main(int argc, char **argv)
         length = build_elf(1, 1, 0, 0, 0, 0); storage[4] = 1;
         memset(&r, 0, sizeof r);
         gsp_fw_examine(storage, length, &r, sig, sizeof sig);
-        check_eq(r.flags & BOOT_FIRMWARE_BAD_MAGIC ? 1 : 0, 1, "a 32-bit container is refused, not walked");
+        /* A 32-bit class announcing 64-byte section headers is not self-consistent, and the walk refuses it
+         * on that size rather than reading past the table it would have to use.  It is not called a non-ELF
+         * file, because it is not one - the difference matters to whoever reads the panel. */
+        check_eq(r.flags & BOOT_FIRMWARE_TRUNCATED ? 1 : 0, 1,
+                 "a 32-bit container announcing 64-byte section headers is refused on that size");
+        check_eq(r.flags & BOOT_FIRMWARE_BAD_MAGIC ? 1 : 0, 0, "but it is not called a file with no ELF magic");
+        check_eq(r.flags & BOOT_FIRMWARE_ELF32 ? 1 : 0, 1, "and its class is recorded as 32-bit");
+        check_eq(r.sections, 0, "with no section claimed for it");
+    }
+
+    /* A 32-bit container laid out as a 32-bit container is laid out - an FMC image, which is what the same
+     * card is booted with.  Before this it read as "no container", because the check written for the RM image
+     * was pointed at it.  It carries neither .fwimage nor a signature section, and nothing may be reported as
+     * missing that was never part of its contract. */
+    {
+        unsigned char *f = storage;
+        size_t length = 52 + 2 * 40 + 8;
+        memset(storage, 0, sizeof storage);
+        memcpy(f, "\x7f" "ELF", 4);
+        f[4] = 1; f[5] = 1; f[6] = 1;                 /* ELFCLASS32, little-endian, current version */
+        put32(f + 32, 52);                             /* e_shoff: the table starts where the header stops */
+        put16(f + 40, 52);                             /* e_ehsize */
+        put16(f + 46, 40);                             /* e_shentsize: 40, not 64 */
+        put16(f + 48, 2);                              /* e_shnum */
+        put16(f + 50, 1);                              /* e_shstrndx */
+        put32(f + 92 + 4, 3);                          /* section 1 is the string table */
+        put32(f + 92 + 16, 52u + 80u);
+        put32(f + 92 + 20, 2);
+        f[52 + 80] = 's'; f[52 + 81] = 0;
+        memset(&r, 0, sizeof r);
+        sig[0] = 0;
+        gsp_fw_examine(f, length, &r, sig, sizeof sig);
+        check_eq(r.flags & (BOOT_FIRMWARE_BAD_MAGIC | BOOT_FIRMWARE_TRUNCATED | BOOT_FIRMWARE_NO_STRINGS
+                            | BOOT_FIRMWARE_ELF64), 0, "a 32-bit container is accepted on its own terms");
+        check_eq(r.flags & BOOT_FIRMWARE_ELF32 ? 1 : 0, 1, "and recorded as 32-bit");
+        check_eq(r.sections, 2, "with both of its section headers walked");
+        check_eq(r.flags & (BOOT_FIRMWARE_PAYLOAD | BOOT_FIRMWARE_SIGNATURE) ? 1 : 0, 0,
+                 "and no .fwimage or signature section claimed for it, because an FMC image has neither");
+        check_eq(sig[0] == 0 ? 1 : 0, 1, "and no signature name invented either");
         storage[4] = 2;
 
         length = build_elf(1, 1, 0, 0, 0, 0); storage[5] = 2;   /* big-endian */
@@ -199,7 +237,8 @@ int main(int argc, char **argv)
         memset(&r, 0, sizeof r);
         gsp_fw_examine(storage, length, &r, sig, sizeof sig);
         check_eq(r.flags & BOOT_FIRMWARE_TRUNCATED ? 1 : 0, 1, "a section table past the end is truncated");
-        check_eq(r.flags & BOOT_FIRMWARE_ELF64 ? 1 : 0, 0, "and the file earns no walkable mark");
+        check_eq(r.flags & BOOT_FIRMWARE_ELF64 ? 1 : 0, 1,
+                 "while the class it did state is still recorded beside the refusal, because that part was true");
 
         length = build_elf(1, 1, 0, 4000, 0, 0);
         memset(&r, 0, sizeof r);

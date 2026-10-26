@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #define BOOT_MAGIC UINT64_C(0x3436544f4f424353)
-#define BOOT_VERSION 5   /* v5 adds the firmware record below; v4 had none */
+#define BOOT_VERSION 6   /* v6 adds the staged bytes to v5's firmware record; v5 the record; v4 had neither */
 /* The coprocessor's firmware set, as the boot stub found it.  Five roles because those are the files the
  * open-source driver for this chip loads (see boot/uefi/gsp_fw.h for the names and where they come from), and
  * a record rather than the bytes because the stub's only job here is to say what the boot volume holds:
@@ -11,6 +11,10 @@
  * own allocator, for an image nothing consumes yet.  The states and flags are shared with the stub's
  * examiner so the kernel cannot disagree about what a number meant. */
 #define BOOT_FIRMWARE_ROLES 5u
+/* What the kernel will hold on the card's behalf.  Bounded on purpose: on a 128 MiB machine an unbounded
+ * carve-out of five 16 MiB files would leave the OS less memory than the firmware is worth, and "we kept
+ * what fit and said which we did not" is a truer report than an out-of-memory boot. */
+#define BOOT_FIRMWARE_RESIDENT_MAX (32u * 1024u * 1024u)
 #define BOOT_FIRMWARE_STATE_ABSENT      0u  /* nothing by that name on the boot volume */
 #define BOOT_FIRMWARE_STATE_STAGED      1u  /* read, sized, examined */
 #define BOOT_FIRMWARE_STATE_TOO_BIG     2u  /* reserved: the stub's read caps at 16 MiB before anything can
@@ -24,6 +28,16 @@
 #define BOOT_FIRMWARE_BAD_MAGIC    8u       /* not an ELF at all */
 #define BOOT_FIRMWARE_TRUNCATED   16u       /* a section table the file does not hold */
 #define BOOT_FIRMWARE_NO_STRINGS  32u       /* the name table is outside the file: sections unreadable */
+/* The RM image is a 64-bit ELF and the boot sequence takes `.fwimage' out of it.  The FMC image is a
+ * 32-bit ELF whose header must match a published byte pattern and whose sections carry their own CRC32 in
+ * sh_info - a different format, from the same package, checked by different code, so the class bit is
+ * reported rather than assumed: requiring 64-bit everywhere is what would have labelled a perfectly good
+ * FMC "no container" until the driver that loads it was read (nvkm/subdev/gsp/gh100.c). */
+#define BOOT_FIRMWARE_ELF32      64u       /* ELF32, walkable with 32-bit section headers */
+#define BOOT_FIRMWARE_FMC_IMAGE 128u       /* ELF32 whose header is the published FMC template */
+#define BOOT_FIRMWARE_FMC_SECTIONS 256u    /* every section legal in type, flags, bounds and CRC32 */
+#define BOOT_FIRMWARE_FMC_NAMED 512u       /* hash, publickey, signature and image are all present */
+#define BOOT_FIRMWARE_FMC_CRC    1024u     /* at least one section's CRC32 does not match its bytes */
 /* The five roles, in the order a report names them, and the 8.3 file on the boot volume each one is read
  * from.  A macro list rather than a table in some header, because the boot stub and the kernel have to say
  * the same names and the kernel cannot include a file from boot/uefi.  tools/makedisk.py writes these files
@@ -32,10 +46,18 @@
 #define BOOT_FIRMWARE_ROLE_FILES { "GSP.BIN", "GSPFMC.BIN", "GSPBL.BIN", "GSPBTL.BIN", "GSPBTU.BIN" }
 struct boot_firmware_role {
     uint32_t state, bytes, crc32, flags;
-    uint32_t payload_bytes, signature_bytes, sections, reserved;
+    uint32_t payload_bytes, signature_bytes, sections;
+    uint32_t offset;              /* where this image was copied in the staged region, or ~0u */
 };
 struct boot_firmware {
     uint32_t staged, total_bytes, complete, flags;   /* flags: what went wrong, OR-ed across roles */
+    /* The bytes themselves, kept: a region the firmware allocated, copied into, and handed over by
+     * physical address, so the kernel can read what will eventually be booted instead of only its size.
+     * `resident_bytes' is 0 whenever nothing could be kept - no image, or the total past
+     * BOOT_FIRMWARE_RESIDENT_MAX - and a role whose offset is ~0u was read but not kept, which the report
+     * distinguishes, because "the disk has it" and "the OS is holding it" are different statements. */
+    uint64_t address;
+    uint32_t resident_bytes, reserved;
     char signature_name[24];        /* what the *gsp* image calls its signature section; empty when that
                                      * image carries none, which is the case the boot sequence would stop at */
     struct boot_firmware_role role[BOOT_FIRMWARE_ROLES];
@@ -94,15 +116,16 @@ _Static_assert(sizeof(struct efi_memory)==40,"UEFI memory descriptor prefix");
  * handoff of any other size, and a silent drift is a boot that panics for no reason a user could guess.
  * (The 208 it grew from was itself an assertion after three u32 fields moved the tail padding; the number
  * has caught every one of these mistakes so far.) */
-_Static_assert(sizeof(struct boot_handoff)==408,"handoff ABI v5");
+_Static_assert(sizeof(struct boot_handoff)==424,"handoff ABI v6");
 _Static_assert(sizeof(struct boot_firmware_role)==32,"firmware record entry ABI");
-_Static_assert(sizeof(struct boot_firmware)==200,"firmware record ABI");
-/* 204, not 208: module_name ended the v4 layout at 204 and the four bytes that padded it up to 208 were
- * nothing's to lose, so the record starts there and the size still lands on 408.  Both numbers are pinned,
- * because "no v4 field moved" is the entire claim that a v4 kernel and a v5 stub cannot disagree about what
- * offset the framebuffer lives at - and an offset that only works by luck is how a machine boots to a panic
- * nobody reading this header could explain. */
-_Static_assert(offsetof(struct boot_handoff,firmware)==204,"firmware record follows v4 fields unchanged");
+_Static_assert(sizeof(struct boot_firmware)==216,"firmware record ABI");
+/* 208, and it moved from 204 when the record grew a 64-bit address: the record's own alignment pushed it to
+ * the next 8-byte boundary, which is still behind every field a v4 kernel read.  That is the property being
+ * asserted - not the number - and the number is pinned beside it because the size the stub writes and the
+ * size the kernel accepts have to agree exactly, so a silent reorder is a boot that panics for a reason
+ * nobody reading this header could explain.  (The 408 v5 grew from was itself an assertion after three u32
+ * fields moved the tail padding; these numbers have caught every one of these mistakes so far.) */
+_Static_assert(offsetof(struct boot_handoff,firmware)==208,"firmware record follows v4 fields unchanged");
 _Static_assert(offsetof(struct boot_handoff,framebuffer)==88,"framebuffer ABI");
 int boot_memory_usable(const struct efi_memory *);
 int boot_map_valid(const struct efi_memory *,size_t);

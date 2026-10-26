@@ -271,16 +271,36 @@ the microcontroller whose release the lock waits for.
 Paste the `Engine:` line whole, these clauses included: the window answer, the coprocessor's state and the
 engine block's reply are three different facts, and the next move depends on which of them this machine gave.
 
-The firmware line is the one part of this report you can change without rebuilding anything, and it is worth
-changing on a machine whose panel says the coprocessor refused.  The five images the open path loads go in the
-SCOS directory at the root of the ESP, named `GSP.BIN`, `GSPFMC.BIN`, `GSPBL.BIN`, `GSPBTL.BIN` and
-`GSPBTU.BIN`; upstream they are
-`nvidia/gb207/gsp/{gsp,fmc,bootloader,booter_load,booter_unload}-570.144.bin`, and running
-`python3 tools/makedisk.py build` with those files (or that whole tree) under `build/gsp/` names them for you.
-`GSP firmware: none of the images the open driver loads` is therefore a statement about the disk and not a
-refusal; once files are there the panel answers with sizes, checksums and the sections a boot sequence would
-read - `ELF64 4s +.fwimage 3375008 +.fwsignature_gb20x 3384` for an image that is what it claims, `no
-container` for one that is not an image at all, `unreadable` for one the firmware could not open, and `set
-incomplete` until all five are present.  Paste the `GSP firmware:` and `GSP firmware intake:` lines beside the
-`Engine:` line: the first says what the stick holds, the second says what this build does not yet do with it,
-and those are different questions a reader has to be able to tell apart.
+The firmware lines are the one part of this report you can change without rebuilding anything, and they are
+worth changing on a machine whose panel says the coprocessor refused.  The five images the open path loads go
+in the SCOS directory at the root of the ESP, named `GSP.BIN`, `GSPFMC.BIN`, `GSPBL.BIN`, `GSPBTL.BIN` and
+`GSPBTU.BIN`; upstream they are `nvidia/gb207/gsp/{gsp,fmc,bootloader,booter_load,booter_unload}-570.144.bin`,
+and running `python3 tools/makedisk.py build` with those files (or that whole tree) under `build/gsp/` names
+them for you.  `GSP firmware: none of the images the open driver loads` is therefore a statement about the disk
+and not a refusal.
+
+Once files are there the panel answers in three paragraphs, and each one is a different question.
+`GSP firmware:` is the disk: per image, its size, its CRC32 as read, whether it is an ELF64 image (with
+`.fwimage` and the name it gives its signature section) or an ELF32 FMC image (which has neither, and is not
+asked for either), and whether the set of five is complete.  `GSP firmware intake:` is what this build does
+with them - it says plainly that nothing is handed to the card.  `GSP firmware image:` is memory: the address
+of the region the boot stub kept the copies in, and for each image held, what this kernel read out of the bytes
+themselves - which section is where, whether every section's own CRC32 still matches, and the four lengths the
+coprocessor's verify command is given.  Measured on a test VM whose five files are the containers the suite
+builds (so: sizes 1896 and 1128, not a real 570.144 blob), the third paragraph reads
+
+    GSP firmware image: 5 of 5 held read-only at 0x061e3000 (20480 B); gsp: ELF64 1896 B, 4 sections,
+    .fwimage 1024 B at 0x00000040, .fwsignature_gb20x 512 B at 0x00000440; fmc: ELF32 1128 B, 6 sections,
+    FMC header exact, every section legal and its CRC32 verified, 0 CRC32 mismatch(es); image 512 B at
+    0x00000268, hash 32, publickey 4, signature 256 B - the four numbers the FSP verify command is given;
+    bootloader: held, not a container either way; ...
+
+The endings to look for are as informative as the success.  `no container` on a role means the file is not one
+of the two ELF images the driver names - a text file, an HTML download page, a copy interrupted halfway.
+`the bytes in memory do not hash to the checksum the disk copy carried` means the file was fine and the copy
+was not, which is a different bug and is reported as such.  `N more on the disk than the boot allocation could
+keep`, or no third paragraph at all, means the region was refused: the cap is 32 MiB and the boot allocation is
+what says no, not this OS choosing to forget.  `unreadable` means the firmware could not open the file at all.
+Paste all three paragraphs, plus the `Engine:` line, when reporting a machine: the first says what the stick
+holds, the second what this build does with it, the third what is in RAM right now, and those are three
+different questions a reader has to be able to tell apart.
