@@ -689,9 +689,10 @@ void graphics_report(char *out, size_t capacity)
             put(&w, "GSP path: the clause above quotes what the chip answered to reads alone, and the "
                     "paragraph before this one is the only thing this OS has ever written to a card to make "
                     "it answer - one query, not a boot.  What would start the coprocessor this OS neither "
-                    "carries nor sends: it reads the firmware off the boot volume if it is given it, assembles "
-                    "the handover, and stops there, so an engine whose coprocessor was not started for it is "
-                    "an engine this build cannot give work to.\n");
+                    "carries nor sends, so the door is held by the card's own firmware boot either way: this "
+                    "build reads the firmware off the boot volume if it is given it, assembles the handover, "
+                    "and stops there, and an engine whose coprocessor was not started for it is an engine this "
+                    "build cannot give work to.\n");
         }
     }
     put(&w, "Tables: ");
