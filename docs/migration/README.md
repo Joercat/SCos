@@ -15,6 +15,9 @@ still requires separate permission after the existing core is converted.
 
 See [hardware/browser research](HARDWARE-AND-BROWSER.md) and
 [host QEMU tooling](EMULATOR.md); no researched guest component is imported.
+The later account/sign-in subsystem is documented in [SECURITY.md](SECURITY.md);
+it is console authentication and access control, explicitly **not** the ring-3
+isolation described as future work in the table below.
 
 ## Baseline and boundaries
 
