@@ -165,7 +165,9 @@ struct gpu_firmware_image {
     uint32_t payload_offset, payload_bytes;           /* .fwimage, from the RM image */
     uint32_t signature_offset, signature_bytes;       /* its .fwsignature_* section */
     uint32_t image_offset, image_bytes;               /* "image", from the FMC image */
-    uint32_t hash_bytes, publickey_bytes, fmc_signature_bytes;
+    uint32_t hash_offset, hash_bytes;                   /* the three authentication sections of an FMC image */
+    uint32_t publickey_offset, publickey_bytes;         /* are offsets too, because a boot sequence is handed */
+    uint32_t fmc_signature_offset, fmc_signature_bytes; /* them physical addresses, not pointers */
     char signature_name[24];
 };
 struct gpu_firmware_state {
@@ -183,6 +185,45 @@ struct gpu_firmware_state {
     struct gpu_firmware_role role[GPU_FIRMWARE_ROLES];
 };
 void gpu_firmware_note(const struct boot_handoff *handoff);
+/* The same CRC32 the staged images are verified with, exposed because the handover payload the security
+ * processor is given has to be checked over the copy the card will read, not over the copy this kernel read. */
+uint32_t gpu_firmware_crc32(const uint8_t *data, uint32_t length);
+
+#define GPU_FSP_PAYLOAD_BYTES 860              /* one NVDM_PAYLOAD_COT, exactly, padded by the sender
+                                                  * to a whole number of dwords before it is written */
+/* What the card's flight security processor said when this OS asked.  Every field is a register read, a byte
+ * count or a staging decision; nothing here is inferred, and a zero `reads' means the file never got as far as
+ * touching the hardware.  See kernel/drivers/gpu/gpu_fsp.c for what each number is and who published it. */
+struct gpu_fsp_state {
+    int present, attempted;                  /* a display function was there; the probe ran on it */
+    int nvidia;                              /* the vendor is the one whose decode these offsets are */
+    uint16_t vendor;                         /* whose it was, whichever it turned out to be */
+    uint64_t bar0;                           /* the aperture the three pages below are offsets into */
+    int skipped;                             /* 1 no aperture at all, 2 one that cannot be mapped */
+    int mapped, mailbox_readable;            /* the windows exist; the queue registers answer at all */
+    int gsp_readable;                        /* the coprocessor's own block no longer refuses a reader */
+    uint32_t boot_scratch;                   /* 0xFF in the low byte once the FSP has finished booting */
+    int booted;
+    uint32_t ucode_version;                  /* NV_PFSP_FSP_UCODE_VERSION, 11:0 */
+    uint32_t fuse_check;                     /* the FSP's own fuse-consistency word: 0 means it passed */
+    uint32_t hwcfg2;                         /* the capability word whose refusal was the blocker */
+    uint32_t queue_head, queue_tail, msgq_head, msgq_tail;
+    int queried, send_blocked;               /* a request went into the channel; why one could not */
+    int polled;                              /* how many looks the queues took to fall idle */
+    uint32_t packet_bytes, doorbell;
+    int responded, framed_ok, reply_som, reply_eom, reply_oversize, reply_delta_ok;
+    uint32_t reply_bytes;
+    int reply_type, reply_kind;              /* the NVDM type in the header, and the payload's first byte */
+    uint32_t reply_task, reply_command, reply_error;
+    int reply_complete;
+    uint64_t reads, writes;                  /* register accesses this file made, counted as it went */
+    uint32_t refusal_reads;                  /* how many of the reads were the 0xbadf4100 refusal */
+    int fmc_seen, staged, cot_ready, cot_defect;
+    uint64_t image_bytes, image_physical, image_crc32;
+    uint8_t payload[GPU_FSP_PAYLOAD_BYTES];  /* the handover, assembled and never sent */
+};
+void gpu_fsp_note(const struct gpu_device *device, const struct boot_handoff *handoff);
+const struct gpu_fsp_state *gpu_fsp_state(void);
 void gpu_firmware_scan(struct gpu_firmware_state *f, const uint8_t *base, uint32_t total);
 const struct gpu_firmware_state *gpu_firmware_state(void);
 const char *gpu_firmware_role_name(unsigned role);

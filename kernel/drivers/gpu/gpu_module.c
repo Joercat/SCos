@@ -483,10 +483,10 @@ static int engine_self_test(void)
 int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handoff)
 {
     const struct scos_gpu_module_header *header = 0;
-    /* The coprocessor's firmware, recorded and parsed in its own file: it belongs to the machine rather
-     * than to this module, and it is reported even when no module is usable.  Called from here because this
-     * is the one place the boot handoff is handed to the GPU code. */
-    gpu_firmware_note(handoff);
+    /* The coprocessor's firmware and the card's security processor are recorded in their own files, by
+     * gpu_init() and before it gets here, because they belong to the machine rather than to this module: a
+     * boot where no module loads still has an FSP to ask, and its answer is the more useful half of the
+     * story on such a boot, not a side effect of a driver being present. */
     record.store_count = handoff->module_store_count;
     measure_store(handoff);
     /* Say what the disk offers and what this machine opened, on every boot whether or not the module

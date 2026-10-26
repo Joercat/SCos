@@ -282,6 +282,209 @@ static void put_firmware_report(struct writer *w, const struct gpu_firmware_stat
            "and nothing here claims to have approved one.\n");
 }
 
+/* What the card's own flight security processor said, and what was therefore asked of it.
+ *
+ * This is the paragraph that turns "no driver" into something a person can act on: on this generation the
+ * register block that owns the coprocessor refuses a cold reader, and the only thing that answers before the
+ * refusal lifts is the mailbox described in kernel/drivers/gpu/gpu_fsp.c.  Whether that mailbox answers is the
+ * fact that decides whether any of the rest is reachable, so it goes on the panel rather than in a manual
+ * command somebody has to be told to run.  Every number here is a register read this kernel performed or a
+ * count it kept while doing so; where nothing was asked, the sentence says which of the reasons applies,
+ * because "the panel is quiet" and "this machine has no NVIDIA function" are different answers.
+ */
+static void put_fsp_mailbox(struct writer *w, const struct gpu_fsp_state *f)
+{
+    put(w, " The FSP's firmware version reads ");
+    put_number(w, f->ucode_version & 0x7ffu);
+    put(w, " and its own fuse check reads 0x");
+    put_hex(w, f->fuse_check);
+    put(w, ", which is what a pass looks like.  The coprocessor's capability word at BAR0+0x1100f4 ");
+    if (f->gsp_readable) {
+        put(w, "answered 0x");
+        put_hex(w, f->hwcfg2);
+        put(w, ", which is the change a successful boot would cause: it is the word every reader has so far "
+               "been refused.");
+    } else {
+        put(w, "still answers the refusal this OS has recorded before - 0x");
+        put_hex(w, f->hwcfg2);
+        put(w, " - so the door the security processor holds is still shut, and this build has no reason to "
+               "believe otherwise.");
+    }
+    put(w, "  A capability query (");
+    put_number(w, f->packet_bytes);
+    put(w, " bytes: an NVDM_TYPE_CAPS_QUERY asking which clock-boost capability the FSP supports, the one "
+           "request the reference driver itself sends before it has unlocked or configured anything) ");
+    if (!f->responded) {
+        /* One sentence per reason, because they mean four different things to whoever is reading this: the
+         * queues never fell idle, they fell idle but refused while being looked at, the channel swallowed
+         * the packet without walking its offset, and the FSP received a request it did not answer.  Only
+         * the last of those is the card being unresponsive, and the panel has not earned saying so until
+         * the other three have been ruled out. */
+        if (f->send_blocked == 1) {
+            put(w, "could not be started: the queue pointers were still held open by something else after ");
+            put_number(w, (unsigned)f->polled);
+            put(w, " looks at them, so no byte was written to the channel");
+        } else if (f->send_blocked == 2) {
+            put(w, "could not be started: the queue registers began refusing while this kernel was waiting "
+                   "for them to fall idle, after ");
+            put_number(w, (unsigned)f->polled);
+            put(w, " looks");
+        } else if (f->send_blocked == 3) {
+            put(w, "went into the channel and the channel's offset did not advance as those writes say it "
+                   "should have, so the doorbell was never rung: a half-written request is not worth a "
+                   "card's time, and nothing further was sent");
+        } else if (f->queried) {
+            put(w, "was put in the channel and no reply came back: the reply queue's two pointers never "
+                   "separated within ");
+            put_number(w, (unsigned)f->polled);
+            put(w, " looks at them.  A refusal to answer is a result - it says the mailbox is there and the "
+                   "thing behind it is not reading, which is what a boot that never reached the FSP looks "
+                   "like from outside");
+        } else {
+            put(w, "was never started: the FSP has not reported itself booted, and a request written into a "
+                   "channel nobody is reading is not a query");
+        }
+        if (f->reply_oversize) {
+            put(w, "  The FSP did put a reply of ");
+            put_number(w, (unsigned)f->reply_oversize);
+            put(w, " bytes in the channel, longer than anything this query can have asked for, so it was left "
+                   "where it is rather than read into a buffer too small for it.");
+        }
+        return;
+    }
+    put(w, "was sent, and a reply came back in ");
+    put_number(w, (unsigned)f->reply_bytes);
+    put(w, " bytes: start ");
+    put_number(w, (unsigned)f->reply_som);
+    put(w, ", end ");
+    put_number(w, (unsigned)f->reply_eom);
+    put(w, " of a message, NVDM type 0x");
+    put_hex(w, (uint32_t)f->reply_type);
+    put(w, ", payload kind 0x");
+    put_hex(w, (uint32_t)f->reply_kind);
+    put(w, " (0x15 is NVDM_TYPE_FSP_RESPONSE, which is what an FSP reply is required to say it is), task ");
+    put_number(w, f->reply_task);
+    put(w, " in answer to command 0x");
+    put_hex(w, f->reply_command);
+    put(w, ", error 0x");
+    put_hex(w, f->reply_error);
+    put(w, ".  An error of 0 is the FSP saying it understood the request; it is not the card being "
+           "accelerated, and nothing on this line sets a register that could make it so.");
+}
+
+static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
+{
+    put(w, "FSP mailbox: ");
+    if (!f) {
+        put(w, "nothing was asked.  This boot has no display function for the question to be put to - the "
+               "mailbox is read out of a card's own BAR0, so a machine with no PCI display function has "
+               "nothing for it to be at.\n");
+        return;
+    }
+    if (!f->nvidia) {
+        put(w, "not asked, and not because anything failed.  Every offset on this path is where an NVIDIA "
+               "chip decodes it inside an NVIDIA function's BAR0, and this machine's display function is "
+               "vendor 0x");
+        put_hex(w, f->vendor);
+        put(w, ", whose aperture holds different things at the same addresses.  Reading them would be a "
+               "guess about somebody else's hardware and writing them would not be a guess at all, so no "
+               "byte of this card's memory was touched and the counts below are zero by design.\n");
+        return;
+    }
+    if (!f->attempted) {
+        put(w, "the NVIDIA function at BAR0 0x");
+        put_hex(w, (uint32_t)f->bar0);
+        put(w, f->skipped == 2 ? " sits above the range this kernel maps devices into, so its mailbox page at "
+                                 "+0x8f0000 was never reached and nothing was asked"
+                               : " has no memory aperture at all, which means its memory decoding is off or "
+                                 "the firmware never gave it an address, so there was nothing to ask through");
+        put(w, ".\n");
+        return;
+    }
+    if (!f->mapped) {
+        put(w, "the three one-page windows this path needs - BAR0+0x20000 for the boot scratch, +0x8f0000 for "
+               "the mailbox and +0x110000 for the coprocessor's falcon - could not be mapped, so the "
+               "registers were never read and nothing was written.\n");
+        return;
+    }
+    put(w, "asked of the card at BAR0 0x");
+    put_hex(w, (uint32_t)f->bar0);
+    put(w, ", through three one-page windows of its own aperture, on a boot that wrote ");
+    put_number(w, (unsigned)f->writes);
+    put(w, " register(s) and read ");
+    put_number(w, (unsigned)f->reads);
+    put(w, " of them (");
+    put_number(w, f->refusal_reads);
+    put(w, " of the reads were the 0xbadf4100 refusal that says the coprocessor's block is locked until the "
+           "FSP releases it).  ");
+    put(w, "The FSP's boot-complete scratch at BAR0+0x200bc reads 0x");
+    put_hex(w, f->boot_scratch);
+    put(w, f->booted ? ", which is the value that means it has finished booting, so the mailbox behind it is "
+                      "worth asking"
+                     : ", which is not 0xFF: the FSP has not reported itself booted, and until it does "
+                       "nothing is reading the channel.  The reference driver waits up to four seconds for "
+                       "this after resetting a chip; this OS does not reset one, so on a machine where the "
+                       "firmware on the card never got this far the wait would end the same way"
+       );
+    if (!f->mailbox_readable) {
+        put(w, ".  The mailbox queue registers themselves refused, so no request was attempted: the "
+               "capability query below was never started, and that is the honest order of the two facts.\n");
+        return;
+    }
+    put_fsp_mailbox(w, f);
+    put(w, "\n");
+    put(w, "GSP handover: ");
+    if (f->staged && f->cot_ready) {
+        put(w, "one NVDM_PAYLOAD_COT of ");
+        put_number(w, GPU_FSP_PAYLOAD_BYTES);
+        put(w, " bytes was assembled from the FMC image the boot volume offered and is sitting in memory this "
+               "kernel owns - the image is ");
+        put_number(w, (unsigned)f->image_bytes);
+        put(w, " bytes copied page-aligned and zero-padded to physical 0x");
+        if (f->image_physical >> 32) { put_hex(w, (uint32_t)(f->image_physical >> 32)); }
+        put_hex(w, (uint32_t)f->image_physical);
+        put(w, ", which is the address the payload carries, and its CRC32 over the copy the card would read is "
+               "0x");
+        put_hex(w, (uint32_t)f->image_crc32);
+        put(w, " (the container's own checksum covers the file, not the copy).  Hash 48 bytes, public key 384, "
+               "signature 384 were taken out of the FMC's sections and placed where the published payload puts "
+               "them, and the resume store is described as absent, which is how the reference driver encodes a "
+               "machine that has nothing to resume.  It is not sent: asking the FSP to boot the coprocessor also "
+               "needs the write-protected region and the resource manager's own image in place, and half a boot "
+               "is a machine that comes back to a black screen with no log, so the payload is built, staged and "
+               "reported here while the command that would consume it stays unimplemented.\n");
+    } else if (f->fmc_seen) {
+        put(w, "the FMC image on the boot volume was read, but it cannot be described in this payload: ");
+        switch (f->cot_defect) {
+            case 1: put(w, "its hash section is not 48 bytes, and the published payload has 12 words for a "
+                            "SHA-384 and no room for any other size"); break;
+            case 2: put(w, "its public key section is not 384 bytes, which the published payload has no room "
+                            "for any other size of"); break;
+            case 3: put(w, "its signature section is not 384 bytes, and the same limit applies to it"); break;
+            case 4: put(w, "its image section is empty or larger than the 8 MiB this kernel will copy"); break;
+            case 5: put(w, "the container's sections are not all individually verifiable, so there is no "
+                            "authenticated image to point the FSP at"); break;
+            case 6: put(w, "this kernel could not get page-aligned memory below 46 bits for the image to be "
+                            "copied into, and an offset handed to a microcontroller has to be one nothing "
+                            "else can move while it is being read"); break;
+            case 7: put(w, "the bytes in the boot allocation no longer match the checksum the stub recorded "
+                            "for them, so what this kernel would hand over is not the file that was on the "
+                            "disk"); break;
+            case 8: put(w, "the container does not hold all four of image, hash, publickey and signature, "
+                            "which is exactly what a handover payload has fields for"); break;
+            default: put(w, "reason code "); put_number(w, (unsigned)f->cot_defect); break;
+        }
+        put(w, ", and no address or blob was staged.  Saying which of these it was is the point: a file of the "
+               "wrong version and a file that got truncated on the way to the disk look the same from the "
+               "outside.\n");
+    } else {
+        put(w, "nothing to assemble it from: no FMC image was staged on the boot volume and parsed, so the "
+               "payload's image offset, hash, public key and signature would all have to be invented, and an "
+               "invented authentication blob is not a thing this OS will hand a security processor.  The "
+               "paragraph above names the five files the boot volume can be given.\n");
+    }
+}
+
 void graphics_report(char *out, size_t capacity)
 {
     struct writer w = {out, capacity};
@@ -480,6 +683,7 @@ void graphics_report(char *out, size_t capacity)
          * the coprocessor is the thing a reader needs in order to agree or argue with the next step. */
         put_firmware_report(&w, gpu_firmware_state());
         put_firmware_image(&w, gpu_firmware_state());
+        put_fsp_report(&w, gpu_fsp_state());
         const struct gpu_module_state *gsp = gpu_module_state();
         if (gsp && gsp->bound) {
             put(&w, "GSP path: the clause above quotes what the chip answered to reads alone; nothing was "

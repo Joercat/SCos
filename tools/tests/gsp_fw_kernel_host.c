@@ -87,7 +87,7 @@ static uint32_t build_fmc(uint8_t *p, uint32_t capacity, unsigned opts)
         put32(shdr + 20, section[i].size);
         memset(p + at, (uint8_t)(0x40 + i), section[i].size);   /* the bytes first: the CRC is of them */
         if (!(opts & TEST_NO_CRC))
-            put32(shdr + 28, firmware_crc32(p + at, section[i].size));
+            put32(shdr + 28, gpu_firmware_crc32(p + at, section[i].size));
         at += section[i].size;
     }
     uint8_t *shdr = p + shoff + 40;                    /* the string table itself, index 1 */
@@ -155,7 +155,7 @@ static void run_fmc(void)
     state.role[1].state = BOOT_FIRMWARE_STATE_STAGED;
     state.role[1].flags = BOOT_FIRMWARE_ELF32 | BOOT_FIRMWARE_FMC_IMAGE;
     state.role[1].bytes = length;
-    state.role[1].crc32 = firmware_crc32(region, length) ;
+    state.role[1].crc32 = gpu_firmware_crc32(region, length) ;
     state.role[1].offset = 0;
     state.resident = 1;
     state.address = (uintptr_t)region;
@@ -207,7 +207,7 @@ static void run_fmc(void)
     memset(&second, 0, sizeof(second));
     second.resident = second.role[1].state = 1;
     second.role[1].bytes = length;
-    second.role[1].crc32 = firmware_crc32(copy, length) ;
+    second.role[1].crc32 = gpu_firmware_crc32(copy, length) ;
     second.role[1].offset = 0;
     gpu_firmware_scan(&second, copy, capacity);
     other = &second.image[1];
@@ -222,7 +222,7 @@ static void run_fmc(void)
     memset(&second, 0, sizeof(second));
     second.resident = second.role[1].state = 1;
     second.role[1].bytes = length;
-    second.role[1].crc32 = firmware_crc32(copy, length) ;
+    second.role[1].crc32 = gpu_firmware_crc32(copy, length) ;
     second.role[1].offset = 0;
     gpu_firmware_scan(&second, copy, capacity);
     other = &second.image[1];
@@ -234,7 +234,7 @@ static void run_fmc(void)
     memset(&second, 0, sizeof(second));
     second.resident = second.role[1].state = 1;
     second.role[1].bytes = length;
-    second.role[1].crc32 = firmware_crc32(copy, length) ;
+    second.role[1].crc32 = gpu_firmware_crc32(copy, length) ;
     second.role[1].offset = 0;
     gpu_firmware_scan(&second, copy, capacity);
     other = &second.image[1];
@@ -288,7 +288,7 @@ static void run_rm(void)
     state.resident = state.role[0].state = 1;
     state.role[0].flags = BOOT_FIRMWARE_ELF64 | BOOT_FIRMWARE_PAYLOAD | BOOT_FIRMWARE_SIGNATURE;
     state.role[0].bytes = length;
-    state.role[0].crc32 = firmware_crc32(region, length) ;
+    state.role[0].crc32 = gpu_firmware_crc32(region, length) ;
     state.role[0].offset = 0;
     state.address = (uintptr_t)region;
     gpu_firmware_scan(&state, region, capacity);
@@ -326,7 +326,7 @@ static int run_file(const char *mode, const char *path, unsigned role)
     memset(&state, 0, sizeof(state));
     state.resident = state.role[role].state = 1;
     state.role[role].bytes = (uint32_t)got;
-    state.role[role].crc32 = firmware_crc32(region, (uint32_t)got) ;
+    state.role[role].crc32 = gpu_firmware_crc32(region, (uint32_t)got) ;
     state.role[role].offset = 0;
     state.address = (uintptr_t)region;
     gpu_firmware_scan(&state, region, (uint32_t)got);

@@ -1,0 +1,439 @@
+/* The card's own security processor: what this OS can ask it, and what it answers.
+ *
+ * Everything on the path to drawing with this GPU goes through one microcontroller.  On this generation the
+ * host is not allowed to bring the chip up itself - the register block that owns the coprocessor answers a
+ * cold reader with 0xbadf4100, a refusal the vendor's own driver names and waits on - and the thing that
+ * clears that lock is the Flight Security Processor, the FSP.  The FSP has a mailbox of its own, reachable
+ * before anything is unlocked, and the vendor driver uses it to hand over the firmware that boots the
+ * coprocessor.  The mailbox is therefore the door, and this file is the first thing this OS has ever put
+ * through it.
+ *
+ * What happens here, in order: the FSP's boot-complete scratch is read; if the FSP says it is up, the mailbox
+ * queue registers are read; if those answer, a capability query - a read-only request the vendor driver
+ * itself sends at exactly this stage of boot - is framed, written into the channel, and its reply read back.
+ * Then, if the coprocessor's firmware was staged on the boot volume and this kernel parsed it, the handover
+ * payload that would boot the GSP is assembled and checked, and the image the FSP is pointed at is copied
+ * into pages this kernel owns, so the address given to a microcontroller is one nothing else can move or
+ * edit while it is being read.
+ *
+ * What does not happen here: the handover is not sent.  Booting the GSP from this OS needs the write-protected
+ * region and the resource manager image in place as well, and a half-written boot is a machine that comes back
+ * with a black screen, so the payload is built, staged and reported, and not put on the wire.  The only
+ * registers this file writes are the channel's offset, its data window and the two queue pointers, and the
+ * report counts them instead of leaving that to be inferred.
+ *
+ * Provenance, in full, because this kernel is its own and not a copy of anything: the offsets, field positions
+ * and message framing are NVIDIA's, from `src/common/inc/swref/published/hopper/gh100/dev_fsp_pri.h` (the
+ * mailbox, which this generation's code reaches through the same hardware-abstraction layer - GB100 publishes
+ * only the scratch and MNOC registers of its own), `blackwell/gb100/dev_fsp_pri.h` and
+ * `dev_fsp_addendum.h` (the scratch group, the FSP's firmware version and its fuse-check word, published in
+ * absolute terms for this generation), `blackwell/gb100/dev_therm.h` with its addendum (the boot-complete
+ * scratch), `hopper/gh100/dev_falcon_v4.h` (the coprocessor capability word this OS has always read as
+ * refused), and the transport from `src/nvidia/arch/nvalloc/common/inc/mctp_format.h`,
+ * `.../fsp/fsp_emem_channels.h`, `.../fsp/fsp_caps_query_rpc.h`, `inc/kernel/gpu/fsp/kern_fsp_cot_payload.h`
+ * and the behaviour of `src/nvidia/src/kernel/gpu/fsp/{kern_fsp.c,arch/hopper/kern_fsp_gh100.c,
+ * arch/blackwell/kern_fsp_gb100.c}`.  All MIT-licensed, fetched 2026-10-26.  The framing is rebuilt here
+ * rather than copied: the vendor's version runs on a kernel with threads, timeouts and an error model, and
+ * this one has a bounded loop and a refusal, which is a different shape of code with the same bytes on the
+ * wire - and every byte of those bytes is pinned by tools/tests/gpu_fsp_host.c against a model of the
+ * mailbox built from the published semantics, not against this file's own opinion of itself.
+ */
+
+#include "gpu.h"
+#include "scos.h"
+#include "boot.h"
+#include "kernel.h"
+
+#define FSP_LOG_PREFIX "gpu: fsp "
+
+/* The FSP's internal memory has a 1 KiB channel reserved for the resource manager.  The host and the FSP each
+ * own a head/tail pair around it: writing a tail *is* the request, so there is no command register, no
+ * interrupt and no doorbell beyond these four pointers. */
+#define NV_PFSP_EMEMC                  0x008f2ac0u  /* OFFS 7:2, BLK 15:8, AINCW bit 24, AINCR bit 25 */
+#define NV_PFSP_EMEMD                  0x008f2ac4u  /* the window: every access moves the offset by one */
+#define NV_PFSP_QUEUE_HEAD             0x008f2c00u  /* how far the FSP has read of what the host wrote */
+#define NV_PFSP_QUEUE_TAIL             0x008f2c04u  /* how far the host has written */
+#define NV_PFSP_MSGQ_HEAD              0x008f2c80u  /* the reply queue, the same arrangement the other way */
+#define NV_PFSP_MSGQ_TAIL              0x008f2c84u
+#define NV_THERM_FSP_BOOT_COMPLETE     0x000200bcu  /* 0xFF once the FSP has finished booting itself */
+#define NV_PFSP_UCODE_VERSION          0x008f0334u  /* SCRATCH_GROUP_3(1), 11:0 */
+#define NV_PFSP_FUSE_ERROR_CHECK       0x008f033cu  /* SCRATCH_GROUP_3(3), 0 = passed */
+#define NV_PGSP_HWCFG2                 0x001100f4u  /* NV_PGSP base 0x110000 + NV_PFALCON_FALCON_HWCFG2 */
+#define FSP_EMEM_CHANNEL_BYTES            1024u
+#define FSP_EMEM_DWORDS_PER_BLOCK           64u      /* so an offset is a block number and a dword within it */
+#define FSP_REFUSED(v)                   (((v) & 0xffffff00u) == 0xbadf4100u)
+#define FSP_HEADER_BYTES                    8u      /* the MCTP transport dword and the NVDM dword */
+#define FSP_POLL_LIMIT                 200000u       /* iterations, and a TSC deadline on top of them */
+#define FSP_IMAGE_MAX            (8u * 1024u * 1024u)
+
+#define NVDM_TYPE_COT                    0x14u
+#define NVDM_TYPE_FSP_RESPONSE           0x15u
+#define NVDM_TYPE_CAPS_QUERY             0x16u
+#define NVDM_TYPE_CLOCK_BOOST            0x20u      /* the capability asked about, which is what the vendor
+                                                       * driver asks about before it has done anything else */
+#define MCTP_VERSION                       1u
+#define MCTP_TYPE_VENDOR_PCI            0x7eu
+#define MCTP_VENDOR_ID_NVIDIA         0x10deu
+
+/* NVDM_PAYLOAD_COT, packed, in the vendor's field order: two u16s, four offsets and sizes, then the three
+ * authentication blobs, then the boot-arguments pointer.  Written as offsets rather than a struct because
+ * the payload has to land in the channel byte for byte, and a struct would let a compiler disagree about the
+ * padding in a way nobody would notice until a card refused to boot.  COT_SIZE is the sum: the test asserts
+ * each field lands where the published layout puts it. */
+#define COT_SIZE              GPU_FSP_PAYLOAD_BYTES   /* the published payload size, from gpu.h, so the
+                                                          * buffer this is built in cannot be a different
+                                                          * size from the record the panel reports */
+#define COT_OFF_VERSION                     0u
+#define COT_OFF_SIZE                        2u
+#define COT_OFF_FMC_ADDRESS                 4u      /* physical, page aligned: the image, not the container */
+#define COT_OFF_FRTS_SYSMEM                12u
+#define COT_OFF_FRTS_SYSMEM_SIZE           20u
+#define COT_OFF_FRTS_VIDMEM                24u      /* an offset back from the *end* of the frame buffer */
+#define COT_OFF_FRTS_VIDMEM_SIZE           32u
+#define COT_OFF_HASH                       36u      /* 48 bytes: SHA-384, exactly the FMC's hash section */
+#define COT_OFF_PUBLICKEY                  84u      /* 384 */
+#define COT_OFF_SIGNATURE                 468u      /* 384 */
+#define COT_OFF_BOOT_ARGS                 852u      /* (uint64_t)-1 on a cold boot: nothing to reuse */
+#define COT_PAYLOAD_VERSION                 2u      /* the version this chip family's HAL sets */
+
+static struct gpu_fsp_state fsp_state;
+static volatile uint32_t *therm_page, *fsp_page, *gsp_page;
+static uint64_t therm_base, fsp_base, gsp_base;
+
+const struct gpu_fsp_state *gpu_fsp_state(void)
+{
+    return fsp_state.present || fsp_state.attempted ? &fsp_state : 0;
+}
+
+static uint32_t load32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void store16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void store32(uint8_t *p, uint32_t v)
+{
+    for (unsigned i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (i * 8));
+}
+static void store64(uint8_t *p, uint64_t v) { store32(p, (uint32_t)v); store32(p + 4, (uint32_t)(v >> 32)); }
+
+static uint64_t fsp_ticks(void)
+{
+    uint32_t low, high;
+    __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
+    return (uint64_t)high << 32 | low;
+}
+
+static uint32_t read32(volatile uint32_t *base, uint64_t page, uint32_t offset)
+{
+    uint64_t within;
+    uint32_t value;
+    if (!base) return 0xffffffffu;
+    within = offset - page;
+    if (within + 4 > 0x1000u) return 0xffffffffu;      /* outside the page this mapping is: no guess */
+    value = base[within >> 2];
+    fsp_state.reads++;
+    if (FSP_REFUSED(value)) fsp_state.refusal_reads++;
+    return value;
+}
+
+static void write32(volatile uint32_t *base, uint64_t page, uint32_t offset, uint32_t value)
+{
+    uint64_t within;
+    if (!base) return;
+    within = offset - page;
+    if (within + 4 > 0x1000u) return;
+    base[within >> 2] = value;
+    fsp_state.writes++;
+}
+
+/* The FSP's registers sit 14 MiB into BAR0 and the therm scratch 128 KiB in, so each is reached through its
+ * own page mapping rather than by asking the kernel for a 14 MiB window it would refuse.  device_map reuses
+ * leaves that already exist, so mapping a page the driver module also maps is a shared window, not a second
+ * set of attributes on the same memory. */
+static void map_mailbox_pages(uint64_t bar0)
+{
+    uint64_t mapped;
+    void *page;
+
+    mapped = 0;
+    page = device_map(bar0 + 0x20000u, 0x1000u, 0, &mapped);
+    if (page && mapped >= 0x1000u) { therm_page = page; therm_base = 0x20000u; }
+    mapped = 0;
+    page = device_map(bar0 + 0x8f0000u, 0x4000u, 0, &mapped);
+    if (page && mapped >= 0x4000u) { fsp_page = page; fsp_base = 0x8f0000u; }
+    mapped = 0;
+    page = device_map(bar0 + 0x110000u, 0x1000u, 0, &mapped);
+    if (page && mapped >= 0x1000u) { gsp_page = page; gsp_base = 0x110000u; }
+    fsp_state.mapped = therm_page && fsp_page;
+    /* The GSP page is a bonus rather than a requirement: it is the page that has answered 0xbadf4100 to
+     * every reader so far, and the first thing that changes if a boot ever succeeds is that it stops.  Not
+     * having it mapped says nothing about the mailbox, so nothing below depends on it. */
+}
+
+static uint32_t emem_offset_dwords(void)
+{
+    uint32_t v = read32(fsp_page, fsp_base, NV_PFSP_EMEMC);
+    return ((v >> 2) & 0x3fu) + ((v >> 8) & 0xffu) * FSP_EMEM_DWORDS_PER_BLOCK;
+}
+
+static void emem_seek(uint32_t dwords, int auto_write, int auto_read)
+{
+    uint32_t v = ((dwords % FSP_EMEM_DWORDS_PER_BLOCK) << 2) |
+                 ((dwords / FSP_EMEM_DWORDS_PER_BLOCK) << 8);
+    if (auto_write) v |= 1u << 24;
+    if (auto_read) v |= 1u << 25;
+    write32(fsp_page, fsp_base, NV_PFSP_EMEMC, v);
+}
+
+/* All four pointers, in one place, because "may I send" is the same question as "is there a reply": the FSP
+ * sets head to tail on both queues as it consumes and as it produces. */
+static int queues(int *idle)
+{
+    fsp_state.queue_head = read32(fsp_page, fsp_base, NV_PFSP_QUEUE_HEAD);
+    fsp_state.queue_tail = read32(fsp_page, fsp_base, NV_PFSP_QUEUE_TAIL);
+    fsp_state.msgq_head = read32(fsp_page, fsp_base, NV_PFSP_MSGQ_HEAD);
+    fsp_state.msgq_tail = read32(fsp_page, fsp_base, NV_PFSP_MSGQ_TAIL);
+    if (FSP_REFUSED(fsp_state.queue_head) || FSP_REFUSED(fsp_state.queue_tail) ||
+        FSP_REFUSED(fsp_state.msgq_head) || FSP_REFUSED(fsp_state.msgq_tail)) {
+        *idle = -1;
+        return 0;                                      /* refused: the mailbox is not there to be used */
+    }
+    *idle = fsp_state.queue_head == fsp_state.queue_tail && fsp_state.msgq_head == fsp_state.msgq_tail;
+    return 1;
+}
+
+static int reply_waiting(void)
+{
+    uint32_t head = read32(fsp_page, fsp_base, NV_PFSP_MSGQ_HEAD);
+    uint32_t tail = read32(fsp_page, fsp_base, NV_PFSP_MSGQ_TAIL);
+    if (FSP_REFUSED(head) || FSP_REFUSED(tail)) return 0;
+    if (head == tail) return 0;
+    fsp_state.msgq_head = head;
+    fsp_state.msgq_tail = tail;
+    return 1;
+}
+
+static int wait_for(int (*condition)(void))
+{
+    uint64_t deadline = fsp_ticks() + 4000000ull;      /* a few milliseconds, bounded twice over: the limit
+                                                        * on iterations means a machine with a dead counter
+                                                        * still stops */
+    for (unsigned i = 0; i < FSP_POLL_LIMIT; i++) {
+        if (condition()) return 1;
+        if (fsp_ticks() > deadline) return 0;
+        for (volatile int spin = 0; spin < 32; spin++) __asm__ volatile("pause");
+    }
+    return 0;
+}
+
+/* One packet: the two header dwords and the payload, into the channel from offset 0, with the queue tail
+ * moved as the last write because that is the moment the FSP is allowed to look.  Multi-packet messages -
+ * which is what a reply larger than the channel would be - are not sent and not pretended at: the payload
+ * here is one byte or 860 of them, and both fit. */
+static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type)
+{
+    uint32_t header[2];
+    uint32_t padded = (size + 3u) & ~3u, before, after;
+    int idle;
+
+    if (padded + FSP_HEADER_BYTES > FSP_EMEM_CHANNEL_BYTES) return 0;
+
+    header[0] = MCTP_VERSION | (1u << 30) | (1u << 31);            /* seid 0, seq 0, end and start of message */
+    header[1] = MCTP_TYPE_VENDOR_PCI | (MCTP_VENDOR_ID_NVIDIA << 8) | (nvdm_type << 24);
+
+    fsp_state.polled = 0;
+    for (unsigned i = 0; i < FSP_POLL_LIMIT; i++) {
+        fsp_state.polled++;
+        if (!queues(&idle)) { fsp_state.send_blocked = 2; return 0; }
+        if (idle == 1) break;
+    }
+    if (idle != 1) { fsp_state.send_blocked = 1; return 0; }        /* busy the whole time: nothing written */
+
+    emem_seek(0, 1, 0);
+    /* Where the channel's offset is *after* it has been set to 0, which is what the reference driver measures
+     * too: the seek itself must not move it, and if it did, the count below would be a complaint about the
+     * seek rather than about the writes. */
+    before = emem_offset_dwords();
+    write32(fsp_page, fsp_base, NV_PFSP_EMEMD, header[0]);
+    write32(fsp_page, fsp_base, NV_PFSP_EMEMD, header[1]);
+    for (uint32_t i = 0; i < padded; i += 4) {
+        uint32_t word = 0;
+        for (uint32_t b = 0; b < 4 && i + b < size; b++) word |= (uint32_t)payload[i + b] << (b * 8);
+        write32(fsp_page, fsp_base, NV_PFSP_EMEMD, word);
+    }
+    after = emem_offset_dwords();
+    /* The vendor driver asserts exactly this, and for the same reason: every byte of the packet is written
+     * through one register and relies on the offset walking by itself.  If it did not move the way the write
+     * count says it should, the channel holds a fraction of the packet and ringing the doorbell would let
+     * the FSP read whatever the last write left there and call it a request. */
+    if (after - before != 2u + padded / 4u) { fsp_state.send_blocked = 3; return 0; }
+
+    fsp_state.packet_bytes = padded + FSP_HEADER_BYTES;
+    fsp_state.doorbell = padded + 4u;        /* the tail is the last dword written, not the one after it */
+    write32(fsp_page, fsp_base, NV_PFSP_QUEUE_TAIL, fsp_state.doorbell);
+    write32(fsp_page, fsp_base, NV_PFSP_QUEUE_HEAD, 0);
+    return 1;
+}
+
+/* A reply, read the same way and acknowledged by moving the message queue's tail to its head.  The packet
+ * carries the two header dwords first: the transport one says where the message starts and ends, the NVDM
+ * one says whose message it is, and only after those eight bytes does the payload begin - with the type of
+ * the response, then task, command and error as the vendor's own response struct lays them out. */
+static int read_reply(uint8_t *buffer, uint32_t capacity)
+{
+    uint32_t size, transport, message;
+
+    size = (fsp_state.msgq_tail - fsp_state.msgq_head) + 4u;
+    if (size < 4u) return -1;
+    if (size > capacity) { fsp_state.reply_oversize = (int)size; return 0; }
+
+    emem_seek(0, 0, 1);
+    for (uint32_t i = 0; i + 4 <= size; i += 4) store32(buffer + i, read32(fsp_page, fsp_base, NV_PFSP_EMEMD));
+    fsp_state.reply_bytes = size;
+    /* The read has to have walked as many dwords as it claims to have returned, for the same reason the
+     * write does: the packet came out of one register, and only the offset proves they were different dwords
+     * of the channel rather than the same one read back five times. */
+    fsp_state.reply_delta_ok = emem_offset_dwords() == size / 4u;
+    /* Acknowledge by pulling the tail up to the head, which is the FSP's cue that the channel is free
+     * again.  The head is written back unchanged because the reference driver writes both: a mailbox this
+     * unforgiving is not where saving one register write is worth the argument. */
+    write32(fsp_page, fsp_base, NV_PFSP_MSGQ_TAIL, fsp_state.msgq_head);
+    write32(fsp_page, fsp_base, NV_PFSP_MSGQ_HEAD, fsp_state.msgq_head);
+
+    transport = load32(buffer);
+    message = load32(buffer + 4);
+    fsp_state.reply_som = (int)((transport >> 31) & 1u);
+    fsp_state.reply_eom = (int)((transport >> 30) & 1u);
+    fsp_state.framed_ok = size >= FSP_HEADER_BYTES && (message & 0x7fu) == MCTP_TYPE_VENDOR_PCI &&
+                          ((message >> 8) & 0xffffu) == MCTP_VENDOR_ID_NVIDIA;
+    if (!fsp_state.framed_ok || !fsp_state.reply_delta_ok) return 0;
+    fsp_state.reply_type = (int)(message >> 24);
+    if (size >= FSP_HEADER_BYTES + 1u + 12u) {
+        fsp_state.reply_kind = buffer[FSP_HEADER_BYTES];
+        fsp_state.reply_task = load32(buffer + FSP_HEADER_BYTES + 1u);
+        fsp_state.reply_command = load32(buffer + FSP_HEADER_BYTES + 5u);
+        if (size >= FSP_HEADER_BYTES + 1u + 16u) fsp_state.reply_error = load32(buffer + FSP_HEADER_BYTES + 9u);
+        fsp_state.reply_complete = 1;
+    }
+    return 1;
+}
+
+/* The FMC image as the handover wants it: the image section copied into pages this kernel owns, and the
+ * three authentication blobs taken out of the container into the payload itself.  The sizes are not
+ * preferences - the published payload has 12 words for a SHA-384, 96 for the key and 96 for the signature,
+ * so an image whose sections are any other size cannot be described by this format, and saying so is the
+ * whole point of checking before anything is sent. */
+static void stage_fmc(void)
+{
+    const struct gpu_firmware_state *fws = gpu_firmware_state();
+    const struct gpu_firmware_image *image;
+    const uint8_t *base;
+    uint64_t bytes;
+    uintptr_t pages;
+
+    if (!fws || !fws->resident || !fws->resident_bytes) return;
+    image = &fws->image[1];                            /* BOOT_FIRMWARE_ROLE_FMC */
+    if (!image->resident) return;        /* nothing was kept of this role, which the panel's firmware
+                                            * paragraph already says in full: no second notice here */
+    fsp_state.fmc_seen = 1;
+    if (!image->checksum_matches) { fsp_state.cot_defect = 7; return; }
+    if (!image->fmc_named) { fsp_state.cot_defect = 8; return; }
+    if (image->hash_bytes != 48u) { fsp_state.cot_defect = 1; return; }
+    if (image->publickey_bytes != 384u) { fsp_state.cot_defect = 2; return; }
+    if (image->signature_bytes != 384u) { fsp_state.cot_defect = 3; return; }
+    if (!image->image_bytes || image->image_bytes > FSP_IMAGE_MAX) { fsp_state.cot_defect = 4; return; }
+    if (!image->fmc_sections) { fsp_state.cot_defect = 5; return; }
+
+    fsp_state.image_bytes = image->image_bytes;
+    bytes = (image->image_bytes + 0xfffu) & ~0xfffu;
+    pages = pages_allocate_limit((size_t)(bytes / 0x1000u), PHYSICAL_LIMIT);
+    if (!pages) { fsp_state.cot_defect = 6; return; }
+    base = (const uint8_t *)(uintptr_t)(fws->address + image->offset);
+    memcpy((void *)pages, base + image->image_offset, image->image_bytes);
+    memset((void *)(pages + image->image_bytes), 0, (size_t)(bytes - image->image_bytes));
+    fsp_state.image_physical = pages;        /* this kernel maps the RAM it runs on one to one, so the */
+    fsp_state.image_crc32 = gpu_firmware_crc32((const uint8_t *)pages, image->image_bytes);
+    fsp_state.staged = 1;                    /* address the FSP is given is the address it was written at */
+
+    memset(fsp_state.payload, 0, sizeof fsp_state.payload);
+    store16(fsp_state.payload + COT_OFF_VERSION, COT_PAYLOAD_VERSION);
+    store16(fsp_state.payload + COT_OFF_SIZE, COT_SIZE);
+    store64(fsp_state.payload + COT_OFF_FMC_ADDRESS, fsp_state.image_physical);
+    store64(fsp_state.payload + COT_OFF_BOOT_ARGS, (uint64_t)-1);
+    /* The FRTS is the GC6 resume store, 1 MiB of it: a machine that never suspends has nothing to resume,
+     * and leaving the fields zero is the encoding the vendor driver uses when its own properties decline the
+     * region, not an omission. */
+    memcpy(fsp_state.payload + COT_OFF_HASH, base + image->hash_offset, 48);
+    memcpy(fsp_state.payload + COT_OFF_PUBLICKEY, base + image->publickey_offset, 384);
+    memcpy(fsp_state.payload + COT_OFF_SIGNATURE, base + image->fmc_signature_offset, 384);
+    fsp_state.cot_ready = 1;
+}
+
+static void probe_mailbox(void)
+{
+    int idle;
+
+    fsp_state.boot_scratch = read32(therm_page, therm_base, NV_THERM_FSP_BOOT_COMPLETE);
+    fsp_state.booted = (fsp_state.boot_scratch & 0xffu) == 0xffu;
+    fsp_state.ucode_version = read32(fsp_page, fsp_base, NV_PFSP_UCODE_VERSION) & 0x7ffu;
+    fsp_state.fuse_check = read32(fsp_page, fsp_base, NV_PFSP_FUSE_ERROR_CHECK);
+    fsp_state.hwcfg2 = read32(gsp_page, gsp_base, NV_PGSP_HWCFG2);
+    fsp_state.gsp_readable = gsp_page && !FSP_REFUSED(fsp_state.hwcfg2) && fsp_state.hwcfg2 != 0xffffffffu;
+    if (!queues(&idle)) return;                        /* refused: there is no mailbox to send through */
+    fsp_state.mailbox_readable = 1;
+    if (!fsp_state.booted) return;        /* until the FSP says it is up, nothing on the other end is reading */
+
+    {
+        uint8_t query = (uint8_t)NVDM_TYPE_CLOCK_BOOST;   /* which capability to ask about; asking is not
+                                                              * setting it, whatever the answer is */
+        uint8_t reply[128];
+        int read;
+
+        if (!send_packet(&query, 1, NVDM_TYPE_CAPS_QUERY)) return;
+        fsp_state.queried = 1;
+        if (!wait_for(reply_waiting)) return;
+        read = read_reply(reply, sizeof reply);
+        fsp_state.responded = read == 1;
+    }
+}
+
+void gpu_fsp_note(const struct gpu_device *device, const struct boot_handoff *handoff)
+{
+    uint64_t bar0 = device ? device->bar[0] : 0;
+
+    /* The state exists for every machine, not only for ones this can be asked about: the fact that the
+     * question was not asked is the answer a reader on a QEMU boot or an AMD laptop needs, and a paragraph
+     * that vanishes tells them nothing about which of the two it is. */
+    (void)handoff;                                     /* the firmware record is reached through its own
+                                                          * accessor, which is the only reason it exists */
+    /* Every offset in this file is an NVIDIA decode of an NVIDIA BAR.  A machine whose display adapter is
+     * somebody else's has three pages at the same distance into its own aperture, and they belong to a
+     * device with no idea what a dword written at BAR+0x8f2ac4 means - so the vendor is checked before
+     * anything is mapped, and a QEMU boot is silently, verifiably, untouched by all of this. */
+    fsp_state.present = 1;
+    fsp_state.vendor = device ? device->vendor : 0;
+    fsp_state.bar0 = bar0;
+    if (!device || device->vendor != 0x10deu) return;
+    fsp_state.nvidia = 1;
+    if (!bar0 || bar0 >> 46) { fsp_state.skipped = bar0 ? 2 : 1; return; }
+    map_mailbox_pages(bar0);
+    if (!fsp_state.mapped) {
+        klog(FSP_LOG_PREFIX "the mailbox page at 0x%x and the therm scratch at 0x%x could not be mapped, so "
+             "nothing was asked of them", 0x8f0000u, 0x20000u);
+        return;
+    }
+    fsp_state.attempted = 1;
+    probe_mailbox();
+    stage_fmc();
+    klog(FSP_LOG_PREFIX "boot scratch 0x%x, mailbox %s, query %s, reply %s, writes %u of %u reads",
+         fsp_state.boot_scratch, fsp_state.mailbox_readable ? "answers" : "refuses",
+         fsp_state.queried ? "sent" : "not sent", fsp_state.responded ? "read" : "none",
+         (unsigned)fsp_state.writes, (unsigned)fsp_state.reads);
+    if (fsp_state.staged)
+        klog(FSP_LOG_PREFIX "gsp-fmc handover staged and not sent: %u B image at 0x%x, crc32 0x%x",
+             (unsigned)fsp_state.image_bytes, (unsigned)fsp_state.image_physical,
+             (unsigned)fsp_state.image_crc32);
+    else if (fsp_state.cot_defect)
+        klog(FSP_LOG_PREFIX "gsp-fmc handover not staged: reason %u", (unsigned)fsp_state.cot_defect);
+}

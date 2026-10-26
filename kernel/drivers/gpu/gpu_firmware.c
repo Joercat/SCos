@@ -53,7 +53,7 @@ const struct gpu_firmware_state *gpu_firmware_state(void)
 
 /* The same reflected CRC32 the disk image is checksummed with, and the same one the FMC format stores in a
  * section header: one polynomial, or the comparison means nothing. */
-static uint32_t firmware_crc32(const uint8_t *data, uint32_t length)
+uint32_t gpu_firmware_crc32(const uint8_t *data, uint32_t length)
 {
     uint32_t crc = ~0u;
     for (uint32_t i = 0; i < length; i++) {
@@ -195,7 +195,7 @@ static void firmware_scan_image(struct gpu_firmware_image *out, const uint8_t *b
                     if (type != FMC_SHT_PROGBITS || flags != FMC_SHF_FLAGS) all_sections_ok = 0;
                     if (soffset < section_begin) all_sections_ok = 0;
                 }
-                if (scrc && scrc != firmware_crc32(image + soffset, ssize)) out->crc_failures++;
+                if (scrc && scrc != gpu_firmware_crc32(image + soffset, ssize)) out->crc_failures++;
                 /* elf_section() in the driver returns the first header whose name matches, so the first one
                  * found here is the one recorded: a file with two "image" sections describes the first to the
                  * FSP, and inventing a rule of our own about which to prefer would be a difference nobody
@@ -203,11 +203,11 @@ static void firmware_scan_image(struct gpu_firmware_image *out, const uint8_t *b
                 if (firmware_name_is(strings, string_size, name, "image") && !(found & 1)) {
                     out->image_offset = soffset; out->image_bytes = ssize; found |= 1;
                 } else if (firmware_name_is(strings, string_size, name, "hash") && !(found & 2)) {
-                    out->hash_bytes = ssize; found |= 2;
+                    out->hash_offset = soffset; out->hash_bytes = ssize; found |= 2;
                 } else if (firmware_name_is(strings, string_size, name, "publickey") && !(found & 4)) {
-                    out->publickey_bytes = ssize; found |= 4;
+                    out->publickey_offset = soffset; out->publickey_bytes = ssize; found |= 4;
                 } else if (firmware_name_is(strings, string_size, name, "signature") && !(found & 8)) {
-                    out->fmc_signature_bytes = ssize; found |= 8;
+                    out->fmc_signature_offset = soffset; out->fmc_signature_bytes = ssize; found |= 8;
                 }
             }
             if (sixty_four) {
@@ -246,7 +246,7 @@ void gpu_firmware_scan(struct gpu_firmware_state *f, const uint8_t *base, uint32
         /* The copy has to still be the file the stub checksummed.  If it is not, something between the
          * boot allocation and this read changed the bytes, and every number below would be a description of
          * a different image than the one on the disk. */
-        image->checksum_matches = firmware_crc32(base + role->offset, role->bytes) == role->crc32 ? 1 : 0;
+        image->checksum_matches = gpu_firmware_crc32(base + role->offset, role->bytes) == role->crc32 ? 1 : 0;
         kept++;
     }
     f->resident = kept;

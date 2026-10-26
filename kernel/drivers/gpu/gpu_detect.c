@@ -277,6 +277,22 @@ void gpu_init(const struct boot_framebuffer *fb)
     klog("gpu: scanout owner %s, %u PCI config write(s) issued",
          scanout_index >= 0 ? "identified by BAR address" : "not identified by address",
          (unsigned)(config_writes_after - config_writes_before));
+    /* Two facts about the machine, gathered before any driver code runs and independent of whether one runs
+     * at all: what the boot volume handed over as the coprocessor's firmware, recorded and parsed in its own
+     * file; and what the card's own flight security processor says when it is asked, which is the only thing
+     * on this generation that answers before anything is unlocked.  Both used to be reached from inside the
+     * module loader, which made a machine without a staged module a machine with nothing to report about its
+     * hardware - and the FSP's answer is exactly the fact such a boot most needs. */
+    if (handoff) {
+        gpu_firmware_note(handoff);
+        /* The card this machine displays on, or the first one this OS has a name for.  Not `gpu_module_eligible':
+         * a chip the naming table knows but no driver claims is exactly the case where asking the security
+         * processor is worth doing, and it is also the case where no module will ever be bound. */
+        for (int i = 0; i < device_count; i++)
+            if (devices[i].is_scanout) { gpu_fsp_note(&devices[i], handoff); break; }
+        for (int i = 0; i < device_count && !gpu_fsp_state(); i++)
+            gpu_fsp_note(&devices[i], handoff);
+    }
     /* A family being *named* is not a driver.  The one module the firmware read for this machine's
      * chip is validated and exercised here; every other family's file stays on the disk. */
     if (!bound && handoff && handoff->module_state) {
