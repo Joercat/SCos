@@ -983,7 +983,9 @@ that both are wrong in the same direction).  The model is what found the two rea
 the port - the one-page bound that dropped every queue-pointer access, and an FMC handover sized against the
 resource manager image's signature field instead of the FMC's own - and it is what asserts the doorbell is the
 *last dword written* rather than the one after it, the order of the two queue writes, and that 1017 bytes of
-payload are refused while 1016 are sent.  One booted QEMU machine with the firmware staged carries the FSP
-paragraph in a report 3667 bytes long against the 8192-byte buffer, 4525 bytes spare, which is still room for
-the widest engine inventory a module can produce; the same boot's log never mentions the FSP, because the
-probe stopped at the vendor gate - correctly, and verifiably.
+payload are refused while 1016 are sent.  A booted QEMU machine carries the FSP paragraph in a report 3667 bytes long with
+nothing staged, 5139 with a complete set of five firmware files, against an 8192-byte buffer - and the test
+requires the difference to leave room for the widest engine inventory a module can produce, because a real card
+is the case that has both.  Neither boot's log mentions the FSP at all, because the probe stopped at the vendor
+gate on a cirrus display function: correctly, and verifiably, since the paragraph that says so is 445 bytes of
+the 3667.
