@@ -14,24 +14,14 @@
 /* What the kernel will hold on the card's behalf.  Bounded on purpose: on a 128 MiB machine an unbounded
  * carve-out of five 16 MiB files would leave the OS less memory than the firmware is worth, and "we kept
  * what fit and said which we did not" is a truer report than an out-of-memory boot. */
-#define BOOT_FIRMWARE_RESIDENT_MAX (96u * 1024u * 1024u)
-/* One file's own limit.  The resource-manager image a real install carries is 63571,696 bytes - measured by
- * tools/gspcheck.py in /lib/firmware/nvidia/gb207/gsp on the machine that matters - and the 16 MiB this stub
- * used to allow could not hold it, so the file a working driver loads every day was reported as unreadable by
- * a limit invented for a smaller design.  72 MiB is that file plus room for the driver package it came with,
- * and it is still far below the memory a boot can spend: RESIDENT_MAX below decides what is actually kept,
- * and a role that does not fit is reported rather than dropped silently. */
-#define BOOT_FIRMWARE_ROLE_MAX (72u * 1024u * 1024u)
+#define BOOT_FIRMWARE_RESIDENT_MAX (32u * 1024u * 1024u)
 #define BOOT_FIRMWARE_STATE_ABSENT      0u  /* nothing by that name on the boot volume */
 #define BOOT_FIRMWARE_STATE_STAGED      1u  /* read, sized, examined */
-#define BOOT_FIRMWARE_STATE_TOO_BIG     2u  /* the file is on the volume and larger than
-                                             * BOOT_FIRMWARE_ROLE_MAX, so it was not read at all.  This state
-                                             * used to be reserved while the stub capped one read at 16 MiB,
-                                             * which made the largest firmware file a Linux install carries
-                                             * unmeasurable; the cap is ROLE_MAX now, so the state means what
-                                             * its name says and says it instead of an I/O failure */
-#define BOOT_FIRMWARE_STATE_UNREADABLE  3u  /* the firmware's read failed: an I/O fault or a short file - not
-                                             * the same as absent, and not knowable further from here */
+#define BOOT_FIRMWARE_STATE_TOO_BIG     2u  /* reserved: the stub's read caps at 16 MiB before anything can
+                                             * be sized, so an oversized file is reported as unreadable and
+                                             * this state stays unused rather than claiming a size */
+#define BOOT_FIRMWARE_STATE_UNREADABLE  3u  /* the firmware's read failed: present too big, or an I/O
+                                             * failure - not the same as absent, and not knowable further here */
 #define BOOT_FIRMWARE_ELF64        1u       /* magic, class, byte order and entry size the loader's walk needs */
 #define BOOT_FIRMWARE_PAYLOAD      2u       /* a `.fwimage' section: the payload the falcon is started from */
 #define BOOT_FIRMWARE_SIGNATURE    4u       /* and the signature section this chip's driver names */
