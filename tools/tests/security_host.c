@@ -276,11 +276,182 @@ static void test_codec(void)
     check(!sc_db_verify(db, strlen(db) - 9), "truncated database is refused");
 }
 
+static int unhex_bytes(const char *hex, uint8_t *out, int n)
+{
+    return sc_unhex(out, (size_t)n, hex, (size_t)n * 2) == 0;
+}
+
+static void test_pbkdf2_blocks(void)
+{
+    uint8_t two[64], one[32];
+    char got[129];
+    /* RFC 6070-style first block, then a second independent block.  The
+     * multi-block API must not change the 32-byte legacy result. */
+    sc_pbkdf2_blocks("password", 8, (const uint8_t *)"salt", 4, 4096, 2, two);
+    hex_of(two, 64, got);
+    check(!strcmp(got,
+        "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
+        "f7ad98c1b458ce3fd74ca35beba3cda7b8d1038d6a87071b918f837405f3fe77"),
+        "PBKDF2 two blocks match hashlib.pbkdf2_hmac(dklen=64)");
+    sc_pbkdf2("password", 8, (const uint8_t *)"salt", 4, 4096, one);
+    check(!memcmp(one, two, 32), "PBKDF2 block 1 equals sc_pbkdf2");
+    check(memcmp(two, two + 32, 32), "PBKDF2 output blocks are independent");
+    sc_pbkdf2_blocks("SCos-Test", 9, (const uint8_t *)"0123456789abcdef", 16,
+                     100000, 2, two);
+    hex_of(two, 64, got);
+    check(!strcmp(got,
+        "a4e45d7ccb71c6e8851f927aa9fb72880b1f0bafd866f6ed6ecfd1138f6920f6"
+        "f68ebe67b9705a9eeed83bbf2112a47a3639bd4f9d17a9ef84aa4f87db9b5ecc"),
+        "PBKDF2 two blocks with a 16-byte salt and 100000 rounds");
+    memset(two, 0xa5, sizeof(two));
+    sc_pbkdf2_blocks("p", 1, (const uint8_t *)"s", 1, 1, 0, two);
+    check(two[0] == 0xa5, "PBKDF2 zero blocks leaves the buffer untouched");
+}
+
+static void test_aes256(void)
+{
+    uint8_t key[32], pt[64], ct[64], back[64], iv[16];
+    char got[129];
+    /* FIPS 197 Appendix C.3, AES-256 single block. */
+    unhex_bytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", key, 32);
+    unhex_bytes("00112233445566778899aabbccddeeff", pt, 16);
+    sc_aes256_encrypt_block(key, pt, ct);
+    hex_of(ct, 16, got);
+    check(!strcmp(got, "8ea2b7ca516745bfeafc49904b496089"),
+          "AES-256 FIPS 197 C.3 known-answer block");
+
+    /* NIST SP 800-38A F.5.5 CTR-AES256.Encrypt, four blocks. */
+    unhex_bytes("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4", key, 32);
+    unhex_bytes("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff", iv, 16);
+    unhex_bytes("6bc1bee22e409f96e93d7e117393172a"
+                "ae2d8a571e03ac9c9eb76fac45af8e51"
+                "30c81c46a35ce411e5fbc1191a0a52ef"
+                "f69f2445df4f9b17ad2b417be66c3710", pt, 64);
+    sc_aes256_ctr(key, iv, ct, pt, 64);
+    hex_of(ct, 64, got);
+    check(!strcmp(got,
+        "601ec313775789a5b7a7f504bbf3d228f443e3ca4d62b59aca84e990cacaf5c5"
+        "2b0930daa23de94ce87017ba2d84988ddfc9c58db67aada613c2dd08457941a6"),
+        "AES-256-CTR SP 800-38A F.5.5 four-block vector");
+    sc_aes256_ctr(key, iv, back, ct, 64);
+    check(!memcmp(back, pt, 64), "AES-256-CTR is its own inverse");
+    memset(back, 0xee, sizeof(back));
+    sc_aes256_ctr(key, iv, back, ct, 17);
+    check(!memcmp(back, pt, 17) && back[17] == 0xee,
+          "AES-256-CTR handles a partial final block without overrun");
+    {
+        uint8_t ks[32], zero[32];
+        memset(zero, 0, sizeof(zero));
+        sc_aes256_ctr(key, iv, ks, 0, 32);
+        sc_aes256_ctr(key, iv, back, zero, 32);
+        check(!memcmp(ks, back, 32), "AES-256-CTR NULL input generates keystream");
+    }
+}
+
+static void test_aead(void)
+{
+    uint8_t key[32], iv[16], pt[100], ct[100], back[100], tag[32], bad[32];
+    const uint8_t ad[24] = "SCos-vault-header-v1-01";
+    for (int i = 0; i < 32; i++) key[i] = (uint8_t)(i * 5 + 3);
+    for (int i = 0; i < 16; i++) iv[i] = (uint8_t)(255 - i * 3);
+    for (int i = 0; i < 100; i++) pt[i] = (uint8_t)(i * 7 + 11);
+    sc_aead_seal(key, iv, ad, sizeof(ad), pt, sizeof(pt), ct, tag);
+    check(memcmp(ct, pt, sizeof(pt)), "AEAD seal produces ciphertext");
+    memset(back, 0xee, sizeof(back));
+    check(sc_aead_open(key, iv, ad, sizeof(ad), ct, sizeof(ct), back, tag) &&
+          !memcmp(back, pt, sizeof(pt)), "AEAD open round trips 100 bytes");
+    ct[0] ^= 1;
+    memset(back, 0xee, sizeof(back));
+    check(!sc_aead_open(key, iv, ad, sizeof(ad), ct, sizeof(ct), back, tag),
+          "AEAD rejects a flipped ciphertext bit");
+    check(back[0] == 0 && back[99] == 0,
+          "AEAD does not release plaintext when the tag fails");
+    ct[0] ^= 1;
+    memcpy(bad, tag, 32);
+    bad[31] ^= 0x80;
+    check(!sc_aead_open(key, iv, ad, sizeof(ad), ct, sizeof(ct), back, bad),
+          "AEAD rejects a modified tag");
+    {
+        uint8_t ad2[24];
+        memcpy(ad2, ad, sizeof(ad2));
+        ad2[23] ^= 1;
+        check(!sc_aead_open(key, iv, ad2, sizeof(ad2), ct, sizeof(ct), back, tag),
+              "AEAD binds the associated header data");
+    }
+    {
+        uint8_t k2[32], iv2[16];
+        memcpy(k2, key, 32); k2[0] ^= 1;
+        memcpy(iv2, iv, 16); iv2[0] ^= 1;
+        check(!sc_aead_open(k2, iv, ad, sizeof(ad), ct, sizeof(ct), back, tag),
+              "AEAD rejects the wrong key");
+        check(!sc_aead_open(key, iv2, ad, sizeof(ad), ct, sizeof(ct), back, tag),
+              "AEAD tag covers the IV indirectly through ciphertext");
+    }
+    check(!sc_aead_open(key, iv, ad, sizeof(ad), ct, 99, back, tag),
+          "AEAD rejects a truncated ciphertext");
+    {
+        uint8_t iv2[16], ct2[100], tag2[32];
+        memcpy(iv2, iv, 16); iv2[15] ^= 1;
+        sc_aead_seal(key, iv2, ad, sizeof(ad), pt, sizeof(pt), ct2, tag2);
+        check(memcmp(ct, ct2, sizeof(ct)) && memcmp(tag, tag2, 32),
+              "a fresh IV changes both ciphertext and tag");
+    }
+    {
+        uint8_t short_ct[16], short_tag[32], short_pt[16], short_back[16];
+        memset(short_pt, 0x42, sizeof(short_pt));
+        sc_aead_seal(key, iv, 0, 0, short_pt, 16, short_ct, short_tag);
+        check(sc_aead_open(key, iv, 0, 0, short_ct, 16, short_back, short_tag) &&
+              !memcmp(short_pt, short_back, 16), "AEAD handles empty associated data");
+    }
+    {
+        uint8_t empty_tag[32], other[32];
+        sc_aead_seal(key, iv, ad, sizeof(ad), 0, 0, 0, empty_tag);
+        sc_aead_seal(key, iv, ad, sizeof(ad) - 1, 0, 0, 0, other);
+        check(memcmp(empty_tag, other, 32), "AEAD tag depends on AD length");
+        check(sc_aead_open(key, iv, ad, sizeof(ad), 0, 0, 0, empty_tag),
+              "AEAD accepts a zero-length message with the right tag");
+    }
+}
+
+static void test_vek_wrap(void)
+{
+    uint8_t kek[32], nonce[16], vek[32], wrapped[48], back[32];
+    for (int i = 0; i < 32; i++) kek[i] = (uint8_t)(i ^ 0x5a);
+    for (int i = 0; i < 16; i++) nonce[i] = (uint8_t)(i * 13 + 1);
+    for (int i = 0; i < 32; i++) vek[i] = (uint8_t)(i * 9 + 7);
+    sc_vek_wrap(kek, nonce, vek, wrapped);
+    check(memcmp(wrapped, vek, 32), "VEK wrap hides the volume key");
+    check(sc_vek_unwrap(kek, nonce, wrapped, back) && !memcmp(back, vek, 32),
+          "VEK wrap/unwrap round trip");
+    {
+        uint8_t zero_wrap[48], k2[32], w2[48], n2[16];
+        memset(zero_wrap, 0, sizeof(zero_wrap));
+        check(!sc_vek_unwrap(kek, nonce, zero_wrap, back),
+              "an all-zero wrapped volume key is rejected");
+        memcpy(k2, kek, 32); k2[31] ^= 1;
+        memset(back, 0xcc, sizeof(back));
+        check(!sc_vek_unwrap(k2, nonce, wrapped, back) && back[0] == 0,
+              "wrong KEK cannot unwrap the volume key");
+        memcpy(w2, wrapped, 48); w2[40] ^= 1;
+        check(!sc_vek_unwrap(kek, nonce, w2, back), "tampered VEK tag is rejected");
+        memcpy(w2, wrapped, 48); w2[3] ^= 1;
+        check(!sc_vek_unwrap(kek, nonce, w2, back), "tampered VEK ciphertext is rejected");
+        memcpy(n2, nonce, 16); n2[15] ^= 1;
+        check(!sc_vek_unwrap(kek, n2, wrapped, back), "VEK wrap binds the KDF salt as nonce");
+        sc_vek_wrap(kek, nonce, vek, w2);
+        check(!memcmp(w2, wrapped, 48), "VEK wrap is deterministic for a fixed KEK and salt");
+    }
+}
+
 int main(void)
 {
     test_sha256();
     test_hmac();
     test_pbkdf2();
+    test_pbkdf2_blocks();
+    test_aes256();
+    test_aead();
+    test_vek_wrap();
     test_helpers();
     test_usernames();
     test_passwords();

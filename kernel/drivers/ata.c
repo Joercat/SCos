@@ -248,15 +248,22 @@ int ata_write_sectors(u32 lba, u32 count, const void *buf)
     return ata_pio_transfer(&devs[storage_dev], lba, count, (void *)buf, 1);
 }
 
-/* FS2: magic[8], entry_count:u32, payload CRC32:u32, then bounded entries.
- * Generated /system boot-chain copies are reconstructed, never serialized.
+/* On-disk image.  Since full security the ONLY format written is SC_VAULT_*:
+ * an authenticated cleartext header plus an AES-256-CTR/HMAC-SHA256 ciphertext
+ * of an SCOSFS2 tree.  The inner FS2 payload is magic[8], entry_count:u32,
+ * payload CRC32:u32, then bounded entries; generated /system boot-chain copies
+ * and the protected account directory are reconstructed, never serialized.
  * A single slot detects interrupted writes but is not a transactional journal.
  */
 #define IMAGE_BYTES (IMG_MAX_SECTORS * SECTOR)
+_Static_assert(IMAGE_BYTES == SC_VAULT_IMAGE_BYTES, "vault image size must match the ATA extent");
 static u8 *img_buf;
+static const char *image_state = "no disk image";
+const char *fs_image_status(void) { return image_state; }
 static int image_error(const char *why)
 {
     klog("filesystem: %s", why);
+    image_state = why;
     return 0;
 }
 static u32 image_crc(const u8 *p, u32 n)
@@ -270,17 +277,24 @@ static int generated(const char *p)
     return !strcmp(p,"system/kernel.bin") || !strcmp(p,"system/README.txt") ||
            !strcmp(p,"system/boot") || !strncmp(p,"system/boot/",12);
 }
-static int walk_serialize(u8 *p, u32 *off, struct vfs_node *n, const char *prefix, u32 *count)
+/* Account state is authoritative in the (AEAD-authenticated) vault header, so
+ * it is never serialized into the encrypted tree: an image apply must never
+ * need a VFS write bypass.  security_fs_restore() re-materializes it. */
+static int protected_meta(const char *p)
+{
+    return !strncmp(p,"system/security",15);
+}
+static int walk_serialize(u8 *p, u32 limit, u32 *off, struct vfs_node *n, const char *prefix, u32 *count)
 {
     for (struct vfs_node *c=n->child;c;c=c->sibling) {
         char path[256];
         u32 a=strlen(prefix), b=strlen(c->name);
         if (!b || a+b >= sizeof(path)-1) return 0;
         memcpy(path,prefix,a); memcpy(path+a,c->name,b+1);
-        if (generated(path)) continue;
+        if (generated(path) || protected_meta(path)) continue;
         u32 plen=a+b, size=c->is_dir ? 0 : c->size;
-        if (*off > IMAGE_BYTES || 7+plen > IMAGE_BYTES-*off ||
-            size > IMAGE_BYTES-*off-7-plen || (size && !c->data)) return 0;
+        if (*off > limit || 7+plen > limit-*off ||
+            size > limit-*off-7-plen || (size && !c->data)) return 0;
         *(u16 *)(p+*off)=(u16)plen; *off+=2;
         memcpy(p+*off,path,plen); *off+=plen;
         p[(*off)++]=(u8)c->is_dir;
@@ -289,7 +303,7 @@ static int walk_serialize(u8 *p, u32 *off, struct vfs_node *n, const char *prefi
         (*count)++;
         if (c->is_dir) {
             path[plen]='/'; path[plen+1]=0;
-            if (!walk_serialize(p,off,c,path,count)) return 0;
+            if (!walk_serialize(p,limit,off,c,path,count)) return 0;
         }
     }
     return 1;
@@ -302,13 +316,19 @@ int fs_image_save(void)
         return image_error("disk ownership changed; no write attempted");
     if (!img_buf) img_buf=palloc_owned(IMAGE_BYTES,HEAP_VFS);
     if (!img_buf) return image_error("out of memory; no write attempted");
+    /* Fail closed: never write an unencrypted tree.  Before first sign-in the
+     * volume key does not exist, and after an explicit logout it is burned. */
+    if (!vault_unlocked())
+        return image_error("encrypted vault is locked; sign in before saving");
     memset(img_buf,0,IMAGE_BYTES);
-    memcpy(img_buf,"SCOSFS2",8);
+    u8 *plain=img_buf+SC_VAULT_HDR_BYTES;
+    memcpy(plain,"SCOSFS2",8);
     u32 off=16,count=0;
-    if (!walk_serialize(img_buf,&off,vfs_root,"",&count))
+    if (!walk_serialize(plain,SC_VAULT_PAYLOAD,&off,vfs_root,"",&count))
         return image_error("tree too large or path invalid; no write attempted");
-    *(u32 *)(img_buf+8)=count;
-    *(u32 *)(img_buf+12)=image_crc(img_buf+8,IMAGE_BYTES-8);
+    *(u32 *)(plain+8)=count;
+    *(u32 *)(plain+12)=image_crc(plain+8,SC_VAULT_PAYLOAD-8);
+    if (!vault_seal(img_buf,IMAGE_BYTES)) return image_error("vault seal failed; no plaintext written");
     /* Invalidate first; clear unused tail as well as writing the new tree.
      * Commit the valid first sector only after all remaining sectors flush. */
     memset(verify,0,512);
@@ -319,6 +339,8 @@ int fs_image_save(void)
     for (u32 i=0;i<IMG_MAX_SECTORS;i++)
         if (!ata_read_sectors(IMG_LBA+i,1,verify) || memcmp(verify,img_buf+i*512,512))
             return image_error("disk readback verification failed");
+    vault_mark_applied();
+    image_state="encrypted vault saved";
     return 1;
 }
 static int valid_path(const char *p)
@@ -364,13 +386,34 @@ bad:
 int fs_image_load(void)
 {
     fs_image_found=0;
+    image_state="RAM-only; no supported verified save target";
     if (storage_dev<0) return 0;
     if (!img_buf) img_buf=palloc_owned(IMAGE_BYTES,HEAP_VFS);
     if (!img_buf) return image_error("out of memory loading saved tree");
     if (!ata_read_sectors(IMG_LBA,IMG_MAX_SECTORS,img_buf)) return image_error("saved tree read failed");
     int blank=1;
     for (u32 i=0;i<IMAGE_BYTES;i++) if (img_buf[i]) { blank=0; break; }
-    if (blank) return 0;
+    if (blank) { image_state="blank verified save target; encrypted vault will be created at first sign-in"; return 0; }
+    /* Encrypted vault: publish ONLY the authenticated metadata that the login
+     * screen needs (account DB + audit log).  The tree stays encrypted until a
+     * password unwraps the volume key.  fs_image_unlock_apply() finishes it. */
+    if (!memcmp(img_buf,SC_VAULT_MAGIC,8)) {
+        if (!vault_stage(img_buf,IMAGE_BYTES)) {
+            err_notify("filesystem","encrypted vault header rejected; sign-in disabled",NULL,0);
+            return image_error("encrypted vault header invalid");
+        }
+        if (!vfs_lookup("system/security")) vfs_mkdir("system/security");
+        if (!vfs_write("system/security/users.db",(const char *)(img_buf+SC_VAULT_DB_OFF),vault_db_len()) ||
+            (vault_audit_len() &&
+             !vfs_write("system/security/audit.log",(const char *)(img_buf+SC_VAULT_AUDIT_OFF),vault_audit_len())))
+            err_notify("filesystem","could not stage vault metadata; first-run setup may be required",NULL,0);
+        image_state="encrypted vault locked; sign in to decrypt the saved tree";
+        klog_raw("filesystem: encrypted vault staged; tree stays encrypted until sign-in");
+        return 0;
+    }
+    /* Legacy SCOSFS2 (the pre-encryption plaintext image).  Load it once so
+     * first sign-in can create a volume key and re-save it encrypted.  No new
+     * plaintext is ever written. */
     u32 stored=*(u32 *)(img_buf+12);
     *(u32 *)(img_buf+12)=0;
     u32 actual=image_crc(img_buf+8,IMAGE_BYTES-8);
@@ -378,10 +421,32 @@ int fs_image_load(void)
     if (memcmp(img_buf,"SCOSFS2",8) || stored!=actual ||
         !image_apply(img_buf,IMAGE_BYTES)) {
         err_notify("filesystem","saved tree invalid/incomplete; defaults retained",NULL,0);
-        return 0;
+        return image_error("legacy plaintext image rejected");
     }
     fs_image_found=1;
-    klog("filesystem: verified saved tree loaded");
+    image_state="legacy plaintext image; it will be encrypted at first sign-in";
+    klog_raw("filesystem: legacy plaintext tree loaded for one-time encryption migration");
+    return 1;
+}
+
+int fs_image_unlock_apply(void)
+{
+    if (!vault_image_pending()) return 0;
+    if (!vault_open(img_buf,IMAGE_BYTES)) {
+        err_notify("filesystem","vault authentication failed; encrypted data withheld",NULL,0);
+        return image_error("vault authentication failed");
+    }
+    if (!image_apply(img_buf+SC_VAULT_HDR_BYTES,SC_VAULT_PAYLOAD)) {
+        err_notify("filesystem","decrypted vault tree invalid; defaults retained",NULL,0);
+        return image_error("decrypted vault tree invalid");
+    }
+    vault_mark_applied();
+    fs_image_found=1;
+    image_state="encrypted vault unlocked and authenticated";
+    /* The tree deliberately has no protected account entries.  Re-materialize
+     * the authoritative account database and audit log from kernel state. */
+    security_fs_restore();
+    klog_raw("filesystem: encrypted vault unlocked; header and tree authenticated");
     return 1;
 }
 

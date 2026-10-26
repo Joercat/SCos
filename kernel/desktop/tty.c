@@ -825,13 +825,18 @@ static void tty_console_loop(void)
 
 void tty_run(int return_to_wm)
 {
-    /* Entering the kernel maintenance console from the desktop re-checks the
-     * signed-in user's password.  Rescue mode (WM already dead) deliberately
-     * does not: there is no compositor to return to, and physical access to a
-     * stopped machine is already full access. */
-    if (return_to_wm && !security_reauthenticate("Maintenance console")) {
-        wm_request_full();
-        return;
+    /* Full security: the maintenance console never inherits an authenticated
+     * session, including "rescue" mode where the WM has already stopped.  The
+     * old exception let anyone at a stopped desktop run admin commands as the
+     * last signed-in user.  Re-auth draws its own masked full-screen prompt, so
+     * it works with or without a compositor. */
+    if (security_initialized()) {
+        if (!security_reauthenticate(return_to_wm ? "Maintenance console" : "Rescue console")) {
+            if (return_to_wm) { wm_request_full(); return; }
+            security_api_drop_session();
+            security_ui_login();
+            if (security_api_session() < 0) return;   /* no session: no console */
+        }
     }
     tty_select(active_console+1);
     tty_rows = (screen_h - 8) / (FONT_H + 2);

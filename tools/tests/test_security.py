@@ -28,19 +28,23 @@ def run(cmd):
 def test_the_crypto_and_policy_core():
     out = ROOT / 'build' / 'security-host'
     out.parent.mkdir(parents=True, exist_ok=True)
-    obj = out.parent / 'sec_core_host.o'
-    run(['gcc'] + HOST_CFLAGS + ['-Ikernel/include', '-c',
-                                 'kernel/desktop/sec_core.c', '-o', str(obj)])
+    objects = []
+    for name in ('sec_core', 'sec_aes'):
+        obj = out.parent / (name + '_host.o')
+        run(['gcc'] + HOST_CFLAGS + ['-Ikernel/include', '-c',
+                                     'kernel/desktop/%s.c' % name, '-o', str(obj)])
+        objects.append(str(obj))
     run(['gcc'] + HOST_CFLAGS + ['-Ikernel/include',
-                                 'tools/tests/security_host.c', str(obj), '-o', str(out)])
+                                 'tools/tests/security_host.c'] + objects + ['-o', str(out)])
     result = subprocess.run([str(out)], cwd=ROOT, capture_output=True, text=True)
     lines = [l for l in result.stdout.splitlines() if l.startswith(('PASS', 'FAIL', 'TOTAL'))]
     print('\n'.join(lines))
     assert result.returncode == 0, result.stdout[-3000:]
     assert not [l for l in lines if l.startswith('FAIL')], result.stdout
-    assert len([l for l in lines if l.startswith('PASS')]) >= 55, \
+    assert len([l for l in lines if l.startswith('PASS')]) >= 86, \
         'the security core suite shrank: %d checks' % len(lines)
-    print('PASS: SHA-256, HMAC, PBKDF2, policy, codec and checksum vectors')
+    print('PASS: SHA-256, HMAC, PBKDF2, AES-256/CTR, AEAD, VEK wrap, '
+          'policy, codec and checksum vectors')
 
 
 def test_the_gate_and_protection_are_wired():
@@ -59,12 +63,23 @@ def test_the_gate_and_protection_are_wired():
     assert 'security_command_allowed(' in term, 'terminal commands bypass authorization'
     tty = (ROOT / 'kernel/desktop/tty.c').read_text()
     assert 'security_reauthenticate(' in tty, 'the maintenance console has no re-auth gate'
+    assert 'Rescue console' in tty and 'if (return_to_wm && !security_reauthenticate' not in tty, \
+        'rescue mode still inherits an authenticated session'
     header = (ROOT / 'kernel/include/security.h').read_text()
     for needle in ('sc_pbkdf2', 'sc_password_eval', 'sc_db_verify', 'SC_FLAG_MUSTCHANGE'):
         assert needle in header, '%s disappeared from the account API' % needle
     core = (ROOT / 'kernel/desktop/sec_core.c').read_text()
     assert 'trailing separator' in core, 'the empty-history reboot regression was removed'
-    print('PASS: boot gate, WM hook, VFS guard, both shells and the codec regression are wired')
+    account = (ROOT / 'kernel/desktop/security.c').read_text()
+    assert 'vault_unlock_password' in account and 'fs_image_unlock_apply' in account, \
+        'sign-in no longer unlocks the encrypted disk'
+    assert 'vault_set_db(db_buf' in account and 'vault_set_audit' in account, \
+        'account state is no longer authenticated as vault associated data'
+    ata = (ROOT / 'kernel/drivers/ata.c').read_text()
+    assert 'vault_seal(img_buf' in ata and 'vault_open(img_buf' in ata, \
+        'the ATA image is no longer encrypted'
+    assert 'SCOSFS2' in ata and 'legacy plaintext' in ata, 'legacy migration was removed'
+    print('PASS: boot gate, WM hook, VFS guard, both shells, vault and codec regression are wired')
 
 
 def test_a_booted_guest_enforces_accounts():
@@ -166,11 +181,54 @@ def test_a_persistent_account_survives_a_reboot():
     print('PASS: checksummed account database and salted verifier survive an ATA reboot')
 
 
+def test_a_booted_vault_is_encrypted_and_tamper_evident():
+    """The saved image must hold no plaintext, and the guest's own AEAD must
+    reject edits to its header, tag and ciphertext - not just the host unit
+    tests.  Signing out must make a plaintext save impossible."""
+    from qemu_support import Guest  # noqa: E402
+
+    canary = b'VAULT-PLAINTEXT-CANARY-9283'
+    with Guest('security-vault', ide=True) as g:
+        d, s = g.debug, g.scratch
+        assert g.call('vault_unlocked') == 1, 'sign-in did not unlock the volume key'
+        g.save('home/documents/secret.txt', canary)
+        assert g.call('fs_image_save') == 1
+        image = d.read(g.ptr(g.base + g.symbols['img_buf']), 131072)
+        assert image[:8] == b'SCOSVAUL', 'the disk image is not an encrypted vault'
+        assert b'SCOSFS2' not in image, 'a plaintext FS2 header is on the disk'
+        assert canary not in image, 'a saved document is readable in cleartext on the disk'
+
+        work = s + 131072
+
+        def opens_after(edit):
+            d.write(work, image)
+            if edit is not None:
+                d.write(work + edit, bytes([image[edit] ^ 1]))
+            return g.call('vault_open', work, 131072)
+
+        assert opens_after(None) == 1, 'the genuine vault does not authenticate'
+        assert opens_after(3000) == 0, 'editing the cleartext account header was not detected'
+        assert opens_after(32740) == 0, 'editing the AEAD tag was not detected'
+        assert opens_after(60000) == 0, 'editing the ciphertext was not detected'
+
+        g.call('vault_lock')
+        assert g.call('fs_image_save') == 0, 'a locked vault still wrote an image'
+        d.write(s, b'admin\0')
+        d.write(s + 64, b'Scos-Test-2026!x7Q\0')
+        d.write(s + 128, b'\0' * 192)
+        assert g.call('security_api_authenticate', s, s + 64, s + 128, 192) == 1
+        assert g.call('vault_unlocked') == 1, 're-authentication did not re-wrap the volume key'
+        assert g.call('fs_image_save') == 1
+    print('PASS: the saved image is encrypted, metadata/tag/data are authenticated, '
+          'and a logged-out vault refuses to write')
+
+
 def test():
     test_the_crypto_and_policy_core()
     test_the_gate_and_protection_are_wired()
     test_a_booted_guest_enforces_accounts()
     test_a_persistent_account_survives_a_reboot()
+    test_a_booted_vault_is_encrypted_and_tamper_evident()
 
 
 if __name__ == '__main__':

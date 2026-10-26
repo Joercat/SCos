@@ -424,6 +424,10 @@ void security_ui_login(void)
 
 void security_ui_logout(void)
 {
+    /* A real logout forgets the volume key.  The next sign-in must unwrap it
+     * again from that user's password-derived KEK; a screen LOCK deliberately
+     * keeps it so background saves keep working while the console is masked. */
+    vault_lock();
     if (!security_api_user_count()) security_ui_setup();
     else security_ui_login();
 }

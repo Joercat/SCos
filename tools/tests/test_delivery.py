@@ -89,7 +89,13 @@ def test_a_record_from_before_an_image_input_change_is_refused():
     if not (ROOT / 'dist/scos.img').is_file():
         print('skip: dist/scos.img is not built')
         return
-    prepare(record_edits={'commit': 'f1ec437', 'tree': 'clean'})
+    # Use a commit this checkout actually contains: a shallow clone has only a
+    # few ancestors, so a hard-coded hash from a fuller history makes this test
+    # fail for the wrong reason ("commit does not exist").  The oldest reachable
+    # commit always has image-input changes between it and HEAD on this branch.
+    root = subprocess.check_output(['git', 'rev-list', '--max-parents=0', 'HEAD'],
+                                   cwd=ROOT, text=True).split()[0]
+    prepare(record_edits={'commit': root, 'tree': 'clean'})
     expect_problem('an image older than the source it claims', 'predates commits that change what gets packed')
 
 

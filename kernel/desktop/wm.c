@@ -489,6 +489,16 @@ void wm_init(void)
     wm_full();
 }
 
+/* The encrypted vault replaces the whole VFS tree AFTER wm_init(), at the
+ * first successful sign-in.  Re-read the saved desktop layout and pinned
+ * files then, without resetting windows (there are none before the first
+ * wm_run()).  Without this, a reboot silently loses desktop icons and pins. */
+void wm_reload_saved_state(void)
+{
+    desktop_load();pins_load();
+    wm_full();
+}
+
 /* -------------------------------------------------------------- menus ---- */
 static __attribute__((noinline)) void menu_cancel(void){
     if(!menu.active)return;

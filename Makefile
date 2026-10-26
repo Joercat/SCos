@@ -58,7 +58,14 @@ $(BUILD)/vectors.o: $(BUILD)/vectors.S
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
 $(BUILD)/kernel.elf: $(GPU_OBJECTS) $(DRIVER_OBJECTS) $(DESKTOP_OBJECTS) $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o kernel/x86_64/linker.ld Makefile
 	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -Bsymbolic --build-id=none -z noexecstack -z max-page-size=0x1000 -T kernel/x86_64/linker.ld -o $@ $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o $(DESKTOP_OBJECTS) $(DRIVER_OBJECTS) $(GPU_OBJECTS) $(BUILD)/lua-runtime.o
-$(BUILD)/efi-main.o: boot/uefi/main.c boot/uefi/efi.h kernel/include/boot.h Makefile | $(BUILD)
+# Signed boot: the stub shares the kernel's freestanding SHA-256 core and links
+# a small RSA-2048 verifier.  trust_anchor.h carries the public modulus, so
+# rotating the release key must relink the loader.
+$(BUILD)/efi-sec_core.o: kernel/desktop/sec_core.c kernel/include/security.h Makefile | $(BUILD)
+	$(CC) $(EFI_CFLAGS) -c $< -o $@
+$(BUILD)/efi-rsa_verify.o: boot/uefi/rsa_verify.c kernel/include/security.h Makefile | $(BUILD)
+	$(CC) $(EFI_CFLAGS) -c $< -o $@
+$(BUILD)/efi-main.o: boot/uefi/main.c boot/uefi/efi.h boot/uefi/trust_anchor.h kernel/include/boot.h kernel/include/security.h Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
 $(BUILD)/efi-font.o: kernel/src/font.c Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
@@ -73,9 +80,9 @@ $(BUILD)/efi-gpu_match.o: kernel/drivers/gpu/gpu_match.c kernel/drivers/gpu/gpu_
 $(BUILD)/efi-pci_scan.o: boot/uefi/pci_scan.c boot/uefi/pci_scan.h kernel/include/gpu_match.h \
                          kernel/drivers/gpu/gpu_ids.h $(BUILD)/scosbuild.h Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -Ikernel/drivers/gpu -c $< -o $@
-$(BUILD)/BOOTX64.EFI: $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o
-	$(LD) -mi386pep --subsystem 10 --entry efi_main --image-base 0 --no-insert-timestamp --enable-reloc-section -o $@ $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o
-$(BUILD)/scos.img: $(BUILD)/BOOTX64.EFI $(BUILD)/kernel.elf tools/makedisk.py
+$(BUILD)/BOOTX64.EFI: $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o $(BUILD)/efi-sec_core.o $(BUILD)/efi-rsa_verify.o
+	$(LD) -mi386pep --subsystem 10 --entry efi_main --image-base 0 --no-insert-timestamp --enable-reloc-section -o $@ $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o $(BUILD)/efi-sec_core.o $(BUILD)/efi-rsa_verify.o
+$(BUILD)/scos.img: $(BUILD)/BOOTX64.EFI $(BUILD)/kernel.elf tools/makedisk.py tools/scos_sign.py tools/scos_sigformat.py keys/boot-signing.json
 	python3 tools/makedisk.py $(BUILD)
 
 # The module list is completed by the per-family rules below, which is later in this file than the

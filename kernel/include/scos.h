@@ -305,6 +305,8 @@ char *vfs_parent_path(const char *path, char *out);   /* "a/b/c" -> "a/b/" */
 const char *ata_model(void);                  /* IDENTIFY model string or NULL */
 int  ata_present(void);
 int  fs_image_save(void);
+int  fs_image_unlock_apply(void);  /* decrypt + apply the staged encrypted vault */
+const char *fs_image_status(void); /* truthful one-line boot/provenance state */
 int  fs_image_available(void);
 const char *fs_image_target(void);
 void vfs_free_tree(struct vfs_node *n);
@@ -426,6 +428,7 @@ u64 proc_wm_mem_kb(void);
 u64 proc_kernel_mem_kb(void);
 
 void wm_init(void);
+void wm_reload_saved_state(void);
 void wm_run(void);                              /* main loop: returns only
                                                  * if the WM dies (r36:
                                                  * kmain then falls into

@@ -179,6 +179,10 @@ static void rng_bytes(void *out, size_t n)
     sc_burn(jitter, sizeof(jitter));
 }
 
+/* The vault needs the same audited entropy pool for volume keys, slot salts
+ * and per-save IVs.  No other subsystem gets a raw-random API. */
+void security_random_bytes(void *out, size_t n) { rng_bytes(out, n); }
+
 void security_mix_event(uint8_t code)
 {
     uint8_t e[16];
@@ -293,6 +297,38 @@ static void audit_file_sync(void)
     S.bypass = 1;
     vfs_write(AUDIT_PATH, audit_buf, (u32)at);
     S.bypass = saved;
+    /* The audit log is part of the vault header's AEAD associated data: an
+     * offline edit to history breaks the tag and is reported at next unlock. */
+    vault_set_audit(audit_buf, (u32)at);
+    S.disk_dirty = 1;
+}
+
+/* Reload the audit ring from the AEAD-authenticated header copy.  Lines are
+ * `epoch|event|uid|user|detail`; comments start with '#'.  This is a bounded
+ * parse into fixed BSS rows - never a heap allocation. */
+static void audit_file_load(void)
+{
+    u32 len = 0;
+    char *data;
+    int saved = S.bypass;
+    const char *p;
+    S.bypass = 1;
+    data = vfs_read(AUDIT_PATH, &len);
+    S.bypass = saved;
+    if (!data || !len || len > SC_AUDIT_BYTES) return;
+    p = data;
+    while (*p) {
+        const char *nl = str_chr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : sc_len(p);
+        if (n && p[0] != '#') {
+            sc_copy(S.audit[S.audit_head], SC_AUDIT_LINE, p);
+            S.audit[S.audit_head][n < SC_AUDIT_LINE ? n : SC_AUDIT_LINE - 1] = 0;
+            S.audit_head = (S.audit_head + 1) % SC_AUDIT_MAX;
+            if (S.audit_count < SC_AUDIT_MAX) S.audit_count++;
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
 }
 
 static void audit(const char *event, const char *detail)
@@ -475,6 +511,10 @@ static void db_save(void)
     db_serialize();
     vfs_write(DB_PATH, db_buf, (u32)sc_len(db_buf));
     S.bypass = saved;
+    /* The account database is the authoritative half of the vault header.
+     * It is cleartext (needed before sign-in) but the whole header is the
+     * AEAD's associated data, so it cannot be edited offline unnoticed. */
+    vault_set_db(db_buf, (u32)sc_len(db_buf));
     audit_file_sync();
     S.disk_dirty = 1;
 }
@@ -574,7 +614,15 @@ static void recovery_generate(void)
     S.rec_iters = S.policy.iters;
     derive(S.rec_code, S.rec_salt, S.rec_iters, S.rec_hash);
     S.rec_valid = 1;
-    audit("recovery-generated", "one-time code shown on the secure screen");
+    /* A recovery code must also be able to unwrap the volume key: otherwise
+     * recovering an administrator password would make saved data unreadable. */
+    if (!vault_bind_recovery(S.rec_code, S.rec_iters)) {
+        S.rec_valid = 0;
+        klog_raw("security: recovery code could not be bound to the encrypted vault");
+    }
+    audit("recovery-generated", vault_disk_present() ?
+          "one-time code shown on the secure screen; vault key slot bound" :
+          "one-time code shown on the secure screen");
 }
 
 /* --------------------------------------------------------------- sessions --- */
@@ -619,6 +667,19 @@ int security_api_authenticate(const char *name, const char *pw, char *msg, size_
     if (!verify_user(idx, pw)) {
         record_failure(idx, "login-fail");
         sc_copy(msg, cap, "Invalid username or password.");
+        return 0;
+    }
+    /* Full-disk encryption: a correct account password is also the only thing
+     * that unwraps the volume encryption key.  A valid verifier with a broken
+     * or missing key slot cannot produce a usable session. */
+    if (!vault_unlock_password(a->name, pw, a->iters, msg, cap)) {
+        record_failure(idx, "vault-unlock-failed");
+        sc_copy(msg, cap, "Saved data could not be unlocked with this password.");
+        return 0;
+    }
+    if (vault_image_pending() && !fs_image_unlock_apply()) {
+        audit("vault-auth-failed", a->name);
+        sc_copy(msg, cap, "The encrypted vault did not authenticate. Saved data was withheld.");
         return 0;
     }
     a->fails = 0;
@@ -699,6 +760,13 @@ int security_api_change_password(int idx, const char *oldpw, const char *newpw,
         memcpy(a->hist[0], a->salt, SC_SALT_BYTES);
         memcpy(a->hist[0] + SC_SALT_BYTES, a->hash, SC_HASH_BYTES);
     }
+    /* Re-wrap the volume key under a KEK derived from the NEW password first.
+     * If that fails the old credentials must stay valid, so the in-memory
+     * account is only committed afterwards. */
+    if (!vault_rebind_password(a->name, newpw, a->iters)) {
+        sc_copy(msg, cap, "The encrypted vault is locked. Sign in before changing a password.");
+        return 0;
+    }
     rng_bytes(a->salt, sizeof(a->salt));
     derive(newpw, a->salt, a->iters, a->hash);
     a->pw_changed = now_epoch();
@@ -739,6 +807,15 @@ int security_create_admin(const char *name, const char *pw, const char *confirm)
     derive(pw, a->salt, a->iters, a->hash);
     a->used = 1;
     S.count = 1;
+    /* First-run setup is the only path allowed to discard an unreadable vault:
+     * there are no accounts to authenticate against, so the old volume key is
+     * gone anyway.  A brand new one is created and wrapped to this password. */
+    vault_reset();
+    if (!vault_unlock_password(a->name, pw, a->iters, 0, 0)) {
+        S.count = 0;
+        set_error("Could not create the encrypted vault.");
+        return 0;
+    }
     begin_session(0);
     S.force_change = 0;
     recovery_generate();
@@ -768,6 +845,11 @@ int security_api_create_user(const char *name, int role, const char *pw)
     a->uid = uid + 1; a->role = (uint32_t)role; a->flags = SC_FLAG_MUSTCHANGE;
     a->iters = S.policy.iters;
     a->created = a->pw_changed = now_epoch();
+    if (!vault_rebind_password(norm, pw, a->iters)) {
+        memset(a, 0, sizeof(*a));
+        set_error("The encrypted vault is locked. Sign in before adding an account.");
+        return 0;
+    }
     rng_bytes(a->salt, sizeof(a->salt));
     derive(pw, a->salt, a->iters, a->hash);
     a->used = 1;
@@ -788,6 +870,7 @@ int security_api_delete_user(const char *name)
             !(S.users[i].flags & SC_FLAG_DISABLED)) admins++;
     if (!admins) { set_error("Cannot delete the last administrator."); return 0; }
     audit("user-deleted", S.users[idx].name);
+    vault_unbind(S.users[idx].name);
     for (int i = idx; i < S.count - 1; i++) S.users[i] = S.users[i+1];
     S.count--;
     memset(&S.users[S.count], 0, sizeof(S.users[0]));
@@ -878,7 +961,18 @@ int security_api_redeem_recovery(const char *code, const char *newpw, char *msg,
         if (S.users[i].role == SC_ROLE_ADMIN && !(S.users[i].flags & SC_FLAG_DISABLED))
             if (admin < 0 || S.users[i].uid < S.users[admin].uid) admin = i;
     if (admin < 0) { sc_copy(msg, cap, "No enabled administrator to recover."); return 0; }
+    /* The one-time code also unwraps the volume key; without this step a
+     * recovery would reset the password and destroy access to saved data. */
+    if (!vault_unlock_recovery(code, msg, cap)) {
+        record_failure(-1, "recovery-vault-failed");
+        return 0;
+    }
+    if (vault_image_pending() && !fs_image_unlock_apply()) {
+        sc_copy(msg, cap, "The encrypted vault did not authenticate. Saved data was withheld.");
+        return 0;
+    }
     if (!security_api_change_password(admin, 0, newpw, 0, msg, cap)) return 0;
+    vault_forget_recovery();
     S.rec_valid = 0;
     S.rec_code[0] = 0;
     memset(S.rec_salt, 0, sizeof(S.rec_salt));
@@ -938,6 +1032,16 @@ void security_api_build_hint(char *out, size_t cap)
     sc_cat(out, cap, " Passwords are never displayed.");
 }
 
+int security_vault_status(char *out, size_t cap)
+{
+    if (!vault_disk_present()) return 0;
+    sc_copy(out, cap, "disk vault: ");
+    sc_cat(out, cap, vault_image_pending() ? "locked (encrypted tree withheld)" :
+           vault_unlocked() ? "unlocked (AES-256-CTR + HMAC-SHA256)" :
+           "volume key not held");
+    return 1;
+}
+
 const char *security_current_user(void) { return security_api_session_name(); }
 
 int security_is_admin(void)
@@ -976,6 +1080,9 @@ void security_init(int have_disk)
         klog_raw(S.corrupt ? "security: account database rejected; first-run setup required"
                            : "security: no account database; first-run setup required");
     }
+    /* The header's audit log is AEAD-authenticated; load it before adding the
+     * boot event so history survives a reboot and cannot be silently reset. */
+    audit_file_load();
     audit("boot", S.db_loaded ? "accounts loaded" : "first-run setup required");
     audit_file_sync();
 }
@@ -1141,10 +1248,16 @@ int security_command_allowed(const char *line, char *out, size_t cap)
         "save", "shutdown", "poweroff", "reboot", "panic", "sysrq",
         "appuninstall", "make", 0
     };
-    static const char *const guest_deny[] = {
-        "touch", "mkdir", "cp", "mv", "rm", "edit", "nano", "save", "appstrt",
-        "appuninstall", "alias", "kill", "sysrq", "panic", "shutdown", "poweroff",
-        "reboot", "theme", "tty", 0
+    /* Default-deny for guests.  A deny-list silently grants every command a
+     * future update adds; an allow-list grants only commands known to be
+     * read-only (or already protected by their own admin check). */
+    static const char *const guest_allow[] = {
+        "help", "ls", "dir", "tree", "cat", "head", "wc", "grep", "hexdump",
+        "dump", "pwd", "cd", "date", "time", "version", "neofetch", "sysinfo",
+        "scinfo", "graphics", "dmesg", "klog", "free", "cpu", "uptime", "df",
+        "disks", "procs", "history", "clear", "echo", "cal", "calc", "about",
+        "whoami", "id", "security", "users", "audit", "policy", "passwd",
+        "lock", "logout", "su", "reauth", 0
     };
     char cmd[64], arg[64];
     int role, n;
@@ -1163,8 +1276,8 @@ int security_command_allowed(const char *line, char *out, size_t cap)
     role = (int)S.users[S.session].role;
     n = first_tokens(line, cmd, sizeof(cmd), arg, sizeof(arg));
     if (!n) return 1;
-    if (role == SC_ROLE_GUEST && in_list(cmd, guest_deny)) {
-        sc_copy(out, cap, "Permission denied: the guest account is read-only. "
+    if (role == SC_ROLE_GUEST && !in_list(cmd, guest_allow)) {
+        sc_copy(out, cap, "Permission denied: the guest command allow-list is read-only. "
                           "Ask an administrator for a standard account.");
         return 0;
     }
@@ -1219,6 +1332,12 @@ static void shell_status(struct outbuf *b)
     ob_num(b, S.policy.iters); ob(b, " iterations (per-record)\n");
     ob(b, "  integrity      : SHA-256 database checksum + previous-good backup");
     ob(b, S.corrupt ? " (setup/repair was needed)\n" : "\n");
+    ob(b, "  disk vault     : ");
+    if (!vault_disk_present()) ob(b, "none (RAM-only machine)\n");
+    else if (vault_image_pending()) ob(b, "LOCKED - encrypted tree withheld until sign-in\n");
+    else if (vault_unlocked()) ob(b, "unlocked; AES-256-CTR + HMAC-SHA256, wrapped VEK per user\n");
+    else ob(b, "volume key not held (sign in to unlock)\n");
+    ob(b, "  boot chain     : RSA-2048/SHA-256 signed manifest verified by the UEFI stub\n");
     ob(b, "  auto-lock      : ");
     if (S.policy.idle_minutes) { ob_num(b, S.policy.idle_minutes); ob(b, " minutes idle\n"); }
     else ob(b, "disabled\n");
@@ -1226,8 +1345,8 @@ static void shell_status(struct outbuf *b)
     ob(b, " failures, "); ob_num(b, S.policy.lock_base); ob(b, "s to ");
     ob_num(b, S.policy.lock_max); ob(b, "s\n");
     ob(b, "  recovery code  : "); ob(b, S.rec_valid ? "active (one use)" : "not active"); ob(b, "\n");
-    ob(b, "  scope          : console authentication only; no process isolation, ");
-    ob(b, "signed boot or disk encryption. See docs/migration/SECURITY.md.\n");
+    ob(b, "  scope          : console authentication, signed boot chain and disk ");
+    ob(b, "encryption; still no process isolation. See docs/migration/SECURITY.md.\n");
 }
 
 static void shell_users(struct outbuf *b)

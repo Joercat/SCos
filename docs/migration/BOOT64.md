@@ -49,10 +49,17 @@ or linked by this build. Protocol fields and pixel words legitimately remain
   at LBA 2048, and FAT32 with mirrored FATs, backup BPB and FSInfo. There is no
   executable BIOS loader in the protective MBR. FAT BPB jump bytes are filesystem
   format metadata, not an alternative OS boot path.
-* The ESP contains `EFI/BOOT/BOOTX64.EFI`, `SCOS/KERNEL.ELF` and a four-byte
-  little-endian CRC32 in `SCOS/KERNEL.CRC`. Firmware handles filesystem/device
-  access before exit; this does not port a filesystem or USB storage driver into
-  the kernel. Files are opened read-only on the loaded application's own volume.
+* The ESP contains `EFI/BOOT/BOOTX64.EFI`, `SCOS/KERNEL.ELF`, a four-byte
+  little-endian CRC32 in `SCOS/KERNEL.CRC`, `SCOS/DRVLIST.IDX`,
+  `SCOS/BUILD.TXT`, one `.MOD` per GPU family, and `SCOS/BOOT.SIG` — an
+  RSA-2048 signature plus a manifest naming every executable/security file and
+  its SHA-256. Before parsing the ELF the loader verifies that signature against
+  the public modulus compiled into itself (`boot/uefi/trust_anchor.h`) and
+  re-hashes every listed file. A module not named by the manifest is never
+  staged. Firmware handles filesystem/device access before exit; this does not
+  port a filesystem or USB storage driver into the kernel. Files are opened
+  read-only on the loaded application's own volume. See
+  [the security design](SECURITY.md) for key rotation and limitations.
 
 The host packager checks PE architecture/subsystem, header and section bounds,
 entry, permissions, relocation blocks and absence of real Windows imports. It
@@ -60,7 +67,11 @@ also checks ELF architecture/type, bounded program headers, load spans, page
 separation, permissions and entry. The loader independently validates the runtime
 ELF and its relocation contract. Image construction uses no host disk device,
 mount, partitioning utility or root privileges; validated output is replaced
-atomically. CRC is accidental-corruption detection, **not authentication**.
+atomically. CRC32 is accidental-corruption detection, **not authentication** —
+the RSA-signed SHA-256 manifest is the authenticity check. `tools/scos_keys.py`
+generates/verifies the RSA-2048 trust anchor; `tools/scos_sign.py` signs the
+manifest at pack time; `tools/check_delivery.py` treats `keys/` and the signing
+tools as image inputs.
 
 Tested toolchain: host GCC 12.2.0 / GNU binutils 2.40. A dedicated cross-toolchain
 is not claimed. The host QEMU bundle already includes x64 EDK2; no additional
@@ -264,9 +275,13 @@ orphan, validates PE section RVAs and dynamically allocates/relocates the kernel
 
 Temporary harnesses, mutated images and screenshots are retired after recording
 results. Legitimate build/packaging/QEMU tools remain. No physical i5-11400,
-motherboard, USB controller or dedicated-GPU boot has been verified. Secure Boot
-is not implemented; the image is unsigned. Firmware/GOP requirements, bounded
-resources and platform IRQ requirements are real limitations, not hidden behind
+motherboard, USB controller or dedicated-GPU boot has been verified. Firmware
+**Secure Boot enrolment is not implemented**: the payload chain is signed, but
+the loader that holds the public key is authenticated by firmware only if the
+machine owner enrols it. The shipped development signing key is public in the
+repository, so its signature proves integrity, not publisher identity; rotate
+the key before a real deployment. Firmware/GOP requirements, bounded resources
+and platform IRQ requirements are real limitations, not hidden behind
 “fully working OS” language.
 
 ## Published development artifact

@@ -1,17 +1,19 @@
-/* SCos account, authentication and access-control subsystem.
+/* SCos security: accounts, access control, AES/AEAD, encrypted vault.
  *
  * This header is deliberately freestanding: sec_core.c (SHA-256, HMAC,
- * PBKDF2, policy, record codec) includes only this file and can be compiled
- * and tested on the host.  Everything below the "kernel services" divider is
- * implemented by security.c / login.c and needs scos.h at the call site.
+ * PBKDF2, policy, record codec) and sec_aes.c include only this file and can
+ * be compiled on the host, in the kernel and in the UEFI stub.  Everything
+ * below the "kernel services" divider is implemented by security.c / login.c /
+ * sec_vault.c and needs scos.h at the call site.
  *
- * Threat model and limitations are documented in docs/migration/SECURITY.md.
- * In particular: this is a cooperative, single-address-space kernel with no
- * ring-3 isolation, no signed boot and no encrypted disk.  This subsystem
- * protects the interactive console against unauthenticated use and against
- * casual inspection of credentials; it is not a sandbox and cannot defend
- * against someone who can replace the boot image or attach a hardware
- * debugger.  Nothing in this file pretends otherwise.
+ * Full security adds an RSA-2048 signed boot chain (verified by the UEFI stub)
+ * and an AES-256-CTR / HMAC-SHA256 encrypted filesystem vault whose volume key
+ * is wrapped per account.  SCos remains a cooperative, single-address-space
+ * kernel with NO ring-3 isolation, no TPM/rollback protection and no firmware
+ * Secure Boot enrolment; the shipped development signing key is public.  This
+ * is not a sandbox and cannot defend against a hardware debugger or an
+ * attacker who can replace the unauthenticated EFI loader itself.  See
+ * docs/migration/SECURITY.md before treating any of it as a stronger boundary.
  */
 #ifndef SCOS_SECURITY_H
 #define SCOS_SECURITY_H
@@ -81,6 +83,33 @@ void sc_hmac_hash(const void *key, size_t keylen, const void *msg, size_t mlen,
 void sc_pbkdf2(const void *pw, size_t pwlen,
                const uint8_t *salt, size_t saltlen,
                uint32_t iterations, uint8_t out[SC_HASH_BYTES]);
+/* General PBKDF2 with a caller-chosen number of 32-byte output blocks.
+ * Block 1 is byte-for-byte what sc_pbkdf2 returns; block 2 is the key-
+ * encryption key used to wrap the disk volume key, so a password produces a
+ * verifier and a wrapping key without ever storing either. */
+void sc_pbkdf2_blocks(const void *pw, size_t pwlen,
+                      const uint8_t *salt, size_t saltlen,
+                      uint32_t iterations, uint32_t blocks, uint8_t *out);
+
+/* ----------------------------------------------------------------- AES ---- */
+void sc_aes256_encrypt_block(const uint8_t key[32], const uint8_t in[16], uint8_t out[16]);
+void sc_aes256_ctr(const uint8_t key[32], const uint8_t iv[16],
+                   uint8_t *out, const uint8_t *in, size_t len);
+/* Encrypt-then-MAC.  Encryption and MAC subkeys are derived from `key' with
+ * distinct labels.  `tag' is a full 32-byte HMAC-SHA256. */
+void sc_aead_seal(const uint8_t key[32], const uint8_t iv[16],
+                  const uint8_t *ad, size_t adlen,
+                  const uint8_t *pt, size_t ptlen,
+                  uint8_t *ct, uint8_t tag[32]);
+int  sc_aead_open(const uint8_t key[32], const uint8_t iv[16],
+                  const uint8_t *ad, size_t adlen,
+                  const uint8_t *ct, size_t ctlen,
+                  uint8_t *pt, const uint8_t tag[32]);
+/* 48-byte wrapped volume key = 32-byte CTR ciphertext + 16-byte HMAC tag. */
+void sc_vek_wrap(const uint8_t kek[32], const uint8_t nonce[16],
+                 const uint8_t vek[32], uint8_t wrapped[48]);
+int  sc_vek_unwrap(const uint8_t kek[32], const uint8_t nonce[16],
+                   const uint8_t wrapped[48], uint8_t vek[32]);
 
 /* Constant-work comparison and best-effort scrubbing of secret buffers. */
 int  sc_ct_eq(const void *a, const void *b, size_t n);
@@ -94,6 +123,64 @@ int  sc_unhex(uint8_t *out, size_t cap, const char *in, size_t hexchars);
  * is NOT a MAC (there is no secret on an unsigned boot medium). */
 void sc_db_digest(const char *body, size_t len, char out[65]);
 int  sc_db_verify(const char *data, size_t len);
+
+/* ------------------------------------------------------- encrypted vault --- */
+/* The ATA data partition holds one 128 KiB image: a 64-sector authenticated
+ * metadata header followed by an AES-256-CTR/HMAC-SHA256 encrypted FS2 tree.
+ * The header is the AEAD's associated data, so *any* edit to a key slot, the
+ * account database or the audit log invalidates the tag and is detected when
+ * the vault is unlocked.  The header is deliberately cleartext: it must be
+ * readable before anybody has typed a password.  It contains no plaintext
+ * secrets - only salts, PBKDF2 verifiers and password-wrapped volume keys.
+ *
+ * One random 256-bit volume encryption key (VEK) encrypts the whole image.
+ * Each account (and the one-time recovery code) has a slot holding that VEK
+ * wrapped under the second PBKDF2 block of its password.  Block 1 remains the
+ * login verifier, so the same password authenticates and unwraps the disk
+ * without ever being stored.  Changing a password re-wraps the VEK.
+ */
+#define SC_VEK_BYTES        32
+#define SC_VEK_WRAP_BYTES   48
+#define SC_VAULT_SLOTS      18      /* 16 accounts + recovery + spare */
+#define SC_VAULT_SLOT_BYTES 160
+#define SC_VAULT_SLOT_OFF   96
+#define SC_VAULT_DB_OFF     (SC_VAULT_SLOT_OFF + SC_VAULT_SLOTS * SC_VAULT_SLOT_BYTES)
+#define SC_VAULT_AUDIT_OFF  (SC_VAULT_DB_OFF + SC_DB_MAX)
+#define SC_VAULT_TAG_OFF    32736
+#define SC_VAULT_HDR_BYTES  32768   /* 64 sectors */
+#define SC_VAULT_IMAGE_BYTES 131072 /* 256 sectors; must match ata.c */
+#define SC_VAULT_PAYLOAD    (SC_VAULT_IMAGE_BYTES - SC_VAULT_HDR_BYTES)
+#define SC_VAULT_MAGIC      "SCOSVAUL"  /* 8 bytes; byte 8..11 is the format version */
+#define SC_VAULT_VERSION    1u
+#define SC_VAULT_SLOT_USED      1u
+#define SC_VAULT_SLOT_RECOVERY  2u
+#define SC_VAULT_FLAG_SEALED    1u
+
+void security_random_bytes(void *out, size_t n);   /* audited entropy pool */
+int  security_vault_status(char *out, size_t cap);
+
+int  vault_disk_present(void);
+int  vault_unlocked(void);
+void vault_lock(void);                 /* burn the VEK (logout / explicit lock) */
+void vault_reset(void);                /* first-run setup discards an unreadable vault */
+int  vault_header_valid(void);
+int  vault_image_pending(void);
+void vault_mark_applied(void);
+uint32_t vault_db_len(void);
+uint32_t vault_audit_len(void);
+int  vault_stage(const uint8_t *image, uint32_t len);   /* pre-auth: parse + bound-check */
+int  vault_open(uint8_t *image, uint32_t len);          /* post-auth: verify tag, decrypt in place */
+int  vault_seal(uint8_t *image, uint32_t len);          /* build header + encrypt in place */
+void vault_set_db(const char *data, uint32_t len);
+void vault_set_audit(const char *data, uint32_t len);
+int  vault_unlock_password(const char *name, const char *pw, uint32_t iters,
+                           char *msg, size_t cap);
+int  vault_unlock_recovery(const char *code, char *msg, size_t cap);
+int  vault_rebind_password(const char *name, const char *pw, uint32_t iters);
+int  vault_unbind(const char *name);
+int  vault_bind_recovery(const char *code, uint32_t iters);
+void vault_forget_recovery(void);
+int  fs_image_unlock_apply(void);     /* ata.c: apply a staged encrypted image */
 
 /* ----------------------------------------------------------------- policy --- */
 struct sc_policy {

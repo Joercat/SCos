@@ -61,9 +61,11 @@ class Guest:
         d.write(self.scratch,self.TEST_USER+b'\0')
         d.write(self.scratch+64,self.TEST_PASSWORD+b'\0')
         d.write(self.scratch+128,self.TEST_PASSWORD+b'\0')
-        if self.call('security_api_authenticate',self.scratch,self.scratch+64,0,0):return
+        d.write(self.scratch+256,b'\0'*192)
+        if self.call('security_api_authenticate',self.scratch,self.scratch+64,self.scratch+256,192):return
+        reason=self.string(self.scratch+256,192) or self.string(self.call('security_api_last_error'),192)
         assert self.call('security_create_admin',self.scratch,self.scratch+64,self.scratch+128),\
-            'the production first-run setup API refused the test account: %s'%self.serial()[-2000:]
+            'the production sign-in/setup API refused the test account (%s): %s'%(reason,self.serial()[-2000:])
     def connect(self,wm_baseline=0):
         self._wait(self.AUTH_MARKER,getattr(self,'_auth_marker',0))
         self.base=int(re.findall(r'Kernel physical span: (0x[0-9a-f]+)',self.serial())[-1],16)

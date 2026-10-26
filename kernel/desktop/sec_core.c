@@ -247,30 +247,45 @@ void sc_hmac_hash(const void *key, size_t keylen, const void *msg, size_t mlen,
     sc_burn(&c, sizeof(c));
 }
 
+void sc_pbkdf2_blocks(const void *pw, size_t pwlen,
+                      const uint8_t *salt, size_t saltlen,
+                      uint32_t iterations, uint32_t blocks, uint8_t *out)
+{
+    sc_hmac base, round;
+    uint8_t u[SC_HASH_BYTES], acc[SC_HASH_BYTES], counter[4];
+    uint32_t block, i;
+    if (!iterations) iterations = 1;
+    if (!blocks || !out) return;
+    sc_hmac_init(&base, pw, pwlen);
+    for (block = 1; block <= blocks; block++) {
+        counter[0] = (uint8_t)(block >> 24);
+        counter[1] = (uint8_t)(block >> 16);
+        counter[2] = (uint8_t)(block >> 8);
+        counter[3] = (uint8_t)block;
+        round = base;
+        sc_hmac_update(&round, salt, saltlen);
+        sc_hmac_update(&round, counter, 4);
+        sc_hmac_final(&round, u);
+        for (i = 0; i < SC_HASH_BYTES; i++) acc[i] = u[i];
+        for (i = 1; i < iterations; i++) {
+            unsigned j;
+            round = base;
+            sc_hmac_update(&round, u, SC_HASH_BYTES);
+            sc_hmac_final(&round, u);
+            for (j = 0; j < SC_HASH_BYTES; j++) acc[j] ^= u[j];
+        }
+        for (i = 0; i < SC_HASH_BYTES; i++)
+            out[(block - 1) * SC_HASH_BYTES + i] = acc[i];
+    }
+    sc_burn(&base, sizeof(base)); sc_burn(&round, sizeof(round));
+    sc_burn(u, sizeof(u)); sc_burn(acc, sizeof(acc));
+}
+
 void sc_pbkdf2(const void *pw, size_t pwlen,
                const uint8_t *salt, size_t saltlen,
                uint32_t iterations, uint8_t out[SC_HASH_BYTES])
 {
-    sc_hmac base, round;
-    uint8_t u[SC_HASH_BYTES], acc[SC_HASH_BYTES], counter[4] = { 0, 0, 0, 1 };
-    uint32_t i;
-    if (!iterations) iterations = 1;
-    sc_hmac_init(&base, pw, pwlen);
-    round = base;
-    sc_hmac_update(&round, salt, saltlen);
-    sc_hmac_update(&round, counter, 4);
-    sc_hmac_final(&round, u);
-    for (i = 0; i < SC_HASH_BYTES; i++) acc[i] = u[i];
-    for (i = 1; i < iterations; i++) {
-        unsigned j;
-        round = base;
-        sc_hmac_update(&round, u, SC_HASH_BYTES);
-        sc_hmac_final(&round, u);
-        for (j = 0; j < SC_HASH_BYTES; j++) acc[j] ^= u[j];
-    }
-    for (i = 0; i < SC_HASH_BYTES; i++) out[i] = acc[i];
-    sc_burn(&base, sizeof(base)); sc_burn(&round, sizeof(round));
-    sc_burn(u, sizeof(u)); sc_burn(acc, sizeof(acc));
+    sc_pbkdf2_blocks(pw, pwlen, salt, saltlen, iterations, 1, out);
 }
 
 int sc_ct_eq(const void *a, const void *b, size_t n)
@@ -358,10 +373,12 @@ int sc_db_verify(const char *data, size_t len)
 /* ---------------------------------------------------------------- policy --- */
 void sc_policy_default(struct sc_policy *p)
 {
-    p->min_len = 12; p->min_classes = 3; p->min_bits = 40;
+    /* Hardened defaults for full-security builds.  Existing databases keep
+     * their own recorded values, so tightening these never locks anyone out. */
+    p->min_len = 12; p->min_classes = 3; p->min_bits = 50;
     p->max_fails = 5; p->lock_base = 30; p->lock_max = 900;
-    p->idle_minutes = 15; p->max_age_days = 0; p->history = 5;
-    p->iters = 100000;
+    p->idle_minutes = 10; p->max_age_days = 90; p->history = 5;
+    p->iters = 200000;
 }
 
 int sc_policy_valid(const struct sc_policy *p)

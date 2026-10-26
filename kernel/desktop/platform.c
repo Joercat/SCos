@@ -115,9 +115,9 @@ void desktop_start(const struct boot_framebuffer *fb){
     acpi_init();int drives=ata_init();
     strcpy(line,"ata: ");fmt_u32(number,(u32)drives);strcat(line,number);strcat(line," drive(s); ");strncat(line,fs_image_target(),70);
     boot_screen_step(line,52);
-    int loaded=fs_image_load();system_files_init(fs_image_available());
+    fs_image_load();system_files_init(fs_image_available());
     security_init(fs_image_available());
-    boot_screen_step(loaded?"fs: verified saved tree loaded":fs_image_available()?"fs: defaults active; verified save target available":"fs: RAM-only; no supported verified save target",62);
+    boot_screen_step(fs_image_status(),62);
     boot_screen_step("security: account database, password policy and audit log initialized",68);
     kbd_init();mouse_init();usb_init();
     input_status(line,sizeof(line));boot_screen_step(line,75);
@@ -133,5 +133,10 @@ void desktop_start(const struct boot_framebuffer *fb){
     while(timer_ticks<until){usb_poll_events();cpu_hlt();}
     klog_raw("desktop: SCos native/Lua apps active in x86-64; native PCI/USB/ATA/ACPI services initialized");
     security_login_gate();   /* no desktop input is accepted before authentication */
+    /* An encrypted vault replaces the VFS tree only at sign-in, so settings,
+     * custom themes, Lua apps and desktop pins must be reloaded from it once
+     * the volume key has been unwrapped.  On a RAM-only machine these calls
+     * simply re-read the same defaults. */
+    theme_load_from_settings();apps_register_all();wm_reload_saved_state();
     for(;;){wm_run();tty_run(0);}
 }
