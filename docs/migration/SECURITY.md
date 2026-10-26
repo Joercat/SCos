@@ -12,17 +12,21 @@ No Secure Boot, no signed boot, no firmware enrolment: boot verification is the
 same as a stock Linux PC without Secure Boot - none cryptographically, just a
 CRC32 that catches a damaged kernel file.
 
-A fresh machine signs in like Linux does, with one **normal** account:
+A fresh machine signs in like Linux does, with one account at the **highest
+permission level**:
 
 ```
 login: root
 Password: scos
 ```
 
-`root` is only a username here. There is **no special root account** and no
-privileged superuser: all accounts have identical permissions until the owner
-turns `roles.enabled` on. Change the default password with `passwd` as soon as
-you can (see §6).
+Every account has top permission by default - that is what "all accounts have
+the same permissions" means here. The shipped `root` is an ordinary account
+record with the `administrator` role, not a built-in uid-0 superuser; it can be
+renamed or deleted. Lower-power `user` and `guest` accounts can still be created
+explicitly (`useradd <name> user|guest`), and `choices set roles.enabled on`
+makes those role differences actually restrict anything. Change the default
+password with `passwd` as soon as you can (see §6).
 
 Read §2 before treating any of this as a boundary against a determined attacker.
 
@@ -97,10 +101,12 @@ check only. **Nothing verifies the boot files cryptographically, by design.**
   shown on the login console while it is active. It is a convenience for a
   first boot, not a secret; `passwd` clears the hint and re-wraps the vault
   key. `login.hint` can hide the hint.
-* **No privileged account.** `security_is_admin()` reports everybody as an
-  administrator while `roles.enabled` is off, because permission checks are
-  neutralized - this is not a hidden superuser, there is nothing to escalate
-  to. A real attacker with local code execution already owns ring 0.
+* **Everyone is an administrator by default.** With `roles.enabled` off,
+  `security_is_admin()` returns true for every signed-in account and the role
+  checks are skipped - that is deliberate, not a lower common denominator. The
+  base `root` account also carries the `administrator` role so it stays top
+  power when roles are enforced. There is no separate uid-0 superuser to
+  escalate to; all code is ring 0 anyway.
 * **Physical access wins.** A hardware debugger, JTAG/ICE, or the QEMU GDB stub
   used by tests can call any kernel function. The test harness calls the
   *production* setup/authentication entry points; there is no `#ifdef`
@@ -141,7 +147,7 @@ unlock. On RAM-only machines they are session-only, like accounts.
 | `isolation.prompt` | on | Ask how to launch an app the first time. |
 | `isolation.default` | **off** | Isolate apps by default when no per-app choice exists. Off by design: nothing is forced. |
 | `confirm.destructive` | on | Ask before destructive shell commands. |
-| `roles.enabled` | **off** | Enforce admin/user/guest privileges. Off = **all accounts have the same permissions** (`root` included). |
+| `roles.enabled` | **off** | Enforce admin/user/guest privileges. Off = **every account has top (administrator) permission**, whatever role its record stores. On = `user`/`guest` become lower-power as requested. |
 | `login.hint` | on | Show the `root` / `scos` hint on the console while default credentials are active. |
 
 Shell interface (Terminal and TTY, help text updated in both):
@@ -153,9 +159,8 @@ choices app <id> always|never|ask   change a per-app isolation choice (admin)
 choices default               restore all defaults (admin)
 ```
 
-A guest can *read* `choices`; only an administrator can change them. With
-`roles.enabled` off (the default) every account can change them, because all
-accounts have equal permissions. Changing
+With `roles.enabled` off (the default) every account is an administrator and can
+change `choices`. Turn roles on and a guest is limited to reading them. Changing
 `vault.encryption` from off to on while no volume key is held requires signing
 out and back in (that is when the password-derived key is created); the shell
 prints that hint. Turning it off writes a plain image immediately and keeps the
@@ -281,30 +286,37 @@ Related APIs: `security_app_isolation()`, `security_app_isolation_set()`,
 
 ## 6. Accounts, database and encrypted vault
 
-### Default account and equal permissions
+### Default account and top-level permissions
 
 On a machine with no account database, `security_init()` creates exactly one
-account: name `root`, password `scos`, role recorded as a plain user, uid 1000,
-no `SC_FLAG_MUSTCHANGE`. It is written through the normal checksummed database
-path and the vault volume key is wrapped to that password, so the encrypted
-filesystem works from the first sign-in. No recovery code is generated (there
-is no setup screen to display it); `security recovery` in the shell creates one
-later. The first-run setup console is still present as a fallback if the
-database is rejected, but a fresh boot no longer stops to ask you to invent a
-password.
+account: name `root`, password `scos`, **`SC_ROLE_ADMIN` (the highest role)**,
+uid 1000, no `SC_FLAG_MUSTCHANGE`. It is written through the normal checksummed
+database path and the vault volume key is wrapped to that password, so the
+encrypted filesystem works from the first sign-in. No recovery code is generated
+(there is no setup screen to display it); `security recovery` in the shell
+creates one later. The first-run setup console is still present as a fallback if
+the database is rejected, but a fresh boot no longer stops to ask you to invent
+a password.
 
-`root` is **not** a superuser. `security_is_admin()`,
+**All accounts have top permission.** `security_is_admin()`,
 `security_command_allowed()`, `security_write_denied()` and the account-shell
-guards consult `roles.enabled`; with it off (the default) all of them grant the
-same permissions to admin, user and guest accounts. Set
-`choices set roles.enabled on` to restore the old role distinctions. The
-`security` command prints `user (all accounts equal)` in this mode.
+guards consult `roles.enabled`; with it off (the default) every signed-in
+account - admin, user or guest - is treated as an administrator. `security` and
+`id` print `administrator (all accounts equal)`, and `users` says so explicitly.
+`useradd <name>` also defaults to `admin`; lower-power accounts are opt-in via
+`useradd <name> user|guest` (or `usermod --role`). `choices set roles.enabled on`
+is what makes those lower roles restrict anything - the role records are kept
+either way, so turning the switch on does not silently change account data.
+The "last administrator" guards only apply while roles are enforced.
 
-`passwd` clears `security_api_default_credentials()` (which is what removes the
-login hint), rebinds the vault key slot and adds the old password to history.
-Deleting the `root` account also clears the hint; no account is required to
-have that name. On a RAM-only machine the default account is recreated at every
-boot, just like the old first-run setup.
+`root` is an ordinary account record, not a built-in uid-0 superuser: there is
+no separate privileged account type, and the name can be changed or removed.
+`passwd` clears `security_api_default_credentials()` (which removes the login
+hint), rebinds the vault key slot and adds the old password to history. Deleting
+`root` also clears the hint. If the database is ever left with no administrator,
+`security_is_admin()` falls back to equal top permission rather than locking
+the owner out or rejecting the database. On a RAM-only machine the default
+account is recreated at every boot, just like the old first-run setup.
 
 The account database is unchanged from the first security phase: strict parsing,
 `SCos-accounts-v1` magic, `P|` policy, `R|` recovery, `U|` accounts, `C|`
@@ -344,7 +356,9 @@ keep their recorded values.
 
 Commands (Terminal and TTY): `whoami`, `id`, `security`, `passwd`, `users`,
 `useradd`, `userdel`, `usermod`, `policy`, `audit`, `lock`, `logout`, `su`,
-`reauth`, `recovery`, `choices`. Passwords are never command arguments.
+`reauth`, `recovery`, `choices`. `useradd <name>` defaults to the top
+(administrator) role; pass `user`, `guest` or `admin` as the second argument to
+choose explicitly. Passwords are never command arguments.
 
 ---
 
@@ -362,9 +376,10 @@ Commands (Terminal and TTY): `whoami`, `id`, `security`, `passwd`, `users`,
   proof that choices default on, actually change behaviour, survive a reboot,
   that `vault.encryption=off` writes a plain image, and that the WM shows the
   first-launch isolation prompt and stores the answer.
-* A real QEMU framebuffer screenshot of the setup console was captured and
-  inspected: black background, monospace text, masked fields, no panels or
-  desktop content behind it.
+* A real QEMU framebuffer screenshot of the tty login console
+  (`docs/migration/login-console.png`) was captured and inspected: black
+  background, monospace `scos login:` prompt, masked password, the default
+  credential hint, no panels or desktop content behind it.
 * Existing suites re-run: `test_textwrap`, `test_studio_edit`,
   `test_affordances`, `test_management`, `test_cat` (including ATA save/reboot),
   `test_compositor`, `test_memory`, `test_buildinfo`, `test_verify_stick`,
@@ -380,9 +395,9 @@ Commands (Terminal and TTY): `whoami`, `id`, `security`, `passwd`, `users`,
 Boot stops at the secure console before `wm: entering main loop`.
 `tools/tests/qemu_support.py` waits for `security: sign-in required`, then uses
 the existing GDB debug port to call the **production**
-`security_api_authenticate` / `security_create_admin` functions — exactly what
-the console calls — and resumes the CPU. `reboot()` waits for the marker and
-signs in again. No kernel-side test hook or compile-time bypass exists. The
+`security_api_authenticate` function with the shipped `root`/`scos` account —
+exactly what the console calls — and resumes the CPU. `reboot()` waits for the
+marker and signs in again. No kernel-side test hook or compile-time bypass exists. The
 harness additionally calls the **production** `security_choice_set()` to turn
 `isolation.prompt` off — the same opt-out a person has — so unrelated UI suites
 keep their original launch behaviour; `test_security.py` turns it back on and

@@ -99,13 +99,16 @@ def test_the_gate_and_protection_are_wired():
         'the per-app isolation flag is not honoured anywhere'
     assert 'int  isolated;' in (ROOT / 'kernel/include/scos.h').read_text()
     assert 'confirm.destructive' in (ROOT / 'kernel/desktop/confirm.c').read_text()
-    # Default account, equal permissions and a Linux-like TTY login prompt.
+    # Default account, top-level equal permissions and a Linux-like TTY login.
     assert 'SC_DEFAULT_USER "root"' in header and 'SC_DEFAULT_PASS "scos"' in header
+    assert 'SC_DEFAULT_ROLE SC_ROLE_ADMIN' in header
     account_src = (ROOT / 'kernel/desktop/security.c').read_text()
-    assert 'create_default_account' in account_src and 'a->role = SC_ROLE_USER' in account_src, \
-        'the default account is privileged again'
+    assert 'create_default_account' in account_src and 'a->role = SC_ROLE_ADMIN' in account_src, \
+        'the default account is not at the highest permission level'
+    assert 'int role = SC_ROLE_ADMIN;' in account_src, \
+        'new accounts no longer default to top permission'
     assert '!security_choice("roles.enabled")' in account_src, \
-        'accounts do not have equal permissions by default'
+        'accounts do not have equal top permissions by default'
     assert 'scos login' in loginui and 'SCos tty1' in loginui, \
         'the login prompt is not a plain Linux-style tty'
     assert 'roles.enabled' in choices and 'login.hint' in choices
@@ -152,10 +155,11 @@ def test_a_booted_guest_enforces_accounts():
         assert g.string(g.call('security_current_user'), 64) == 'root'
         assert g.call('security_api_default_credentials') == 1, \
             'the shipped root/scos default credentials were not provisioned'
-        assert g.call('security_is_admin') == 1       # equal permissions, not a superuser
+        assert g.call('security_is_admin') == 1       # top permission
         d.write(s, b'roles.enabled\0')
         assert g.call('security_choice', s) == 0, 'role privileges are forced on by default'
-        assert 'all accounts equal' in shell('security')[1]
+        assert 'administrator (all accounts equal)' in shell('security')[1]
+        assert 'administrator (all accounts equal)' in shell('id')[1]
 
         # A wrong password and an unknown user both fail with the same message.
         assert auth('root', b'wrong') == 0
@@ -198,6 +202,8 @@ def test_a_booted_guest_enforces_accounts():
         d.write(s + 16384, b'data\0')
         assert g.call('vfs_write', s + 8192, s + 16384, 4) == 0
         assert auth('root', p1) == 1
+        assert g.call('security_is_admin') == 1, \
+            'the base account is not top power when roles are enforced'
         d.write(s, b'roles.enabled\0')
         assert g.call('security_choice_set', s, 0) == 1
         assert allowed('save')[0] == 1, 'equal permissions do not apply to all commands'

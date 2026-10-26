@@ -908,7 +908,9 @@ int security_api_delete_user(const char *name)
     for (int i = 0; i < S.count; i++)
         if (i != idx && S.users[i].role == SC_ROLE_ADMIN &&
             !(S.users[i].flags & SC_FLAG_DISABLED)) admins++;
-    if (!admins) { set_error("Cannot delete the last administrator."); return 0; }
+    if (security_choice("roles.enabled") && !admins) {
+        set_error("Cannot delete the last administrator."); return 0;
+    }
     audit("user-deleted", S.users[idx].name);
     if (sc_eq(S.users[idx].name, SC_DEFAULT_USER)) S.default_pw = 0;
     vault_unbind(S.users[idx].name);
@@ -925,7 +927,8 @@ int security_api_set_role(const char *name, int role)
     int idx = find_user(name);
     if (idx < 0 || role < SC_ROLE_ADMIN || role > SC_ROLE_GUEST) return 0;
     if (!security_is_admin()) return 0;
-    if (S.users[idx].role == SC_ROLE_ADMIN && (uint32_t)role != SC_ROLE_ADMIN) {
+    if (security_choice("roles.enabled") &&
+        S.users[idx].role == SC_ROLE_ADMIN && (uint32_t)role != SC_ROLE_ADMIN) {
         int admins = 0;
         for (int i = 0; i < S.count; i++)
             if (i != idx && S.users[i].role == SC_ROLE_ADMIN &&
@@ -945,7 +948,8 @@ int security_api_set_disabled(const char *name, int disabled)
     int idx = find_user(name);
     if (idx < 0 || !security_is_admin()) return 0;
     if (idx == S.session && disabled) return 0;
-    if (disabled && S.users[idx].role == SC_ROLE_ADMIN) {
+    if (security_choice("roles.enabled") && disabled &&
+        S.users[idx].role == SC_ROLE_ADMIN) {
         int admins = 0;
         for (int i = 0; i < S.count; i++)
             if (i != idx && S.users[i].role == SC_ROLE_ADMIN &&
@@ -1127,7 +1131,7 @@ static void create_default_account(void)
     sc_copy(a->name, sizeof(a->name), SC_DEFAULT_USER);
     sc_copy(a->display, sizeof(a->display), SC_DEFAULT_USER);
     a->uid = 1000;
-    a->role = SC_ROLE_USER;              /* no special account */
+    a->role = SC_ROLE_ADMIN;             /* highest power, but still just an account record */
     a->flags = 0;
     a->iters = S.policy.iters;
     a->created = a->pw_changed = a->last_login = now_epoch();
@@ -1146,7 +1150,7 @@ static void create_default_account(void)
     }
     db_save();
     audit("default-account", "root/scos created; change it with passwd");
-    klog_raw("security: default account root/scos created (normal account)");
+    klog_raw("security: default account root/scos created (administrator)");
 }
 
 int security_api_default_credentials(void) { return S.default_pw; }
@@ -1456,7 +1460,7 @@ static void shell_status(struct outbuf *b)
     ob(b, "  signed in      : "); ob(b, security_api_session_name());
     ob(b, " (uid "); ob_num(b, a ? a->uid : 0); ob(b, ", ");
     ob(b, security_choice("roles.enabled") ? (a ? role_name(a->role) : "none")
-                                           : "user (all accounts equal)");
+                                           : "administrator (all accounts equal)");
     ob(b, ")\n");
     ob(b, "  session start  : epoch "); ob_num(b, S.session_epoch); ob(b, "\n");
     ob(b, "  accounts       : "); ob_num(b, (uint64_t)S.count);
@@ -1506,6 +1510,8 @@ static void shell_users(struct outbuf *b)
         ob(b, "   "); sc_fmt(n, sizeof(n), a->fails); ob(b, n);
         ob(b, i == S.session ? "  <- you\n" : "\n");
     }
+    if (!security_choice("roles.enabled"))
+        ob(b, "roles.enabled is off: every account has full administrator permissions.\n");
 }
 
 static void shell_policy(struct outbuf *b, int argc, char **argv)
@@ -1677,7 +1683,9 @@ int security_shell(const char *line, char *out, size_t cap)
         ob(&b, "uid=");
         ob_num(&b, S.session >= 0 ? S.users[S.session].uid : 0);
         ob(&b, "("); ob(&b, security_api_session_name()); ob(&b, ") role=");
-        ob(&b, S.session >= 0 ? role_name(S.users[S.session].role) : "none");
+        ob(&b, S.session < 0 ? "none" :
+           security_choice("roles.enabled") ? role_name(S.users[S.session].role) :
+           "administrator (all accounts equal)");
         ob(&b, " session=epoch "); ob_num(&b, S.session_epoch);
         return 1;
     }
@@ -1715,9 +1723,11 @@ int security_shell(const char *line, char *out, size_t cap)
         return 1;
     }
     if (sc_eq(args[0], "useradd")) {
-        int role = SC_ROLE_USER;
+        /* Same permission as the base account by default.  Lower-power roles
+         * are still available, explicitly, as the owner's choice. */
+        int role = SC_ROLE_ADMIN;
         if (argc < 2 || argc > 3 || !sc_username_valid(args[1])) {
-            ob(&b, "Usage: useradd <name> [admin|user|guest]"); return 1;
+            ob(&b, "Usage: useradd <name> [admin|user|guest]  (default: admin)"); return 1;
         }
         if (!security_is_admin()) { ob(&b, "Administrator rights required."); return 1; }
         if (argc == 3) {

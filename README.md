@@ -44,24 +44,27 @@ lock-screen app is shipped; `security_set_lock_screen()` is a documented API so
 you can write one. See [the security design](docs/migration/SECURITY.md).
 
 **Default account:** a fresh machine signs in with `root` / `scos` (shown on the
-console until you change it). This is a **normal account, not a privileged root
-account**: all accounts have the same permissions until the owner turns
-`roles.enabled` on. Run `passwd` to replace the weak default password.
+console until you change it). It has the **highest role (administrator)** and
+**every account has top-level permission** by default. There is no separate
+built-in superuser account — `root` is an ordinary, renameable account record.
+Run `passwd` to replace the weak default password.
 
 Accounts store only random 128-bit salts and PBKDF2-HMAC-SHA256 verifiers in
 `system/security/users.db`, with a SHA-256 checksum, a last-known-good backup
 and a bounded audit ring. Roles (administrator, standard user, read-only guest)
-are only enforced if `roles.enabled` is on; by default permission checks are
-neutralized and everyone is equal. Passwords never appear in command arguments,
-history, scrollback or logs.
+are only enforced if `roles.enabled` is on; by default all accounts are treated
+as administrators. `useradd <name>` creates an administrator too; lower-power
+accounts are an explicit choice (`useradd <name> user|guest`). Passwords never
+appear in command arguments, history, scrollback or logs.
 
 **User choices:** `choices` in Terminal or TTY lists 16 switches; `choices set
 <key> on|off` changes one; `choices default` restores defaults. They
 control `login.required`, `lock.enabled`, `lock.idle`, `password.policy`,
 `password.history`, `password.age`, `lockout`, `guest.restrict`, `audit.enabled`,
 `vault.encryption`, `recovery.enabled`, `isolation.prompt`, `isolation.default`
-and `confirm.destructive`, plus `roles.enabled` (off = equal permissions) and
-`login.hint` (the default-credential hint). Choices are persisted in the AEAD-authenticated
+and `confirm.destructive`, plus `roles.enabled` (off = everyone has top
+permission, on = lower-power roles are enforced) and `login.hint` (the
+default-credential hint). Choices are persisted in the AEAD-authenticated
 vault header, so they survive reboot and an offline edit is detected. A
 Settings app can be built on `security_choice*()` in `security.h` — no app is
 shipped, by design.

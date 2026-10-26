@@ -314,8 +314,13 @@ int  security_api_persistent(void);
 /* True while the shipped default account still uses its initial password.
  * The console may show a hint; `passwd` clears it. */
 int  security_api_default_credentials(void);
+/* The shipped account has the HIGHEST role.  It is still an ordinary,
+ * renameable/deletable account record - not a built-in uid-0 superuser.
+ * `roles.enabled` (off by default) gives EVERY account top permission;
+ * turning it on makes the admin/user/guest distinctions effective. */
 #define SC_DEFAULT_USER "root"
 #define SC_DEFAULT_PASS "scos"
+#define SC_DEFAULT_ROLE SC_ROLE_ADMIN
 int  security_api_denied(void);
 uint32_t security_api_deny_remaining(void);
 int  security_api_verify(int idx, const char *pw, char *msg, size_t cap);

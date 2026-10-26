@@ -23,8 +23,9 @@ at rest, explicitly **not** the ring-3 isolation described as future work in the
 table below. Boot verification / Secure Boot was deliberately left out at the
 owner's request - like Linux without Secure Boot, only a CRC32 integrity check
 remains. A TPM and rollback protection are also out of scope. The shipped
-default login is the normal account `root` / `scos` with no special privileges;
-all accounts have equal permissions unless `roles.enabled` is turned on.
+default login is `root` / `scos`, an ordinary account with the highest role; all
+accounts have top-level permission unless `roles.enabled` is turned on to
+enforce lower-power user/guest roles.
 
 ## Baseline and boundaries
 
