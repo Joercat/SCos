@@ -60,6 +60,14 @@
 #define NV_PFSP_UCODE_VERSION          0x008f0334u  /* SCRATCH_GROUP_3(1), 11:0 */
 #define NV_PFSP_FUSE_ERROR_CHECK       0x008f033cu  /* SCRATCH_GROUP_3(3), 0 = passed */
 #define NV_PGSP_HWCFG2                 0x001100f4u  /* NV_PGSP base 0x110000 + NV_PFALCON_FALCON_HWCFG2 */
+#define NV_PGSP_MAILBOX0               0x00110040u  /* NV_PFALCON_FALCON_MAILBOX0: the FMC's own report */
+#define NV_PGSP_MAILBOX1               0x00110044u  /* and its partner: together they hold a 64-bit address */
+#define FSP_HWCFG2_LOCKDOWN_BIT                  13u /* NV_PFALCON_FALCON_HWCFG2_RISCV_BR_PRIV_LOCKDOWN 13:13,
+                                                       * LOCK=1 UNLOCK=0, from nvhw/ref/gh100/dev_falcon_v4.h */
+#define FSP_BOOT_COMPLETE_SUCCESS    0x000000ffu    /* NV_THERM_I2CS_SCRATCH_FSP_BOOT_COMPLETE_STATUS_SUCCESS:
+                                                       * a 32-bit compare, not a low-byte one, and FAILED is 0 */
+#define FSP_BOOT_COMPLETE_FAILED     0x00000000u
+#define FSP_PMC_BOOT_0                        0x0u  /* the first dword of the aperture, inside the VF window */
 #define FSP_EMEM_CHANNEL_BYTES            1024u
 #define FSP_EMEM_DWORDS_PER_BLOCK           64u      /* so an offset is a block number and a dword within it */
 #define FSP_REFUSED(v)                   (((v) & 0xffffff00u) == 0xbadf4100u)
@@ -70,6 +78,16 @@
  * this test everywhere a value could otherwise be read as content by accident. */
 #define FSP_NOT_CONTENT(v)               (((v) & 0xffff0000u) == 0xbadf0000u)
 #define FSP_HEADER_BYTES                    8u      /* the MCTP transport dword and the NVDM dword */
+#define FSP_WAIT_REPLY_MS                1500u       /* the reference driver gives a reply `int time = 1000'
+                                                       * iterations of usleep_range(1000, 2000) - about a
+                                                       * second and a half - and four seconds to the FSP's own
+                                                       * boot (`unsigned timeout_ms = 4000' in wait_secure_boot
+                                                       * and in the lockdown wait).  Those are the numbers a
+                                                       * chip that works is timed against; a bound expressed as
+                                                       * a count of uncached reads comes out tens of times too
+                                                       * small, and prints "silent" about a device that was
+                                                       * still on its way. */
+#define FSP_WAIT_BOOT_MS                 4000u
 #define FSP_POLL_LIMIT                 200000u       /* looks at a pair of registers, and on the reply wait a
                                                          * TSC deadline on top of them: an MMIO read dominates
                                                          * either bound, so both are counts of work rather
@@ -285,20 +303,86 @@ static int reply_waiting(void)
  * waits for the order of tens of milliseconds, bounded by the count of reads below and by the cycle counter,
  * whichever expires first.  Both counts are reported, because "it did not answer in time" is only a fact once
  * a reader can see how much time that was. */
-static int wait_for(int (*condition)(void), int *count)
+static int read_ptimer(uint32_t *nanoseconds);
+
+/* The PTIMER is the only clock in this OS that the device itself is keeping, and NV_PTIMER counts 32 ns
+ * steps, so it is what the cycle counter gets timed against once here: without that ratio a wait can be
+ * counted in reads but not promised in milliseconds, and a bound nobody can state is a bound nobody can
+ * check afterwards.  `wait_clocked' says which of the two happened. */
+static void measure_tick_rate(void)
 {
-    uint64_t deadline = fsp_ticks() + 50000000ull;
+    uint32_t first = 0, last = 0;
+    uint64_t t0 = fsp_ticks(), t1;
+    uint64_t ns;
+
+    if (!read_ptimer(&first)) return;
+    for (volatile int spin = 0; spin < 8192; spin++) __asm__ volatile("pause");
+    if (!read_ptimer(&last)) return;
+    t1 = fsp_ticks();
+    if (last == first || t1 <= t0) return;
+    ns = (uint64_t)(uint32_t)(last - first) * 32ull;
+    if (!ns) return;
+    fsp_state.ticks_per_ms = (uint32_t)(((t1 - t0) * 1000000ull) / ns / 1000ull);
+    fsp_state.wait_clocked = fsp_state.ticks_per_ms != 0;
+}
+
+static uint64_t waited_ms(uint64_t start)
+{
+    if (!fsp_state.ticks_per_ms) return 0;
+    return (fsp_ticks() - start) / fsp_state.ticks_per_ms;
+}
+
+static int wait_for_timed(int (*condition)(void), int *count, uint32_t budget_ms, uint64_t *ms_used)
+{
+    uint64_t start = fsp_ticks();
+    uint64_t deadline = fsp_state.ticks_per_ms
+        ? start + (uint64_t)budget_ms * fsp_state.ticks_per_ms : 0;
+    int hit = 0;
+
     for (unsigned i = 0; i < FSP_POLL_LIMIT; i++) {
         (*count)++;                                     /* every wait says how long it took, because "it did not
                                                            * answer" is only a fact once the reader can see what
                                                            * was waited on and for how long; `polled'
                                                            * above for the send, because they are two different
                                                            * waits and one number would be either vague or wrong */
-        if (condition()) return 1;
-        if (fsp_ticks() > deadline) return 0;
+        if (condition()) { hit = 1; break; }
+        if (deadline && fsp_ticks() > deadline) break;
+        if (!deadline && i >= FSP_POLL_LIMIT / 4u) break;   /* no clock: the read count is the bound, and the
+                                                                * panel says the wait was bounded that way */
         for (volatile int spin = 0; spin < 32; spin++) __asm__ volatile("pause");
     }
-    return 0;
+    if (ms_used) *ms_used = waited_ms(start);
+    return hit;
+}
+
+static int wait_for(int (*condition)(void), int *count)
+{
+    fsp_state.reply_ms = FSP_WAIT_REPLY_MS;       /* the budget the wait was given, printed beside the time it
+                                                     * took: "it did not answer" is only a measurement once a
+                                                     * reader can see what it was waited against */
+    return wait_for_timed(condition, count, FSP_WAIT_REPLY_MS, &fsp_state.reply_ms_used);
+}
+
+/* The reference driver's own readiness test (gh100_gsp_lockdown_released): a pair of all-ones or a refusal is
+ * no answer, the low byte of the therm scratch is compared as a whole dword against SUCCESS, and the
+ * coprocessor is reachable once bit 13 of its capability word reads UNLOCK. */
+static int boot_ready(void)
+{
+    fsp_state.boot_scratch = read32(&w_therm, NV_THERM_FSP_BOOT_COMPLETE);
+    if (FSP_REFUSED(fsp_state.boot_scratch) || fsp_state.boot_scratch == 0xffffffffu) return 1;
+    return fsp_state.boot_scratch == FSP_BOOT_COMPLETE_SUCCESS;
+}
+
+static int lockdown_now(void)
+{
+    uint32_t hwcfg2;
+
+    if (!w_gsp.page) return -1;
+    hwcfg2 = read32(&w_gsp, NV_PGSP_HWCFG2);
+    fsp_state.hwcfg2 = hwcfg2;
+    fsp_state.gsp_readable = !FSP_REFUSED(hwcfg2) && !FSP_NOT_CONTENT(hwcfg2) && hwcfg2 != 0xffffffffu;
+    if (!fsp_state.gsp_readable) return -1;
+    return (int)((hwcfg2 >> FSP_HWCFG2_LOCKDOWN_BIT) & 1u);
 }
 
 /* One packet: the two header dwords and the payload, into the channel from offset 0, with the queue tail
@@ -369,11 +453,14 @@ static int read_reply(uint8_t *buffer, uint32_t capacity, struct gpu_fsp_reply *
      * write does: the packet came out of one register, and only the offset proves they were different dwords
      * of the channel rather than the same one read back five times. */
     reply->delta_ok = emem_offset_dwords() == size / 4u;
-    /* Acknowledge by pulling the tail up to the head, which is the FSP's cue that the channel is free
-     * again.  The head is written back unchanged because the reference driver writes both: a mailbox this
-     * unforgiving is not where saving one register write is worth the argument. */
-    write32(&w_fsp, NV_PFSP_MSGQ_TAIL, fsp_state.msgq_head);
-    write32(&w_fsp, NV_PFSP_MSGQ_HEAD, fsp_state.msgq_head);
+    /* Acknowledge by pulling *both* pointers to zero, which is what the driver that boots this family does
+     * (`nvkm_wr32(MSGQ_TAIL, 0); nvkm_wr32(MSGQ_HEAD, 0)' in gh100_fsp_recv) - not up to the head, which is
+     * how the other reference implementation leaves them.  The difference is invisible after one message and
+     * decisive after two: this kernel reads a reply out of channel offset 0, so the second message - the
+     * handover, right after the query - is only found there if the ring was restarted rather than left
+     * wherever the first one ended.  Two writes, and the ring is empty from both ends. */
+    write32(&w_fsp, NV_PFSP_MSGQ_TAIL, 0);
+    write32(&w_fsp, NV_PFSP_MSGQ_HEAD, 0);
 
     transport = load32(buffer);
     message = load32(buffer + 4);
@@ -437,6 +524,48 @@ static const char *flcn_name(uint32_t code)
  * preferences - the published payload has 12 words for a SHA-384, 96 for the key and 96 for the signature,
  * so an image whose sections are any other size cannot be described by this format, and saying so is the
  * whole point of checking before anything is sent. */
+/* The reference driver's per-generation FSP parameters, in its own words: `gh100_fsp' is
+ * { version 1, hash 48, public key 384, signature 384 } and both `gb100_fsp' and `gb202_fsp' are
+ * { version 2, hash 48, public key 97, signature 96 } (the three files nvkm/subdev/fsp/gh100.c, gb100.c and gb202.c, MIT).  There is no FSP entry for
+ * any other architecture there, which is the same statement as "that chip has no mailbox at these offsets":
+ * Turing, Ampere and Ada reach their coprocessor through the older ACR path, and poking the FSP page of a
+ * generation whose documentation does not define it is how a report gets a number nobody can interpret.
+ *
+ * `arch' here is read from the aperture rather than from a PCI id, because the sizes belong to the silicon.
+ * A chip that will not say (0, all ones, or a PRI error) leaves every size at zero and the handover
+ * unsendable: an unknown expectation is not a licence to assume one, and the panel prints the difference. */
+static void cot_parameters(void)
+{
+    uint32_t boot0 = read32(&w_vf, FSP_PMC_BOOT_0);
+
+    if (FSP_REFUSED(boot0) || FSP_NOT_CONTENT(boot0) || boot0 == 0 || boot0 == 0xffffffffu) {
+        fsp_state.arch_unknown = 1;
+        return;
+    }
+    fsp_state.arch = (boot0 >> 24) & 0x1fu;
+    fsp_state.cot_hash_bytes = 48u;
+    switch (fsp_state.arch) {
+    case 0x18u:                                           /* GH100 */
+        fsp_state.fsp_supported = 1;
+        fsp_state.cot_version = 1u;
+        fsp_state.cot_pkey_bytes = 384u;
+        fsp_state.cot_sig_bytes = 384u;
+        break;
+    case 0x1Au:                                           /* GB100: the GB10x chips */
+    case 0x1Bu:                                           /* GB200: the GB2xx chips, this card's family */
+        fsp_state.fsp_supported = 1;
+        fsp_state.cot_version = 2u;
+        fsp_state.cot_pkey_bytes = 97u;
+        fsp_state.cot_sig_bytes = 96u;
+        break;
+    default:
+        fsp_state.fsp_supported = 0;
+        fsp_state.cot_version = 0;
+        fsp_state.cot_hash_bytes = 0;
+        break;
+    }
+}
+
 static void stage_fmc(void)
 {
     const struct gpu_firmware_state *fws = gpu_firmware_state();
@@ -452,12 +581,13 @@ static void stage_fmc(void)
     fsp_state.fmc_seen = 1;
     if (!image->checksum_matches) { fsp_state.cot_defect = 7; return; }
     if (!image->fmc_named) { fsp_state.cot_defect = 8; return; }
-    if (image->hash_bytes != 48u) { fsp_state.cot_defect = 1; return; }
-    if (image->publickey_bytes != 384u) { fsp_state.cot_defect = 2; return; }
+    if (!fsp_state.fsp_supported) { fsp_state.cot_defect = fsp_state.arch_unknown ? 9 : 10; return; }
+    if (image->hash_bytes != fsp_state.cot_hash_bytes) { fsp_state.cot_defect = 1; return; }
+    if (image->publickey_bytes != fsp_state.cot_pkey_bytes) { fsp_state.cot_defect = 2; return; }
     /* The FMC image's own signature section, which is a different field from the resource manager image's:
      * the two files name their authentication data differently, and the handover wants the FMC's, because the
      * FMC is what the FSP verifies before it will load anything. */
-    if (image->fmc_signature_bytes != 384u) { fsp_state.cot_defect = 3; return; }
+    if (image->fmc_signature_bytes != fsp_state.cot_sig_bytes) { fsp_state.cot_defect = 3; return; }
     if (!image->image_bytes || image->image_bytes > FSP_IMAGE_MAX) { fsp_state.cot_defect = 4; return; }
     if (!image->fmc_sections) { fsp_state.cot_defect = 5; return; }
 
@@ -473,16 +603,26 @@ static void stage_fmc(void)
     fsp_state.staged = 1;                    /* address the FSP is given is the address it was written at */
 
     memset(fsp_state.payload, 0, sizeof fsp_state.payload);
-    store16(fsp_state.payload + COT_OFF_VERSION, COT_PAYLOAD_VERSION);
+    store16(fsp_state.payload + COT_OFF_VERSION, fsp_state.cot_version);
     store16(fsp_state.payload + COT_OFF_SIZE, COT_SIZE);
     store64(fsp_state.payload + COT_OFF_FMC_ADDRESS, fsp_state.image_physical);
     store64(fsp_state.payload + COT_OFF_BOOT_ARGS, (uint64_t)-1);
-    /* The FRTS is the GC6 resume store, 1 MiB of it: a machine that never suspends has nothing to resume,
-     * and leaving the fields zero is the encoding the vendor driver uses when its own properties decline the
-     * region, not an omission. */
-    memcpy(fsp_state.payload + COT_OFF_HASH, base + image->hash_offset, 48);
-    memcpy(fsp_state.payload + COT_OFF_PUBLICKEY, base + image->publickey_offset, 384);
-    memcpy(fsp_state.payload + COT_OFF_SIGNATURE, base + image->fmc_signature_offset, 384);
+    /* Two fields the driver that boots this chip fills and this one cannot yet.  The FRTS is a 1 MiB region
+     * placed by an offset back from the *end* of the frame buffer (aligned to the 128 KiB WPR granularity),
+     * and the boot arguments are a GSP_FMC_BOOT_PARAMS block in sysmem whose address the FMC reads back into
+     * its mailbox when it starts.  This OS reserves no vidmem and has no resource-manager descriptor to point
+     * at, so the FRTS fields are the declined encoding the vendor driver itself uses when it has no region
+     * (offset 0, size 0) and the arguments are (uint64_t)-1, which is the same "none" that file writes.  A
+     * handover accepted with these declined is a verified FMC image with nothing to boot *into*: the FSP
+     * refusing or accepting it is still the measurement, and a silent zero pretending to be a reservation
+     * would not be. */
+    /* Each blob is copied at the length *this* generation's FSP table asks for, into a field of the published
+     * size, exactly as the reference driver memcpy's `func->cot.size_hash/_pkey/_sig' bytes into hash384[12],
+     * publicKey[96] and signature[96].  The rest of the field stays zero, which is why the payload is 860
+     * bytes on Hopper and on Blackwell while the data inside it is not interchangeable. */
+    memcpy(fsp_state.payload + COT_OFF_HASH, base + image->hash_offset, fsp_state.cot_hash_bytes);
+    memcpy(fsp_state.payload + COT_OFF_PUBLICKEY, base + image->publickey_offset, fsp_state.cot_pkey_bytes);
+    memcpy(fsp_state.payload + COT_OFF_SIGNATURE, base + image->fmc_signature_offset, fsp_state.cot_sig_bytes);
     fsp_state.cot_ready = 1;
 }
 
@@ -570,9 +710,20 @@ static void hand_over_fmc(void)
 
     fsp_state.hwcfg2_after = read32(&w_gsp, NV_PGSP_HWCFG2);
     fsp_state.boot_scratch_after = read32(&w_therm, NV_THERM_FSP_BOOT_COMPLETE);
+    fsp_state.gsp_mailbox0_after = read32(&w_gsp, NV_PGSP_MAILBOX0);
+    fsp_state.gsp_mailbox1_after = read32(&w_gsp, NV_PGSP_MAILBOX1);
     if (fsp_state.timer_readable) read_ptimer(&fsp_state.timer_after);
-    fsp_state.gsp_released = fsp_state.hwcfg2_after != 0 && fsp_state.hwcfg2_after != 0xffffffffu &&
-                             !FSP_REFUSED(fsp_state.hwcfg2_after);
+    /* The reference driver's own completion test, in its own order (gh100_gsp_lockdown_released): a refusal is
+     * "not yet", a non-zero mailbox pair is an error unless it is the address the driver handed the FMC as its
+     * boot arguments, and the lock is bit 13.  There is no boot-args block in this OS, so a mailbox that
+     * answers with anything at all is reported as an answer that cannot be matched rather than as success -
+     * and `gsp_released' below is the bit, never "a register read something". */
+    if (!FSP_REFUSED(fsp_state.hwcfg2_after) && !FSP_NOT_CONTENT(fsp_state.hwcfg2_after) &&
+        fsp_state.hwcfg2_after != 0xffffffffu)
+        fsp_state.lockdown_after = (int)((fsp_state.hwcfg2_after >> FSP_HWCFG2_LOCKDOWN_BIT) & 1u);
+    else
+        fsp_state.lockdown_after = -1;
+    fsp_state.gsp_released = fsp_state.lockdown_after == 0;
     queues(&idle);
     fsp_state.queues_idle_after = idle == 1;
 }
@@ -583,18 +734,17 @@ static void probe_mailbox(void)
 
     /* Wait for the FSP to say it is up, because on a card that is going to answer there is a window in which
      * it has not yet, and a report written inside that window would be a measurement of the wrong moment. */
-    for (unsigned i = 0; i < FSP_BOOT_POLL_LIMIT; i++) {
-        fsp_state.boot_polls = (int)i;
-        fsp_state.boot_scratch = read32(&w_therm, NV_THERM_FSP_BOOT_COMPLETE);
-        fsp_state.booted = (fsp_state.boot_scratch & 0xffu) == 0xffu;
-        if (fsp_state.booted || FSP_REFUSED(fsp_state.boot_scratch)) break;
-        for (volatile int spin = 0; spin < 64; spin++) __asm__ volatile("pause");
-    }
-    fsp_state.boot_polls++;
+    fsp_state.boot_ms = FSP_WAIT_BOOT_MS;
+    (void)wait_for_timed(boot_ready, &fsp_state.boot_polls, FSP_WAIT_BOOT_MS, &fsp_state.boot_ms_used);
+    /* No ++ here: the wait already counted the look that answered, and a count that adds one for the
+     * reader's benefit is a count of nothing. */
+    fsp_state.booted = fsp_state.boot_scratch == FSP_BOOT_COMPLETE_SUCCESS;
     fsp_state.ucode_version = read32(&w_fsp, NV_PFSP_UCODE_VERSION) & 0x7ffu;
     fsp_state.fuse_check = read32(&w_fsp, NV_PFSP_FUSE_ERROR_CHECK);
-    fsp_state.hwcfg2 = read32(&w_gsp, NV_PGSP_HWCFG2);
-    fsp_state.gsp_readable = w_gsp.page && !FSP_REFUSED(fsp_state.hwcfg2) && fsp_state.hwcfg2 != 0xffffffffu;
+    fsp_state.lockdown = lockdown_now();
+    fsp_state.gsp_released = fsp_state.lockdown == 0;
+    fsp_state.gsp_mailbox0 = read32(&w_gsp, NV_PGSP_MAILBOX0);
+    fsp_state.gsp_mailbox1 = read32(&w_gsp, NV_PGSP_MAILBOX1);
     if (!queues(&idle)) return;                        /* refused: there is no mailbox to send through */
     fsp_state.mailbox_readable = 1;
     if (!fsp_state.booted) return;        /* until the FSP says it is up, nothing on the other end is reading */
@@ -650,6 +800,22 @@ void gpu_fsp_note(const struct gpu_device *device, const struct boot_handoff *ha
     /* Staged first, because the handover can be sent during the probe: the payload and the pages it names have
      * to exist before the message that describes them leaves this machine. */
     measure_submission_surface();
+    measure_tick_rate();                          /* before any wait, so the waits can be promised in time */
+    cot_parameters();                             /* and the generation is decided before a byte is staged */
+    /* A chip the reference driver has no FSP for gets no packet at all - not even the read-only capability
+     * query - because the page this file would write into is not documented as a queue on that generation,
+     * and "it is only a query" is not a reason to write to an undocumented register file on a machine whose
+     * firmware is the only thing between this OS and a hung display.  What was measured instead is kept. */
+    if (!fsp_state.fsp_supported) {
+        /* The two "not this chip" codes, so the panel's handover sentence names the architecture rather than
+         * describing a defect in somebody's file. */
+        fsp_state.cot_defect = fsp_state.arch_unknown ? 9u : 10u;
+        klog(FSP_LOG_PREFIX "%s (architecture 0x%x read from the aperture), so nothing was written to it",
+             fsp_state.arch_unknown ? "the architecture would not answer"
+                                    : "no FSP mailbox exists for this architecture",
+             (unsigned)fsp_state.arch);
+        return;
+    }
     stage_fmc();
     probe_mailbox();
     klog(FSP_LOG_PREFIX "boot scratch 0x%x, mailbox %s, query %s, reply %s, writes %u of %u reads",

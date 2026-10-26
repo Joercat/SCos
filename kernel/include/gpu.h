@@ -263,6 +263,28 @@ struct gpu_fsp_state {
     uint32_t hwcfg2_after, boot_scratch_after;                  /* re-read after the attempt: the two words
                                                                    * that change if the FSP took the image */
     int gsp_released, queues_idle_after;
+    /* What the reference driver's own per-chip FSP table decides, read from the chip's architecture field
+     * rather than assumed: nouveau's `nvkm_fsp_func.cot' in nvkm/subdev/fsp/{gh100,gb100,gb202}.c, the driver
+     * that boots this family today.  The sizes are not interchangeable - Hopper's public key and signature are
+     * both 384 bytes while both Blackwell generations want 97 and 96 - so one hard-coded number is how a real
+     * GB207's own firmware file gets refused as malformed by the OS that should have accepted it.  A chip
+     * whose architecture has no entry has no FSP mailbox in that driver either, and says so instead of poking
+     * a page that belongs to something else. */
+    int fsp_supported, arch_unknown;
+    uint32_t arch;                              /* NV_PMC_BOOT_0 28:24, as the chip answered it */
+    uint32_t cot_version, cot_hash_bytes, cot_pkey_bytes, cot_sig_bytes;
+    /* The FSP's completion signal in the form the working driver reads it: the lockdown bit of the
+     * coprocessor's capability word, and the falcon mailbox pair the FMC writes its boot-arguments address -
+     * or an error code - into once it stops being zero. */
+    uint32_t gsp_mailbox0, gsp_mailbox1, gsp_mailbox0_after, gsp_mailbox1_after;
+    int lockdown, lockdown_after;               /* 1 = bit 13 of HWCFG2 set = still locked */
+    /* The two waits in the units the reference driver uses, milliseconds, measured against the device's own
+     * PTIMER (whose rate the cycle counter is timed against once per probe).  A wait bounded by a count of
+     * uncached reads is tens of times too short for a coprocessor that takes four seconds to train, and a
+     * timeout printed as silence is a measurement of the wrong moment. */
+    uint64_t reply_ms, reply_ms_used, boot_ms, boot_ms_used;
+    int wait_clocked;                           /* 0 = no PTIMER, so look counts bounded the waits instead */
+    uint32_t ticks_per_ms;                      /* what the measurement came to, printed so it can be argued */
     uint64_t image_bytes, image_physical, image_crc32;
     uint8_t payload[GPU_FSP_PAYLOAD_BYTES];  /* the handover, assembled and never sent */
 };

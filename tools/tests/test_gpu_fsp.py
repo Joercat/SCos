@@ -22,7 +22,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-FSP_CHECKS = 91                     # the modelled mailbox, pinned: a dropped case is a silent loosening
+FSP_CHECKS = 104                    # the modelled mailbox, pinned: a dropped case is a silent loosening
+FSP_SIZES = (48, 97, 96)            # what a GB2xx FSP asks the container for, from the reference driver
 
 # The published register description, transcribed rather than read out of the file under test:
 # src/common/inc/swref/published/hopper/gh100/dev_fsp_pri.h, which is the header GB100's hardware-abstraction
@@ -213,34 +214,85 @@ def test_the_one_line_at_the_front_says_what_the_paragraphs_say():
         'the headline stopped quoting the fields the paragraphs quote'
 
 
-def test_the_narrow_surface_carries_the_same_paragraphs():
-    """`graphics fsp` exists because the panel is longer than what a person can carry out of a console.
+def test_the_generation_table_is_the_reference_driver_and_not_a_convenience():
+    """The blob widths and the container version are per-chip facts in the driver that boots these cards, and
+    they are not the numbers this file started with.
 
-    The failure this pins is the one it was written for: a report that runs past the buffer a caller prints from
-    is *silently* shortened, and the paragraphs at the end - the ones that answer a question - are what go
-    missing.  So the narrow surface must be the same functions, not a paraphrase of them (two texts drift), and
-    both command surfaces must reach it.
+    `nvkm_fsp_func.cot' in nvkm/subdev/fsp/{gh100,gb100,gb202}.c of the Linux kernel's nouveau driver (MIT,
+    fetched from the torvalds/linux tree on 2026-10-26) is the table below, transcribed rather than derived: a
+    harness that read its expectations out of the driver under test could not notice both being wrong, and the
+    consequence of being wrong here is that a person's real firmware file is refused as malformed.
     """
+    table = {
+        0x18: (1, 48, 384, 384),       # gh100_fsp: Hopper
+        0x1a: (2, 48, 97, 96),         # gb100_fsp: Blackwell, the GB10x chips
+        0x1b: (2, 48, 97, 96),         # gb202_fsp: Blackwell, the GB2xx chips - this project's target
+    }
+    text = source('kernel/drivers/gpu/gpu_fsp.c')
+    body = text[text.index('static void cot_parameters(void)'):]
+    body = body[:body.index('\n}\n')]
+    for arch, (version, hash_bytes, pkey, sig) in table.items():
+        # Up to this case's own `break;', which is how the two Blackwell rows share a body in the file: the
+        # pin asks what the chip would be given, not how many lines the switch happens to have.
+        case = re.search(r"case 0x%xu:.*?break;" % arch, body, re.S | re.I)   # the file writes 0x1Au upper-case
+        assert case, 'architecture 0x%x has no row in cot_parameters(), so the chip would be measured against ' \
+                     'whatever the file happened to assume' % arch
+        clause = case.group(0)
+        for name, value in (('cot_version', version), ('cot_hash_bytes', hash_bytes),
+                            ('cot_pkey_bytes', pkey), ('cot_sig_bytes', sig)):
+            if name == 'cot_hash_bytes':
+                continue                    # 48 is set once above the switch, for every row that applies
+            assert re.search(r'%s = %uu' % (name, value), clause), \
+                'architecture 0x%x wants %s to be %d (the reference driver\'s table) and the file sets it ' \
+                'from one hard-coded size for every chip' % (arch, name, value)
+    assert FSP_SIZES == table[0x1b][1:], 'this file and the driver disagree about what a GB2xx FSP wants'
+    # The two "not this chip" outcomes have to be said, not swallowed: an unknown architecture and an
+    # architecture with no FSP are different sentences, and neither is a defect in anybody's file.
+    assert 'fsp_state.cot_defect = fsp_state.arch_unknown ? 9u : 10u;' in text, \
+        'the generation gate no longer records which of the two it refused, so a refusal to attempt looks like ' \
+        'a broken container'
+    gate = text[text.index('if (!fsp_state.fsp_supported) {'):]
+    assert 'return;' in gate[:900], 'the gate no longer stops the probe: a chip whose generation is unknown ' \
+                                    'would still get a packet written into its aperture'
+    # ...and the panel has to print the expectation, not just the verdict.
     panel = source('kernel/desktop/graphics.c')
-    start = panel.index('void graphics_fsp_report')
-    body = panel[start:panel.index('void graphics_report', start)]
-    for call in ('put_firmware_report(&w, gpu_firmware_state());',
-                 'put_firmware_image(&w, gpu_firmware_state());',
-                 'put_fsp_report(&w, gpu_fsp_state());'):
-        assert call in body, \
-            'the narrow report re-worded %s instead of calling it, so the two can disagree' % call.split('(')[0]
-    assert 'put_fsp_mailbox' not in body, \
-        'the narrow report builds a mailbox paragraph of its own, which is the second text that will drift'
-    for surface, needle in (('kernel/desktop/tty.c', 'graphics_fsp_report(result,sizeof(result));tty_print(result)'),
-                            ('kernel/desktop/app_terminal.c',
-                             'graphics_fsp_report(response,sizeof(response))')):
-        text = source(surface)
-        assert needle in text, '%s cannot ask for the narrow report' % surface
-        assert 'Usage: graphics | graphics fsp' in text or 'graphics [fsp]' in text, \
-            '%s accepts a subcommand it never mentions in its usage line' % surface
-    declared = source('kernel/include/scos.h')
-    assert 'void graphics_fsp_report(char *out,size_t capacity);' in declared, \
-        'the narrow report is defined but not declared, so only one of the two surfaces can reach it'
+    for needle in ('The architecture field of NV_PMC_BOOT_0 reads 0x', 'whose FSP wants a hash of ',
+                   "Hopper's table says 48/384/384", 'no FSP mailbox for arch 0x', 'bit13=',
+                   "NV_PFALCON_FALCON_HWCFG2_RISCV_BR_PRIV_LOCKDOWN", "The falcon's own mailbox pair read 0x",
+                   'ms of the ', 'reads at 0x200bc', 'cot '):
+        assert needle in panel, 'the panel never prints %r, so a refusal cannot be told from a guess' % needle
+
+
+def test_the_time_bounds_are_the_working_driver_s():
+    """Two of this path's failures were not the card\'s: a wait bounded by a count of uncached reads is tens of
+    times shorter than the driver that works, and the completion test was "the word was not zero" instead of the
+    lockdown bit.  Both are pinned to the published numbers here, so they cannot quietly drift back.
+    """
+    text = source('kernel/drivers/gpu/gpu_fsp.c')
+    for name, value in (('FSP_WAIT_REPLY_MS', 1500), ('FSP_WAIT_BOOT_MS', 4000),
+                        ('FSP_HWCFG2_LOCKDOWN_BIT', 13)):
+        m = re.search(r'#define %s\s+(\d+)u' % name, text)
+        assert m, '%s is not a named bound in the file any more' % name
+        assert int(m.group(1)) == value, \
+            '%s is %s here and %s in nvkm/subdev/fsp (gh100_fsp_send, wait_secure_boot, dev_falcon_v4.h)' % (
+                name, m.group(1), value)
+    m = re.search(r'#define FSP_BOOT_COMPLETE_SUCCESS\s+(0x[0-9a-f]+)u', text)
+    assert m and int(m.group(1), 16) == 0xff, \
+        'boot-complete is no longer compared against the whole 0x000000FF the register publishes as SUCCESS'
+    # The falcon pair the FMC answers through, at the coprocessor's own base.
+    for name, offset in (('NV_PGSP_MAILBOX0', 0x40), ('NV_PGSP_MAILBOX1', 0x44)):
+        m = re.search(r'#define %s\s+0x0011(\d{4})u' % name, text)
+        assert m and int(m.group(1), 16) == offset, '%s is not at the falcon\'s offset 0x%x' % (name, offset)
+    # A reply is acknowledged by restarting the ring, because the second message - the handover - is read out
+    # of offset 0 and nothing else.
+    ack = text[text.index('static int read_reply'):]
+    ack = ack[:ack.index('\n}\n')]
+    assert 'NV_PFSP_MSGQ_TAIL, 0' in ack and 'NV_PFSP_MSGQ_HEAD, 0' in ack, \
+        'the acknowledge moved back to pulling the tail up to the head, which leaves the next reply somewhere ' \
+        'this driver does not look'
+    assert 'wait_clocked' in text and 'ticks_per_ms' in text, \
+        'the waits are no longer reported as timed or untimed, which is the difference between a bound and a ' \
+        'story about time'
 
 
 def main():

@@ -81,11 +81,17 @@ void klog(const char *fmt, ...) { (void)fmt; }
 #define M_TIMER_DEAD  4096u  /* the block is not decoded: every read is all-ones */
 #define M_COT_WPR     8192u  /* the FSP reads the handover and refuses it with the WPR error */
 #define M_COT_SILENT 16384u  /* the FSP takes the handover and never answers */
+#define M_NO_IDENTITY 32768u /* even NV_PMC_BOOT_0 refuses: nobody can say which chip this is */
 
 static uint8_t model_therm[0x1000];
 static uint8_t model_fsp[0x4000];
 static uint8_t model_gsp[0x1000];
 static uint8_t model_vf[0x3000];                      /* NV_VIRTUAL_FUNCTION_PRIV, BAR0+0x0..0x2fff */
+
+/* The architecture the modelled chip reports, which decides the sizes its FSP wants: 0x1b is the GB200
+ * family's number, and 0x1b7000a1 is the dword a GB207 answers with.  A fixture that wants another
+ * generation changes this before it asks, which is how one machine's answers become another's. */
+static uint32_t model_arch_boot0 = 0x1b7000a1u;
 static uint8_t model_timer[0x1000];                   /* NV_PTIMER, BAR0+0x9000..0x9fff */
 static uint8_t model_channel[FSP_EMEM_CHANNEL_BYTES];
 static uint8_t model_pages[16 * 1024] __attribute__((aligned(4096)));
@@ -250,22 +256,44 @@ static void model_answer_cot(uint32_t bytes)
     memcpy(model.cot, model_channel, model.cot_bytes);
     (void)0;
 
-    model.cot_shape_ok = bytes >= FSP_HEADER_BYTES + COT_SIZE && (m_read(payload) & 0xffffu) == 2u &&
-                         ((m_read(payload) >> 16) & 0xffffu) == COT_SIZE &&
-                         m_read(payload + COT_OFF_BOOT_ARGS) == ~(uint32_t)0;
+    /* What an FSP would check, at the widths *its* chip reports: version 2 and 48/97/96 for the GB200
+     * family this model answers as, version 1 and 48/384/384 for Hopper.  Everything past the generation's
+     * width has to still be zero, because a driver that copied the full 384-byte field into a container whose
+     * key section is 97 bytes long would be describing bytes the file does not have - and a model that only
+     * checked the front of the field would let that pass. */
+    {
+        uint32_t arch = (model_arch_boot0 >> 24) & 0x1fu;
+        uint32_t want_version = (arch == 0x1au || arch == 0x1bu) ? 2u : 1u;
+        uint32_t width[3] = { 48u, want_version == 2u ? 97u : 384u, want_version == 2u ? 96u : 384u };
+        uint32_t off[3] = { COT_OFF_HASH, COT_OFF_PUBLICKEY, COT_OFF_SIGNATURE };
+        uint32_t field[3] = { 48u, 384u, 384u };             /* hash384[12], publicKey[96], signature[96] */
+
+        model.cot_shape_ok = bytes >= FSP_HEADER_BYTES + COT_SIZE &&
+                             (m_read(payload) & 0xffffu) == want_version &&
+                             ((m_read(payload) >> 16) & 0xffffu) == COT_SIZE &&
+                             m_read(payload + COT_OFF_BOOT_ARGS) == ~(uint32_t)0;
+        model.cot_blobs_ok = 1;
+        for (unsigned which = 0u; which < 3u; which++)
+            for (unsigned i = 0u; i < field[which]; i++) {   /* the published field's own width, not the copy's */
+                /* Inside the width the generation asked for there has to be *something* - the fixture fills
+                 * each section with a walking pattern, so equality against a fixed byte is not the test - and
+                 * outside it there has to be nothing, which is the half that catches a driver copying a whole
+                 * 384-byte field from a container whose section is 97 bytes long.  The byte-for-byte identity
+                 * of what was copied is checked against the staged image itself, below. */
+                if (i < width[which] && payload[off[which] + i] == 0u) model.cot_blobs_ok = 0;
+                /* A field wider than this generation's blob has to be zero for the rest of its width - except
+                 * the hash field, which is exactly 48 bytes on both rows of the table and so has no tail
+                 * inside the struct at all: the next field starts where it stops. */
+                if (i >= width[which] && field[which] != width[which] &&
+                    payload[off[which] + i] != 0u) model.cot_blobs_ok = 0;
+            }
+    }
     model.cot_target_ok = m_read(payload + COT_OFF_FMC_ADDRESS) == (uint32_t)(uintptr_t)model_pages &&
                           m_read(payload + COT_OFF_FMC_ADDRESS + 4) == (uint32_t)(((uintptr_t)model_pages) >> 32) &&
                           ((uintptr_t)model_pages & 0xfffu) == 0;
     /* Not the 46-bit rule the driver is held to when it asks for the pages: a host allocation is not a
      * physical address, and the limit is enforced where the pages are requested and tested there (defect 6),
      * so repeating it here would compare a machine's memory map against an array's link address. */
-    model.cot_blobs_ok = 1;
-    for (unsigned i = 0; i < 48u; i++)
-        if (payload[COT_OFF_HASH + i] != (uint8_t)0x11) model.cot_blobs_ok = 0;
-    for (unsigned i = 0; i < 384u; i++) {
-        if (payload[COT_OFF_PUBLICKEY + i] != (uint8_t)0x22) model.cot_blobs_ok = 0;
-        if (payload[COT_OFF_SIGNATURE + i] != (uint8_t)0x33) model.cot_blobs_ok = 0;
-    }
 
     if (!model.cot_shape_ok) error = 0x02u;             /* FLCN_ERR_INVALID_ARGUMENT */
     else if (!model.cot_target_ok) error = 0xddu;       /* FLCN_ERR_FMC_INVALID_DMA_TARGET */
@@ -300,7 +328,12 @@ uint32_t gpu_io_read32(const volatile uint32_t *window, uint64_t within)
     model.reads++;
     if (which < 0) return 0xa5a5a5a5u;
     if (index * 4u + 4u > window_bytes(which)) return 0xa5a5a5a5u;
-    if ((model.mode & M_REFUSE) && which != 0 && !(which == 2 && (model.mode & M_RELEASED))) {
+    if ((model.mode & M_REFUSE) && which != 0 && !(which == 2 && (model.mode & M_RELEASED)) &&
+        /* A chip whose coprocessor block is locked still answers NV_PMC_BOOT_0 - that is the machine this
+         * driver exists for, and the panel of a real one says so: the boot register reads 0x1b7000a1 while
+         * every GSP offset answers 0xbadf4100.  Refusing the identity as well would model a powered-down
+         * function, which is a different fixture (M_NO_IDENTITY) and a different decision. */
+        !(which == 3 && index == 0 && !(model.mode & M_NO_IDENTITY))) {
         model.refusals++;
         return 0xbadf4100u;
     }
@@ -414,6 +447,7 @@ static void model_reset(unsigned mode)
         for (unsigned i = 0; i < 4u; i++) h_put32(model_vf + 0x2100u + i * 4u, 0xa0a0a0a0u + i);
     }
     if (mode & M_TIMER_FROZEN) h_put32(model_timer + 0x400u, 0x1234u);
+    h_put32(model_vf + 0x0u, model_arch_boot0);        /* NV_PMC_BOOT_0, at the first dword of the aperture */
     memset(&model, 0, sizeof model);
     model.mode = mode;
     *(uint32_t *)(model_therm + T_BOOT_COMPLETE * 4u) = (mode & M_NOT_BOOTED) ? 0x12345600u : 0xffu;
@@ -444,7 +478,8 @@ static void ask(unsigned mode)
     gpu_fsp_note(&device, &handoff);
 }
 
-/* An FMC image with the sizes a handover payload has fields for - 48, 384 and 384 - rather than the short ones
+/* An FMC image at the sizes the modelled generation wants - 48, 97 and 96 for a GB200-family chip, which
+ * are *not* the sizes the payload's fields are wide enough for - rather than the short ones
  * tools/tests/gsp_fw_kernel_host.c uses to exercise the container's rules.  Each section's bytes are distinct
  * and the image's walk, so a payload that took the wrong section, or the right one from one byte off, cannot
  * pass a comparison by accident. */
@@ -591,6 +626,21 @@ static void test_the_gates(void)
     gpu_fsp_note(&device, &empty);
     check("and as readable the moment it answers, which is what a successful boot would change",
           fsp_state.gsp_readable && fsp_state.hwcfg2 == 0x123u);
+    /* The architecture gate, which decides everything downstream: the sizes a container is judged against are
+     * a per-generation fact, so the first thing this path does is ask the chip which generation it is. */
+    check("the identity is read even while the coprocessor's block refuses, and it selects this chip's row of "
+          "the table - version 2 and 48/97/96 for a GB200-family part",
+          fsp_state.fsp_supported && fsp_state.arch == 0x1bu && fsp_state.cot_version == 2u &&
+          fsp_state.cot_hash_bytes == 48u && fsp_state.cot_pkey_bytes == 97u && fsp_state.cot_sig_bytes == 96u);
+    check("and in the released state it is the bit that says so, not a word that happened to be non-zero",
+          fsp_state.lockdown == 0 && fsp_state.gsp_released && fsp_state.hwcfg2 == 0x123u);
+
+    model_reset(M_REFUSE | M_NO_IDENTITY);
+    gpu_fsp_note(&device, &empty);
+    check("a chip that will not say which chip it is is sent nothing at all: the width its FSP expects for a "
+          "public key is unknown, and an unknown expectation is not a licence to assume one",
+          fsp_state.arch_unknown && !fsp_state.fsp_supported && fsp_state.cot_defect == 9 &&
+          !fsp_state.queried && !fsp_state.staged && fsp_state.writes == 0 && model.writes == 0);
 
     model_reset(M_NOT_BOOTED);
     gpu_fsp_note(&device, &empty);
@@ -600,8 +650,12 @@ static void test_the_gates(void)
           !fsp_state.queried && model.writes == 0);
     check("the FSP's version and fuse check are read whether or not a request is possible",
           fsp_state.ucode_version == 42 && fsp_state.fuse_check == 0);
+    /* Two bounds exist on a wait and the file states both: the count of reads, and - when the device's own
+     * clock could be read - the milliseconds the reference driver allows.  Either may end it first, and what
+     * must never happen is a third way to stop, so the check is that one of the two stated bounds was the
+     * one reached rather than that a particular number was. */
     check("and the wait for a boot that never happens is the bound the file says it is, not a hang",
-          fsp_state.boot_polls == FSP_BOOT_POLL_LIMIT);
+          fsp_state.boot_polls == FSP_POLL_LIMIT || fsp_state.boot_ms_used >= FSP_WAIT_BOOT_MS);
 
     model_reset(M_BUSY);
     ((uint32_t *)model_fsp)[R_QUEUE_TAIL] = 4;              /* a packet the FSP has not finished with */
@@ -731,7 +785,7 @@ static void test_the_handover_payload(void)
     const struct gpu_firmware_image *image;
     const uint8_t *payload;
 
-    ask_with(0, 48, 384, 384, -1, 0);
+    ask_with(0, 48, 97, 96, -1, 0);
     image = &gpu_firmware_state()->image[1];
     payload = fsp_state.payload;
     check("the container was built to the size its sections add up to, and parsed as the FMC it is",
@@ -760,9 +814,12 @@ static void test_the_handover_payload(void)
     check("the three authentication blobs are the container's own sections, at the published offsets",
           memcmp(payload + COT_OFF_HASH, staged_region + image->hash_offset, 48) == 0 &&
           COT_OFF_HASH + 48u == COT_OFF_PUBLICKEY &&
-          memcmp(payload + COT_OFF_PUBLICKEY, staged_region + image->publickey_offset, 384) == 0 &&
+          memcmp(payload + COT_OFF_PUBLICKEY, staged_region + image->publickey_offset, 97) == 0 &&
           COT_OFF_PUBLICKEY + 384u == COT_OFF_SIGNATURE &&
-          memcmp(payload + COT_OFF_SIGNATURE, staged_region + image->fmc_signature_offset, 384) == 0);
+          memcmp(payload + COT_OFF_SIGNATURE, staged_region + image->fmc_signature_offset, 96) == 0 &&
+          /* The field is wide, the generation is not: everything past the 97 bytes this chip's table asks for
+           * stays zero, which is how a 384-byte field and a 97-byte key coexist in one 860-byte payload. */
+          payload[COT_OFF_PUBLICKEY + 97] == 0 && payload[COT_OFF_SIGNATURE + 96] == 0);
     check("the CRC32 recorded is of the image as the card will read it: over the copy's 512 bytes, not over "
           "the page of padding that follows them",
           fsp_state.image_crc32 == gpu_firmware_crc32(model_pages, IMAGE_BYTES) &&
@@ -789,22 +846,23 @@ static void test_the_handover_payload(void)
     check("the queue fell idle again after the exchange, which is what the next message would need",
           fsp_state.queues_idle_after);
 
-    ask_with(0, 32, 384, 384, -1, 0);
+    ask_with(0, 32, 97, 96, -1, 0);
     check("an FMC whose hash section is not 48 bytes is refused a payload, and told which section it was",
           fsp_state.fmc_seen && !fsp_state.staged && fsp_state.cot_defect == 1);
-    ask_with(0, 48, 383, 384, -1, 0);
-    check("the same for a public key one byte short of the 384 the payload has room for",
+    ask_with(0, 48, 96, 96, -1, 0);
+    check("the same for a public key one byte short of the 97 this chip's table asks for (the payload has "
+          "room for 384, and that is not the question)",
           fsp_state.cot_defect == 2);
-    ask_with(0, 48, 384, 512, -1, 0);
+    ask_with(0, 48, 97, 512, -1, 0);
     check("and for a signature of a size the format has no field for", fsp_state.cot_defect == 3);
-    ask_with(0, 48, 384, 384, 2, 0);
+    ask_with(0, 48, 97, 96, 2, 0);
     check("a container with the hash section's name pointing elsewhere has no image to describe",
           fsp_state.cot_defect == 8);
-    ask_with(M_NO_PAGES, 48, 384, 384, -1, 0);
+    ask_with(M_NO_PAGES, 48, 97, 96, -1, 0);
     check("and running out of memory for the copy is its own reason rather than a silent skip",
           fsp_state.fmc_seen && !fsp_state.staged && fsp_state.cot_defect == 6);
 
-    ask_with(0, 48, 384, 384, -1, 1);
+    ask_with(0, 48, 97, 96, -1, 1);
     check("bytes that no longer match the checksum the stub recorded are seen, but not trusted",
           fsp_state.fmc_seen && !fsp_state.staged && fsp_state.cot_defect == 7);
 
@@ -837,7 +895,7 @@ static void test_the_handover_payload(void)
  * each is a separate boot of the model rather than three assertions on one. */
 static void test_the_handover_answers(void)
 {
-    ask_with(M_COT_WPR, 48, 384, 384, -1, 0);
+    ask_with(M_COT_WPR, 48, 97, 96, -1, 0);
     check("a card that reads the image and rejects it is reported as having read and rejected it, with the "
           "falcon's own name for that answer",
           fsp_state.handover_sent && fsp_state.handover.error == 0xdfu && fsp_state.handover.complete &&
@@ -848,12 +906,12 @@ static void test_the_handover_answers(void)
     check("the lock it did not lift is still the locked-target code, so nothing on this path claims a change",
           FSP_NOT_CONTENT(fsp_state.hwcfg2_after));
 
-    ask_with(M_COT_SILENT, 48, 384, 384, -1, 0);
+    ask_with(M_COT_SILENT, 48, 97, 96, -1, 0);
     check("a card that takes the handover and answers nothing is reported as exactly that: sent, and no reply",
           fsp_state.handover_sent && fsp_state.handover.bytes == 0 && fsp_state.handover.complete == 0 &&
           fsp_state.hwcfg2_after == 0 && !fsp_state.gsp_released);
 
-    ask_with(M_BUSY, 48, 384, 384, -1, 0);
+    ask_with(M_BUSY, 48, 97, 96, -1, 0);
     check("a card still holding the queue open from the query is not sent a second message, and the reason is "
           "kept rather than flattened into a silence",
           !fsp_state.handover_sent && fsp_state.handover_attempted == 0);
@@ -900,6 +958,80 @@ static void test_the_clock_and_the_doorbell_page(void)
           !fsp_state.vf_answered && fsp_state.vf_refusals == 0);
 }
 
+/* The table this path reads its expectations out of is per generation, so the fixtures are too: two rows of
+ * the reference driver's own table, the lock as the bit the driver reads, the mailbox pair the FMC answers
+ * through, and the two bounds a wait is allowed to have. */
+static void test_the_generation_table(void)
+{
+    struct gpu_device device = nvidia_at();
+    struct boot_handoff empty;
+
+    memset(&empty, 0, sizeof empty);
+    model_arch_boot0 = 0x187000a1u;                       /* GH100: Hopper's row */
+    ask_with(0, 48, 384, 384, -1, 0);
+    check("a Hopper part is judged against Hopper's row - version 1 and 48/384/384 - and its own container "
+          "passes it",
+          fsp_state.arch == 0x18u && fsp_state.fsp_supported && fsp_state.cot_version == 1u &&
+          fsp_state.cot_pkey_bytes == 384u && fsp_state.cot_sig_bytes == 384u &&
+          fsp_state.staged && fsp_state.cot_defect == 0 &&
+          model.cot_shape_ok && model.cot_blobs_ok && fsp_state.handover.error == 0);
+    ask_with(0, 48, 97, 96, -1, 0);
+    check("and the same chip shown a Blackwell-sized container refuses it on the public key: the two rows are "
+          "not interchangeable in either direction, which is the whole reason the row is read from the chip",
+          fsp_state.arch == 0x18u && !fsp_state.staged && fsp_state.cot_defect == 2);
+    model_arch_boot0 = 0x197000a1u;                       /* AD100: no FSP entry in the reference driver */
+    ask(0);
+    check("a generation with no FSP in the reference driver is not written to, and the reason printed is the "
+          "architecture rather than a failure of the card",
+          fsp_state.arch == 0x19u && !fsp_state.fsp_supported && fsp_state.cot_defect == 10 &&
+          !fsp_state.queried && !fsp_state.handover_attempted && fsp_state.writes == 0 && model.writes == 0);
+    model_arch_boot0 = 0x1b7000a1u;                       /* back to the chip everything else models */
+
+    model_reset(M_REFUSE | M_RELEASED);   /* M_RELEASED exempts the coprocessor's window from the refusal,
+                                             * which is how a fixture gets to choose the word it answers with */
+    ((uint32_t *)model_gsp)[G_HWCFG2] = 0x2a13u;          /* answers, and answers with bit 13 set */
+    gpu_fsp_note(&device, &empty);
+    check("a capability word that answers with the lockdown bit set is readable and still locked: the test "
+          "before this one was \"the word was not zero\", which called this state released",
+          fsp_state.gsp_readable && fsp_state.lockdown == 1 && !fsp_state.gsp_released &&
+          fsp_state.hwcfg2 == 0x2a13u);
+    model_reset(M_REFUSE | M_RELEASED);   /* M_RELEASED exempts the coprocessor's window from the refusal,
+                                             * which is how a fixture gets to choose the word it answers with */
+    ((uint32_t *)model_gsp)[G_HWCFG2] = 0xa13u;           /* the same word, that bit clear */
+    gpu_fsp_note(&device, &empty);
+    check("and the same read with the bit clear is the release - one bit apart, and the difference is all this "
+          "path claims about the lock",
+          fsp_state.gsp_readable && fsp_state.lockdown == 0 && fsp_state.gsp_released);
+    model_reset(M_REFUSE | M_RELEASED);   /* M_RELEASED exempts the coprocessor's window from the refusal,
+                                             * which is how a fixture gets to choose the word it answers with */
+    ((uint32_t *)model_gsp)[G_HWCFG2] = 0xa13u;
+    ((uint32_t *)model_gsp)[(NV_PGSP_MAILBOX0 - MODEL_GSP) / 4u] = 0xdeadbeefu;
+    gpu_fsp_note(&device, &empty);
+    check("the falcon's mailbox pair is recorded as read and not interpreted: this OS hands over no boot "
+          "arguments for the FMC to write back, so a non-zero pair is an answer whose kind cannot be told",
+          fsp_state.gsp_mailbox0 == 0xdeadbeefu);
+
+    ask_with(0, 48, 97, 96, -1, 0);
+    check("a reply is acknowledged by pulling both message pointers to zero, which is what the driver that "
+          "boots this chip does, and what leaves the second message - the handover - at the channel offset "
+          "this driver reads from",
+          ((uint32_t *)model_fsp)[R_MSGQ_HEAD] == 0u && ((uint32_t *)model_fsp)[R_MSGQ_TAIL] == 0u);
+
+    check("the waits carry the reference driver's budgets in milliseconds, not a count of reads that happens "
+          "to land near one",
+          fsp_state.reply_ms == FSP_WAIT_REPLY_MS && fsp_state.boot_ms == FSP_WAIT_BOOT_MS);
+    model_reset(M_TIMER_DEAD);
+    gpu_fsp_note(&device, &empty);
+    check("with no clock to read the file says the wait was bounded by reads, instead of quoting a duration it "
+          "cannot measure",
+          !fsp_state.wait_clocked && fsp_state.ticks_per_ms == 0);
+    ask(0);
+    check("and with the clock there, the rate the cycle counter was measured against is on the state and the "
+          "wait says how much of its budget it spent",
+          fsp_state.wait_clocked && fsp_state.ticks_per_ms != 0 &&
+          fsp_state.reply_ms_used <= FSP_WAIT_REPLY_MS && fsp_state.boot_ms_used <= FSP_WAIT_BOOT_MS);
+}
+
 int main(void)
 {
     test_nothing_staged();
@@ -909,6 +1041,7 @@ int main(void)
     test_the_handover_payload();
     test_the_handover_answers();
     test_the_clock_and_the_doorbell_page();
+    test_the_generation_table();
     printf("%u check(s), %u failure(s)\n", checks_run, failures_run);
     return failures_run != 0;
 }

@@ -996,6 +996,79 @@ is the case that has both.  Neither boot's log mentions the FSP at all, because 
 gate on a cirrus display function: correctly, and verifiably, since the paragraph that says so is 445 bytes of
 the 3667.
 
+## The FMC boot as the driver that works does it (r-fmc-table)
+
+The instruction was to look at nouveau, since nouveau runs this card.  It had moved: there is no
+`nvkm/subdev/gsp/r535.c` in the current tree any more.  The FSP conversation now lives in its own subdev -
+`nvkm/subdev/fsp/{base,gh100,gb100,gb202}.c` - and the FMC boot sequence in `nvkm/subdev/gsp/gh100.c`
+(`gh100_gsp_oneinit`, `gh100_gsp_init`), which `gb202.c` reuses for GB202 through GB207 with
+`.sig_section = ".fwsignature_gb20x"` and `rm.gpu = &gb20x_gpu`.  All of it is MIT; the values below are
+transcribed from those files as fetched from torvalds/linux on 2026-10-26, and each one replaced something
+this tree had inferred from the vendor's out-of-tree driver.
+
+**The COT parameters are per generation, and Blackwell is not Hopper.**  `struct nvkm_fsp_func.cot` is:
+
+| chip    | version | hash | public key | signature |
+|---------|---------|------|------------|-----------|
+| gh100   | 1       | 48   | 384        | 384       |
+| gb100   | 2       | 48   | **97**     | **96**    |
+| gb202   | 2       | 48   | **97**     | **96**    |
+
+and `gh100_fsp_boot_gsp_fmc()` memcpy's exactly `size_hash`/`size_pkey`/`size_sig` bytes into `hash384[12]`,
+`publicKey[96]` and `signature[96]`: the payload's fields are the same width on every generation while the
+data inside them is not.  This tree had 384/384 written once and applied to everything, which on a GB207 means
+its own `fmc-570.144.bin` - a file with a 97-byte key - gets refused as malformed *before the card is ever
+asked*.  `kernel/drivers/gpu/gpu_fsp.c` now reads the architecture out of `NV_PMC_BOOT_0` (the first dword of
+the aperture, inside the window the submission-surface measurement already maps) and picks the row from that
+table; `tools/tests/test_gpu_fsp.py` pins the table itself, transcribed, so neither side can drift back to one
+comfortable number.  A generation with no row - Turing, Ampere, Ada, which reach their coprocessor through the
+older ACR path - gets no packet at all, not even the read-only capability query, because the page an FSP queue
+would live on is not documented as a queue there.  An aperture that will not answer `NV_PMC_BOOT_0` gets no
+packet either: reason 9 on the panel, "the sizes are unknown", which is not the same sentence as "your file is
+wrong" and is not an invitation to assume.
+
+**The three readiness facts, as `gh100_gsp_init()` reads them.**  `NV_THERM_I2CS_SCRATCH_FSP_BOOT_COMPLETE` is
+compared as a whole dword against `0x000000FF` (FAILED is 0) - not against the low byte, which is what this
+file did and which reads a `0x83` as booted.  The lock is bit 13 of `NV_PFALCON_FALCON_HWCFG2`
+(`RISCV_BR_PRIV_LOCKDOWN`, LOCK=1 UNLOCK=0 in `nvhw/ref/gh100/dev_falcon_v4.h`), not `the word was not zero`:
+a fixture answers `0x2a13` now - readable, and locked - and the old test called that released.  And the
+completion signal is the falcon's own mailbox pair at `+0x40`/`+0x44` (0x110040/0x110044 here): zero means the
+FMC has not answered, and a non-zero pair is *either* the address of the `GSP_FMC_BOOT_PARAMS` block the driver
+allocated *or* an error code, which nouveau can tell apart and this OS cannot, because it has no boot
+arguments to match against.  The pair is read before and after, recorded, and not interpreted.
+
+**Two waits, in the units the working driver states.**  `gh100_fsp_send()` and `gh100_fsp_wait()` allow 1000
+iterations of `usleep_range(1000, 2000)` - about 1500 ms - and both `wait_secure_boot` and the lockdown wait
+allow 4000 ms.  The bounds here were 200000 reads with a 50 ms cycle-counter deadline, which is tens of times
+shorter than the coprocessor is given: on a real card that does not print "slow", it prints "silent", which is
+a false fact about hardware that was still working.  The waits now carry `FSP_WAIT_REPLY_MS`/`FSP_WAIT_BOOT_MS`
+and the panel prints how much of the budget was spent, measured against the PTIMER (32 ns steps) with the
+cycle counter timed against it once per probe - and when there is no PTIMER to read, it says the bound was a
+read count instead of quoting a duration it cannot measure.
+
+**The acknowledge, which is where the second message was going to be lost.**  `gh100_fsp_recv()` answers a
+reply by writing 0 to `NV_PFSP_MSGQ_TAIL` *and* `NV_PFSP_MSGQ_HEAD`.  This driver copied the head back into
+both, which is the other reference implementation's shape and leaves the ring's pointers where the first
+message ended - while the driver reads every reply out of channel offset 0.  One message per boot looked fine;
+the sequence here is two (the capability query, then the handover), so the handover's reply would have been
+read from the wrong end of the channel on the first real attempt.  Both pointers now go to zero.
+
+**What nouveau does that this tree still cannot, and what it caps.**  `gh100_gsp_oneinit()` validates
+`fmc-<ver>.bin` as an ELF32 whose 52-byte header is compared against a fixed table and whose six section
+headers must be SHT_PROGBITS with `SHF_MASKPROC|SHF_MASKOS|SHF_OS_NONCONFORMING|SHF_ALLOC` (plus the string
+table), each with a CRC32 in `sh_info`, holding the sections `hash`, `publickey`, `signature` and `image` -
+which is the container shape `gpu_firmware.c` parses.  Then it loads `image` into memory, keeps the three blobs,
+and calls `nvkm_fsp_boot_gsp_fmc(fsp, args_addr, rsvd_size, resume, img_addr, hash, pkey, sig)`: `args_addr`
+is a `GSP_FMC_BOOT_PARAMS` block (its `bootGspRmParams` carry the offset and size of a `GspFwWprMeta` that
+describes the radix-3 table, the bootloader, the signature and the heaps), and `rsvd_size` places a 1 MiB FRTS
+by an offset back from the end of the frame buffer, aligned to the 128 KiB WPR granularity.  This OS reserves
+no vidmem and has no resource-manager descriptor, so it sends the declined encodings the vendor driver itself
+uses when it has no region - `frts*` 0/0 and `gspBootArgsSysmemOffset = (NvU64)-1` - and says so on the panel.
+An accepted handover with those declined is therefore a verified FMC image with nothing to boot *into*: it is
+the step that proves the mailbox, the sizes and the framing, and it is not rendering.  The next increment is
+the vidmem reservation plus `GspFwWprMeta` plus `GSP_FMC_BOOT_PARAMS`, in that order, and nouveau's
+`gh100_gsp_wpr_meta_init()` is the specification for it.
+
 ## What a report is allowed to say about itself
 
 The card's own `Engine:` line - the one a user pastes - is built by the module into `struct inventory::text`

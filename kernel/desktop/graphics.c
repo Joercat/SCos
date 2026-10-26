@@ -450,14 +450,40 @@ static void put_fsp_headline(struct writer *w, const struct gpu_fsp_state *f)
         put(w, f->skipped == 2 ? " is above this kernel's device window\n" : " has no memory aperture\n");
         return;
     }
+    /* Which row of the reference driver's table this chip is measured against, first, because it is the
+     * shortest sentence that explains a refusal of a file that is not malformed. */
+    if (f->arch_unknown) put(w, "architecture unreadable, cot sizes unknown, ");
+    else if (!f->fsp_supported) {
+        put(w, "no FSP mailbox for arch 0x");
+        put_hex(w, f->arch);
+        put(w, " (the reference driver has none for it), ");
+    } else {
+        put(w, "cot ");
+        put_number(w, f->cot_hash_bytes);
+        put(w, "/");
+        put_number(w, f->cot_pkey_bytes);
+        put(w, "/");
+        put_number(w, f->cot_sig_bytes);
+        put(w, " v");
+        put_number(w, f->cot_version);
+        put(w, ", ");
+    }
     put(w, "boot 0x");
     put_hex(w, f->boot_scratch);
     put(w, f->booted ? " booted, " : " not booted (waited ");
     if (!f->booted) {
-        put_number(w, (unsigned)f->boot_polls);
-        put(w, " looks), ");
+        if (f->wait_clocked) {
+            put_number(w, (unsigned)f->boot_ms_used);
+            put(w, " of ");
+            put_number(w, (unsigned)f->boot_ms);
+            put(w, " ms), ");
+        } else {
+            put_number(w, (unsigned)f->boot_polls);
+            put(w, " looks), ");
+        }
     }
-    put(w, !f->mapped ? "windows unmapped, nothing read"
+    put(w, !f->fsp_supported ? "no packet sent: this generation has no FSP mailbox in the reference driver"
+        : !f->mapped ? "windows unmapped, nothing read"
         : !f->mailbox_readable ? "mailbox refused, no request attempted"
         : !f->queried ? "mailbox answers, nothing asked"
         : !f->responded ? "query sent, no reply read"
@@ -492,7 +518,15 @@ static void put_fsp_headline(struct writer *w, const struct gpu_fsp_state *f)
     }
     put(w, ", lock 0x");
     put_hex(w, f->hwcfg2);
-    put(w, f->gsp_released ? " released" : " locked");
+    if (f->lockdown < 0) {
+        put(w, " unreadable");
+    } else {
+        /* The word, then the bit that means it: a reader who knows the register can check the claim, and a
+         * reader who does not is not left to infer a lock from "the read was not zero". */
+        put(w, f->lockdown ? " locked" : " released");
+        put(w, " bit13=");
+        put_number(w, (unsigned)(f->lockdown & 1));
+    }
     if (f->handover_sent) {
         put(w, " after 0x");
         put_hex(w, f->hwcfg2_after);
@@ -556,6 +590,32 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
     put_number(w, f->refusal_reads);
     put(w, " of the reads were the 0xbadf4100 refusal that says the coprocessor's block is locked until the "
            "FSP releases it).  ");
+    /* What the handover will be measured against, printed ahead of the outcome: on this generation the three
+     * blob sizes are the difference between a firmware file being accepted and being refused as malformed,
+     * and the row of the table that applies is the chip's architecture, not this file's preference. */
+    put(w, "The architecture field of NV_PMC_BOOT_0 reads 0x");
+    put_hex(w, f->arch);
+    if (f->arch_unknown)
+        put(w, " and would not answer - 0, all ones, or a PRI error - so the size this chip's FSP wants for the "
+               "three authentication blobs is unknown and nothing is sent: a container is not judged against "
+               "an expectation invented for it");
+    else if (!f->fsp_supported)
+        put(w, ", a generation the reference driver has no FSP entry for: no mailbox exists at these offsets "
+               "on it, and its coprocessor is reached through the older ACR path, so nothing here is asked of "
+               "it");
+    else {
+        put(w, ", whose FSP wants a hash of ");
+        put_number(w, f->cot_hash_bytes);
+        put(w, ", a public key of ");
+        put_number(w, f->cot_pkey_bytes);
+        put(w, " and a signature of ");
+        put_number(w, f->cot_sig_bytes);
+        put(w, " bytes, in a container of version ");
+        put_number(w, f->cot_version);
+        put(w, ".  Hopper's table says 48/384/384 and both Blackwell tables say 48/97/96, which is why one "
+               "hard-coded size in this file used to be enough and now is not");
+    }
+    put(w, ".  ");
     put(w, "The FSP's boot-complete scratch at BAR0+0x200bc reads 0x");
     put_hex(w, f->boot_scratch);
     put(w, f->booted ? ", which is the value that means it has finished booting, so the mailbox behind it is "
@@ -563,16 +623,37 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
                      : ", which is not 0xFF: the FSP has not reported itself booted, and until it does "
                        "nothing is reading the channel");
     if (!f->booted) {
-        /* The wait is counted rather than described, because the only honest way to say "it did not answer in
-         * time" is to say how much time that was - and this early in a boot the time this kernel can measure is
-         * a number of reads of an uncached register, not a clock it can read. */
+        /* Counted, not described: the only honest way to say "it did not answer in time" is to say how much
+         * time that was.  The budget is the reference driver's own four seconds, and it is measured against
+         * the coprocessor's PTIMER - the cycle counter timed against that clock once per probe - because a
+         * bound expressed as a count of uncached reads is a claim about this CPU, not about the chip.  When
+         * there is no clock to read, the panel says the bound was a count instead of pretending otherwise. */
         put(w, ".  That was waited for: ");
-        put_number(w, (unsigned)f->boot_polls);
-        put(w, " looks at one uncached register, which is tens of milliseconds on a modern core, and then "
-               "stopped rather than holding a boot open.  The reference driver waits up to four seconds here, "
-               "because it has just reset the chip and is training the coprocessor's loader; this OS does "
-               "neither, so on a card whose own firmware never got this far the wait ends the same way however "
-               "long it is");
+        if (f->wait_clocked) {
+            put_number(w, (unsigned)f->boot_ms_used);
+            put(w, " ms of the ");
+            put_number(w, (unsigned)f->boot_ms);
+            put(w, " ms the reference driver allows, in ");
+            put_number(w, (unsigned)f->boot_polls);
+            put(w, " reads at 0x200bc, and then it stopped rather than holding a boot open.  That is the whole "
+                   "budget, not a fraction of it: a card that has not reported itself booted after four seconds "
+                   "of its own clock is not a card that was still on its way");
+        } else {
+            put_number(w, (unsigned)f->boot_polls);
+            put(w, " reads at 0x200bc.  The coprocessor's timer block would not answer, so this wait could not "
+                   "be promised in milliseconds and was bounded by a count of reads instead - which says how "
+                   "much work was done, and not how much time passed, and the difference is printed rather than "
+                   "hidden");
+        }
+    }
+    if (!f->fsp_supported) {
+        /* Said and stopped, rather than tried and reported as a failure: the paragraphs below would each
+         * describe an exchange this OS deliberately did not start. */
+        put(w, ".\nGSP handover: not staged, and nothing was asked of the mailbox, because the page an FSP "
+               "queue would live on is not a queue on this generation.  The reference driver reaches this "
+               "chip's coprocessor through the older ACR path, which is not implemented here, so the honest "
+               "report is that this OS has no business writing to these offsets on this card.\n");
+        return;
     }
     if (!f->mailbox_readable) {
         put(w, ".  The mailbox queue registers themselves refused, so no request was attempted: the "
@@ -621,6 +702,26 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
                                    : " after it, still the locked-target refusal - the FSP took the message "
                                      "without opening the coprocessor's block to a cold reader, which is what "
                                      "the protected region and the resource manager's image exist to change");
+            put(w, ".  Bit 13 of that word - NV_PFALCON_FALCON_HWCFG2_RISCV_BR_PRIV_LOCKDOWN, which is the "
+                   "lock itself rather than a read that looked friendly - was ");
+            put(w, f->lockdown < 0 ? "unreadable before the message"
+                 : f->lockdown ? "set (locked)" : "clear (unlocked)");
+            put(w, " and ");
+            put(w, f->lockdown_after < 0 ? "unreadable after it"
+                 : f->lockdown_after ? "set (locked)" : "clear (unlocked)");
+            put(w, ".  The falcon's own mailbox pair read 0x");
+            put_hex(w, f->gsp_mailbox0);
+            put(w, "/0x");
+            put_hex(w, f->gsp_mailbox1);
+            put(w, " before and 0x");
+            put_hex(w, f->gsp_mailbox0_after);
+            put(w, "/0x");
+            put_hex(w, f->gsp_mailbox1_after);
+            put(w, " after: zero means the FMC has not reported yet, and a non-zero pair is its boot-arguments "
+                   "address or an error code, which this OS cannot tell apart because it hands over no "
+                   "arguments for the FMC to write back - the reference driver compares that pair against the "
+                   "address of a GSP_FMC_BOOT_PARAMS block it allocated, and this kernel has no resource "
+                   "manager to point at");
             put(w, ".  The FSP's boot-complete scratch read 0x");
             put_hex(w, f->boot_scratch);
             put(w, " before and 0x");

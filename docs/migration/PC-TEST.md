@@ -279,6 +279,19 @@ and running `python3 tools/makedisk.py build` with those files (or that whole tr
 them for you.  `GSP firmware: none of the images the open driver loads` is therefore a statement about the disk
 and not a refusal.
 
+To copy them off a machine where the open driver already works, mount the ESP and take the three the FMC
+path loads - the file names come from `NVKM_GSP_FIRMWARE_FMC(gb207, 570.144)` and `nvkm_firmware_get()` in the
+kernel's nouveau driver, which is where this OS's intake contract came from:
+
+    sudo mkdir -p /mnt/esp/SCOS
+    sudo cp /lib/firmware/nvidia/gb207/gsp/fmc-570.144.bin        /mnt/esp/SCOS/GSPFMC.BIN
+    sudo cp /lib/firmware/nvidia/gb207/gsp/gsp-570.144.bin         /mnt/esp/SCOS/GSP.BIN
+    sudo cp /lib/firmware/nvidia/gb207/gsp/bootloader-570.144.bin  /mnt/esp/SCOS/GSPBL.BIN
+
+`GSPFMC.BIN` is the one this build assembles a handover from; `GSP.BIN` and `GSPBL.BIN` are what the resource
+manager's own boot arguments would need, and those are not implemented here yet, so staging all three changes
+what the panel can *say* before it changes what the card does.  Say so rather than let `fw 3/5` imply more.
+
 Once files are there the panel answers in three paragraphs, and each one is a different question.
 `GSP firmware:` is the disk: per image, its size, its CRC32 as read, whether it is an ELF64 image (with
 `.fwimage` and the name it gives its signature section) or an ELF32 FMC image (which has neither, and is not
@@ -362,4 +375,11 @@ bracketed notice about its own length, paste that too - it is the one part of th
 removed rather than a fact withheld.
 The numbers in them - the boot scratch value, the refusal count, each reply's error code, and the before/after
 pair around a handover - are what a follow-up change gets argued against, and every one is a register read or a
-count the kernel kept while doing it.
+count the kernel kept while doing it.  Two of those numbers arrived because the working driver was read instead
+of guessed at: the first line now names the row of the FSP's table this chip is measured against (`cot
+48/97/96 v2` on a GB2xx, `48/384/384 v1` on a GH100 - a container is judged against *its* generation's widths,
+which is why a real GB207 file that is fine can now be accepted rather than refused as malformed), and the lock
+is reported as `bit13=1 locked` or `bit13=0 released`, which is the bit the driver reads rather than whether a
+register looked non-zero.  Waits are printed in milliseconds against the reference driver's own budgets (1500
+ms for a reply, 4000 ms for the FSP's boot) because a wait counted in reads was tens of times shorter than the
+chip needs, and a too-short wait shows up on a panel as "silent" - the most misleading thing a report can say.
