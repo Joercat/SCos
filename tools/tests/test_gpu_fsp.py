@@ -149,8 +149,11 @@ def test_the_panel_says_what_was_asked_and_what_was_not():
                    'It is not sent: asking the FSP to boot the coprocessor'):
         assert needle in panel, 'the panel no longer says: %s' % needle
     boot = source('kernel/drivers/gpu/gpu_detect.c')
-    assert 'gpu_fsp_note(&devices[i], handoff);' in boot, \
+    assert 'gpu_fsp_note(&devices[pick], handoff);' in boot, \
         'the probe is no longer reached from detection, so a boot with no staged module asks nothing'
+    assert boot.count('gpu_fsp_note(') == 1, \
+        'detection asks the security processor from %d places, and a panel that shows one answer cannot ' \
+        'say which of them produced it' % boot.count('gpu_fsp_note(')
     assert 'gpu_firmware_note(handoff);' in boot, \
         'the firmware record is no longer noted before the handover is built, and the handover would be ' \
         'described as absent on a machine that has it'

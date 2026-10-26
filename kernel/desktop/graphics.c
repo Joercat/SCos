@@ -686,11 +686,12 @@ void graphics_report(char *out, size_t capacity)
         put_fsp_report(&w, gpu_fsp_state());
         const struct gpu_module_state *gsp = gpu_module_state();
         if (gsp && gsp->bound) {
-            put(&w, "GSP path: the clause above quotes what the chip answered to reads alone; nothing was "
-                    "written to make it answer. Where it answered an error code instead of a register, the "
-                    "door is held by the card's own firmware boot, which this OS neither carries nor "
-                    "speaks to - so an engine whose coprocessor was not started for it is an engine this "
-                    "build cannot give work to.\n");
+            put(&w, "GSP path: the clause above quotes what the chip answered to reads alone, and the "
+                    "paragraph before this one is the only thing this OS has ever written to a card to make "
+                    "it answer - one query, not a boot.  What would start the coprocessor this OS neither "
+                    "carries nor sends: it reads the firmware off the boot volume if it is given it, assembles "
+                    "the handover, and stops there, so an engine whose coprocessor was not started for it is "
+                    "an engine this build cannot give work to.\n");
         }
     }
     put(&w, "Tables: ");

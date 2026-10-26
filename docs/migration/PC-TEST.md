@@ -304,3 +304,28 @@ what says no, not this OS choosing to forget.  `unreadable` means the firmware c
 Paste all three paragraphs, plus the `Engine:` line, when reporting a machine: the first says what the stick
 holds, the second what this build does with it, the third what is in RAM right now, and those are three
 different questions a reader has to be able to tell apart.
+
+### The FSP paragraph, and what to paste from it (r-fsp-panel)
+
+The Graphics report now has a paragraph starting `FSP mailbox:` - the card's own security processor, which is
+the thing that has to answer before any part of this GPU can be driven.  It is read, and one question is asked,
+on every boot; nothing is written to make the chip do anything.  Three endings are worth knowing the difference
+between, and all three are information:
+
+* `not asked, and not because anything failed ... vendor 0xNNNN` - this machine's display function is not an
+  NVIDIA one, so the offsets were never touched.  On a QEMU boot it reads `0x00001013` and that is correct.
+* `The FSP's boot-complete scratch ... reads 0x...`, where the low byte is not `ff` - the FSP has not reported
+  itself booted.  This is the expected answer on a card whose own firmware never got going, and it is a real
+  measurement rather than a missing one.
+* `asked of the card at BAR0 0x...` with a query sent and a reply read, or refused - the mailbox is alive.  The
+  sentence after it says which of the four ways a request can fail applies, and how many registers were written.
+
+Below that, a `GSP handover:` sentence says whether the FMC image on the stick was staged into memory this
+kernel owns for the card to read, with the sizes and checksums it would be given, and it ends by saying the
+payload was not sent.  That last part is deliberate, not a stub: the boot that would consume it is not
+implemented, so a machine reporting `staged and ready` is a machine one step short of a test nobody has run.
+
+When reporting a real card, paste the whole `FSP mailbox:` and `GSP handover:` paragraphs, plus the `Engine:`
+line and the `Scanout owner` line.  The numbers in them - the boot scratch value, the refusal count, the reply's
+error code - are what a follow-up change would be argued against, and each is a register read or a count the
+kernel kept while doing it.

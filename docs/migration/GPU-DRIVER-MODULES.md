@@ -903,3 +903,87 @@ this commit: 122 host checks, 0 failures, five of them the refusal replayed as o
 `GSP block … refused all five reads`, the unit cross-check, the engine block refusing the same way, the FSP
 refusing, three mappings and no store - and the widest report the format can now produce is 888 bytes
 against a describe field grown from 768 to 1152 for exactly these clauses.
+
+## The door that is open before the lock: the FSP mailbox (r-fsp-mailbox)
+
+Everything in the section above this one ends in the same place: the register block that owns the coprocessor
+answers a cold reader with `0xbadf4100`, and no read this OS performs, and no write it is willing to make in
+someone else's machine, clears that.  What clears it is the card's own Flight Security Processor.  The previous
+section's conclusion - that the path "ended from this side" - is now superseded in one specific respect: the FSP
+has a mailbox of its own, reachable *while the lock is still on*, and this kernel has started talking to it.
+
+`kernel/drivers/gpu/gpu_fsp.c` is that conversation.  Three windows, each its own `device_map` request rather
+than one 14 MiB mapping the kernel would refuse: BAR0+0x20000 for one page (the therm scratch, whose
+`NV_THERM_I2CS_SCRATCH` low byte reads 0xFF once the FSP has finished booting itself), BAR0+0x8f0000 for four
+pages (the FSP's own register group: its mailbox at +0x2ac0 from there, its queue pointers at +0x2c00 and
++0x2c80, its ucode version and fuse check at +0x334 and +0x33c), and BAR0+0x110000 for one page (the falcon
+whose capability word has been refusing every reader since the first boot on real hardware).  Four pages for
+the second window, not one, because the queue pointers sit 11 KiB past its base - which is worth recording
+because the file was written with a one-page bound first, and every read of those four pointers was being
+dropped and reported as 0xffffffff by a check that looked entirely reasonable in isolation.  A host model of
+the register file caught it in the same minute it was introduced; on hardware it would have been a week.
+
+The request is the smallest real one there is, chosen because the reference driver itself sends it before it
+has unlocked, reset or configured anything: an `NVDM_TYPE_CAPS_QUERY` whose whole payload is the one byte
+naming which capability to report on (`NVDM_TYPE_CLOCK_BOOST`, which is a question about the clock, not a
+change to it).  Framing is MCTP over the channel, so the packet is twelve bytes - transport dword `0xc0000001`
+(version 1, start and end of the message, no endpoint ids, no tag, no sequence, because there is one packet),
+NVDM dword `0x1610de7e` (vendor-defined PCI, NVIDIA's id, the caps-query type), then the payload padded to a
+dword.  It goes into the channel's data window with auto-increment for writes enabled, the *count* of the
+walk is checked against the number of dwords written, and only then is the queue tail set to the last dword
+written and the head pulled up behind it, because writing the tail is the request.  A reply is waited for by
+watching the message queue's two pointers separate, read back through the same window with auto-increment for
+reads, and acknowledged by pulling the tail to the head.  Refusals at any step are reported as what they are
+and the card is left alone; the panel prints the reason, the number of register writes (nine, on a boot where
+the FSP answered: one control, three data, four pointers, and the ack) and how many of the reads were
+`0xbadf4100`.
+
+The handover that *would* start the coprocessor is assembled and not sent.  `NVDM_PAYLOAD_COT` is 860 bytes -
+version and size, the page-aligned physical address of the FMC image, four fields describing the GC6 resume
+store, the 48-byte hash, the 384-byte public key and the 384-byte signature taken out of the FMC container's
+own sections, and the boot-arguments pointer, set to all-ones because there is nothing to reuse - and
+`stage_fmc()` builds it in `fsp_state.payload`, having first copied the FMC image into pages this kernel asked
+the allocator for and CRC32'd the *copy*, since the address handed to a microcontroller has to be one nothing
+else can move.  It stops there on purpose.  Booting the GSP from that payload also needs the write-protected
+region and the resource manager's image in place, and a half-written boot is a machine that comes back to a
+black screen with no log; so the payload is built, staged, described on the panel and never put on the wire.
+The one thing this leaves unproven is also the reason it is left: `kgspImageListCopyToVid` - the GSPRM half -
+is not implemented in this tree, so there is nothing for the handover to be a prelude to yet.
+
+The probe is gated on the vendor.  Every offset above is where an NVIDIA chip decodes it inside an NVIDIA
+function's BAR0, and a machine whose display adapter is somebody else's has three pages at the same distances
+into an aperture that means something entirely different; reading them is a guess and writing them is worse
+than a guess.  So `gpu_fsp_note()` checks `vendor == 0x10de` before it maps anything, and says so on the panel
+in 445 bytes rather than staying quiet - which was measured on a booted QEMU machine, because "the paragraph
+is missing" and "the kernel forgot to look" must not be the same sentence to a reader.  Detection asks it once
+per boot, of the function that owns the screen, from `gpu_init()` rather than from the module loader: a machine
+with no staged module is a machine where the FSP's answer is the *most* useful thing on the panel, not the
+least relevant.
+
+Provenance, because this kernel is its own and the bytes on this wire are somebody else's specification:
+`hopper/gh100/dev_fsp_pri.h` (the mailbox: `NV_PFSP_EMEMC/EMEMD`, the two queue-pointer pairs, the 7:2 offset
+and 15:8 block fields, the 1<<24 and 1<<25 auto-increment bits - the header GB100's abstraction layer includes
+explicitly, which is why the Blackwell port uses these offsets), `blackwell/gb100/dev_fsp_pri.h` and
+`dev_fsp_addendum.h` (the scratch group and the FSP's version and fuse words), `blackwell/gb100/dev_therm.h`
+with its addendum (the boot-complete scratch), `hopper/gh100/dev_falcon_v4.h` (HWCFG2 at +0xf4 in the falcon's
+page), `mctp_format.h` (the two header dwords and the inline that builds them), `fsp_emem_channels.h` (the RM
+channel, its 1 KiB size, the 64-dword block), `fsp_caps_query_rpc.h` and `nvdm_payload_cmd_response.h` (the
+query's payload and the response's task/command/error triple), `kern_fsp_cot_payload.h` (the 860-byte
+handover, field for field) and the behaviour of `kern_fsp.c`, `kern_fsp_gh100.c` and `kern_fsp_gb100.c`.  All
+from NVIDIA's open GPU kernel modules, MIT, read 2026-10-26.  Nothing from that tree is compiled into this
+one: the framing is rebuilt here against a bounded loop and a refusal rather than a thread, a timeout and an
+error model, and the parts that are the vendor's are their register positions and field offsets, which are the
+thing no reimplementation may invent.
+
+Measured: `tools/tests/gpu_fsp_host.c` compiles the kernel file straight in against a model of the register
+file and reports 72 checks, 0 failures, under ASan and UBSan
+(`python3 tools/tests/test_gpu_fsp.py`, which also pins the published offsets and the payload's field positions
+independently of the harness, since a test deriving its constants from the file it tests could only ever prove
+that both are wrong in the same direction).  The model is what found the two real defects in the first draft of
+the port - the one-page bound that dropped every queue-pointer access, and an FMC handover sized against the
+resource manager image's signature field instead of the FMC's own - and it is what asserts the doorbell is the
+*last dword written* rather than the one after it, the order of the two queue writes, and that 1017 bytes of
+payload are refused while 1016 are sent.  One booted QEMU machine with the firmware staged carries the FSP
+paragraph in a report 3667 bytes long against the 8192-byte buffer, 4525 bytes spare, which is still room for
+the widest engine inventory a module can produce; the same boot's log never mentions the FSP, because the
+probe stopped at the vendor gate - correctly, and verifiably.
