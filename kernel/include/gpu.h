@@ -118,8 +118,15 @@ struct gpu_module_state {
      * so the number is a ceiling to check against, not a place where text dies quietly.  It went to 1152
      * when the report grew its per-target clauses: each named block a chip refuses to answer costs about a
      * hundred and thirty bytes to say so, and how many blocks that is is the chip's decision, not the
-     * driver's - so the fixture seeds its widest case and asserts the length, rather than this note. */
-    char describe[1152];
+     * driver's - so the fixture seeds its widest case and asserts the length, rather than this note.
+     *
+     * The note was right and the fixture was not: a real GB207's inventory came back measuring 1151 bytes,
+     * which is this field minus one, and the clause it lost was the one about the submission window's clock.
+     * The widest case a fixture can seed is a guess about what a chip will say, so the ceiling has to be
+     * large enough that no driver's whole report reaches it *and* the copy below has to say so when it clips.
+     * 2048 is that: twice the length a real card produced, with room for the per-target clauses a chip with
+     * more engines refused would add. */
+    char describe[2048];
     uint64_t resident_bytes;         /* image in the executable boot-arena region */
     uint64_t file_bytes;             /* bytes read off the disk */
     uint32_t store_count;            /* modules on the disk, including those never opened */

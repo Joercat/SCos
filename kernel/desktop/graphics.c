@@ -423,6 +423,94 @@ static void put_fsp_mailbox(struct writer *w, const struct gpu_fsp_state *f)
     put(w, ".\n");
 }
 
+/* The one line that decides everything else on this panel, at the front where it cannot be lost.
+ *
+ * Three reports in a row from real hardware have now come back ending in the middle of a word, every one of
+ * them cut somewhere before the paragraph this summarizes - which made the one fact anybody needed, whether
+ * the card's security processor is even awake, unreadable no matter how carefully it was written down.  So
+ * each of its five answers is compressed here to a word, with the number it came from beside it, and this
+ * goes first: a copy that survives 350 bytes survives this line, and a line that has to be read from a screen
+ * can be read from a screen.  Nothing is introduced - every clause is the same state the paragraphs below
+ * spell out, from the same fields, and where a paragraph explains, this one only reports. */
+static void put_fsp_headline(struct writer *w, const struct gpu_fsp_state *f)
+{
+    const struct gpu_firmware_state *fw = gpu_firmware_state();
+
+    put(w, "FSP: ");
+    if (!f) { put(w, "no PCI display function to ask.\n"); return; }
+    if (!f->nvidia) {
+        put(w, "not asked: this display function is vendor 0x");
+        put_hex(w, f->vendor);
+        put(w, ", and every offset on this path is NVIDIA's.\n");
+        return;
+    }
+    if (!f->attempted) {
+        put(w, "not asked: the function at BAR0 0x");
+        put_hex(w, (uint32_t)f->bar0);
+        put(w, f->skipped == 2 ? " is above this kernel's device window\n" : " has no memory aperture\n");
+        return;
+    }
+    put(w, "boot 0x");
+    put_hex(w, f->boot_scratch);
+    put(w, f->booted ? " booted, " : " not booted (waited ");
+    if (!f->booted) {
+        put_number(w, (unsigned)f->boot_polls);
+        put(w, " looks), ");
+    }
+    put(w, !f->mapped ? "windows unmapped, nothing read"
+        : !f->mailbox_readable ? "mailbox refused, no request attempted"
+        : !f->queried ? "mailbox answers, nothing asked"
+        : !f->responded ? "query sent, no reply read"
+        : "query answered");
+    if (f->responded) {
+        put(w, " err 0x");
+        put_hex(w, f->query.error);
+    } else if (f->send_blocked) {
+        put(w, ", send blocked(");
+        put_number(w, (unsigned)f->send_blocked);
+        put(w, ")");
+    }
+    put(w, ", handover ");
+    if (!f->fmc_seen) put(w, "no FMC on the volume");
+    else if (!f->staged) {
+        put(w, "not staged, defect ");
+        put_number(w, (unsigned)f->cot_defect);
+    }
+    else if (!f->handover_attempted) put(w, "staged, query not answered cleanly");
+    else if (!f->handover_sent) {
+        put(w, "written, refused(");
+        put_number(w, (unsigned)f->handover_blocked);
+        put(w, ")");
+    } else if (!f->handover.bytes) put(w, "sent, no reply");
+    else {
+        put(w, "sent, err 0x");
+        put_hex(w, f->handover.error);
+        {
+            const char *name = gpu_fsp_flcn_name(f->handover.error);
+            if (name) { put(w, " "); put(w, name); }
+        }
+    }
+    put(w, ", lock 0x");
+    put_hex(w, f->hwcfg2);
+    put(w, f->gsp_released ? " released" : " locked");
+    if (f->handover_sent) {
+        put(w, " after 0x");
+        put_hex(w, f->hwcfg2_after);
+    }
+    put(w, ", clock 0x9400 ");
+    put(w, !f->timer_readable ? "unmapped" : f->timer_refused ? "refused" : f->timer_dead ? "silent block"
+          : f->timer_ticking ? "moving" : "still");
+    put(w, ", VF page ");
+    put(w, !f->vf_readable ? "unmapped" : f->vf_answered ? "answering" : f->vf_refusals ? "refused" : "empty");
+    put(w, ", fw ");
+    put_number(w, fw ? (unsigned)fw->staged : 0u);
+    put(w, "/5, card reads ");
+    put_number(w, (unsigned)f->reads);
+    put(w, " writes ");
+    put_number(w, (unsigned)f->writes);
+    put(w, ". Full text: `graphics fsp`.\n");
+}
+
 static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
 {
     put(w, "FSP mailbox: ");
@@ -629,6 +717,7 @@ void graphics_fsp_report(char *out, size_t capacity)
     if (!out || capacity == 0) return;
     *out = 0;
     put(&w, "FSP and GSP firmware, in the words the boot panel prints:\n");
+    put_fsp_headline(&w, gpu_fsp_state());
     put_firmware_report(&w, gpu_firmware_state());
     put_firmware_image(&w, gpu_firmware_state());
     put_fsp_report(&w, gpu_fsp_state());
@@ -649,6 +738,9 @@ void graphics_report(char *out, size_t capacity)
      * middle one is the state a virtual machine is usually in, and a report that called it either
      * "accelerated" or "unavailable" would be lying. */
     const struct gpu_module_state *ms = gpu_module_state();
+    /* First, because every long report a person has copied out of this OS so far lost its end: the line below
+     * the summary is the longest text on the panel and the first thing to fall off a clipboard. */
+    put_fsp_headline(&w, gpu_fsp_state());
     put(&w, "Renderer: ");
     if (engine) put(&w, "CPU software compositor, engine available for selected ops\n");
     else if (ms && ms->bound && gpu_engine_drives_output())

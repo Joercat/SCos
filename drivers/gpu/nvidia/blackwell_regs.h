@@ -37,12 +37,25 @@
 #define NV_PMC_BOOT_0_IMPLEMENTATION(v)   (((v) >> 20) & 0xfu)   /* 23:20 */
 #define NV_PMC_BOOT_0_ARCHITECTURE(v)    (((v) >> 24) & 0x1fu)   /* 28:24 */
 
-/* The architecture numbers the newest published manual names.  Anything else - including the number a
- * Blackwell chip answers - is printed as a number rather than translated, since inventing a mapping
- * here would be a guess dressed up as a fact. */
+/* The architecture numbers the published field tables name, from `src/common/inc/swref/published/nv_ref.h`
+ * in the open kernel-modules tree (NV_PMC_BOOT_0_ARCHITECTURE_*), which is the register field read above and
+ * nothing else.  A number outside this list is printed as a number rather than translated, since inventing a
+ * mapping here would be a guess dressed up as a fact.
+ *
+ * What these do NOT settle is which chip inside an architecture a machine has: nv_ref.h splits that into a
+ * second field (`_ARCHITECTURE_1 8:8`, the impl) and the driver's own arch+impl -> chip table turns
+ * 0x1b/impl 7 into GB207, 0x1b/impl 6 into GB206 and so on.  That table is a generated file which is not in
+ * this tree, so this header names the architecture and the module prints the impl as a number.  Guessing a
+ * chip name from a device id would be worse than not naming it: the id is shared by chips in one
+ * architecture, which is the whole reason the engine counts above are read instead of looked up. */
 #define NV_PMC_BOOT_0_ARCHITECTURE_GV100  0x14u   /* Volta   */
-#define NV_PMC_BOOT_0_ARCHITECTURE_TU100  0x16u   /* Turing  */
-#define NV_PMC_BOOT_0_ARCHITECTURE_GA100  0x17u   /* Ampere  */
+#define NV_PMC_BOOT_0_ARCHITECTURE_TU100  0x16u   /* Turing: TU100, TU110 */
+#define NV_PMC_BOOT_0_ARCHITECTURE_GA100  0x17u   /* Ampere: GA100 through GA107 */
+#define NV_PMC_BOOT_0_ARCHITECTURE_GH100  0x18u   /* Hopper: GH100 */
+#define NV_PMC_BOOT_0_ARCHITECTURE_AD100  0x19u   /* Ada: AD102, AD103, AD106, AD107 */
+#define NV_PMC_BOOT_0_ARCHITECTURE_GB100  0x1Au   /* Blackwell, the GB10x chips */
+#define NV_PMC_BOOT_0_ARCHITECTURE_GB200  0x1Bu   /* Blackwell, the GB2xx chips */
+#define NV_PMC_BOOT_0_ARCHITECTURE_GR100  0x1Cu   /* the generation after: GR100, GR102 */
 
 /* ------------------------------------------------------------------------ the GSP ----
  * Blackwell's management processor, and the block a driver talks to it through.  Published in full for

@@ -888,7 +888,7 @@ the end), plus three booted machines - one with a complete staged set held and p
 where the payload image belongs, and the tests' own pair of refusal replays.  The report buffer is sized from
 those boots: 4582 bytes with everything staged and parsed against 8192 provided, the size raised this commit
 because the parse paragraph pushed the worst case to 4582 and the test requires room for the longest engine
-inventory (1152 bytes) on top of it; the cost is stack and was measured with `-fstack-usage` (13440 bytes for
+inventory (2048 bytes) on top of it; the cost is stack and was measured with `-fstack-usage` (13440 bytes for
 the terminal's command dispatcher, 8768 for the tty's executor, against the 64 KiB the boot stack entry gives
 them).  Before this commit: 114 host checks, the report at 3719 bytes against 5120, and a panel that could
 only say a real FMC image was not a container.
@@ -995,6 +995,37 @@ requires the difference to leave room for the widest engine inventory a module c
 is the case that has both.  Neither boot's log mentions the FSP at all, because the probe stopped at the vendor
 gate on a cirrus display function: correctly, and verifiably, since the paragraph that says so is 445 bytes of
 the 3667.
+
+## What a report is allowed to say about itself
+
+The card's own `Engine:` line - the one a user pastes - is built by the module into `struct inventory::text`
+and then copied by the kernel into `struct gpu_module_state::describe`.  For two revisions both were 1152
+bytes, and a real GB207's report measured **1151**: the field held 1151 characters plus the terminator, the
+copy loop stopped there, and the sentence that fell off the end was `; the window answered but its clock did
+not tick, so nothing was submitted through it`.  The user's paste also ended mid-number at `Display: 1024x7`,
+which is what proved the cut was ours: a terminal that lost a paste would not stop at exactly one byte less
+than a buffer size that appears nowhere on the screen.
+
+Three things follow, and all three are in the tree rather than promised.
+
+* Both fields are 2048 bytes now: twice what a real card produced, because the length of that report is the
+  chip's decision (each block it refuses to answer costs about 130 bytes to say so) and not something a
+  fixture can guess.  The host harness's widest case seeds *every* refusal clause plus the live-window-dead-
+  clock clause and measures 1156 bytes, so the ceiling is asserted against a text longer than any machine has
+  produced; it would have failed at 1152.
+* `DESC_RESERVE` (96 bytes) is held back at the end of the module's field and `put_char` counts what it could
+  not write, so an overrun ends the line with `[+N B of this line would not fit this module's own buffer:
+  report it as truncated]`.  The kernel's copy carries its own notice.  Refusing to write more is a limit;
+  hiding that you refused is the defect, and a report whose tail was eaten silently is the failure class this
+  repository has been argued against everywhere else.
+* The architecture field is named from the published table rather than left as a number: 0x16 Turing, 0x17
+  Ampere, 0x18 Hopper, 0x19 Ada, 0x1A Blackwell's GB10x chips, 0x1B Blackwell's GB2xx chips, 0x1C GR100, from
+  `NV_PMC_BOOT_0_ARCHITECTURE_*` in `src/common/inc/swref/published/nv_ref.h` (open kernel modules, MIT - the
+  same disclosure as the FSP port).  What the *chip* within an architecture is belongs to a second field,
+  `impl`, and the vendor's arch+impl -> chip table (the generated `__nv__arch__`/`__nv__impl__` lists) is not
+  in this tree, so the module prints `impl 0x7` and stops: on this generation that combination separates GB202
+  from GB207, and naming the wrong chip on a panel is worse than naming none.  A number outside the table is
+  still printed as a number and labelled `(arch not in the published table)`.
 
 ## The handover goes on the wire: r-cot-send
 

@@ -310,17 +310,19 @@ int main(void)
     check(ops && ops->describe, "the one operation it does offer is the description");
     const char *text = ops && ops->describe ? ops->describe(ops->context) : 0;
     check(text && str_len(text) > 40, "the description is non-empty");
-    /* gpu_module.c copies a description into the describe field of gpu_module_state (1024 bytes) and the
-     * module keeps its own buffer of the same size, so anything longer arrives clipped: the tail is the
+    /* gpu_module.c copies a description into the describe field of gpu_module_state (2048 bytes) and the
+     * module keeps its own buffer of the same size with 96 bytes held back for the notice, so a report
+     * longer than that arrives *labelled* rather than clipped: the tail is the
      * engine inventory, which is the clause the next increment of this driver reads.  The bound is checked
      * here rather than trusted, because a ceiling nobody measures is a wish. */
-    check(text && str_len(text) < 1152, "the description fits the kernel's describe field");
+    check(text && str_len(text) < 2048, "the description fits the kernel's describe field");
 
     char needle[64];
     snprintf(needle, sizeof needle, "NV_PMC_BOOT_0=0x%08x", boot0);
     check(has(text, needle), "the description quotes the raw dword, so the decode can be re-checked");
-    check(has(text, "arch 0x1a (arch not in the published table)"),
-          "an architecture the published table does not name is reported as unnamed, not refused");
+    check(has(text, "arch 0x1a Blackwell, GB10x"),
+          "an architecture the published field table names is named on the panel, not left as a number "
+          "for the reader to decode");
     check(has(text, "impl 0x8"), "IMPLEMENTATION is taken from 23:20, where NVIDIA documents it");
     check(has(text, "rev A.1"), "MAJOR_REVISION 7:4 and MINOR_REVISION 3:0 are read as separate fields");
     check(has(text, "reads 18, writes 0"),
@@ -699,6 +701,12 @@ int main(void)
         }
     }
     ce_block[0] = 0x12345678u;                      /* both targets answering, in their longest form */
+    /* And the tail a real card added that this fixture had never seeded: a window that answers while its
+     * clock stands still.  Those 73 bytes are what took a GB207's report past the field it was written
+     * into, so the widest case has to contain them or the ceiling below is measured against a text shorter
+     * than any machine in use will produce. */
+    umode_class = 0x40u;
+    timer_frozen = 1;
     ce_block[1] = 0x9abcdef0u;
     for (unsigned i = 0; i < 4u; i++) fsp_regs[i] = 0xf00dbabeu;
     /* And the coprocessor refusing, which is the clause a real Blackwell card produces and the longest of
@@ -706,9 +714,12 @@ int main(void)
     for (unsigned i = 0; i < 5u; i++) gsp_regs[i] = 0xbadf4100u;
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(verdict == 0 && str_len(text) < 1152,
+    check(verdict == 0 && str_len(text) < 2048,
           "the longest inventory this format can describe, with every target clause it can print, still "
           "fits the kernel's field unclipped");
+    check(has(text, "the window answered but its clock did not tick") &&
+          !has(text, "would not fit this module's own buffer"),
+          "and the widest case carries the clause that clipped a real card, with nothing dropped from it");
     check(has(text, "the first LCE's block at 0x104000 answers 0x12345678/0x9abcdef0") &&
           has(text, "FSP scratch at 0x8f0320 answers 0xf00dbabe") &&
           has(text, "GSP block at 0x110000 refused all five reads"),
@@ -718,9 +729,11 @@ int main(void)
     check(has(text, "17 engines per its own IS_ENGINE, 4 bus"),
           "the chip's own engine flag and the bus count are both reported, so devices and engines cannot "
           "be confused for each other by a reader or by this driver");
-    check(has(text, "engines are register blocks, not channels: no submission window answered"),
-          "and a report that names engines without a window to ring them says what follows from that");
-    check(!has(text, "clock +"), "a silent window is not reported as a ticking one");
+    check(has(text, "the window answered but its clock did not tick, so nothing was submitted through it"),
+          "and a report whose window answers while its clock stands still says nothing was submitted "
+          "through it, which is the clause a real GB207 produced and this fixture had never seeded");
+    check(!has(text, "clock +") && !has(text, "no submission window answered"),
+          "a window that answered is not called silent, and a clock that stood still is not called ticking");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
 
@@ -933,6 +946,15 @@ int main(void)
     check(far_maps == 1, "the attempt is recorded even though it failed");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
+
+    /* ---- the branch that must stay: a number the table does not name.  Same chip, one field replaced, so
+            the two architecture cases differ only in the thing under test. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0);
+    registers[0] = (boot0 & ~(0x1fu << 24)) | (0x1du << 24);
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops && ops->describe ? ops->describe(ops->context) : 0;
+    check(verdict == 0 && has(text, "arch 0x1d (arch not in the published table)"),
+          "an architecture outside the published table is printed as a number and labelled as unnamed");
 
     /* Counted rather than written down: the number of scenarios has grown every time a new answer from a
      * chip was added to the driver, and a stale figure in a passing line is worse than no figure. */

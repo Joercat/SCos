@@ -40,6 +40,8 @@ void *memset(void *pointer, int value, unsigned long bytes)
 
 static const struct scos_gpu_exports *X;
 
+#define DESC_RESERVE 96u        /* room held back at the end of `text' for the clipping notice */
+
 struct inventory {
     u64 physical, mapped_bytes;         /* where the block is, as the PCI function reports it */
     u64 handle;                         /* what the kernel's accessors want */
@@ -96,14 +98,16 @@ struct inventory {
     u32 top_engines, top_bus;         /* entries the chip called engines, and the bus blocks it also lists */
     u32 top_ce_raw0, top_ce_raw1, top_ce_raw2;   /* the first copy engine's three rows, as read */
     u32 top_v2_cfg;                   /* the CFG dword of whichever block answered, kept for the report */
-    /* Built once at the end of init, at the kernel's own limit for a description (1152, in
-     * gpu_module_state.describe - and the same number again here, because the shorter of the two is what
-     * decides what a user reads).  The size is asserted by the host harness rather than trusted here: the
-     * fixture seeds the widest report the format can describe and checks the length, which is how 512
-     * became 768 and why 768 became this: every clause that names a target the chip refused costs about a
-     * hundred and thirty bytes, and a clipped tail would drop the very clause the next increment depends
-     * on. */
-    char text[1152];
+    /* Built once at the end of init, sized to the kernel's own limit for a description
+     * (gpu_module_state.describe - and the same number again here, because the shorter of the two decides
+     * what a user reads).  It has gone 512 -> 768 -> 1152 -> 2048, and the last step was not a refactor: a
+     * real GB207's report measured 1151 bytes, one less than the old field, because the clause naming what a
+     * chip refused to answer is longer than any clause a fixture had seeded, and the part that fell off the
+     * end was the part about the submission window's clock.  Every per-target refusal costs about a hundred
+     * and thirty bytes to state and how many there are is the chip's decision, so the field is now twice what
+     * a real card produced, DESC_RESERVE is held back at the end for a notice that says a report was cut, and
+     * both this buffer and the kernel's copy of it announce themselves instead of stopping quietly. */
+    char text[2048];   /* DESC_RESERVE of it is held back for the notice, so 1951 is what a report gets */
 };
 
 static struct inventory inv;
@@ -601,11 +605,16 @@ static void probe_usermode(void)
  * formats into its own buffer.  These four helpers are the whole formatting machinery. */
 struct buf {
     char *at, *end;                     /* `end' is one past the last byte that may be written */
+    u32 dropped;                        /* bytes asked for and refused: see the notice build_text writes */
 };
 
+/* A writer with a memory of what it could not write.  Before this, text that did not fit simply stopped, and
+ * a real card's inventory lost its last clause - the one about the submission window's clock - with nothing
+ * on the panel to show a sentence had been removed.  Refusing to write is a limit; hiding it is the bug. */
 static void put_char(struct buf *b, char c)
 {
     if (b->at < b->end) *b->at++ = c;
+    else b->dropped++;
 }
 
 static void put_text(struct buf *b, const char *s)
@@ -636,13 +645,18 @@ static const char *architecture_name(u32 architecture)
     case NV_PMC_BOOT_0_ARCHITECTURE_GV100: return "Volta";
     case NV_PMC_BOOT_0_ARCHITECTURE_TU100: return "Turing";
     case NV_PMC_BOOT_0_ARCHITECTURE_GA100: return "Ampere";
+    case NV_PMC_BOOT_0_ARCHITECTURE_GH100: return "Hopper";
+    case NV_PMC_BOOT_0_ARCHITECTURE_AD100: return "Ada";
+    case NV_PMC_BOOT_0_ARCHITECTURE_GB100: return "Blackwell, GB10x";
+    case NV_PMC_BOOT_0_ARCHITECTURE_GB200: return "Blackwell, GB2xx";
+    case NV_PMC_BOOT_0_ARCHITECTURE_GR100: return "Blackwell-next, GR10x";
     default: return 0;
     }
 }
 
 static void build_text(void)
 {
-    struct buf b = { inv.text, inv.text + sizeof(inv.text) - 1 };
+    struct buf b = { inv.text, inv.text + sizeof(inv.text) - 1 - DESC_RESERVE, 0 };
     u32 architecture = NV_PMC_BOOT_0_ARCHITECTURE(inv.boot0);
     const char *name = architecture_name(architecture);
     static const char major[] = "0123456789ABCDEF";
@@ -658,8 +672,10 @@ static void build_text(void)
     }
     put_text(&b, " arch 0x");
     put_hex(&b, architecture, 2);
-    /* Short on purpose: the kernel keeps 256 characters, and a sentence clipped at the end would hide
-     * the one clause a user most needs - whose screen this is. */
+    /* The name is short because it sits inside one line that a user reads as a whole; the field it is built
+     * in is gpu_module_state's describe, 2048 bytes with 96 held back for a clipping notice, and the number
+     * this line used to be written down to - 256, then 1152 - is how two generations of reports lost their
+     * tail without saying so. */
     put_char(&b, ' ');
     put_text(&b, name ? name : "(arch not in the published table)");
     put_text(&b, ", impl 0x");
@@ -1029,7 +1045,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     /* Wide enough for the whole description plus the prefix: the window clause sits at the end of the
      * text, so a narrow log buffer would cut the one part this increment added. */
     char line[1280];  /* the description plus the log prefix, at the wider budget */
-    struct buf b = { line, line + sizeof(line) - 1 };
+    struct buf b = { line, line + sizeof(line) - 1, 0 };
     put_text(&b, "nvidia: ");
     put_hex(&b, device->vendor, 4);
     put_char(&b, ':');
@@ -1048,7 +1064,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
         /* A second line for whoever reads the log to decide what to build next: it states the inference
          * and its limit, rather than leaving a reader to conclude that the doorbell had been tried. */
         static char second[320];
-        struct buf t = { second, second + sizeof(second) - 1 };
+        struct buf t = { second, second + sizeof(second) - 1, 0 };
         put_text(&t, "nvidia: BAR0+0x810090 is the legacy user-mode doorbell and this generation's is "
                       "NV_VIRTUAL_FUNCTION_PRIV_DOORBELL at 0x2200; neither is written, and the clock in the "
                       "legacy page read ");
@@ -1062,7 +1078,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
      * deciding what to build next needs its state, not an inference from the mailbox addresses. */
     {
         static char third[320];
-        struct buf u = { third, third + sizeof(third) - 1 };
+        struct buf u = { third, third + sizeof(third) - 1, 0 };
         put_text(&u, "nvidia: GSP block at BAR0+0x110000 read, nothing written; ");
         if (!inv.gsp_reachable)
             put_text(&u, "the block does not answer, so there is nothing to hand work to yet");
@@ -1090,7 +1106,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
      * depends on whether *any* of the aperture answers, and the three answers only mean anything together. */
     if (inv.ce_attempted || inv.fsp_attempted || (inv.top_gsp_found && !inv.pri_confirmed)) {
         static char fourth[448];
-        struct buf w = { fourth, fourth + sizeof(fourth) - 1 };
+        struct buf w = { fourth, fourth + sizeof(fourth) - 1, 0 };
         int said = 0;
         put_text(&w, "nvidia: the other targets in the same aperture: ");
         if (inv.ce_attempted) {

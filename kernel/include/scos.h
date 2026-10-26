@@ -559,14 +559,16 @@ void graphics_init(const struct boot_framebuffer *fb);
 void gpu_init(const struct boot_framebuffer *fb);
 /* The buffer every consumer of graphics_report() provides, named because the report outgrew an unnamed one.
  * The panel carries the detection lines, the whole inventory a driver module read from the chip (up to
- * 1152 bytes of it, which is the chip's decision and not this file's), and the paragraph about the
+ * 2048 bytes of it, which is the chip's decision and not this file's - 1152 was the number before a real
+ * GB207's report measured 1151 of it and lost its last clause, which is why a copy now states its own
+ * limit), and the paragraph about the
  * coprocessor's firmware - and with all three present on a booted machine the report measured 2559 bytes
  * into a 2560 buffer, i.e. it was clipped by one byte of headroom.
  *
  * It is 8192 for the measured reason in the test rather than a comfortable-looking one: the longest report
  * ever printed here was 4582 bytes - a complete firmware set staged, every image held and parsed, the module
  * inventory and all five adapter listings - and tools/tests/test_gsp_firmware.py requires the buffer to hold
- * that *plus* the headroom a driver module's own inventory needs (1152 bytes, struct gpu_module_state's
+ * that *plus* the headroom a driver module's own inventory needs (2048 bytes, struct gpu_module_state's
  * describe), because a card with both is the machine this ships for.  The number below is what leaves both
  * room, and the cost of it is stack, measured with -fstack-usage: a 13440-byte frame for the terminal's
  * command dispatcher and 8768 for the tty's command executor, each of which holds one of these buffers,

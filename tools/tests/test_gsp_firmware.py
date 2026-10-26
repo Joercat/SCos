@@ -467,6 +467,23 @@ def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
             # not be a clipped copy of the same text.  This is the branch that decides whether a long panel on a
             # real card arrives whole or arrives halfway, so it is tested against a booted kernel rather than
             # against the source.
+            # The front line, measured rather than asserted: it has to be short enough to survive the copy a
+            # person can actually make, and it has to still be there when the report is asked for in 1400 bytes,
+            # because 1400 is roughly what three real machines have managed to deliver.
+            line = panel.splitlines()[0]
+            assert line.startswith('FSP: '), 'the report no longer opens with the summary line: ' + panel[:200]
+            assert len(line) <= 512, 'the headline is %d bytes, which is not a line, it is a paragraph' % len(line)
+            g.call('graphics_report', g.scratch, 1400)
+            short = g.string(g.scratch, 1400)
+            assert short.startswith(line), \
+                   'a 1400-byte copy lost the first line: %r vs %r' % (short[:120], line[:120])
+            # On a cirrus display function the honest answer is that nothing was asked, and the line has to say
+            # that in itself rather than leave a reader to wonder whether the probe was skipped or lost: the two
+            # are different facts, and on a real card the same slot holds the boot scratch and the reply's error.
+            assert 'not asked' in line or 'graphics fsp' in line, \
+                   'the summary neither answers nor points at the answer: ' + line
+            assert line in panel and panel.index(line) == 0, \
+                   'the line the panel opens with is not the line that was built: %r' % panel[:120]
             cut = panel.index('GSP firmware:')         # where the three tail paragraphs begin
             spare = len(panel) - cut                   # everything the guard has to fit, plus what follows it
             assert spare > 800, 'the tail this guard exists for is only %d bytes: the paragraphs have been ' \

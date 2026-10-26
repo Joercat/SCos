@@ -182,6 +182,37 @@ def test_the_panel_says_what_was_asked_and_what_was_not():
         'described as absent on a machine that has it'
 
 
+def test_the_one_line_at_the_front_says_what_the_paragraphs_say():
+    """The panel's decision belongs where a truncated copy still has it.
+
+    Three real-card reports ended in the middle of a word, always before the paragraph that answers the
+    question, so the answer is not a shorter paragraph: it is the same state, compressed, on the first line -
+    and the first line is the one thing that has arrived every time.  Pinned here as *position* and *shape*;
+    the length bound and the survival of the line through a 1400-byte copy are measured on a booted machine in
+    test_gsp_firmware.py, because a limit derived from a fixture is a limit nobody believes.
+    """
+    panel = source('kernel/desktop/graphics.c')
+    assert 'static void put_fsp_headline(struct writer *w, const struct gpu_fsp_state *f)' in panel, \
+        'the summary line is gone, so the front of the panel is back to being prose'
+    assert panel.count('put_fsp_headline(&w, gpu_fsp_state());') == 2, \
+        'the headline is on %d of the two surfaces, and the narrow one is the one people are told to paste' \
+        % panel.count('put_fsp_headline(&w, gpu_fsp_state());')
+    assert panel.index('put_fsp_headline(&w, gpu_fsp_state());') < panel.index('put(&w, "Renderer: ")'), \
+        'the summary moved below the longest text on the panel, which is the position that keeps losing it'
+    start = panel.index('static void put_fsp_headline')
+    body = panel[start:panel.index('static void put_fsp_report', start)]
+    for needle in ('FSP: ', 'not booted (waited ', 'query answered', 'handover ', ' released', '" locked',
+                   'clock 0x9400 ', 'VF page ', ', fw ', 'card reads ', 'Full text: `graphics fsp`'):
+        assert needle in body, 'the headline no longer carries %r, so the paragraph is the only place it is said' % needle
+    # Every clause has to come from the state the paragraphs use, not from a re-measurement: two reads of the
+    # same register on the same boot can disagree, and a summary that disagreed with its own detail would be
+    # the worst possible thing to put first.
+    assert 'read32' not in body and 'gpu_io_' not in body, \
+        'the headline reads the card itself, so it can disagree with the paragraph below it'
+    assert body.count('f->') > 25 and 'f->query.error' in body and 'f->handover' in body, \
+        'the headline stopped quoting the fields the paragraphs quote'
+
+
 def test_the_narrow_surface_carries_the_same_paragraphs():
     """`graphics fsp` exists because the panel is longer than what a person can carry out of a console.
 

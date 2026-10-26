@@ -49,7 +49,7 @@ struct module_record {
     int bound;                   /* init succeeded and the self-test passed */
     char name[24];
     char family[SCOS_GPU_FAMILY_NAME];
-    char describe[1152];              /* mirrors struct gpu_module_state: see the note there */
+    char describe[2048];              /* mirrors struct gpu_module_state: see the note there */
     u64 region, region_bytes;
     u64 file_bytes, load_bytes, image_bytes, resident_bytes;
     u32 header_crc, computed_crc;
@@ -640,10 +640,20 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
         return -1;
     }
     if (ops->describe) {
+        /* Copied with a notice at the end if it runs out, because the last clause of a real card's report was
+         * lost exactly this way: the module's own text reached 1151 bytes, this field held 1152, the loop
+         * ended at its limit and nothing on the panel showed that a sentence had been removed.  A limit that
+         * announces itself is a different thing from a silent cut - and the module reserves room for its own
+         * notice at the same size, so this one should never be the only warning a reader gets. */
+        static const char tail[] = " [clipped by the kernel's copy: report this line as truncated]";
         const char *text = ops->describe(ops->context);
+        unsigned room = (unsigned)sizeof(record.describe) - 1u;
         unsigned n = 0;
-        while (n + 1 < sizeof(record.describe) && text && text[n]) {
-            record.describe[n] = text[n]; n++;
+        while (text && n < room && text[n]) { record.describe[n] = text[n]; n++; }
+        if (text && text[n]) {
+            room -= (unsigned)sizeof(tail) - 1u;
+            while (n > room) n--;
+            for (unsigned i = 0; i + 1u < sizeof(tail); i++) record.describe[n++] = tail[i];
         }
         record.describe[n] = 0;
     }

@@ -341,7 +341,15 @@ and which one you have is the single most useful sentence to report:
 
 **How to report it without losing the end of it.**  The panel is longer than what a console paste carries, and
 the last three reports came back cut off inside the detection list - which is upstream of the two paragraphs
-above.  Run:
+above.  Two things changed because of that.  The first line of `graphics` is now a single `FSP:` line that
+carries the whole decision - boot scratch, mailbox, query error code, handover outcome, lock, clock, VF page,
+firmware count, read/write totals - so a paste that stops early still says what happened and why.  And the cut
+itself was found to be ours rather than the terminal's: one report's `Engine:` line measured 1151 bytes, which
+is the size of the buffer the module builds that line in, so the sentence ended mid-word and the panel's last
+line stopped at `Display: 1024x7`.  That line is now built in a field twice as large, with 96 bytes held back
+at the end so that if a report ever overruns again it ends with `[+N B of this line dropped by this module's own
+buffer: report it as truncated]` instead of stopping in the middle of a clause, and the kernel's copy of the
+field says the same thing about itself.  To see the clipped text either way, run:
 
     graphics fsp
 
@@ -349,7 +357,9 @@ in the terminal or on the TTY.  It prints *only* the firmware intake, the parsed
 paragraphs - the same text the panel prints, from the same code - and nothing else, so it fits.  If the panel
 itself prints `Firmware intake and FSP mailbox: not printed`, the buffer did not have room for them and `graphics
 fsp` is the only way to see them; that notice says how many bytes were left, because a limit that states itself is
-not the same thing as a loss.  Paste all of that output, plus the `Engine:` line and the `Scanout owner` line.
+not the same thing as a loss.  Paste all of that output, plus the `Engine:` line and the `Scanout owner` line, and if any of them ends in a
+bracketed notice about its own length, paste that too - it is the one part of the report that says a fact was
+removed rather than a fact withheld.
 The numbers in them - the boot scratch value, the refusal count, each reply's error code, and the before/after
 pair around a handover - are what a follow-up change gets argued against, and every one is a register read or a
 count the kernel kept while doing it.
