@@ -5,7 +5,19 @@
  * and string files. Optionally persisted to an ATA disk image (see ata.c).
  */
 #include "scos.h"
+#include "security.h"
 #include "lua_examples.h"
+
+/* system/security/ belongs to the account subsystem.  Reads, writes, deletes
+ * and renames are refused here (the only writer is security.c, which sets a
+ * short-lived bypass flag), so a shell `rm -s`, a Notepad "save as" or a Lua
+ * app cannot quietly replace the password database.  Guest accounts are also
+ * refused every mutating call. */
+static int vfs_denied(const char *path)
+{
+    if (security_protected_path(path) && !security_bypass_active()) return 1;
+    return security_write_denied();
+}
 
 struct vfs_node *vfs_root;
 
@@ -79,6 +91,7 @@ int vfs_init_defaults(void)
         vfs_root=old; node_free_recursive(fresh); return 0;
     }
     if (old) node_free_recursive(old);
+    security_fs_restore();   /* factory reset must not drop the signed-in account DB */
     return 1;
 }
 
@@ -128,7 +141,9 @@ int vfs_list(struct vfs_node *dir, char names[][VFS_NAME], int max)
 
 char *vfs_read(const char *path, u32 *len)
 {
-    struct vfs_node *n = vfs_lookup(path);
+    struct vfs_node *n;
+    if (security_protected_path(path) && !security_bypass_active()) return NULL;
+    n = vfs_lookup(path);
     if (!n || n->is_dir) return NULL;
     if (len) *len = n->size;
     return n->data;
@@ -155,7 +170,7 @@ static int node_set_data(struct vfs_node *n, const char *data, u32 len)
 
 int vfs_write(const char *path, const char *data, u32 len)
 {
-    if (!path || strlen(path)>=256) return 0;
+    if (!path || strlen(path)>=256 || vfs_denied(path)) return 0;
     char dirpath[256];
     vfs_parent_path(path, dirpath);
     struct vfs_node *dir = vfs_lookup(dirpath);
@@ -176,7 +191,7 @@ int vfs_write(const char *path, const char *data, u32 len)
 
 int vfs_mkdir(const char *path)
 {
-    if (!path || strlen(path)>=256) return 0;
+    if (!path || strlen(path)>=256 || vfs_denied(path)) return 0;
     char dirpath[256];
     vfs_parent_path(path, dirpath);
     struct vfs_node *dir = vfs_lookup(dirpath);
@@ -202,7 +217,9 @@ static void node_free_recursive(struct vfs_node *n)
 
 int vfs_delete(const char *path)
 {
-    struct vfs_node *n = vfs_lookup(path);
+    struct vfs_node *n;
+    if (vfs_denied(path)) return 0;
+    n = vfs_lookup(path);
     if (!n || n == vfs_root || !n->parent) return 0;
     struct vfs_node *p = n->parent;
     struct vfs_node *prev = NULL;
@@ -243,8 +260,10 @@ char *vfs_parent_path(const char *path, char *out)
 
 int vfs_rename(const char *oldp, const char *newp)
 {
+    struct vfs_node *n;
     if (!oldp || !newp || strlen(newp)>=256) return 0;
-    struct vfs_node *n = vfs_lookup(oldp);
+    if (vfs_denied(oldp) || vfs_denied(newp)) return 0;
+    n = vfs_lookup(oldp);
     if (!n || !n->parent) return 0;
     const char *slash = newp;
     for (const char *q = newp; *q; q++) if (*q == '/') slash = q + 1;
@@ -272,6 +291,7 @@ int vfs_rename(const char *oldp, const char *newp)
 /* wipe everything back to factory defaults (used by Settings) */
 int vfs_factory_reset(void)
 {
+    if (security_initialized() && !security_is_admin()) return 0;
     return vfs_init_defaults();
 }
 

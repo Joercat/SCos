@@ -41,14 +41,41 @@ class Guest:
         try:self.connect();return self
         except BaseException:self.process.terminate();self.process.wait();self.log.close();raise
     def serial(self):return (self.directory/'serial.log').read_text(errors='replace') if (self.directory/'serial.log').exists() else ''
-    def connect(self):
+    # Boot now stops at a full-screen sign-in gate before wm_run().  The guest
+    # tests do not type on a virtual keyboard: they drive the SAME production
+    # entry points the secure screen calls, through the existing GDB debug port.
+    # No test-only bypass exists in the kernel; a debugger on a real machine is
+    # already physical access.  A persistent ATA save means the account may
+    # already exist, so authenticate first and create it only on a fresh boot.
+    AUTH_MARKER='security: sign-in required'
+    WM_MARKER='wm: entering main loop'
+    TEST_USER=b'admin'
+    TEST_PASSWORD=b'Scos-Test-2026!x7Q'
+    def _wait(self,marker,baseline=0):
         for _ in range(2400):
-            if 'wm: entering main loop' in self.serial():break
+            if self.serial().count(marker)>baseline:return
             assert self.process.poll() is None;time.sleep(.025)
-        else:raise AssertionError(self.serial())
+        raise AssertionError('timed out waiting for %r\n%s'%(marker,self.serial()[-2500:]))
+    def _provision_account(self):
+        d=self.debug
+        d.write(self.scratch,self.TEST_USER+b'\0')
+        d.write(self.scratch+64,self.TEST_PASSWORD+b'\0')
+        d.write(self.scratch+128,self.TEST_PASSWORD+b'\0')
+        if self.call('security_api_authenticate',self.scratch,self.scratch+64,0,0):return
+        assert self.call('security_create_admin',self.scratch,self.scratch+64,self.scratch+128),\
+            'the production first-run setup API refused the test account: %s'%self.serial()[-2000:]
+    def connect(self,wm_baseline=0):
+        self._wait(self.AUTH_MARKER,getattr(self,'_auth_marker',0))
         self.base=int(re.findall(r'Kernel physical span: (0x[0-9a-f]+)',self.serial())[-1],16)
         self.symbols={p[2]:int(p[0],16) for line in subprocess.check_output(['nm','--defined-only',str(ROOT/'build/kernel.elf')],text=True).splitlines() if len(p:=line.split())==3}
         self.socket=socket.socket(socket.AF_UNIX);self.socket.settimeout(20);self.socket.connect(str(self.directory/'qmp.sock'));self.stream=self.socket.makefile('rb');self.stream.readline();self.qmp('qmp_capabilities');self.debug=Debugger(self.directory/'debug');self.idle();self.scratch=self.call('palloc_owned',262144,0)
+        self._provision_account()
+        # GDB calls leave the CPU stopped.  Let the secure screen hand over to
+        # wm_run(), then stop again at the same idle boundary the old harness
+        # used, so every existing test's first g.call() still finds it parked.
+        self.run(1.0)
+        self._wait(self.WM_MARKER,wm_baseline)
+        self._auth_marker=self.serial().count(self.AUTH_MARKER)
     def qmp(self,cmd,args=None):
         self.socket.sendall((json.dumps({'execute':cmd,**({'arguments':args} if args else {})})+'\n').encode())
         while True:
@@ -86,11 +113,9 @@ class Guest:
         time.sleep(.15);self.pause()
     def snapshot(self,name):self.qmp('screendump',{'filename':str(RESULTS/(self.name+'-'+name+'.ppm'))})
     def reboot(self):
-        before=self.serial().count('wm: entering main loop');assert self.debug.command('D')=='OK';self.debug.sock.close();self.qmp('system_reset');self.stream.close();self.socket.close()
-        for _ in range(2400):
-            if self.serial().count('wm: entering main loop')>before:break
-            time.sleep(.025)
-        else:raise AssertionError('reboot did not reach WM')
-        self.connect()
+        before=self.serial().count(self.WM_MARKER);auth_before=getattr(self,'_auth_marker',0)
+        assert self.debug.command('D')=='OK';self.debug.sock.close();self.qmp('system_reset');self.stream.close();self.socket.close()
+        self._wait(self.AUTH_MARKER,auth_before)
+        self.connect(wm_baseline=before)
     def __exit__(self,*args):
         (RESULTS/(self.name+'.log')).write_text(self.serial());self.process.terminate();self.process.wait(timeout=10);self.log.close();self.debug.sock.close();self.stream.close();self.socket.close();shutil.rmtree(self.directory)

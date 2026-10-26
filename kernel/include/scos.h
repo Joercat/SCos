@@ -4,6 +4,7 @@
 #define SCOS_H
 
 #include "kernel.h"
+#include "security.h" /* accounts, credentials, secure-screen and command policy */
 #include "gpu.h"      /* display adapter registry: detection, matching, engine boundary */
 #define SCOS_BUILD_TAG "x64-dev"
 /* Which commit these bytes came from.  build/scosbuild.h is generated from the repository by

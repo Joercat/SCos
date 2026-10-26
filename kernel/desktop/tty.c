@@ -72,8 +72,9 @@ static void tty_print(const char *s)
 /* Console prompt. */
 static void tty_prompt(char *out, int max)
 {
-    strcpy(out, "scos:");
-    int used = 5;
+    strcpy(out, security_current_user());
+    strcat(out, "@scos:");
+    int used = (int)strlen(out);
     int cl = (int)strlen(tty_cwd);
     if (cl > max - used - 3) cl = max - used - 3;   /* clamp long cwds */
     if (cl > 0) { memcpy(out + used, tty_cwd, (u32)cl); used += cl; }
@@ -183,6 +184,22 @@ static void tty_exec(char *cmd)
 {
     char message[192];
     if (confirm_command(&tty_confirmation, cmd, TTY_COLS + 1, message)) { tty_print(message); return; }
+    /* Run before tokenization: the tokenizer replaces the spaces in `cmd`
+     * with NULs, and the account policy needs the whole command line. */
+    {
+        char sec_out[1024];
+        sec_out[0] = 0;
+        if (security_shell(cmd, sec_out, sizeof(sec_out))) {
+            tty_print(sec_out);
+            security_run_pending();   /* TTY owns the screen: run the flow now */
+            return;
+        }
+        sec_out[0] = 0;
+        if (!security_command_allowed(cmd, sec_out, sizeof(sec_out))) {
+            tty_print(sec_out);
+            return;
+        }
+    }
     char *args[6];
     int nargs = 0;
     char *p = cmd;
@@ -225,6 +242,11 @@ static void tty_exec(char *cmd)
             "  sysrq <act>     panic/reboot/error/dump/time - system requests\n"
             "  ping            network reachability (there is no stack)\n"
             "  whoami/version  identity\n"
+            "  security        account system + session status\n"
+            "  passwd          change your password (masked secure screen)\n"
+            "  users/policy/audit/usermod  account administration (admin)\n"
+            "  lock/logout/su/reauth  session control (masked secure screen)\n"
+            "  recovery        issue a one-time administrator recovery code\n"
             "  clear           clear this console\n"
             "  reboot          reboot the machine now\n"
             "  kill --system <pid> - confirmed stop (scwm only)\n"
@@ -707,7 +729,7 @@ static void tty_exec(char *cmd)
         tty_print("No network interface driver is present (see 'disks'/"
                   "'sysinfo' for real hardware).");
     }
-    else if (!strcmp(args[0], "whoami")) tty_print("user");
+    else if (!strcmp(args[0], "whoami")) tty_print(security_current_user());
     else if (!strcmp(args[0], "save")) {
         if (nargs != 1) tty_print("Usage: save");
         else if (!fs_image_available()) tty_print("No verified ATA persistence target. Files are RAM-only; no disk was written.");
@@ -803,6 +825,14 @@ static void tty_console_loop(void)
 
 void tty_run(int return_to_wm)
 {
+    /* Entering the kernel maintenance console from the desktop re-checks the
+     * signed-in user's password.  Rescue mode (WM already dead) deliberately
+     * does not: there is no compositor to return to, and physical access to a
+     * stopped machine is already full access. */
+    if (return_to_wm && !security_reauthenticate("Maintenance console")) {
+        wm_request_full();
+        return;
+    }
     tty_select(active_console+1);
     tty_rows = (screen_h - 8) / (FONT_H + 2);
     if (tty_rows > TTY_ROWS_MAX) tty_rows = TTY_ROWS_MAX;

@@ -115,7 +115,7 @@ clean:
 	rm -rf $(BUILD)
 
 APP_CFLAGS := $(filter-out -mgeneral-regs-only,$(CFLAGS)) -mno-avx -fno-strict-aliasing
-$(BUILD)/desktop-%.o: kernel/desktop/%.c kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD) $(BUILD)/scosbuild.h
+$(BUILD)/desktop-%.o: kernel/desktop/%.c kernel/include/scos.h kernel/include/security.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD) $(BUILD)/scosbuild.h
 	$(CC) $(APP_CFLAGS) -c $< -o $@
 # Every callback reachable from a hardware IRQ remains general-register-only.
 $(BUILD)/desktop-kbd.o $(BUILD)/desktop-mouse.o $(BUILD)/desktop-cpumeter.o $(BUILD)/desktop-klog.o $(BUILD)/desktop-platform.o: APP_CFLAGS = $(CFLAGS) -fno-strict-aliasing

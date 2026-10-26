@@ -136,6 +136,10 @@ static void reset_confirm_cb(int ok, const char *text, void *ud)
 {
     (void)text; (void)ud;
     if (!ok) return;
+    if (security_initialized() && !security_is_admin()) {
+        wm_error_popup("Factory reset requires an administrator.\nFiles unchanged.");
+        return;
+    }
     /* wipe everything back to shipping defaults and persist the wipe */
     if (!vfs_factory_reset()) {
         wm_error_popup("Reset failed: out of memory.\nFiles unchanged; not restarting.");

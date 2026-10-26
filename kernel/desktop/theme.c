@@ -120,6 +120,7 @@ void settings_save(void)
 
 void system_reset(void)
 {
+    if (security_initialized() && !security_is_admin()) return;
     prefs.mouse_sens = PREFS_MOUSE_DEFAULT;
     prefs.dbl_ms = PREFS_DBL_DEFAULT;
     theme_set_index(0);

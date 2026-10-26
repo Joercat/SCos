@@ -157,7 +157,8 @@ static void prompt_str(struct term *t, char *out)
         strcpy(dispbuf + 1, tmp + 5);
         disp = dispbuf;
     }
-    strcpy(out, "user@scos:");
+    strcpy(out, security_current_user());
+    strcat(out, "@scos:");
     strcat(out, disp);
     strcat(out, "$ ");
 }
@@ -192,7 +193,16 @@ static const char *help_text =
     "procs     - Process table with real per-task memory\n"
     "kill <pid>- Terminate an app task (see 'procs')\n"
     "tab       - new | close | <n>: terminal tabs (also Ctrl+T)\n"
-    "whoami    - Show current user\n"
+    "whoami/id - Show the signed-in account and role\n"
+    "security  - Account system, crypto and session status\n"
+    "passwd    - Change your password on the secure (masked) screen\n"
+    "users     - List accounts (administrator only)\n"
+    "useradd/userdel/usermod - Manage accounts (administrator only)\n"
+    "policy    - Show or set password/lockout policy (administrator)\n"
+    "audit     - Show or clear the security audit ring (administrator)\n"
+    "lock/logout - Lock the screen / sign out and switch user\n"
+    "su        - Switch identity to another account\n"
+    "reauth/recovery - Confirm identity / issue a one-time recovery code\n"
     "version   - Show system version and the commit + tree state it was built from\n"
     "uptime    - Time since boot (PIT)\n"
     "free      - Memory usage (real page allocator)\n"
@@ -293,6 +303,12 @@ static void run_command(struct term *t, const char *command)
     if (!confirmed && confirm_command(&t->confirmation,effective,sizeof(effective),confirmation_message)) {
         term_print(t,confirmation_message); return;
     }
+    /* The legacy tokenizer overwrites the spaces in `effective` with NULs.
+     * Keep a pristine copy for the account subsystem, which needs the whole
+     * line (including options such as `rm -s` / `useradd bob admin`). */
+    char effective_copy[TERM_LINE];
+    sc_copy(effective_copy, sizeof(effective_copy), effective);
+
     /* tokenize (naive, space separated like the web version) */
     char *args[24];
     int nargs = 0;
@@ -311,7 +327,14 @@ static void run_command(struct term *t, const char *command)
     response[0] = 0;
     int typed = 1;
 
-    if (!strcmp(cmd, "help")) {
+    /* Account commands own their own masked input and role checks.  All other
+     * commands pass one central authorization table before the legacy shell
+     * dispatch runs, so no individual command needs to be modified. */
+    if (security_shell(effective_copy, response, sizeof(response))) {
+        /* handled */
+    } else if (!security_command_allowed(effective_copy, response, sizeof(response))) {
+        /* response already explains the denial */
+    } else if (!strcmp(cmd, "help")) {
         int page = 1;
         if (nargs > 1 && !strncmp(args[1], "--p", 3)) page = (int)str_to_u32(args[1] + 3);
         else if (nargs > 1) page = (int)str_to_u32(args[1]);
@@ -607,7 +630,6 @@ static void run_command(struct term *t, const char *command)
             } else strcpy(response, "Error: File or directory not found.");
         }
     }
-    else if (!strcmp(cmd, "whoami")) strcpy(response, "user");
     else if (!strcmp(cmd, "version")) {
         strcpy(response, "SCos unnumbered x64 development - build " SCOS_BUILD_TAG " from ");
         scos_build_stamp(response + strlen(response), sizeof(response) - strlen(response));

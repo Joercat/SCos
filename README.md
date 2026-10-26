@@ -26,6 +26,29 @@ ACPI has a manual-power fallback for unsupported firmware. Emulator success is
 
 For the first physical boot, use the [PC test guide and final USB-boot checks](docs/migration/PC-TEST.md). It distinguishes verified results from hardware requirements and includes safe flashing/UEFI settings.
 
+## Sign-in and accounts
+
+SCos now requires a sign-in before the desktop accepts input. The first boot
+creates an administrator account on a full-screen setup screen (username,
+policy-checked password, and a one-time recovery code); later boots show a
+masked username/password screen. `system/security/users.db` stores only random
+128-bit salts and PBKDF2-HMAC-SHA256 verifiers — no plaintext passwords — with
+a SHA-256 checksum, a last-known-good backup and a bounded audit ring. Both
+shells gained `security`, `passwd`, `users`, `useradd`, `userdel`, `usermod`,
+`policy`, `audit`, `lock`, `logout`, `su`, `reauth` and `recovery`. Roles are
+administrator, standard user and read-only guest; privileged commands and the
+`system/security` files are protected. Sessions auto-lock when idle, switch user
+closes all windows, and the maintenance console re-authenticates.
+
+On a machine without the unique verified ATA SCos-data partition, accounts are
+**session-only** and first-run setup repeats at each boot — the secure screen
+says so. With that target, accounts survive `save`/reboot. See
+[the account and security design](docs/migration/SECURITY.md) for the crypto,
+policy, database format, commands, verification and — importantly — the honest
+limitations: this is authentication and access control in a cooperative
+single-address-space kernel, **not** process isolation, signed boot or disk
+encryption.
+
 ## Write your own apps
 
 All preinstalled desktop apps are **native C**, including **App Studio**.

@@ -7,6 +7,7 @@
  * is mouse- and keyboard-driven through the PS/2 drivers.
  */
 #include "scos.h"
+#include "security.h"
 
 #define MAX_WINDOWS 48
 #define TASKBAR_H 40
@@ -2396,6 +2397,11 @@ void wm_run(void)
         }
         struct key_event ke;
         while (kbd_poll(&ke)) {handle_key(&ke);if(tty_request||wm_stop_requested)break;}
+        if (wm_stop_requested) goto stopped;
+        /* Security work happens here, after every window callback has returned:
+         * full-screen password/lock flows are safe to open at this point and
+         * cannot free a window that is still executing its own key handler. */
+        security_wm_tick();
         if (wm_stop_requested) goto stopped;
 
         static u64 last_tick;
