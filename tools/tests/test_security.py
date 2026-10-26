@@ -79,7 +79,33 @@ def test_the_gate_and_protection_are_wired():
     assert 'vault_seal(img_buf' in ata and 'vault_open(img_buf' in ata, \
         'the ATA image is no longer encrypted'
     assert 'SCOSFS2' in ata and 'legacy plaintext' in ata, 'legacy migration was removed'
-    print('PASS: boot gate, WM hook, VFS guard, both shells, vault and codec regression are wired')
+    # User choices, plain console and per-app isolation choice plumbing.
+    choices = (ROOT / 'kernel/desktop/sec_choices.c').read_text()
+    for needle in ('login.required', 'lock.enabled', 'password.policy', 'guest.restrict',
+                   'vault.encryption', 'isolation.prompt', 'confirm.destructive'):
+        assert needle in choices, '%s is no longer a user choice' % needle
+    assert 'security_choice_set' in choices and 'security_choices_save' in choices, \
+        'choices are not persisted through an app-facing API'
+    loginui = (ROOT / 'kernel/desktop/login.c').read_text()
+    assert 'con_put' in loginui and 's_vgrad' not in loginui and 's_frame_rect' not in loginui, \
+        'the login screen is a graphical panel again instead of a plain TTY console'
+    assert 'security_set_lock_screen' in loginui, 'no documented API for a user-made lock-screen app'
+    assert 'custom_lock_screen' in loginui
+    assert 'security_choice("lock.enabled")' in loginui
+    assert 'wm_launch_app_interactive' in wm and 'iso_items' in wm, \
+        'the WM first-launch isolation prompt was removed'
+    assert 'w->isolated' in wm and 'cat_isolation_guard' in (ROOT / 'kernel/desktop/lua_apps.c').read_text(), \
+        'the per-app isolation flag is not honoured anywhere'
+    assert 'int  isolated;' in (ROOT / 'kernel/include/scos.h').read_text()
+    assert 'confirm.destructive' in (ROOT / 'kernel/desktop/confirm.c').read_text()
+    # No Secure Boot / signed boot anywhere in the tree.
+    for path in ('boot/uefi/main.c', 'tools/makedisk.py', 'Makefile',
+                 'kernel/include/security.h', 'kernel/desktop/security.c'):
+        assert 'Secure Boot' not in (ROOT / path).read_text() and \
+               'BOOT.SIG' not in (ROOT / path).read_text(), \
+            'boot signing / Secure Boot came back in %s' % path
+    print('PASS: boot gate, WM hook, VFS guard, plain TTY console, user choices, '
+          'isolation prompt and codec regression are wired')
 
 
 def test_a_booted_guest_enforces_accounts():
@@ -223,12 +249,101 @@ def test_a_booted_vault_is_encrypted_and_tamper_evident():
           'and a logged-out vault refuses to write')
 
 
+def test_security_are_user_choices_and_isolation_is_per_app():
+    """Choices default on, can be turned off, survive a reboot, and actually
+    change behaviour.  Isolation is a recorded per-app choice, never forced."""
+    from qemu_support import Guest  # noqa: E402
+
+    with Guest('security-choices', ide=True) as g:
+        d, s = g.debug, g.scratch
+
+        def choice(key):
+            d.write(s, key.encode() + b'\0')
+            return g.call('security_choice', s)
+
+        def choice_set(key, value):
+            d.write(s, key.encode() + b'\0')
+            return g.call('security_choice_set', s, value)
+
+        def shell(line):
+            d.write(s + 8192, line.encode() + b'\0')
+            d.write(s + 16384, b'\0' * 2048)
+            g.call('security_shell', s + 8192, s + 16384, 2048)
+            return g.string(s + 16384, 2048)
+
+        # The QEMU harness turns isolation.prompt off so unrelated UI suites
+        # keep their original launch paths.  Restore it here to test the real
+        # default and the WM prompt (this is also a user choice, not a bypass).
+        assert choice_set('isolation.prompt', 1) == 1
+        for key in ('login.required', 'lock.enabled', 'lock.idle', 'password.policy',
+                    'password.age', 'guest.restrict', 'audit.enabled',
+                    'vault.encryption', 'isolation.prompt', 'confirm.destructive'):
+            assert choice(key) == 1, '%s is not enabled by default' % key
+        assert choice('isolation.default') == 0, 'isolation is forced by default'
+        assert 'ALL are the owner' in shell('choices'), 'choices command does not list switches'
+
+        # Turning a protection off really changes behaviour (not just a flag).
+        assert choice_set('lock.enabled', 0) == 1
+        g.call('security_api_lock_session')
+        assert g.call('security_api_locked') == 0, 'lock.enabled=off still locked the session'
+        assert choice_set('lock.enabled', 1) == 1
+        g.call('security_api_lock_session')
+        assert g.call('security_api_locked') == 1, 'lock.enabled=on no longer locks'
+        g.call('security_api_unlock_session')
+        # Choices live in the AEAD-authenticated vault header, so they survive a reboot.
+        assert choice_set('lock.idle', 0) == 1
+        assert g.call('fs_image_save') == 1
+        g.run(0.5)
+        g.reboot()
+        d, s = g.debug, g.scratch
+        assert choice('lock.idle') == 0, 'a user choice did not survive reboot'
+        assert choice('login.required') == 1, 'other choices were lost on reboot'
+        assert choice_set('lock.idle', 1) == 1
+        assert choice_set('isolation.prompt', 1) == 1   # harness opts out on connect
+
+        # Per-app isolation is a choice, and the WM exposes it to an app.
+        d.write(s, b'counter\0')
+        assert g.call('security_app_isolation', s) == 0, 'a new app is not asked'
+        assert g.call('security_app_isolation_pending', s) == 1
+        assert g.call('security_app_isolation_set', s, 1) == 1
+        assert g.call('security_app_isolation', s) == 1
+        assert g.call('security_app_isolation_pending', s) == 0
+        assert g.call('security_app_last_isolated', s) == 0, 'a stored choice forces isolation'
+        assert g.call('security_app_launch_isolated', s, 1) == 1
+        assert g.call('security_app_last_isolated', s) == 1
+        assert 'always isolated' in shell('choices'), 'per-app choice is not listed'
+
+        # A real user-driven WM launch shows the four-way prompt on first open.
+        d.write(s, b'files\0')
+        assert g.call('security_app_isolation_pending', s) == 1
+        g.call('wm_launch_app_interactive', s, 0)
+        assert g.value('menu', 4) == 1, 'no first-launch isolation prompt in the WM'
+        g.call('iso_answer', 1, 0)          # "Never launch isolated"
+        assert g.call('security_app_isolation', s) == 2, 'the menu answer was not stored'
+        assert g.call('wm_win_count') >= 1, 'the app did not launch after the choice'
+        d.write(s, b'sketch\0')
+        assert choice_set('isolation.prompt', 0) == 1
+        assert g.call('security_app_isolation_pending', s) == 0, \
+            'the prompt choice does not disable the prompt'
+
+        # Encryption is a choice too: turning it off writes a plain FS2 image.
+        assert choice_set('vault.encryption', 0) == 1
+        assert g.call('fs_image_save') == 1
+        img = d.read(g.ptr(g.base + g.symbols['img_buf']), 131072)
+        assert img[:7] == b'SCOSFS2', ('vault.encryption=off did not produce a plain image: '
+                                      'choice=%d magic=%r' % (choice('vault.encryption'), img[:16]))
+        assert choice_set('vault.encryption', 1) == 1
+    print('PASS: security choices default on, persist across reboot, change behaviour, '
+          'and per-app isolation is a user decision')
+
+
 def test():
     test_the_crypto_and_policy_core()
     test_the_gate_and_protection_are_wired()
     test_a_booted_guest_enforces_accounts()
     test_a_persistent_account_survives_a_reboot()
     test_a_booted_vault_is_encrypted_and_tamper_evident()
+    test_security_are_user_choices_and_isolation_is_per_app()
 
 
 if __name__ == '__main__':

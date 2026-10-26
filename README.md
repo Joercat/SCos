@@ -26,47 +26,62 @@ ACPI has a manual-power fallback for unsupported firmware. Emulator success is
 
 For the first physical boot, use the [PC test guide and final USB-boot checks](docs/migration/PC-TEST.md). It distinguishes verified results from hardware requirements and includes safe flashing/UEFI settings.
 
-## Sign-in, signed boot and encrypted storage
+## Sign-in, user choices and encrypted storage
 
-SCos now requires a sign-in before the desktop accepts input. The first boot
-creates an administrator account on a full-screen setup screen (username,
-policy-checked password, and a one-time recovery code); later boots show a
-masked username/password screen. `system/security/users.db` stores only random
-128-bit salts and PBKDF2-HMAC-SHA256 verifiers — no plaintext passwords — with
-a SHA-256 checksum, a last-known-good backup and a bounded audit ring. Both
-shells gained `security`, `passwd`, `users`, `useradd`, `userdel`, `usermod`,
-`policy`, `audit`, `lock`, `logout`, `su`, `reauth` and `recovery`. Roles are
-administrator, standard user and read-only guest (now an explicit command
-allow-list); privileged commands and `system/security` files are protected.
-Sessions auto-lock after 10 idle minutes, passwords expire after 90 days by
-default, switch user closes all windows, and the maintenance console
-re-authenticates — including rescue mode.
+**The owner is in control.** Every security restriction that could get in the
+way is a user choice — on by default where it has a clear benefit, off the
+moment you turn it off. **No Secure Boot and no signed boot**: the boot-signing
+stack was removed at the owner's request as unnecessary friction. Boot integrity
+is the plain `KERNEL.CRC` accidental-corruption check only; there is no
+cryptographic verification of the boot files. Do not describe this image as
+"secure boot".
 
-**Boot chain:** `BOOTX64.EFI` verifies an RSA-2048/SHA-256 signature over
-`\SCOS\BOOT.SIG`, a manifest of `KERNEL.ELF`, `KERNEL.CRC`, `DRVLIST.IDX`,
-`BUILD.TXT` and every GPU `.MOD`. It hashes each listed file before loading the
-kernel, and refuses to boot if a byte has changed. The public key is embedded in
-the loader; the private development key is in `keys/boot-signing.json`. Rotate
-it with `python3 tools/scos_keys.py --generate` for a real release (see below).
+**Login and lock are a plain TTY console**, not a graphical screen. Before
+authentication the framebuffer is a black monospace text console, like a Linux
+machine before a desktop starts. The same console handles first-run setup,
+sign-in, screen lock, password changes, re-authentication and recovery. No
+lock-screen app is shipped; `security_set_lock_screen()` is a documented API so
+you can write one. See [the security design](docs/migration/SECURITY.md).
 
-**Data at rest:** on a verified ATA SCos-data partition the saved filesystem is
+Accounts store only random 128-bit salts and PBKDF2-HMAC-SHA256 verifiers in
+`system/security/users.db`, with a SHA-256 checksum, a last-known-good backup
+and a bounded audit ring. Roles are administrator, standard user and read-only
+guest (an explicit command allow-list). Passwords never appear in command
+arguments, history, scrollback or logs.
+
+**User choices:** `choices` in Terminal or TTY lists 14 switches; `choices set
+<key> on|off` changes one (admin); `choices default` restores defaults. They
+control `login.required`, `lock.enabled`, `lock.idle`, `password.policy`,
+`password.history`, `password.age`, `lockout`, `guest.restrict`, `audit.enabled`,
+`vault.encryption`, `recovery.enabled`, `isolation.prompt`, `isolation.default`
+and `confirm.destructive`. Choices are persisted in the AEAD-authenticated
+vault header, so they survive reboot and an offline edit is detected. A
+Settings app can be built on `security_choice*()` in `security.h` — no app is
+shipped, by design.
+
+**Process isolation is a per-app user choice, never forced.** On the first
+user-driven launch of an app the WM prompts: always isolated / never isolated /
+isolated once (ask next time) / unisolated once (ask next time). The answer is
+saved (`choices app <id> always|never|ask`). An isolated Lua CAT package loses
+filesystem and global-theme writes; native C apps are cooperative ring-0 code
+and are not sandboxed. `w->isolated` is the flag a future isolation engine can
+honour.
+
+**Data at rest:** with `vault.encryption` on (default) the saved filesystem is
 an `SCOSVAUL` image — AES-256-CTR ciphertext with an encrypt-then-MAC
-HMAC-SHA256 tag. The cleartext header (account DB, audit log, key slots) is the
-AEAD's associated data, so editing any of it is detected at unlock. A random
-256-bit volume key is wrapped separately under each account's password-derived
-KEK; the one-time recovery code has its own slot so recovery does not destroy
-data. Signing in is what unlocks the disk; signing out burns the key and
-`save` fails closed. Legacy plaintext `SCOSFS2` images are encrypted on first
-sign-in.
+HMAC-SHA256 tag. The cleartext header (account DB, audit log, choices, key
+slots) is the AEAD's associated data, so editing any of it is detected at
+unlock. A random 256-bit volume key is wrapped under each account's
+password-derived KEK; the recovery code has its own slot. Signing in unlocks
+the disk; signing out burns the key and `save` fails closed. With
+`vault.encryption` off, saves are plain `SCOSFS2` — the owner's choice.
 
-On a machine without the unique verified ATA SCos-data partition, accounts are
-**session-only** and first-run setup repeats at each boot — the secure screen
-says so. See [the full security design](docs/migration/SECURITY.md) for the
-crypto, formats, key rotation, commands, verification and — importantly — the
-honest limitations: SCos is still a cooperative single-address-space kernel
-with **no process isolation**, firmware Secure Boot enrolment is a machine-owner
-step (not implemented here), the checked-in development signing key is public,
-and there is no TPM/rollback protection.
+On a machine without the unique verified ATA SCos-data partition, accounts and
+choices are **session-only** and first-run setup repeats at each boot. See
+[the full security design](docs/migration/SECURITY.md) for formats, commands,
+the lock-screen app contract, verification and the honest limitations: SCos is
+still a cooperative single-address-space kernel with no ring-3 isolation, no
+TPM/rollback protection, and no boot verification at all.
 
 ## Write your own apps
 
@@ -108,11 +123,9 @@ no host libc or Windows runtime is linked. No EFI SDK, FAT utilities or mounted
 filesystem is needed.
 
 ```sh
-make                           # build/BOOTX64.EFI, kernel.elf, BOOT.SIG and scos.img
+make                           # build/BOOTX64.EFI, kernel.elf and scos.img
 python3 tools/check_milestone.py
-python3 tools/scos_keys.py --verify      # trust anchor matches the signing key
-python3 tools/tests/test_signed_boot.py  # RSA KATs + tampered-image boot refusals
-python3 tools/tests/test_security.py     # crypto KATs + encrypted-vault guest tests
+python3 tools/tests/test_security.py     # crypto KATs + choices/vault/isolation guest tests
 sha256sum -c dist/scos.img.sha256
 python3 tools/setup_qemu.py     # optional pinned host QEMU environment
 python3 tools/run_qemu.py --xhci # x64 EDK2/q35, native USB HID, disposable disk state
@@ -121,26 +134,21 @@ make clean
 
 The packaged `dist/scos.img` is a 64-MiB GPT disk with a FAT32 EFI system partition:
 `EFI/BOOT/BOOTX64.EFI`, `SCOS/KERNEL.ELF`, `SCOS/KERNEL.CRC`, `SCOS/DRVLIST.IDX`,
-`SCOS/BUILD.TXT`, the GPU `.MOD` files and `SCOS/BOOT.SIG`. It is a development
+`SCOS/BUILD.TXT` and the GPU `.MOD` files. There is no signature file and no
+key material: boot signing was deliberately removed. It is a development
 integration artifact, not a request to flash or physically test the PC now.
 It also contains a separate 128-KiB SCos-data partition. Only the verified ATA
-path can save there, and the saved image is encrypted; the default q35/AHCI
+path can save there, and the saved image is encrypted by default; the q35/AHCI
 guest cannot persist. Neither a USB boot medium nor the xHCI HID driver implies
 USB mass-storage support.
 
-**Before a real deployment:** `python3 tools/scos_keys.py --generate`, keep
-`keys/boot-signing.json` private, rebuild (`make -j4 && make gpu-modules &&
-make dist`), and enrol the resulting `BOOTX64.EFI` in firmware Secure Boot. The
-checked-in development key is public by design so that anyone can build bootable
-images; its signature proves integrity, not publisher identity.
-
 A later physical test must use **x64 UEFI boot, not the previous CSM configuration**.
-The shipped development image has no firmware Secure Boot enrolment, so Secure
-Boot must be disabled unless you rotated the key and enrolled your own loader as
-described above. The firmware must provide GOP direct framebuffer access and a
-readable boot filesystem. Writing a raw image to an entire USB device destroys
-existing contents; identify/back up the device first. Successful emulator USB
-boot does not establish motherboard/GPU acceptance.
+Boot verification is intentionally absent, so firmware Secure Boot (if enabled
+on that machine) will not recognise this image; the owner decides what to enrol.
+The firmware must provide GOP direct framebuffer access and a readable boot
+filesystem. Writing a raw image to an entire USB device destroys existing
+contents; identify/back up the device first. Successful emulator USB boot does
+not establish motherboard/GPU acceptance.
 
 ## Implementation details and evidence
 

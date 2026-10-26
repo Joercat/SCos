@@ -46,6 +46,7 @@ int vault_image_pending(void) { return image_pending; }
 void vault_mark_applied(void) { image_pending = 0; }
 uint32_t vault_db_len(void) { return hdr_valid ? get32(hdr + 12) : 0; }
 uint32_t vault_audit_len(void) { return hdr_valid ? get32(hdr + 64) : 0; }
+uint32_t vault_choices_len(void) { return hdr_valid ? get32(hdr + 68) : 0; }
 
 void vault_lock(void)
 {
@@ -78,6 +79,14 @@ void vault_set_audit(const char *data, uint32_t len)
     put32(hdr + 64, len);
 }
 
+void vault_set_choices(const char *data, uint32_t len)
+{
+    if (!data || len > SC_VAULT_CHOICES_MAX) return;
+    memset(hdr + SC_VAULT_CHOICES_OFF, 0, SC_VAULT_CHOICES_MAX);
+    memcpy(hdr + SC_VAULT_CHOICES_OFF, data, len);
+    put32(hdr + 68, len);
+}
+
 static int structural(const uint8_t *h)
 {
     uint32_t i;
@@ -85,6 +94,7 @@ static int structural(const uint8_t *h)
     if (get32(h + 8) != SC_VAULT_VERSION) return 0;
     if (!get32(h + 12) || get32(h + 12) > SC_DB_MAX) return 0;
     if (get32(h + 64) > SC_AUDIT_BYTES) return 0;
+    if (get32(h + 68) > SC_VAULT_CHOICES_MAX) return 0;
     if (get32(h + 16) != SC_VAULT_SLOTS) return 0;
     if (get32(h + 56) != SC_VAULT_PAYLOAD) return 0;
     if (!(get32(h + 60) & SC_VAULT_FLAG_SEALED)) return 0;

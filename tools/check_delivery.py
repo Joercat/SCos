@@ -36,9 +36,8 @@ CHECKSUM = 'dist/scos.img.sha256'
 IMAGE_BYTES = 67108864
 # Everything that ends up packed into the image.  A change here between the record's commit and HEAD means
 # the artifact on the branch is not the artifact this source would produce.
-IMAGE_INPUTS = ('kernel/', 'boot/', 'drivers/', 'keys/', 'tools/makedisk.py',
-                'tools/scos_sign.py', 'tools/scos_sigformat.py', 'tools/scos_keys.py',
-                'tools/research/gen_gpu_tables.py', 'Makefile')
+IMAGE_INPUTS = ('kernel/', 'boot/', 'drivers/', 'tools/makedisk.py', 'tools/research/gen_gpu_tables.py',
+                'Makefile')
 
 
 def git(*args, **kwargs):

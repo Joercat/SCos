@@ -401,6 +401,10 @@ struct window {
     int restore_state;               /* state before minimize */
     void *console;                  /* terminal tab that launched this app
                                      * via `appstrt`: receives its logs */
+    int  isolated;                  /* USER CHOICE: per-launch isolation flag.
+                                     * Never forced.  Native C apps are not
+                                     * sandboxed; Lua CAT apps honour it by
+                                     * refusing filesystem/theme writes. */
 };
 
 int  wm_win_count(void);
@@ -440,6 +444,10 @@ void wm_run(void);                              /* main loop: returns only
 extern int tty_request;
 void tty_run(int return_to_wm);
 struct window *wm_open_app(const char *app_id, void *arg);
+/* Interactive (mouse/keyboard) launch path: shows the first-launch isolation
+ * choice prompt before opening the app.  Programmatic wm_open_app() calls do
+ * not prompt, so scripts and tests keep working unchanged. */
+void wm_launch_app_interactive(const char *app_id, void *arg);
 void wm_close_window(struct window *w);
 void wm_set_title(struct window *w, const char *title);
 int wm_resize_window(struct window *,int,int);

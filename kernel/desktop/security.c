@@ -30,6 +30,7 @@ enum {
 
 struct sec_state {
     int ready, have_disk, corrupt, db_loaded, bypass;
+    int meta_io;                  /* scoped protected-metadata I/O (choices module) */
     int disk_dirty, last_save_try;
     struct sc_policy policy;
     struct sc_account users[SC_USERS_MAX];
@@ -268,11 +269,23 @@ int security_protected_path(const char *path)
 }
 
 int security_initialized(void) { return S.ready; }
-int security_bypass_active(void) { return S.bypass || !S.ready; }
+int security_bypass_active(void) { return S.bypass || S.meta_io || !S.ready; }
+
+/* A bounded, nestable scope for the account/vault/choices modules to write
+ * their own protected metadata.  Not exported to apps or Lua. */
+void security_bypass_scope(int on)
+{
+    if (on) { if (S.meta_io < 8) S.meta_io++; }
+    else if (S.meta_io > 0) S.meta_io--;
+}
+void security_mark_dirty(void)
+{
+    S.disk_dirty = 1;
+}
 
 int security_write_denied(void)
 {
-    if (!S.ready || S.bypass) return 0;
+    if (!S.ready || S.bypass || S.meta_io) return 0;
     if (S.session >= 0 && S.session < SC_USERS_MAX &&
         S.users[S.session].role == SC_ROLE_GUEST) return 1;
     return 0;
@@ -334,6 +347,7 @@ static void audit_file_load(void)
 static void audit(const char *event, const char *detail)
 {
     char line[SC_AUDIT_LINE];
+    if (!security_choice("audit.enabled")) return;
     uint32_t uid = 0;
     const char *who = "-";
     size_t at = 0;
@@ -579,6 +593,7 @@ static void dummy_work(void)
 static void throttle(void)
 {
     uint32_t shift = S.global_fails > 5 ? 5 : S.global_fails;
+    if (!security_choice("lockout")) { S.deny_until = (uint64_t)tick_count + 5; return; }
     S.deny_until = (uint64_t)tick_count + (uint64_t)10 * (1u << shift);
     if (S.global_fails < 32) S.global_fails++;
 }
@@ -586,7 +601,7 @@ static void throttle(void)
 static void record_failure(int idx, const char *event)
 {
     uint64_t now = now_epoch();
-    if (idx >= 0) {
+    if (idx >= 0 && security_choice("lockout")) {
         struct sc_account *a = &S.users[idx];
         if (a->fails < 1000000) a->fails++;
         if (a->fails >= S.policy.max_fails) {
@@ -616,7 +631,8 @@ static void recovery_generate(void)
     S.rec_valid = 1;
     /* A recovery code must also be able to unwrap the volume key: otherwise
      * recovering an administrator password would make saved data unreadable. */
-    if (!vault_bind_recovery(S.rec_code, S.rec_iters)) {
+    if (security_choice("vault.encryption") &&
+        !vault_bind_recovery(S.rec_code, S.rec_iters)) {
         S.rec_valid = 0;
         klog_raw("security: recovery code could not be bound to the encrypted vault");
     }
@@ -657,7 +673,7 @@ int security_api_authenticate(const char *name, const char *pw, char *msg, size_
         sc_copy(msg, cap, "This account is disabled.");
         return 0;
     }
-    if (a->lock_until > now) {
+    if (security_choice("lockout") && a->lock_until > now) {
         char n[24];
         sc_fmt(n, sizeof(n), a->lock_until - now);
         sc_copy(msg, cap, "Sign-in temporarily blocked. Try again in ");
@@ -672,7 +688,10 @@ int security_api_authenticate(const char *name, const char *pw, char *msg, size_
     /* Full-disk encryption: a correct account password is also the only thing
      * that unwraps the volume encryption key.  A valid verifier with a broken
      * or missing key slot cannot produce a usable session. */
-    if (!vault_unlock_password(a->name, pw, a->iters, msg, cap)) {
+    /* Even with encryption switched off, unwrap a pending legacy vault once so
+     * the owner's data is readable before the next plaintext save. */
+    if ((security_choice("vault.encryption") || vault_image_pending()) &&
+        !vault_unlock_password(a->name, pw, a->iters, msg, cap)) {
         record_failure(idx, "vault-unlock-failed");
         sc_copy(msg, cap, "Saved data could not be unlocked with this password.");
         return 0;
@@ -687,8 +706,8 @@ int security_api_authenticate(const char *name, const char *pw, char *msg, size_
     a->last_login = now;
     begin_session(idx);
     S.force_change = (a->flags & SC_FLAG_MUSTCHANGE) != 0 ||
-                     (S.policy.max_age_days && a->pw_changed &&
-                      now > a->pw_changed &&
+                     (security_choice("password.age") && S.policy.max_age_days &&
+                      a->pw_changed && now > a->pw_changed &&
                       now - a->pw_changed > (uint64_t)S.policy.max_age_days * 86400u);
     audit("login-ok", a->name);
     db_save();
@@ -738,9 +757,13 @@ int security_api_change_password(int idx, const char *oldpw, const char *newpw,
     if (idx < 0 || idx >= S.count) { sc_copy(msg, cap, "No such account."); return 0; }
     a = &S.users[idx];
     if (require_old && !security_api_verify(idx, oldpw, msg, cap)) return 0;
-    if (!sc_password_eval(a->name, newpw, &S.policy, msg, cap)) return 0;
+    if (security_choice("password.policy")) {
+        if (!sc_password_eval(a->name, newpw, &S.policy, msg, cap)) return 0;
+    } else if (!newpw || sc_len(newpw) < 4) {
+        sc_copy(msg, cap, "Password too short (minimum 4 characters)."); return 0;
+    }
     /* Password history: each remembered entry keeps its own salt and verifier. */
-    for (int i = 0; i < a->hist_count; i++) {
+    for (int i = 0; i < (security_choice("password.history") ? a->hist_count : 0); i++) {
         derive(newpw, a->hist[i], a->iters, got);
         if (sc_ct_eq(got, a->hist[i] + SC_SALT_BYTES, SC_HASH_BYTES)) {
             sc_burn(got, sizeof(got));
@@ -749,7 +772,7 @@ int security_api_change_password(int idx, const char *oldpw, const char *newpw,
         }
     }
     sc_burn(got, sizeof(got));
-    if (S.policy.history) {
+    if (S.policy.history && security_choice("password.history")) {
         int keep = (int)S.policy.history - 1;
         if (a->hist_count > keep) a->hist_count = (uint8_t)keep;
         if (a->hist_count < SC_HISTORY_MAX) {
@@ -763,7 +786,8 @@ int security_api_change_password(int idx, const char *oldpw, const char *newpw,
     /* Re-wrap the volume key under a KEK derived from the NEW password first.
      * If that fails the old credentials must stay valid, so the in-memory
      * account is only committed afterwards. */
-    if (!vault_rebind_password(a->name, newpw, a->iters)) {
+    if (security_choice("vault.encryption") &&
+        !vault_rebind_password(a->name, newpw, a->iters)) {
         sc_copy(msg, cap, "The encrypted vault is locked. Sign in before changing a password.");
         return 0;
     }
@@ -810,11 +834,13 @@ int security_create_admin(const char *name, const char *pw, const char *confirm)
     /* First-run setup is the only path allowed to discard an unreadable vault:
      * there are no accounts to authenticate against, so the old volume key is
      * gone anyway.  A brand new one is created and wrapped to this password. */
-    vault_reset();
-    if (!vault_unlock_password(a->name, pw, a->iters, 0, 0)) {
-        S.count = 0;
-        set_error("Could not create the encrypted vault.");
-        return 0;
+    if (security_choice("vault.encryption")) {
+        vault_reset();
+        if (!vault_unlock_password(a->name, pw, a->iters, 0, 0)) {
+            S.count = 0;
+            set_error("Could not create the encrypted vault.");
+            return 0;
+        }
     }
     begin_session(0);
     S.force_change = 0;
@@ -845,7 +871,8 @@ int security_api_create_user(const char *name, int role, const char *pw)
     a->uid = uid + 1; a->role = (uint32_t)role; a->flags = SC_FLAG_MUSTCHANGE;
     a->iters = S.policy.iters;
     a->created = a->pw_changed = now_epoch();
-    if (!vault_rebind_password(norm, pw, a->iters)) {
+    if (security_choice("vault.encryption") &&
+        !vault_rebind_password(norm, pw, a->iters)) {
         memset(a, 0, sizeof(*a));
         set_error("The encrypted vault is locked. Sign in before adding an account.");
         return 0;
@@ -935,7 +962,9 @@ int security_api_reset_user(const char *name, char *msg, size_t cap)
     return 1;
 }
 
-int security_api_recovery_active(void) { return S.rec_valid; }
+int security_api_recovery_active(void) {
+    return S.rec_valid && security_choice("recovery.enabled");
+}
 
 const char *security_api_recovery_code(void) { return S.rec_code; }
 
@@ -963,7 +992,8 @@ int security_api_redeem_recovery(const char *code, const char *newpw, char *msg,
     if (admin < 0) { sc_copy(msg, cap, "No enabled administrator to recover."); return 0; }
     /* The one-time code also unwraps the volume key; without this step a
      * recovery would reset the password and destroy access to saved data. */
-    if (!vault_unlock_recovery(code, msg, cap)) {
+    if (security_choice("vault.encryption") &&
+        !vault_unlock_recovery(code, msg, cap)) {
         record_failure(-1, "recovery-vault-failed");
         return 0;
     }
@@ -1014,7 +1044,9 @@ void security_api_drop_session(void)
     S.force_change = 0;
 }
 
-void security_api_lock_session(void) { S.locked = 1; }
+void security_api_lock_session(void) {
+    if (security_choice("lock.enabled")) S.locked = 1;
+}
 void security_api_unlock_session(void)
 {
     S.locked = 0;
@@ -1054,6 +1086,7 @@ int security_is_admin(void)
 void security_init(int have_disk)
 {
     memset(&S, 0, sizeof(S));
+    security_choices_default();
     sc_policy_default(&S.policy);
     S.session = -1;
     S.have_disk = have_disk;
@@ -1083,6 +1116,8 @@ void security_init(int have_disk)
     /* The header's audit log is AEAD-authenticated; load it before adding the
      * boot event so history survives a reboot and cannot be silently reset. */
     audit_file_load();
+    security_choices_load();
+    if (!vfs_lookup(SC_CHOICES_PATH)) security_choices_save();
     audit("boot", S.db_loaded ? "accounts loaded" : "first-run setup required");
     audit_file_sync();
 }
@@ -1092,6 +1127,28 @@ void security_login_gate(void)
     if (!S.ready) return;
     klog_raw("security: sign-in required");
     if (!S.count) security_ui_setup();
+    else if (!security_choice("login.required")) {
+        /* Owner's choice: no login prompt.  Use the lowest-uid enabled admin
+         * as an implicit session.  First-run setup still happens above, since
+         * an account has to exist before one can be skipped. */
+        int best = -1;
+        for (int i = 0; i < S.count; i++)
+            if (!(S.users[i].flags & SC_FLAG_DISABLED) &&
+                (best < 0 || S.users[i].uid < S.users[best].uid)) best = i;
+        if (best >= 0) {
+            begin_session(best);
+            audit("auto-login", S.users[best].name);
+            db_save();
+        } else security_ui_login();
+        if (S.session >= 0 && security_choice("vault.encryption")) {
+            /* No password was typed, so a locked vault cannot be opened. */
+            if (vault_image_pending()) {
+                klog_raw("security: login.required=off but the encrypted vault needs a password");
+                security_api_drop_session();
+                security_ui_login();
+            }
+        }
+    }
     else security_ui_login();
     if (S.session < 0) panic("security: sign-in gate exited without a session");
     S.locked = 0;
@@ -1111,7 +1168,8 @@ void security_wm_tick(void)
         persist_now();
     }
     if (S.pending) { security_run_pending(); wm_request_full(); return; }
-    if (S.session >= 0 && !S.locked && S.policy.idle_minutes) {
+    if (S.session >= 0 && !S.locked && security_choice("lock.enabled") &&
+        security_choice("lock.idle") && S.policy.idle_minutes) {
         uint32_t idle = t - (uint32_t)input_last_tick;
         if (idle > S.policy.idle_minutes * 600u) {
             audit("auto-lock", "idle timeout");
@@ -1257,7 +1315,7 @@ int security_command_allowed(const char *line, char *out, size_t cap)
         "scinfo", "graphics", "dmesg", "klog", "free", "cpu", "uptime", "df",
         "disks", "procs", "history", "clear", "echo", "cal", "calc", "about",
         "whoami", "id", "security", "users", "audit", "policy", "passwd",
-        "lock", "logout", "su", "reauth", 0
+        "lock", "logout", "su", "reauth", "choices", 0
     };
     char cmd[64], arg[64];
     int role, n;
@@ -1276,7 +1334,8 @@ int security_command_allowed(const char *line, char *out, size_t cap)
     role = (int)S.users[S.session].role;
     n = first_tokens(line, cmd, sizeof(cmd), arg, sizeof(arg));
     if (!n) return 1;
-    if (role == SC_ROLE_GUEST && !in_list(cmd, guest_allow)) {
+    if (role == SC_ROLE_GUEST && security_choice("guest.restrict") &&
+        !in_list(cmd, guest_allow)) {
         sc_copy(out, cap, "Permission denied: the guest command allow-list is read-only. "
                           "Ask an administrator for a standard account.");
         return 0;
@@ -1337,7 +1396,6 @@ static void shell_status(struct outbuf *b)
     else if (vault_image_pending()) ob(b, "LOCKED - encrypted tree withheld until sign-in\n");
     else if (vault_unlocked()) ob(b, "unlocked; AES-256-CTR + HMAC-SHA256, wrapped VEK per user\n");
     else ob(b, "volume key not held (sign in to unlock)\n");
-    ob(b, "  boot chain     : RSA-2048/SHA-256 signed manifest verified by the UEFI stub\n");
     ob(b, "  auto-lock      : ");
     if (S.policy.idle_minutes) { ob_num(b, S.policy.idle_minutes); ob(b, " minutes idle\n"); }
     else ob(b, "disabled\n");
@@ -1345,8 +1403,10 @@ static void shell_status(struct outbuf *b)
     ob(b, " failures, "); ob_num(b, S.policy.lock_base); ob(b, "s to ");
     ob_num(b, S.policy.lock_max); ob(b, "s\n");
     ob(b, "  recovery code  : "); ob(b, S.rec_valid ? "active (one use)" : "not active"); ob(b, "\n");
-    ob(b, "  scope          : console authentication, signed boot chain and disk ");
-    ob(b, "encryption; still no process isolation. See docs/migration/SECURITY.md.\n");
+    ob(b, "  user choices   : "); ob_num(b, (uint64_t)security_choice_count());
+    ob(b, " switches (see 'choices'); isolation is a per-app user choice\n");
+    ob(b, "  scope          : console authentication and disk encryption; no forced ");
+    ob(b, "process isolation. See docs/migration/SECURITY.md.\n");
 }
 
 static void shell_users(struct outbuf *b)
@@ -1443,6 +1503,69 @@ static void shell_audit(struct outbuf *b, int argc, char **argv)
     }
 }
 
+static void shell_choices(struct outbuf *b, int argc, char **argv)
+{
+    char line[256];
+    if (argc == 1 || sc_eq(argv[1], "show")) {
+        ob(b, "Security choices - ALL are the owner's decision. Defaults keep the\n");
+        ob(b, "important protections ON until you turn them off.\n");
+        for (int i = 0; i < security_choice_count(); i++) {
+            security_choice_describe(i, line, sizeof(line));
+            ob(b, "  "); ob(b, line); ob(b, "\n");
+        }
+        ob(b, "\nPer-app isolation choices (never forced):\n");
+        if (!security_app_isolation_count()) ob(b, "  (none yet - an app gets one on first launch)\n");
+        for (int i = 0; i < security_app_isolation_count(); i++) {
+            security_app_isolation_describe(i, line, sizeof(line));
+            ob(b, "  "); ob(b, line); ob(b, "\n");
+        }
+        ob(b, "\nUsage: choices set <key> on|off\n"
+              "       choices app <id> always|never|ask\n"
+              "       choices default   (restore all defaults)\n");
+        return;
+    }
+    if (!security_is_admin()) { ob(b, "Administrator rights required to change choices.\n"); return; }
+    if (sc_eq(argv[1], "default") && argc == 2) {
+        security_choices_default();
+        security_choices_save();
+        audit("choices-default", "all choices reset");
+        ob(b, "All security choices restored to their defaults.\n");
+        return;
+    }
+    if (sc_eq(argv[1], "set") && argc == 4) {
+        int on = sc_eq(argv[3], "on") || sc_eq(argv[3], "1") || sc_eq(argv[3], "yes");
+        int off = sc_eq(argv[3], "off") || sc_eq(argv[3], "0") || sc_eq(argv[3], "no");
+        if ((!on && !off) || security_choice(argv[2]) < 0) {
+            ob(b, "Unknown key or value. Run 'choices' for the list.\n"); return;
+        }
+        if (!security_choice_set(argv[2], on)) { ob(b, security_choice_error()); ob(b, "\n"); return; }
+        audit("choice-changed", argv[2]);
+        ob(b, "Choice updated: "); ob(b, argv[2]); ob(b, " = ");
+        ob(b, on ? "on" : "off");
+        if (sc_eq(argv[2], "vault.encryption") && on && !vault_unlocked() && vault_disk_present())
+            ob(b, "  (sign out and back in to create the new volume key)");
+        if (sc_eq(argv[2], "login.required") && !on && vault_disk_present() &&
+            security_choice("vault.encryption"))
+            ob(b, "  (an encrypted vault still needs a password at boot, so a "
+                  "sign-in prompt will still appear until vault.encryption is off)");
+        ob(b, "\n");
+        return;
+    }
+    if (sc_eq(argv[1], "app") && argc == 4) {
+        int mode = sc_eq(argv[3], "always") ? SC_ISO_ALWAYS :
+                   sc_eq(argv[3], "never") ? SC_ISO_NEVER :
+                   sc_eq(argv[3], "ask") ? SC_ISO_ASK : -1;
+        if (mode < 0 || !security_app_isolation_set(argv[2], mode)) {
+            ob(b, security_choice_error()); ob(b, "\n"); return;
+        }
+        audit("isolation-choice", argv[2]);
+        ob(b, "Isolation choice saved for "); ob(b, argv[2]); ob(b, ".\n");
+        return;
+    }
+    ob(b, "Usage: choices [show] | choices set <key> on|off | "
+          "choices app <id> always|never|ask | choices default\n");
+}
+
 int security_shell(const char *line, char *out, size_t cap)
 {
     char buf[512], *args[8];
@@ -1462,6 +1585,10 @@ int security_shell(const char *line, char *out, size_t cap)
         if (*p) *p++ = 0;
     }
     if (!argc) return 0;
+    if (sc_eq(args[0], "choices")) {
+        shell_choices(&b, argc, args);
+        return 1;
+    }
     if (sc_eq(args[0], "whoami")) {
         ob(&b, security_api_session_name());
         ob(&b, " (uid ");

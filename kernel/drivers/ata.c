@@ -280,9 +280,10 @@ static int generated(const char *p)
 /* Account state is authoritative in the (AEAD-authenticated) vault header, so
  * it is never serialized into the encrypted tree: an image apply must never
  * need a VFS write bypass.  security_fs_restore() re-materializes it. */
+static int plaintext_save;   /* vault.encryption=off: persist metadata inside the tree */
 static int protected_meta(const char *p)
 {
-    return !strncmp(p,"system/security",15);
+    return !plaintext_save && !strncmp(p,"system/security",15);
 }
 static int walk_serialize(u8 *p, u32 limit, u32 *off, struct vfs_node *n, const char *prefix, u32 *count)
 {
@@ -316,8 +317,31 @@ int fs_image_save(void)
         return image_error("disk ownership changed; no write attempted");
     if (!img_buf) img_buf=palloc_owned(IMAGE_BYTES,HEAP_VFS);
     if (!img_buf) return image_error("out of memory; no write attempted");
-    /* Fail closed: never write an unencrypted tree.  Before first sign-in the
-     * volume key does not exist, and after an explicit logout it is burned. */
+    /* User choice: with vault.encryption off the owner gets a plain SCOSFS2
+     * image (no vault, no password-wrapped key).  The protected metadata is
+     * then serialized inside the tree so it still survives a reboot. */
+    if (!security_choice("vault.encryption")) {
+        memset(img_buf,0,IMAGE_BYTES);
+        memcpy(img_buf,"SCOSFS2",8);
+        u32 poff=16,pcount=0;
+        plaintext_save=1;
+        int ok=walk_serialize(img_buf,IMAGE_BYTES,&poff,vfs_root,"",&pcount);
+        plaintext_save=0;
+        if (!ok) return image_error("tree too large or path invalid; no write attempted");
+        *(u32 *)(img_buf+8)=pcount;
+        *(u32 *)(img_buf+12)=image_crc(img_buf+8,IMAGE_BYTES-8);
+        memset(verify,0,512); memcpy(verify,"SCOSBAD",8);
+        if (!ata_write_sectors(IMG_LBA,1,verify) ||
+            !ata_write_sectors(IMG_LBA+1,IMG_MAX_SECTORS-1,img_buf+512) ||
+            !ata_write_sectors(IMG_LBA,1,img_buf)) return image_error("disk write/flush failed");
+        for (u32 i=0;i<IMG_MAX_SECTORS;i++)
+            if (!ata_read_sectors(IMG_LBA+i,1,verify) || memcmp(verify,img_buf+i*512,512))
+                return image_error("disk readback verification failed");
+        image_state="plaintext SCOSFS2 saved (vault.encryption is off by user choice)";
+        return 1;
+    }
+    /* Fail closed for the encrypted path: before first sign-in the volume key
+     * does not exist, and after an explicit logout it is burned. */
     if (!vault_unlocked())
         return image_error("encrypted vault is locked; sign in before saving");
     memset(img_buf,0,IMAGE_BYTES);
@@ -403,9 +427,15 @@ int fs_image_load(void)
             return image_error("encrypted vault header invalid");
         }
         if (!vfs_lookup("system/security")) vfs_mkdir("system/security");
-        if (!vfs_write("system/security/users.db",(const char *)(img_buf+SC_VAULT_DB_OFF),vault_db_len()) ||
-            (vault_audit_len() &&
-             !vfs_write("system/security/audit.log",(const char *)(img_buf+SC_VAULT_AUDIT_OFF),vault_audit_len())))
+        int staged = vfs_write("system/security/users.db",
+                               (const char *)(img_buf+SC_VAULT_DB_OFF),vault_db_len());
+        if (vault_audit_len())
+            vfs_write("system/security/audit.log",
+                      (const char *)(img_buf+SC_VAULT_AUDIT_OFF),vault_audit_len());
+        if (vault_choices_len())
+            vfs_write(SC_CHOICES_PATH,
+                      (const char *)(img_buf+SC_VAULT_CHOICES_OFF),vault_choices_len());
+        if (!staged)
             err_notify("filesystem","could not stage vault metadata; first-run setup may be required",NULL,0);
         image_state="encrypted vault locked; sign in to decrypt the saved tree";
         klog_raw("filesystem: encrypted vault staged; tree stays encrypted until sign-in");

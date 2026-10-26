@@ -119,7 +119,16 @@ static void data_path(lua_State *L,char *out) {
     vfs_mkdir("home/appdata");vfs_mkdir(out);strcat(out,"/");strcat(out,name);
 }
 static int api_read(lua_State *L){char path[128];data_path(L,path);u32 n;char *s=vfs_read(path,&n);if(!s)lua_pushnil(L);else if(n>SCRIPT_MAX)return luaL_error(L,"data file too large");else lua_pushlstring(L,s,n);return 1;}
+/* Per-app isolation is the OWNER'S choice, carried on the window.  When set,
+ * a Lua CAT package keeps its drawing/query API but loses filesystem writes
+ * and global theme changes.  Native C apps are cooperative and not sandboxed. */
+static void cat_isolation_guard(lua_State *L)
+{
+    if (context(L)->w->isolated)
+        luaL_error(L, "isolated app: this operation is disabled by the owner");
+}
 static int api_write(lua_State *L){
+    cat_isolation_guard(L);
     char path[128];data_path(L,path);size_t n;const char *s=luaL_checklstring(L,2,&n);
     if(n>SCRIPT_MAX)return luaL_error(L,"data file too large");
     struct vfs_node *old=vfs_lookup(path);

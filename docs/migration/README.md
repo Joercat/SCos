@@ -15,12 +15,13 @@ still requires separate permission after the existing core is converted.
 
 See [hardware/browser research](HARDWARE-AND-BROWSER.md) and
 [host QEMU tooling](EMULATOR.md); no researched guest component is imported.
-The full security subsystem — accounts/sign-in, the RSA-2048 signed boot chain
-and the AES-256 encrypted filesystem vault — is documented in
-[SECURITY.md](SECURITY.md). It is authentication, access control, boot
-integrity and encryption at rest, explicitly **not** the ring-3 isolation
-described as future work in the table below; firmware Secure Boot enrolment, a
-TPM and rollback protection also remain outside this build.
+The full security subsystem — accounts/sign-in, a plain TTY-style secure
+console, user-controlled security choices, a per-app isolation choice and the
+AES-256 encrypted filesystem vault — is documented in
+[SECURITY.md](SECURITY.md). It is authentication, access control and encryption
+at rest, explicitly **not** the ring-3 isolation described as future work in the
+table below. Boot verification / Secure Boot was deliberately left out at the
+owner's request, as were a TPM and rollback protection.
 
 ## Baseline and boundaries
 

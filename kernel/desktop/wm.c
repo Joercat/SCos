@@ -136,7 +136,7 @@ static void pins_load(void){
 }
 static char pin_menu_id[32];
 static void pin_menu_answer(int item,void *ud){(void)ud;
-    if(item==0)wm_open_app(pin_menu_id,NULL);
+    if(item==0)wm_launch_app_interactive(pin_menu_id,NULL);
     else if(item==1)pin_remove(pin_menu_id);
     else if(item==2)wm_desk_show_app(pin_menu_id);
 }
@@ -417,6 +417,47 @@ void wm_close_window(struct window *w)
     wm_full();
 }
 
+/* ------------------------------------------- first-launch isolation choice --- */
+/* The owner decides per app, on first launch, whether it should be isolated.
+ * Four answers: always / never (persisted), or isolated / unisolated once with
+ * the same question next time.  No app is forced into isolation. */
+static const char *iso_items[4] = {
+    "Always launch isolated",
+    "Never launch isolated",
+    "Isolated once (ask next time)",
+    "Unisolated once (ask next time)"
+};
+static char iso_id[SC_APP_ID_MAX];
+static void *iso_arg;
+static int iso_once = -1;      /* -1 = use stored choice, 0/1 = this launch */
+
+static void iso_answer(int item, void *ud)
+{
+    (void)ud;
+    if (item < 0 || item > 3) return;      /* menu cancelled: no launch */
+    if (item == 0) security_app_isolation_set(iso_id, SC_ISO_ALWAYS);
+    else if (item == 1) security_app_isolation_set(iso_id, SC_ISO_NEVER);
+    /* 2 and 3 deliberately leave the stored choice at ASK. */
+    iso_once = (item == 0 || item == 2) ? 1 : 0;
+    security_app_launch_isolated(iso_id, iso_once);
+    wm_open_app(iso_id, iso_arg);
+    iso_once = -1;
+}
+
+void wm_launch_app_interactive(const char *app_id, void *arg)
+{
+    if (!app_id || app_id[0] == '_' || !security_initialized() ||
+        !security_choice("isolation.prompt") ||
+        !security_app_isolation_pending(app_id)) {
+        iso_once = -1;
+        wm_open_app(app_id, arg);
+        return;
+    }
+    sc_copy(iso_id, sizeof(iso_id), app_id);
+    iso_arg = arg;
+    wm_menu(screen_w / 2 - 175, screen_h / 2 - 60, iso_items, 4, iso_answer, NULL);
+}
+
 struct window *wm_open_app(const char *app_id, void *arg)
 {
     /* console hand-off: `appstrt` parks the launching terminal tab here so
@@ -442,8 +483,14 @@ struct window *wm_open_app(const char *app_id, void *arg)
     cyc_reset_all();
     memset(w, 0, sizeof(*w));
     w->console = cons;
-    w->id = next_id++;
     w->app = app;
+    {
+        int mode = app_id && app_id[0] != '_' ? security_app_isolation(app_id) : SC_ISO_NEVER;
+        w->isolated = iso_once >= 0 ? iso_once :
+                      mode == SC_ISO_ALWAYS ? 1 :
+                      mode == SC_ISO_NEVER ? 0 : security_app_last_isolated(app_id);
+    }
+    w->id = next_id++;
     strncpy(w->title, app->title, sizeof(w->title) - 1);
     int dw = app->def_w ? app->def_w : 600;
     int dh = app->def_h ? app->def_h : 400;
@@ -684,7 +731,7 @@ static void desktop_load(void)
 }
 static void desktop_open(struct ditem *d)
 {
-    if (d->kind == 0) wm_open_app(d->app, NULL);
+    if (d->kind == 0) wm_launch_app_interactive(d->app, NULL);
     else app_open_document(d->path);
 }
 static void desk_remove_sel(void)
@@ -935,8 +982,8 @@ static void desk_empty_menu_cb(int item, void *ud)
 {
     if(item<0)return;
     (void)ud;
-    if (item == 1) { wm_open_app("files", 0); return; }
-    if (item == 2) { wm_open_app("terminal", 0); return; }
+    if (item == 1) { wm_launch_app_interactive("files", 0); return; }
+    if (item == 2) { wm_launch_app_interactive("terminal", 0); return; }
     desk_restore();
 }
 
@@ -995,6 +1042,8 @@ static void desk_openwith_answer(int item, void *ud)
 {
     (void)ud;
     if (item < 0 || item >= desk_openwith_count) return;
+    /* "Open with" is an app-to-app hand-off, not a fresh user launch: keep the
+     * synchronous wm_open_app so the document argument is passed immediately. */
     if (!wm_open_app(desk_openwith_ids[item], desk_openwith_path))
         wm_notify("Cannot open it there", "That application did not take the file.", 1);
 }
@@ -1954,7 +2003,7 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
             if (launch.active && press == launcher_at_point()) {
                 struct app *a = app_at(press);
                 launch.active = 0;
-                if (a) wm_open_app(a->id, NULL);
+                if (a) wm_launch_app_interactive(a->id, NULL);
             } else if (launch.active) {
                 launch.active = 0;
                 launch.hover = -1;
@@ -2176,7 +2225,7 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
                     }
                     bar_last_i = -1;      /* the pair is spent, so a third click starts a new one */
                 } else {
-                    wm_open_app(task_pins[i], NULL);
+                    wm_launch_app_interactive(task_pins[i], NULL);
                 }
                 wm_full();return;
             }
@@ -2223,7 +2272,7 @@ static void handle_key(struct key_event *e)
             int matches = 0;
             for (int i = 0; i < app_count(); i++)
                 if (launch_match(i) && matches++ >= launch.offset) {
-                    wm_open_app(app_at(i)->id, NULL); break;
+                    wm_launch_app_interactive(app_at(i)->id, NULL); break;
                 }
             launch.active = 0;
             wm_full();

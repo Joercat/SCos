@@ -1,22 +1,21 @@
-/* SCos secure screen: sign-in, first-run setup, session lock, masked password
- * prompts and recovery.  These flows own the framebuffer directly rather than
- * going through a window, so no compositor widget, window surface or terminal
- * scrollback ever holds a typed secret.  The only characters ever painted for
- * a masked field are '*'.  Every input buffer is scrubbed on the way out.
+/* SCos secure console: a plain TTY-style sign-in / setup / lock / recovery
+ * screen.  There is no graphical shell here: before authentication the whole
+ * framebuffer is a text console, exactly like a Linux machine that has not
+ * started a desktop.  The same console is used for screen locking.
  *
- * The screen is deliberately driven by the same kbd_poll/usb_poll path as the
- * WM (no second input stack), and calls cpu_hlt() so the machine stays idle
- * while waiting for a person.
+ * These flows own the framebuffer directly rather than going through a window,
+ * so no compositor widget, window surface or terminal scrollback ever holds a
+ * typed secret.  The only characters ever painted for a masked field are '*'.
+ * Every input buffer is scrubbed on the way out.  An app can supply its own
+ * lock screen with security_set_lock_screen(); none is shipped by default.
+ *
+ * Input uses the same kbd_poll/usb_poll path as the WM (no second input stack)
+ * and calls cpu_hlt() so the machine stays idle while waiting for a person.
  */
 #include "scos.h"
 #include "security.h"
 
 #define UI_FIELDS 3
-#define UI_BG     0x00070d16u
-#define UI_WARN   0x00ffbb55u
-#define UI_ERROR  0x00ff7070u
-#define UI_DIM    0x008090a0u
-#define UI_FIELD  0x00101c2au
 
 struct ui_field {
     const char *label;
@@ -47,7 +46,7 @@ static void drain_input(void)
 static void wipe_screen(void)
 {
     fb_scene_unclip();
-    fb_clear(UI_BG);
+    fb_clear(0);
     fb_flip();
 }
 
@@ -95,82 +94,102 @@ static const char *field_display(const struct ui_field *f, char *buf, size_t cap
 }
 
 /* ------------------------------------------------------------------ painting --- */
+/* Deliberately a plain text console, like a Linux virtual console before a
+ * desktop starts.  No panels, gradients, widgets or themes: the login and lock
+ * prompt is the same kind of screen, so there is never any desktop content
+ * behind a masked password.  An app may replace the lock screen through
+ * security_set_lock_screen(); by default there is no lock-screen app at all. */
+#define CON_BG   0x00000000u
+#define CON_FG   0x00d8d8d8u
+#define CON_DIM  0x008a9aa8u
+#define CON_WARN 0x00ffcc66u
+#define CON_ERR  0x00ff8080u
+#define CON_OK   0x007ce07cu
+#define CON_LINE (FONT_H + 4)
+#define CON_X    8
+
+static void con_put(int *y, const char *text, u32 fg)
+{
+    if (!text) return;
+    s_clip_text(&screen, CON_X, *y, text, fg, screen_w - CON_X * 2);
+    *y += CON_LINE;
+}
+
+static int con_wrap(int y, const char *text, u32 fg)
+{
+    if (!text || !*text) return 0;
+    return s_text_wrap(&screen, CON_X, y, screen_w - CON_X * 2, text, fg);
+}
+
 static void status_line(char *out, size_t cap)
 {
     struct rtc_time r;
     char n[16];
     rtc_read(&r);
-    sc_copy(out, cap, "SCos " SCOS_BUILD_TAG "  |  ");
-    sc_fmt(n, sizeof(n), r.year); sc_cat(out, cap, n); sc_cat(out, cap, "-");
+    sc_copy(out, cap, "SCos " SCOS_BUILD_TAG "  ttyS0   ");
+    fmt_pad2(n, r.year % 100); sc_cat(out, cap, "20"); sc_cat(out, cap, n); sc_cat(out, cap, "-");
     fmt_pad2(n, r.mon); sc_cat(out, cap, n); sc_cat(out, cap, "-");
     fmt_pad2(n, r.day); sc_cat(out, cap, n); sc_cat(out, cap, " ");
     fmt_pad2(n, r.hour); sc_cat(out, cap, n); sc_cat(out, cap, ":");
     fmt_pad2(n, r.min); sc_cat(out, cap, n);
-    sc_cat(out, cap, "  |  ");
-    sc_cat(out, cap, security_api_persistent() ? "disk-backed accounts" : "RAM-only accounts");
+    sc_cat(out, cap, security_api_persistent() ? "   disk-backed accounts" :
+                                                  "   RAM-only accounts");
 }
 
 static void paint(struct ui_screen *s)
 {
-    const struct theme *t = theme_current();
-    int W = screen_w, H = screen_h;
-    int pw = W - 40 < 560 ? W - 40 : 560;
-    int ph = s->nfields ? 150 + s->nfields * 48 + 78 : 320;
-    int px, py, y;
-    char status[192], disp[SC_PASS_MAX + 2];
-    if (ph > H - 16) ph = H - 16;
-    if (ph < 200) ph = 200;
-    px = (W - pw) / 2;
-    py = (H - ph) / 2;
+    int y = 6;
+    char line[SC_MSG_MAX + 96], disp[SC_PASS_MAX + 2];
     fb_scene_unclip();
-    s_vgrad(&screen, 0, 0, W, H, t->bg_top, t->bg_bot);
-    s_fill(&screen, px, py, pw, ph, t->win_bg);
-    s_frame_rect(&screen, px, py, pw, ph, t->main);
-    s_fill(&screen, px + 1, py + 1, pw - 2, 4, t->main);
-    s_text_scaled(&screen, px + 18, py + 16, s->title, t->text, 2);
-    if (s->subtitle) s_text(&screen, px + 18, py + 54, s->subtitle, t->main);
-    status_line(status, sizeof(status));
-    s_clip_text(&screen, px + 18, py + 74, status, UI_DIM, pw - 36);
+    s_fill(&screen, 0, 0, screen_w, screen_h, CON_BG);
+
+    status_line(line, sizeof(line));
+    con_put(&y, line, CON_DIM);
+    con_put(&y, "SCos unnumbered development (native x64 UEFI)", CON_DIM);
+    y += CON_LINE / 2;
+    con_put(&y, s->title ? s->title : "SCos console", CON_FG);
+    if (s->subtitle) con_put(&y, s->subtitle, CON_DIM);
+    y += CON_LINE / 2;
 
     for (int i = 0; i < s->nfields; i++) {
-        int y0 = py + 98 + i * 48;
-        int by = y0 + 18;
-        s_text(&screen, px + 18, y0, s->f[i].label, t->text);
-        s_fill(&screen, px + 18, by, pw - 36, 26, UI_FIELD);
-        s_frame_rect(&screen, px + 18, by, pw - 36, 26,
-                     i == s->active ? t->main : UI_DIM);
-        s_clip_text(&screen, px + 26, by + 5,
-                    field_display(&s->f[i], disp, sizeof(disp)), t->text, pw - 52);
+        const char *shown = field_display(&s->f[i], disp, sizeof(disp));
+        size_t plen = sc_len(s->f[i].label), dlen = sc_len(shown);
+        sc_copy(line, sizeof(line), s->f[i].label);
+        sc_cat(line, sizeof(line), ": ");
+        sc_cat(line, sizeof(line), shown);
+        /* Keep the line inside the screen without exposing more than 40 marks. */
+        if (sc_len(line) > (size_t)((screen_w - CON_X * 2) / FONT_W))
+            line[(screen_w - CON_X * 2) / FONT_W] = 0;
+        con_put(&y, line, i == s->active ? CON_FG : CON_DIM);
         if (i == s->active && (u32)(tick_count / 50) % 2 == 0) {
-            int col = s->f[i].visible ? (int)sc_len(s->f[i].buf) :
-                      (int)(sc_len(s->f[i].buf) > 40 ? 41 : sc_len(s->f[i].buf));
-            if (col > (pw - 60) / 8) col = (pw - 60) / 8;
-            s_fill(&screen, px + 26 + col * 8, by + 5, 2, 16, t->main);
+            int col = (int)(plen + 2 + dlen);
+            if (col > (screen_w - CON_X * 2) / FONT_W - 1)
+                col = (screen_w - CON_X * 2) / FONT_W - 1;
+            s_fill(&screen, CON_X + col * FONT_W, y - CON_LINE + FONT_H - 3,
+                   FONT_W, 2, CON_FG);
         }
         if (!s->f[i].visible && s->caps && i == s->active)
-            s_text(&screen, px + pw - 120, y0, "[CAPS]", UI_WARN);
+            con_put(&y, "[CAPS LOCK]", CON_WARN);
     }
 
-    y = py + ph - 92;
-    if (!s->nfields && s->show_help && s->hint) {
-        /* Full-page information (recovery code, verification result): give the
-         * text the whole panel instead of the three-line hint strip. */
-        s_text_wrap(&screen, px + 18, py + 96, pw - 36, s->hint, t->text);
-    } else if (s->show_help && s->hint) {
-        y += s_text_wrap(&screen, px + 18, y, pw - 36, s->hint, UI_DIM) * 18;
-    }
-    (void)y;
+    y += CON_LINE / 2;
+    if (s->show_help && s->hint)
+        y += con_wrap(y, s->hint, CON_DIM) * (FONT_H + 2);
     if (security_api_denied()) {
         char wait[128], n[24];
         sc_fmt(n, sizeof(n), security_api_deny_remaining());
         sc_copy(wait, sizeof(wait), "Too many attempts. Wait ");
         sc_cat(wait, sizeof(wait), n); sc_cat(wait, sizeof(wait), " seconds.");
-        s_text_wrap(&screen, px + 18, py + ph - 60, pw - 36, wait, UI_WARN);
+        y += con_wrap(y, wait, CON_WARN) * (FONT_H + 2);
     } else if (s->msg[0]) {
-        s_text_wrap(&screen, px + 18, py + ph - 60, pw - 36, s->msg, UI_ERROR);
+        y += con_wrap(y, s->msg, CON_ERR) * (FONT_H + 2);
     }
-    s_clip_text(&screen, px + 18, py + ph - 28, s->footer ? s->footer : "",
-                t->text, pw - 36);
+    if (s->footer) {
+        if (y + CON_LINE * 2 > screen_h) y = screen_h - CON_LINE * 2;
+        con_put(&y, "------------------------------------------------------------", CON_DIM);
+        con_put(&y, s->footer, CON_DIM);
+    }
+    (void)CON_OK;
 }
 
 static int ui_run(struct ui_screen *s, ui_submit submit, void *ctx)
@@ -432,13 +451,34 @@ void security_ui_logout(void)
     else security_ui_login();
 }
 
+/* Optional app-supplied lock screen.  Nothing in the repository registers
+ * one: the default is the same plain console used at boot.  A lock-screen app
+ * should draw masked input itself, call security_api_verify() with the typed
+ * password, then security_api_unlock_session(), and return 1 when unlocked,
+ * -3 to switch user, 0 to cancel.  See docs/migration/SECURITY.md. */
+static security_lock_screen_fn custom_lock_screen;
+void security_set_lock_screen(security_lock_screen_fn fn) { custom_lock_screen = fn; }
+
 void security_ui_lock(void)
 {
     struct ui_screen s;
     if (security_api_session() < 0) { security_ui_logout(); return; }
+    if (!security_choice("lock.enabled")) return;   /* owner turned locking off */
     security_api_lock_session();
     for (;;) {
         char sub[128];
+        if (custom_lock_screen) {
+            int r = custom_lock_screen(security_api_session_name());
+            if (r == 1) break;
+            if (r == -3) {
+                security_api_unlock_session();
+                security_api_drop_session();
+                security_ui_logout();
+                return;
+            }
+            if (security_api_gate_satisfied() && !security_api_locked()) break;
+            continue;                 /* the app owns the lock screen entirely */
+        }
         sc_copy(sub, sizeof(sub), "Signed in as ");
         sc_cat(sub, sizeof(sub), security_api_session_name());
         screen_init(&s, "Session locked", sub);

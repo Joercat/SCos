@@ -72,6 +72,12 @@ class Guest:
         self.symbols={p[2]:int(p[0],16) for line in subprocess.check_output(['nm','--defined-only',str(ROOT/'build/kernel.elf')],text=True).splitlines() if len(p:=line.split())==3}
         self.socket=socket.socket(socket.AF_UNIX);self.socket.settimeout(20);self.socket.connect(str(self.directory/'qmp.sock'));self.stream=self.socket.makefile('rb');self.stream.readline();self.qmp('qmp_capabilities');self.debug=Debugger(self.directory/'debug');self.idle();self.scratch=self.call('palloc_owned',262144,0)
         self._provision_account()
+        # The harness opts out of the first-launch isolation prompt (exactly as
+        # a user can with `choices set isolation.prompt off`) so unrelated UI
+        # suites still exercise their original click/launch paths.  The prompt
+        # itself is tested explicitly in tools/tests/test_security.py.
+        self.debug.write(self.scratch + 4096, b'isolation.prompt\0')
+        self.call('security_choice_set', self.scratch + 4096, 0)
         # GDB calls leave the CPU stopped.  Let the secure screen hand over to
         # wm_run(), then stop again at the same idle boundary the old harness
         # used, so every existing test's first g.call() still finds it parked.

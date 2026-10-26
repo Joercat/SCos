@@ -6,13 +6,12 @@
  * below the "kernel services" divider is implemented by security.c / login.c /
  * sec_vault.c and needs scos.h at the call site.
  *
- * Full security adds an RSA-2048 signed boot chain (verified by the UEFI stub)
- * and an AES-256-CTR / HMAC-SHA256 encrypted filesystem vault whose volume key
- * is wrapped per account.  SCos remains a cooperative, single-address-space
- * kernel with NO ring-3 isolation, no TPM/rollback protection and no firmware
- * Secure Boot enrolment; the shipped development signing key is public.  This
- * is not a sandbox and cannot defend against a hardware debugger or an
- * attacker who can replace the unauthenticated EFI loader itself.  See
+ * Full security adds an AES-256-CTR / HMAC-SHA256 encrypted filesystem vault
+ * whose volume key is wrapped per account, plus a user-controlled policy layer
+ * (security choices).  SCos remains a cooperative, single-address-space
+ * kernel: process isolation is a per-app USER CHOICE, never forced.  There is
+ * no TPM/rollback protection.  This is not a sandbox and cannot defend against
+ * a hardware debugger or an attacker who can replace the boot medium.  See
  * docs/migration/SECURITY.md before treating any of it as a stronger boundary.
  */
 #ifndef SCOS_SECURITY_H
@@ -146,7 +145,20 @@ int  sc_db_verify(const char *data, size_t len);
 #define SC_VAULT_SLOT_OFF   96
 #define SC_VAULT_DB_OFF     (SC_VAULT_SLOT_OFF + SC_VAULT_SLOTS * SC_VAULT_SLOT_BYTES)
 #define SC_VAULT_AUDIT_OFF  (SC_VAULT_DB_OFF + SC_DB_MAX)
+#define SC_VAULT_CHOICES_OFF (SC_VAULT_AUDIT_OFF + SC_AUDIT_BYTES)
+#define SC_VAULT_CHOICES_MAX 4096
 #define SC_VAULT_TAG_OFF    32736
+_Static_assert(SC_VAULT_CHOICES_OFF + SC_VAULT_CHOICES_MAX <= SC_VAULT_TAG_OFF,
+               "vault metadata regions overlap the AEAD tag");
+#define SC_CHOICES_PATH "system/security/choices.cfg"
+#define SC_APP_CHOICES_MAX 24
+#define SC_APP_ID_MAX 32
+
+/* Per-app process isolation is a USER CHOICE, never forced.  0 = ask every
+ * time (or use isolation.default), 1 = always isolated, 2 = never isolated. */
+#define SC_ISO_ASK    0
+#define SC_ISO_ALWAYS 1
+#define SC_ISO_NEVER  2
 #define SC_VAULT_HDR_BYTES  32768   /* 64 sectors */
 #define SC_VAULT_IMAGE_BYTES 131072 /* 256 sectors; must match ata.c */
 #define SC_VAULT_PAYLOAD    (SC_VAULT_IMAGE_BYTES - SC_VAULT_HDR_BYTES)
@@ -159,6 +171,40 @@ int  sc_db_verify(const char *data, size_t len);
 void security_random_bytes(void *out, size_t n);   /* audited entropy pool */
 int  security_vault_status(char *out, size_t cap);
 
+/* --------------------------------------------------- user security choices --- */
+/* Everything that could restrict the owner of the machine is a choice.  The
+ * defaults keep important protections ON, but every one of them can be turned
+ * off from `choices` in either shell, or through the API below from an app the
+ * user writes.  Values are stored in the AEAD-authenticated vault header, so
+ * they survive reboot and cannot be edited offline without breaking the tag.
+ * Choice keys and their defaults are in sec_choices.c. */
+int  security_choice(const char *key);                  /* 0/1, -1 if unknown */
+int  security_choice_set(const char *key, int value);  /* persists; 0 if unknown */
+int  security_choice_count(void);
+void security_choice_describe(int i, char *out, size_t cap); /* "key = on : help" */
+int  security_choices_load(void);                      /* from VFS at boot */
+int  security_choices_save(void);                      /* VFS + vault header */
+void security_choices_default(void);
+const char *security_choice_error(void);
+
+/* Per-app isolation choice.  The WM asks on first launch; the answer is stored
+ * and can be changed with `choices app <id> always|never|ask`.  The isolation
+ * engine is deliberately NOT implemented: w->isolated is a flag apps/drivers
+ * can honour (Lua CAT apps deny filesystem writes when set), and no app is
+ * forced into isolation. */
+int  security_app_isolation(const char *app_id);
+int  security_app_isolation_set(const char *app_id, int mode);
+int  security_app_isolation_pending(const char *app_id);
+int  security_app_launch_isolated(const char *app_id, int isolated);
+int  security_app_last_isolated(const char *app_id);
+int  security_app_isolation_count(void);
+void security_app_isolation_describe(int i, char *out, size_t cap);
+
+/* Internal metadata-I/O helpers.  Only the account/vault/choices modules use
+ * these; they are not a general-purpose way around the VFS guard. */
+void security_bypass_scope(int on);
+void security_mark_dirty(void);
+
 int  vault_disk_present(void);
 int  vault_unlocked(void);
 void vault_lock(void);                 /* burn the VEK (logout / explicit lock) */
@@ -168,11 +214,13 @@ int  vault_image_pending(void);
 void vault_mark_applied(void);
 uint32_t vault_db_len(void);
 uint32_t vault_audit_len(void);
+uint32_t vault_choices_len(void);
 int  vault_stage(const uint8_t *image, uint32_t len);   /* pre-auth: parse + bound-check */
 int  vault_open(uint8_t *image, uint32_t len);          /* post-auth: verify tag, decrypt in place */
 int  vault_seal(uint8_t *image, uint32_t len);          /* build header + encrypt in place */
 void vault_set_db(const char *data, uint32_t len);
 void vault_set_audit(const char *data, uint32_t len);
+void vault_set_choices(const char *data, uint32_t len);
 int  vault_unlock_password(const char *name, const char *pw, uint32_t iters,
                            char *msg, size_t cap);
 int  vault_unlock_recovery(const char *code, char *msg, size_t cap);
@@ -300,5 +348,13 @@ int  security_ui_user_add(const char *name, int role);
 int  security_ui_user_del(const char *name);
 int  security_ui_switch_user(const char *name);
 int  security_ui_recovery(void);
+
+/* App-facing lock-screen API.  No lock-screen app is shipped; by default the
+ * plain secure console is used.  Register a renderer here to replace it.  The
+ * callback owns the framebuffer while the session is locked and must never
+ * draw a typed password.  Return 1 when unlocked, -3 to switch user, 0 to
+ * keep waiting.  See docs/migration/SECURITY.md for the full contract. */
+typedef int (*security_lock_screen_fn)(const char *user);
+void security_set_lock_screen(security_lock_screen_fn fn);
 
 #endif /* SCOS_SECURITY_H */

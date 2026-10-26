@@ -40,6 +40,9 @@ int confirm_command(struct shell_confirm *c, char *line, unsigned cap,
         strcpy(line,c->command); c->command[0] = 0;
         return 0;
     }
+    /* User choice: an owner who does not want the extra friction can turn
+     * destructive-command confirmations off entirely. */
+    if (!security_choice("confirm.destructive")) return 0;
     /* Power actions, privileged deletions and system stops require consent. */
     char normalized[256]; unsigned ni = 0; int space = 0;
     for (const char *p = line; *p && ni < sizeof(normalized)-1; p++) {

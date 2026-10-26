@@ -23,11 +23,8 @@ Three layers, because each catches a different failure:
 """
 import os, re, shlex, struct, subprocess, sys, zlib
 from pathlib import Path
-import importlib.util
+import importlib
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import scos_sigformat as sigformat
-import scos_sign
 from qemu_support import Guest, RESULTS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -151,13 +148,8 @@ def test_tampered_module_is_refused():
 
     The boot stub verifies the module against `DRVLIST.IDX`, so the tamper below leaves that index
     consistent with the file: a corrupt card, a bad image write or a deliberate edit can all produce
-    exactly that state.  Since signed boot, the stub ALSO checks every boot file against an RSA-2048
-    signed manifest; an attacker who flips a byte cannot re-sign.  This test therefore re-signs the
-    deliberately tampered image with the repository's development key (as a real release build would
-    after a bad module was packed), which lets the kernel's own payload CRC be the last line of
-    defence.  A version of this image that is NOT re-signed is booted too, and must be refused by the
-    UEFI stub before any kernel code runs.  Either way the desktop must stay usable on the CPU
-    compositor.
+    exactly that state.  What must still catch it is the kernel's own payload check, and what must still
+    be true afterwards is a usable machine on the CPU compositor.
     """
     image = ROOT / 'build' / 'scos.img'
     module = ROOT / 'build' / 'gpu' / 'ati.mod'
@@ -197,50 +189,7 @@ def test_tampered_module_is_refused():
     # Rewrite that entry's crc so the stub accepts the tampered file, leaving only the kernel's own
     # check to refuse it.
     struct.pack_into('<I', img, entry_at + 12, zlib.crc32(bytes(bad)) & 0xffffffff)
-    index_bad = bytearray(index)
-    struct.pack_into('<I', index_bad, 8 + 16 * slot + 12, zlib.crc32(bytes(bad)) & 0xffffffff)
-    # Rebuild BOOT.SIG for the modified files with the development key.  The
-    # manifest entry count is unchanged, so the signature container stays the
-    # same size and can be replaced in place inside the FAT image.
-    # Locate BOOT.SIG by its exact packed bytes, not by the magic string:
-    # BOOTX64.EFI itself contains "SCOSSIG1" as a literal.
-    spec = importlib.util.spec_from_file_location('scos_verify_stick',
-                                                  ROOT / 'tools/verify-stick.py')
-    vs = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(vs)
-    packed_sig = vs.read_named_file(image, 'BOOT', 'SIG')
-    assert packed_sig, 'BOOT.SIG is missing from the packed image'
-    sig_at = img.find(packed_sig)
-    assert sig_at >= 0, 'the packed BOOT.SIG bytes are not contiguous in the image'
-    old_sig = bytes(img[sig_at:sig_at + len(packed_sig)])
-    manifest, _signature = sigformat.parse_sigfile(old_sig)
-    entries = sigformat.parse_manifest(manifest)
-    kernel = (ROOT / 'build' / 'kernel.elf').read_bytes()
-    blobs = {
-        'KERNEL.ELF': kernel,
-        'KERNEL.CRC': struct.pack('<I', zlib.crc32(kernel) & 0xffffffff),
-        'DRVLIST.IDX': bytes(index_bad),
-        'BUILD.TXT': (ROOT / 'build' / 'BUILD.TXT').read_bytes(),
-    }
-    for name in (e[0] for e in entries):
-        if name not in blobs:
-            blobs[name] = bytes(bad) if name == 'ATI.MOD' else \
-                (ROOT / 'build' / 'gpu' / name.lower()).read_bytes()
-    resigned = scos_sign.sign_manifest(sigformat.manifest_bytes(
-        [(e[0], blobs[e[0]]) for e in entries]))
-    assert len(resigned) == len(old_sig), 're-signed manifest changed length'
-    unsigned = bytes(img)
-    img[sig_at:sig_at + len(resigned)] = resigned
     image.write_bytes(bytes(img))
-    # First prove the same tamper WITHOUT a fresh signature is stopped in UEFI.
-    image.write_bytes(unsigned)
-    try:
-        from test_signed_boot import _boot_serial
-        log = _boot_serial(image, seconds=20)
-        assert 'HALTED: boot chain verification failed' in log, log[-2000:]
-        assert 'wm: entering main loop' not in log, 'an unsigned tampered module booted'
-    finally:
-        image.write_bytes(bytes(img))
     try:
         with Guest('gpu-tamper', devices=['ati-vga']) as g:
             log = g.serial()

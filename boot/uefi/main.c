@@ -2,12 +2,6 @@
 #include "boot.h"
 #include "gpu_match.h"
 #include "pci_scan.h"
-#include "trust_anchor.h"
-#include "security.h"    /* sc_sha256_hash, linked from kernel/desktop/sec_core.c */
-
-int boot_rsa_verify(const uint8_t *msg, size_t len,
-                    const uint8_t sig[256], const uint8_t pub_n[256]);
-static status read_file(struct file *root,const char16 *name,void **data,size_t *length);
 static struct system_table *system;
 static struct boot_services *bs;
 static struct boot_framebuffer fatal_framebuffer;
@@ -79,92 +73,6 @@ static void family_file_name(const char *family,char16 *out){
  out[i++]=u'\\';out[i++]=u'S';out[i++]=u'C';out[i++]=u'O';out[i++]=u'S';out[i++]=u'\\';
  for(unsigned k=0;k<n;k++)out[i++]=(char16)stem[k];
  out[i++]=u'.';out[i++]=u'M';out[i++]=u'O';out[i++]=u'D';out[i]=0;
-}
-/* ------------------------------------------------------------ signed boot --- */
-/* BOOT.SIG is a fixed-format container: 8-byte magic, version, manifest length,
- * a 256-byte RSA-2048 signature, then the manifest.  The manifest lists each
- * boot file by its 8.3 name, length and SHA-256.  Every listed file is read
- * back and hashed here, before any ELF byte is parsed or any module is staged.
- * The public modulus lives in BOOTX64.EFI itself (trust_anchor.h); firmware
- * Secure Boot, when enrolled, is what authenticates that root of trust. */
-#define SIG_HEADER 272
-#define SIG_BYTES 256
-#define MAN_HEADER 52
-#define MAN_ENTRY 48
-#define MAN_MAX 24
-static const char man_domain[]="SCos x64 UEFI signed boot v1";
-static uint8_t signed_manifest[MAN_HEADER+MAN_MAX*MAN_ENTRY];
-static size_t signed_manifest_len;
-static uint32_t le32(const uint8_t *p){return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);}
-static int manifest_name_ok(const uint8_t *n){
- unsigned i=0,dots=0,len=0,term=0;
- for(;i<12;i++){
-  uint8_t c=n[i];
-  if(!c){term=1;break;}
-  if(!((c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='.'||c=='_'||c=='-'))return 0;
-  if(c=='.')dots++;
-  len++;
- }
- if(!term||len<3||len>11||dots!=1)return 0;
- for(i=0;i<12;i++)if(n[i]){if(n[i]=='.')break;}
- return i>0&&i<=8&&len-i-1>=1&&len-i-1<=3;
-}
-static int manifest_has(const char *name){
- size_t count=signed_manifest_len?(signed_manifest_len-MAN_HEADER)/MAN_ENTRY:0;
- for(size_t i=0;i<count;i++){
-  const uint8_t *e=signed_manifest+MAN_HEADER+i*MAN_ENTRY;
-  size_t k=0;int ok=1;
-  for(;name[k];k++)if(k>=12||e[k]!=(uint8_t)name[k]||!e[k]){ok=0;break;}
-  if(ok&&k<12&&e[k]==0)return 1;
- }
- return 0;
-}
-static int verify_boot_chain(struct file *root){
- void *blob=0;size_t len=0;status s;
- s=read_file(root,(const char16*)u"\\SCOS\\BOOT.SIG",&blob,&len);
- if(FAILED(s)){log("BOOT.SIG missing: signed boot manifest required\r\n");return 0;}
- const uint8_t *p=blob;
- int ok=0;
- if(len<SIG_HEADER+MAN_HEADER||len>SIG_HEADER+MAN_HEADER+MAN_MAX*MAN_ENTRY)goto done;
- if(!equal(p,"SCOSSIG1",8)||le32(p+8)!=1)goto done;
- size_t mlen=le32(p+12);
- if(mlen<MAN_HEADER||mlen>MAN_HEADER+MAN_MAX*MAN_ENTRY||len!=SIG_HEADER+mlen)goto done;
- const uint8_t *m=p+SIG_HEADER;
- if(!boot_rsa_verify(m,mlen,p+16,boot_trust_modulus)){
-  log("BOOT.SIG: RSA-2048 signature verification FAILED\r\n");goto done;
- }
- if(!equal(m,"SCOSMAN1",8)||le32(m+8)!=1||le32(m+16))goto done;
- size_t count=le32(m+12);
- if(count<4||count>MAN_MAX||mlen!=MAN_HEADER+count*MAN_ENTRY)goto done;
- if(!equal(m+20,man_domain,sizeof(man_domain)-1))goto done;
- int have_kernel=0,have_crc=0,have_index=0,have_build=0;
- for(size_t i=0;i<count;i++){
-  const uint8_t *e=m+MAN_HEADER+i*MAN_ENTRY;
-  if(!manifest_name_ok(e))goto done;
-  char16 path[32];unsigned at=0;
-  path[at++]=u'\\';path[at++]=u'S';path[at++]=u'C';path[at++]=u'O';path[at++]=u'S';path[at++]=u'\\';
-  for(unsigned k=0;k<12&&e[k];k++)path[at++]=(char16)e[k];
-  path[at]=0;
-  void *data=0;size_t n=0;
-  if(FAILED(read_file(root,path,&data,&n))){log("signed manifest names a missing boot file\r\n");goto done;}
-  uint8_t digest[32];sc_sha256_hash(data,n,digest);
-  int match=(n==le32(e+12))&&equal(digest,e+16,32);
-  bs->free_pool(data);
-  if(!match){log("signed boot manifest hash mismatch\r\n");goto done;}
-  unsigned k=0;while(e[k]&&k<12)k++;
-  if(k==10&&equal(e,"KERNEL.ELF",10))have_kernel=1;
-  if(k==10&&equal(e,"KERNEL.CRC",10))have_crc=1;
-  if(k==11&&equal(e,"DRVLIST.IDX",11))have_index=1;
-  if(k==9&&equal(e,"BUILD.TXT",9))have_build=1;
- }
- if(!have_kernel||!have_crc||!have_index||!have_build)goto done;
- for(size_t i=0;i<mlen;i++)signed_manifest[i]=m[i];
- signed_manifest_len=mlen;
- log("signed boot manifest verified (RSA-2048/SHA-256)\r\n");
- ok=1;
-done:
- bs->free_pool(blob);
- return ok;
 }
 static uint64_t ticks(void){uint32_t a,d;__asm__ volatile("lfence; rdtsc":"=a"(a),"=d"(d)::"memory");return ((uint64_t)d<<32)|a;}
 static uint32_t crc32(const uint8_t *p,size_t n){uint32_t c=~0u;while(n--){c^=*p++;for(unsigned i=0;i<8;i++)c=(c>>1)^(0xedb88320u&-(c&1));}return ~c;}
@@ -302,13 +210,6 @@ status EFIAPI efi_main(handle image,struct system_table *table){
  phase="open boot volume";s=fs->open_volume(fs,&root);if(FAILED(s))goto fail;
  phase="read kernel ELF";s=read_file(root,(const char16*)u"\\SCOS\\KERNEL.ELF",&elf,&elf_size);
  if(!FAILED(s)){phase="read kernel CRC";s=read_file(root,(const char16*)u"\\SCOS\\KERNEL.CRC",&checksum,&checksum_size);}
- /* Fail closed.  Nothing below this point may execute a byte that is not in
-  * the RSA-verified manifest, so a failed check returns to firmware instead of
-  * being overwritten by a later successful file read. */
- if(!FAILED(s)){
-  phase="verify signed boot manifest";
-  if(!verify_boot_chain(root)){log("HALTED: boot chain verification failed\r\n");s=ERROR(28);goto fail;}
- }
  /* Choose the one GPU driver module this machine needs, while the boot volume handle is still
   * open: it is closed immediately below and nothing may use it afterwards.  The bytes land in a
   * pool for now and move into the executable boot-arena region once that region exists. */
@@ -328,29 +229,20 @@ status EFIAPI efi_main(handle image,struct system_table *table){
    /* A chip the naming table knows but no driver table binds gets no module read at all: firmware
     * must not hand the kernel bytes for a chip generation nothing can drive. */
    unsigned n=0;while(n<15&&family[n]){selected_family[n]=family[n];n++;}selected_family[n]=0;
-   char mname[16];n=0;while(n<8&&family[n]){char c=family[n];mname[n++]=(c>='a'&&c<='z')?(char)(c-32):c;}
-   mname[n]='.';mname[n+1]='M';mname[n+2]='O';mname[n+3]='D';mname[n+4]=0;
    char16 path[32];family_file_name(family,path);
-   /* Executable module bytes must appear in the verified manifest.  A module
-    * present on the disk but absent from the manifest is never staged. */
-   if(!manifest_has(mname)){
-    log("GPU driver module is not in the signed manifest; CPU compositor\r\n");
+   phase="read gpu driver module";s=read_file(root,path,&module_data,&module_size);
+   if(FAILED(s)||module_size>GPU_MODULE_REGION||!module_size){
     select_state=2;
+    if(module_data){bs->free_pool(module_data);module_data=0;}
+    module_size=0;
+    /* EFI_NOT_FOUND: the disk simply has no module for this family, which is a normal state.  Any
+     * other failure is an I/O problem and must not be reported as "not present". */
+    if((uint64_t)(uint64_t)(int64_t)s==0x800000000000000Eull)
+     log("No driver module on disk for the detected GPU family; CPU compositor\r\n");
+    else log("GPU driver module could not be read; CPU compositor\r\n");
    }else{
-    phase="read gpu driver module";s=read_file(root,path,&module_data,&module_size);
-    if(FAILED(s)||module_size>GPU_MODULE_REGION||!module_size){
-     select_state=2;
-     if(module_data){bs->free_pool(module_data);module_data=0;}
-     module_size=0;
-     /* EFI_NOT_FOUND: the disk simply has no module for this family, which is a normal state.  Any
-      * other failure is an I/O problem and must not be reported as "not present". */
-     if((uint64_t)(uint64_t)(int64_t)s==0x800000000000000Eull)
-      log("No driver module on disk for the detected GPU family; CPU compositor\r\n");
-     else log("GPU driver module could not be read; CPU compositor\r\n");
-    }else{
-     select_state=1;
-     log("GPU driver module read for this chip\r\n");
-    }
+    select_state=1;
+    log("GPU driver module read for this chip\r\n");
    }
   }else log("No GPU family matched by the generated tables; no module read\r\n");
   /* The index is a small fixed table, not a directory walk: it lets the kernel report how many

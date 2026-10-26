@@ -2,9 +2,8 @@
 """Deterministic GPT/ESP FAT32 image containing only native x64 UEFI startup.
 
 No partitioning utilities, mounted filesystems, host disks or BIOS boot code.
-Firmware loads EFI/BOOT/BOOTX64.EFI; that application reads SCOS/KERNEL.ELF,
-its accidental-corruption CRC and an RSA-2048 signed manifest of every boot
-file from the same EFI system partition.
+Firmware loads EFI/BOOT/BOOTX64.EFI; that application reads SCOS/KERNEL.ELF
+and its accidental-corruption CRC from the same EFI system partition.
 """
 from pathlib import Path
 import hashlib
@@ -15,10 +14,6 @@ import tempfile
 import uuid
 import re
 import zlib
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import scos_sigformat as sigformat  # noqa: E402
-import scos_sign  # noqa: E402
 
 SECTOR = 512
 SECTORS = 131072  # 64 MiB, enough clusters for an actual FAT32 filesystem
@@ -240,8 +235,7 @@ def main(directory):
         struct.pack_into('<HI', data, 26, cluster & 65535, size)
         return data
     dirs = [allocate(bytes(512)) for _ in range(4)]  # root, EFI, BOOT, SCOS
-    crc_blob = struct.pack('<I', zlib.crc32(elf))
-    ec, kc, cc = allocate(efi), allocate(elf), allocate(crc_blob)
+    ec, kc, cc = allocate(efi), allocate(elf), allocate(struct.pack('<I', zlib.crc32(elf)))
     def dot(parent, own):
         a = entry('DOT', own, directory=True);a[:11] = b'.          '
         b = entry('DOT', parent, directory=True);b[:11] = b'..         '
@@ -270,22 +264,9 @@ def main(directory):
                                             [(stem + '.MOD', blob) for stem, blob in modules])
     (d / 'BUILD.TXT').write_text(record_text)
     (d / 'build.json').write_text(json.dumps(record_json, sort_keys=True, indent=1) + '\n')
-    record_blob = record_text.encode()
-    bc = allocate(record_blob)
-    # The signature covers the kernel, its CRC, the module index, the build
-    # record and every GPU module - i.e. everything the stub can execute or use
-    # to decide what to execute.  BOOT.SIG itself is not listed (it is the
-    # signature) and BOOTX64.EFI is the root of trust, authenticated by
-    # firmware Secure Boot when the machine is enrolled.
-    signed_files = [('KERNEL.ELF', elf), ('KERNEL.CRC', crc_blob),
-                    ('DRVLIST.IDX', index), ('BUILD.TXT', record_blob)]
-    signed_files += [(stem + '.MOD', blob) for stem, blob in modules]
-    signature = scos_sign.sign_manifest(sigformat.manifest_bytes(signed_files))
-    (d / 'BOOT.SIG').write_bytes(signature)
-    gc = allocate(signature)
+    bc = allocate(record_text.encode())
     scos = (dot(0, dirs[3]) + entry('KERNEL.ELF', kc, len(elf)) + entry('KERNEL.CRC', cc, 4)
-            + entry('BUILD.TXT', bc, len(record_blob)) + entry('DRVLIST.IDX', ic, len(index))
-            + entry('BOOT.SIG', gc, len(signature)))
+            + entry('BUILD.TXT', bc, len(record_text.encode())) + entry('DRVLIST.IDX', ic, len(index)))
     for stem, blob in modules:
         scos += entry(stem + '.MOD', allocate(blob), len(blob))
     directory_data = [entry('EFI', dirs[1], directory=True)+entry('SCOS', dirs[3], directory=True),
