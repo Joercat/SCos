@@ -185,6 +185,10 @@ struct gpu_firmware_state {
     struct gpu_firmware_role role[GPU_FIRMWARE_ROLES];
 };
 void gpu_firmware_note(const struct boot_handoff *handoff);
+/* The name of one of the falcon return values an FSP answer can carry, or 0 when the code is not in the
+ * published list.  Exposed so the panel can print what the card said rather than a bare number. */
+const char *gpu_fsp_flcn_name(uint32_t code);
+
 /* The same CRC32 the staged images are verified with, exposed because the handover payload the security
  * processor is given has to be checked over the copy the card will read, not over the copy this kernel read. */
 uint32_t gpu_firmware_crc32(const uint8_t *data, uint32_t length);
@@ -199,6 +203,18 @@ uint32_t gpu_firmware_crc32(const uint8_t *data, uint32_t length);
  * kernel/drivers/gpu/gpu_io.c is the production pair; tools/tests/gpu_fsp_host.c supplies its own. */
 uint32_t gpu_io_read32(const volatile uint32_t *window, uint64_t within);
 void gpu_io_write32(volatile uint32_t *window, uint64_t within, uint32_t value);
+
+/* One reply, as the message format describes it: the two header dwords' flags and types, and the response
+ * payload's task, the request it answers, and its error code.  `framed' says the packet was NVIDIA's at all;
+ * `delta_ok' says the channel's offset walked while it was read out; `complete' says there were enough bytes
+ * for the task/command/error triple to have been read rather than assumed. */
+struct gpu_fsp_reply {
+    uint32_t bytes;
+    uint32_t request_bytes;               /* how big the message this one answers was, as it left us */
+    int som, eom, framed, delta_ok, complete, oversize;
+    int type, kind;                          /* the NVDM type in the header, and the payload's first byte */
+    uint32_t task, command, error;
+};
 
 /* What the card's flight security processor said when this OS asked.  Every field is a register read, a byte
  * count or a staging decision; nothing here is inferred, and a zero `reads' means the file never got as far as
@@ -217,17 +233,29 @@ struct gpu_fsp_state {
     uint32_t fuse_check;                     /* the FSP's own fuse-consistency word: 0 means it passed */
     uint32_t hwcfg2;                         /* the capability word whose refusal was the blocker */
     uint32_t queue_head, queue_tail, msgq_head, msgq_tail;
-    int queried, send_blocked;               /* a request went into the channel; why one could not */
+    int queried, responded, send_blocked;     /* a request went into the channel, a reply was read back off
+                                               * it, and why a request could not go in */
     int polled, reply_polls;                  /* how many looks each of the two waits took */
     uint32_t packet_bytes, doorbell;
-    int responded, framed_ok, reply_som, reply_eom, reply_oversize, reply_delta_ok;
-    uint32_t reply_bytes;
-    int reply_type, reply_kind;              /* the NVDM type in the header, and the payload's first byte */
-    uint32_t reply_task, reply_command, reply_error;
-    int reply_complete;
+    struct gpu_fsp_reply query, handover;     /* the two requests this file can make, and what came back */
     uint64_t reads, writes;                  /* register accesses this file made, counted as it went */
     uint32_t refusal_reads;                  /* how many of the reads were the 0xbadf4100 refusal */
     int fmc_seen, staged, cot_ready, cot_defect;
+    int handover_polls;                               /* looks at the reply queue while waiting for the handover answer */
+    int handover_attempted, handover_sent, handover_blocked;   /* the COT message: tried, put in the channel,
+                                                                   * and why not, in that order of detail */
+    /* The two things a submission needs on this generation, measured at the addresses the published
+     * Blackwell headers give for them rather than at the legacy user-mode page: the timer block, whose clock
+     * has to be running and readable for anything to be timed against, and the virtual-function page, which
+     * is where the doorbell a channel is rung through now lives.  `*_readable' means this kernel reached the
+     * window at all; `dead' and `answered' are what the chip put back. */
+    int timer_readable, timer_dead, timer_ticking, timer_refused;
+    uint32_t timer_start, timer_end, timer_after;
+    int vf_readable, vf_answered, vf_refusals;
+    uint32_t vf_leaf0, vf_top0, vf_scratch[4];
+    uint32_t hwcfg2_after, boot_scratch_after;                  /* re-read after the attempt: the two words
+                                                                   * that change if the FSP took the image */
+    int gsp_released, queues_idle_after;
     uint64_t image_bytes, image_physical, image_crc32;
     uint8_t payload[GPU_FSP_PAYLOAD_BYTES];  /* the handover, assembled and never sent */
 };

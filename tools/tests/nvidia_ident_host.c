@@ -354,9 +354,12 @@ int main(void)
           "the GSP block, "
           "and no more");
     check(stores == 0, "the doorbell page was read and never written");
-    check(log_count >= 2 && has(logs[1], "doorbell at BAR0+0x810090 named, not written"),
-          "the second log line states what was not attempted, so the log cannot be misread as a submission");
-    check(has(logs[1], "a channel can be attempted next"), "and what a live clock makes possible");
+    check(log_count >= 2 && has(logs[1], "NV_VIRTUAL_FUNCTION_PRIV_DOORBELL at 0x2200"),
+          "the second log line says where this generation's doorbell is, and that neither one was written");
+    check(has(logs[1], "neither is written"), "and states what was not attempted, so the log cannot be "
+          "misread as a submission");
+    check(has(logs[1], "the clock in the legacy page read moving"),
+          "and what the page's clock did is quoted as a measurement of that page");
 
     /* ---- 1c. the same window answering a class no published document names. ---- */
     fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
@@ -364,10 +367,13 @@ int main(void)
     umode_class = 0xc761u;                      /* a Blackwell-shaped answer nobody here has seen */
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(has(text, "window class 0xc761 clock +2097us"),
+    check(has(text, "window class 0xc761") && has(text, "clock +2097us"),
           "an unpublished class number is reported as a number, and is not refused");
     check(!has(text, "=published"),
           "and it is not labelled as a generation nobody documented for this chip");
+    check(has(text, "documented for Volta and Turing, not Blackwell"),
+          "but it does say that the number belongs to a page this generation never documented, which is the "
+          "difference between a measurement and an expectation");
 
     /* ---- 1d. a window whose clock does not move. ---- */
     fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
@@ -376,8 +382,13 @@ int main(void)
     timer_frozen = 1;
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(has(text, "clock frozen"), "a clock that does not advance is reported as frozen");
-    check(has(logs[1], "no submission is attempted"), "and that answer decides against the channel");
+    check(has(text, "clock silent here"), "a clock that does not advance is reported as silent, in that page");
+    check(!has(text, "so nothing was submitted through it"),
+          "and with no engine block measured on this fixture the report stops at the clock: it draws no "
+          "conclusion about submission it did not have a target for");
+    check(has(logs[1], "says nothing about the GPU's own timer at 0x9400"),
+          "and the sentence stops short of concluding that the chip's clock is stopped, which is the mistake "
+          "this page used to invite");
 
     /* ---- 1e. the shape a real card has: a 16 MiB register BAR, mapped by the kernel only as far as its
      * cap, so the documented page lies outside the first mapping and has to be mapped on its own.  This
@@ -609,7 +620,9 @@ int main(void)
           "chip said exist and four scratch words: nothing is read past the end of the table it decoded");
     check(has(text, "FSP scratch at 0x8f0320 answers 0x00000000/0x00000000/0x00000000/0x00000000"),
           "a block that answers with its published initial values is reported as answering, not as free");
-    check(has(text, "uninterpreted here"), "and the report says out loud that it is not interpreting them");
+    check(has(text, "all zeros, which is what the vendor's driver says a CPU read of that region returns"),
+          "and the report says out loud that zeros from that region are the decoupler answering, not content "
+          "and not silence");
     check(!has(text, "base unit"), "no engine address is derived when the table names no GSP entry to "
                                    "check the field's unit against");
     check(ce_block_reads == 0, "and the copy engine's own block is therefore never read");
@@ -841,6 +854,33 @@ int main(void)
     check(has(text, "which is content"),
           "and the claim stops at \"this is a reply and not an error code\": gb100 publishes no register "
           "names inside a copy engine, so nothing here says what the two words mean");
+    check(!has(text, "a refused read, named"),
+          "and a pair of ordinary values is not dressed up as a PRI fault either: the family test runs before "
+          "the naming, in both directions");
+
+    /* ---- 1q2. the same block answering with a refusal this driver had no name for.  The value a real card
+     * produced was 0xbadf5040, which is not the one the vendor's driver waits on, and an earlier build of this
+     * module therefore called it content - the exact mistake the family test in blackwell_regs.h exists to
+     * prevent, and the reason it masks 0xFFFF0000 rather than comparing one constant. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    umode_class = 0x1100u;
+    timer_frozen = 1;
+    low_mapping_bytes = 0x800000ull;
+    TOP2_WITH_GSP(0x1100u);
+    for (unsigned i = 0; i < 5u; i++) gsp_regs[i] = 0xbadf4100u;
+    for (unsigned i = 0; i < 4u; i++) fsp_regs[i] = 0xbadf4100u;
+    ce_block[0] = 0xbadf5040u;
+    ce_block[1] = 0xbadf5040u;
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(has(text, "a refused read, named a client error at a target it would not decode") &&
+          !has(text, "which is content"),
+          "0xbadf5040 is named for what it is: FECS_PRI_CLIENT_ERR, a bus fault with an information byte");
+    check(has(text, "the FSP scratch at 0x8f0320 refused too"),
+          "and the block behind it is still reported as refusing, not as answering badly");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
     check(has(text, "GSP block at 0x110000 refused all five reads (0xbadf4100"),
           "and the coprocessor's refusal is still reported next to it, unhedged");
     check(!has(text, "is locked the same way"),

@@ -126,6 +126,30 @@ static u32 window_read(u32 offset)
     return X->read32(inv.window_handle, offset - NV_USERMODE_CFG0);
 }
 
+/* What a read that the bus refused said, in the words the published code list gives for it.  This is a
+ * formatting function over a two-line lookup, and its whole job is that a refusal is never printed as an
+ * answer: an earlier build of this module called 0xbadf5040 "content", which is how a driver reads a fault as
+ * a fact about a block. */
+static const char *pri_refusal_name(u32 value)
+{
+    switch (NV_PRI_REFUSAL_CODE(value)) {
+        case NV_PRI_ERROR_TARGET_LOCKED:        return "the coprocessor's target is locked to this reader";
+        case NV_PRI_CODE_FECS_PRI_TIMEOUT:      return "the front-end channel scheduler timed out on it";
+        case NV_PRI_CODE_FECS_PRI_DECODE:       return "nothing decodes at that address";
+        case NV_PRI_CODE_FECS_PRI_RESET:        return "the block is in reset";
+        case NV_PRI_CODE_FECS_PRI_FLOORSWEEP:   return "the block is floor-swept off";
+        case NV_PRI_CODE_FECS_PRI_STUCK_ACK:    return "an acknowledge never came back";
+        case NV_PRI_CODE_FECS_PRI_0_EXPECTED_ACK: return "no acknowledge was expected and one was owed";
+        case NV_PRI_CODE_FECS_PRI_FENCE_ERROR:  return "a fence faulted";
+        case NV_PRI_CODE_FECS_PRI_SUBID_ERROR:  return "the sub-id was wrong";
+        case NV_PRI_CODE_FECS_PRI_ORPHAN:       return "the request was orphaned";
+        case NV_PRI_CODE_FECS_DEAD_RING:        return "its ring is dead";
+        case NV_PRI_CODE_FECS_TRAP:             return "the block trapped the access";
+        case NV_PRI_CODE_FECS_PRI_CLIENT_ERR:   return "a client error at a target it would not decode";
+        default:                                return 0;
+    }
+}
+
 static u32 reg_read(u32 offset)
 {
     inv.reads++;
@@ -660,7 +684,8 @@ static void build_text(void)
         put_text(&b, "; window ");
         put_text(&b, "class 0x");
         put_hex(&b, inv.usermode_class, 4);
-        put_text(&b, inv.usermode_class == NV_USERMODE_CLASS_ID_VOLTA_TURING ? "=published" : "");
+        put_text(&b, inv.usermode_class == NV_USERMODE_CLASS_ID_VOLTA_TURING ? "=published"
+                           : " (this page is documented for Volta and Turing, not Blackwell)");
         if (inv.timer_ticking) {
             u64 delta = inv.timer_end - inv.timer_start;
             u32 us = (u32)(delta / 1000u);
@@ -668,7 +693,7 @@ static void build_text(void)
             put_dec(&b, us);
             put_text(&b, "us");
         } else {
-            put_text(&b, " clock frozen");
+            put_text(&b, " clock silent here");
         }
     }
     /* The inventory the chip itself gave.  It goes at the end of the description, after the identity and
@@ -818,9 +843,12 @@ static void build_text(void)
         if (inv.ce_locked) put_text(&b, " refused the same way");
         else if (inv.ce_dead) put_text(&b, " answers nothing");
         else if (inv.ce_replies) {
+            const char *why = NV_PRI_IS_REFUSAL(inv.ce_probe[0]) ? pri_refusal_name(inv.ce_probe[0]) :
+                              (NV_PRI_IS_REFUSAL(inv.ce_probe[1]) ? pri_refusal_name(inv.ce_probe[1]) : 0);
             put_text(&b, " answers 0x"); put_hex(&b, inv.ce_probe[0], 8);
             put_text(&b, "/0x"); put_hex(&b, inv.ce_probe[1], 8);
-            put_text(&b, ", which is content");
+            put_text(&b, why ? " - a refused read, named " : ", which is content");
+            if (why) put_text(&b, why);
         }
     }
     if (inv.fsp_locked) {
@@ -832,7 +860,8 @@ static void build_text(void)
             if (i) put_text(&b, "/0x");
             put_hex(&b, inv.fsp_scratch[i], 8);
         }
-        put_text(&b, " (its own debug words, uninterpreted here)");
+        put_text(&b, ": all zeros, which is what the vendor's driver says a CPU read of that region returns "
+                      "while its access is decoupled - not debug words, and not a silent microcontroller");
     } else if (inv.fsp_unreachable) {
         put_text(&b, "; the FSP page at 0x8f0000 could not be mapped, so nothing is claimed about it");
     }
@@ -1018,11 +1047,14 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     if (inv.window_live) {
         /* A second line for whoever reads the log to decide what to build next: it states the inference
          * and its limit, rather than leaving a reader to conclude that the doorbell had been tried. */
-        static char second[208];
+        static char second[320];
         struct buf t = { second, second + sizeof(second) - 1 };
-        put_text(&t, "nvidia: doorbell at BAR0+0x810090 named, not written; ");
-        put_text(&t, inv.timer_ticking ? "with a live clock in that page a channel can be attempted next"
-                                       : "with the clock frozen no submission is attempted");
+        put_text(&t, "nvidia: BAR0+0x810090 is the legacy user-mode doorbell and this generation's is "
+                      "NV_VIRTUAL_FUNCTION_PRIV_DOORBELL at 0x2200; neither is written, and the clock in the "
+                      "legacy page read ");
+        put_text(&t, inv.timer_ticking ? "moving"
+                                       : "still, which says nothing about the GPU's own timer at 0x9400 that "
+                                         "the kernel panel measures");
         *t.at = 0;
         note(second);
     }

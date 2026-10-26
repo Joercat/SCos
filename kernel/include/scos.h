@@ -575,5 +575,10 @@ void gpu_init(const struct boot_framebuffer *fb);
  * buffer would be shared the same way. */
 #define SCOS_GRAPHICS_REPORT 8192
 void graphics_report(char *out,size_t capacity);
+/* The same three paragraphs the panel ends with - firmware intake, the parsed images, and the FSP mailbox -
+ * and nothing else, for a surface that cannot carry the whole panel.  The panel is longer than what a person
+ * can copy out of a console, and the paragraphs at its end are the ones that answer a question, so they get
+ * their own command rather than their own wording: this calls the panel's own report functions. */
+void graphics_fsp_report(char *out,size_t capacity);
 
 #endif /* SCOS_H */

@@ -308,9 +308,11 @@ different questions a reader has to be able to tell apart.
 ### The FSP paragraph, and what to paste from it (r-fsp-panel)
 
 The Graphics report now has a paragraph starting `FSP mailbox:` - the card's own security processor, which is
-the thing that has to answer before any part of this GPU can be driven.  It is read, and one question is asked,
-on every boot; nothing is written to make the chip do anything.  Three endings are worth knowing the difference
-between, and all three are information:
+the thing that has to answer before any part of this GPU can be driven.  It is read on every boot.  One thing is
+written, and only after the read has come back clean: a capability query goes into the mailbox, and if the FSP
+answers it with a well-formed reply and no error, the FMC image this build was given is handed over (see
+`r-cot-send` below).  Anything that has not answered a query is never handed an image.  Four endings are worth
+knowing the difference between, and all four are information:
 
 * `not asked, and not because anything failed ... vendor 0xNNNN` - this machine's display function is not an
   NVIDIA one, so the offsets were never touched.  On a QEMU boot it reads `0x00001013` and that is correct.
@@ -320,12 +322,34 @@ between, and all three are information:
 * `asked of the card at BAR0 0x...` with a query sent and a reply read, or refused - the mailbox is alive.  The
   sentence after it says which of the four ways a request can fail applies, and how many registers were written.
 
-Below that, a `GSP handover:` sentence says whether the FMC image on the stick was staged into memory this
-kernel owns for the card to read, with the sizes and checksums it would be given, and it ends by saying the
-payload was not sent.  That last part is deliberate, not a stub: the boot that would consume it is not
-implemented, so a machine reporting `staged and ready` is a machine one step short of a test nobody has run.
+Below that, a `GSP handover:` paragraph says what became of the FMC image on the stick.  It has four endings now,
+and which one you have is the single most useful sentence to report:
 
-When reporting a real card, paste the whole `FSP mailbox:` and `GSP handover:` paragraphs, plus the `Engine:`
-line and the `Scanout owner` line.  The numbers in them - the boot scratch value, the refusal count, the reply's
-error code - are what a follow-up change would be argued against, and each is a register read or a count the
-kernel kept while doing it.
+* `the ... payload was written into the channel and the doorbell rung.  It carried the FMC image of N bytes at
+  physical 0x..., CRC32 0x...; the FSP answered in 28 bytes with error 0x.. (FLCN_...)` - the card took the
+  image.  The rest of the paragraph gives the coprocessor's capability word *before* and *after* the message
+  and the same for the FSP's boot-complete scratch: those two are the measurement, so report both numbers.
+  `FLCN_ERR_FMC_BOOT_FROM_INVALID_WPR` or `..._INVALID_DMA_TARGET` are ordinary answers and each points at a
+  different missing piece; `FLCN_OK` with the capability word changing is the one that means something started.
+* `... and no answer came back` - the message went out and the reply queue never separated.  Say which, because
+  a card that answers a query and not a handover is a different machine from one that answers neither.
+* `... the write was refused before the doorbell could be rung` - the queue registers themselves refused while
+  the second message was being prepared, which says the first one is possibly still being read.
+* `It goes on the wire only after the FSP has answered the query cleanly` - the query did not come back, so the
+  image stayed in memory.  This is the same ending a machine with no firmware on the stick produces, and the
+  sentence before it says which of the two applies.
+
+**How to report it without losing the end of it.**  The panel is longer than what a console paste carries, and
+the last three reports came back cut off inside the detection list - which is upstream of the two paragraphs
+above.  Run:
+
+    graphics fsp
+
+in the terminal or on the TTY.  It prints *only* the firmware intake, the parsed images and the FSP mailbox
+paragraphs - the same text the panel prints, from the same code - and nothing else, so it fits.  If the panel
+itself prints `Firmware intake and FSP mailbox: not printed`, the buffer did not have room for them and `graphics
+fsp` is the only way to see them; that notice says how many bytes were left, because a limit that states itself is
+not the same thing as a loss.  Paste all of that output, plus the `Engine:` line and the `Scanout owner` line.
+The numbers in them - the boot scratch value, the refusal count, each reply's error code, and the before/after
+pair around a handover - are what a follow-up change gets argued against, and every one is a register read or a
+count the kernel kept while doing it.

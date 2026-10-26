@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-FSP_CHECKS = 74                     # the modelled mailbox, pinned: a dropped case is a silent loosening
+FSP_CHECKS = 91                     # the modelled mailbox, pinned: a dropped case is a silent loosening
 
 # The published register description, transcribed rather than read out of the file under test:
 # src/common/inc/swref/published/hopper/gh100/dev_fsp_pri.h, which is the header GB100's hardware-abstraction
@@ -127,7 +127,7 @@ def test_the_probe_is_gated_and_the_doorbell_is_counted():
     assert 'device->vendor != 0x10deu' in text, \
         'the mailbox is no longer gated on the vendor whose BAR decode these offsets are, which means a boot ' \
         'on another company\'s card would write into it'
-    assert text.count('device_map(') == 3, 'this file maps %d windows, not the three it describes' % \
+    assert text.count('device_map(') == 5, 'this file maps %d windows, not the five it describes' % \
         text.count('device_map(')
     for call in re.finditer(r'device_map\([^;]*?\)', text, re.S):
         assert ', 0, &mapped)' in call.group(0), \
@@ -146,8 +146,31 @@ def test_the_panel_says_what_was_asked_and_what_was_not():
         'the paragraph exists but is never emitted, so the panel is quiet about the mailbox either way'
     for needle in ('FSP mailbox: ', 'not asked, and not because anything failed',
                    '0xbadf4100 refusal that says the coprocessor',
-                   'It is not sent: asking the FSP to boot the coprocessor'):
+                   # The handover's three endings, each of which has to stay sayable: sent and the block opened,
+                   # sent and it did not, and staged but not sent because the query did not come back clean.  The
+                   # last of the three is the one that used to claim the command was unimplemented, which is no
+                   # longer true, so it is pinned to the sentence that replaced it.
+                   'It goes on the wire only after the FSP has answered the ',
+                   'the block that refused every read on this panel is answering',
+                   'still the locked-target refusal - the FSP took the message ',
+                   'A submission also needs a clock and a doorbell',
+                   # the other half of the same sentence pair: what the panel says when a handover did go out
+                   'including one handover of a firmware image the boot volume supplied',
+                   'a code this build does not have a name for'):
         assert needle in panel, 'the panel no longer says: %s' % needle
+    # The tail is printed whole or not at all, and the reader is told where the rest is.  This is the one
+    # structural answer to the pastes that came back cut inside the detection list: a limit that says so is a
+    # different thing from a sentence that ends in the middle of a number.
+    assert '#define FSP_TAIL_LIMIT 6144' in panel, 'the tail has no scratch of its own any more, so its ' \
+        'length cannot be known before it is written'
+    assert 'if (need + 1u <= w.left && need + 1u < sizeof tail)' in panel, \
+        'the three tail paragraphs can be printed partly again'
+    assert "more than this build's own tail buffer of " in panel, 'a tail longer than its own scratch is ' \
+        'not reported as its own finding'
+    assert 'Run `graphics fsp`' in panel, 'the notice that replaces them does not say where the rest went'
+    assert 'SCOS_GRAPHICS_REPORT 8192' in source('kernel/include/scos.h'), \
+        'the caller buffer moved, and the tail scratch is sized against it'
+
     boot = source('kernel/drivers/gpu/gpu_detect.c')
     assert 'gpu_fsp_note(&devices[pick], handoff);' in boot, \
         'the probe is no longer reached from detection, so a boot with no staged module asks nothing'
@@ -157,6 +180,36 @@ def test_the_panel_says_what_was_asked_and_what_was_not():
     assert 'gpu_firmware_note(handoff);' in boot, \
         'the firmware record is no longer noted before the handover is built, and the handover would be ' \
         'described as absent on a machine that has it'
+
+
+def test_the_narrow_surface_carries_the_same_paragraphs():
+    """`graphics fsp` exists because the panel is longer than what a person can carry out of a console.
+
+    The failure this pins is the one it was written for: a report that runs past the buffer a caller prints from
+    is *silently* shortened, and the paragraphs at the end - the ones that answer a question - are what go
+    missing.  So the narrow surface must be the same functions, not a paraphrase of them (two texts drift), and
+    both command surfaces must reach it.
+    """
+    panel = source('kernel/desktop/graphics.c')
+    start = panel.index('void graphics_fsp_report')
+    body = panel[start:panel.index('void graphics_report', start)]
+    for call in ('put_firmware_report(&w, gpu_firmware_state());',
+                 'put_firmware_image(&w, gpu_firmware_state());',
+                 'put_fsp_report(&w, gpu_fsp_state());'):
+        assert call in body, \
+            'the narrow report re-worded %s instead of calling it, so the two can disagree' % call.split('(')[0]
+    assert 'put_fsp_mailbox' not in body, \
+        'the narrow report builds a mailbox paragraph of its own, which is the second text that will drift'
+    for surface, needle in (('kernel/desktop/tty.c', 'graphics_fsp_report(result,sizeof(result));tty_print(result)'),
+                            ('kernel/desktop/app_terminal.c',
+                             'graphics_fsp_report(response,sizeof(response))')):
+        text = source(surface)
+        assert needle in text, '%s cannot ask for the narrow report' % surface
+        assert 'Usage: graphics | graphics fsp' in text or 'graphics [fsp]' in text, \
+            '%s accepts a subcommand it never mentions in its usage line' % surface
+    declared = source('kernel/include/scos.h')
+    assert 'void graphics_fsp_report(char *out,size_t capacity);' in declared, \
+        'the narrow report is defined but not declared, so only one of the two surfaces can reach it'
 
 
 def main():

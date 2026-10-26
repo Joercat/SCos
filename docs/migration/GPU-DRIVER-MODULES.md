@@ -942,7 +942,7 @@ and the card is left alone; the panel prints the reason, the number of register 
 the FSP answered: one control, three data, four pointers, and the ack) and how many of the reads were
 `0xbadf4100`.
 
-The handover that *would* start the coprocessor is assembled and not sent.  `NVDM_PAYLOAD_COT` is 860 bytes -
+The handover that *would* start the coprocessor is assembled, staged and - when the FSP has answered a query cleanly - sent; `r-cot-send` at the end of this file is that part, and this paragraph is about the payload itself.  `NVDM_PAYLOAD_COT` is 860 bytes -
 version and size, the page-aligned physical address of the FMC image, four fields describing the GC6 resume
 store, the 48-byte hash, the 384-byte public key and the 384-byte signature taken out of the FMC container's
 own sections, and the boot-arguments pointer, set to all-ones because there is nothing to reuse - and
@@ -950,9 +950,11 @@ own sections, and the boot-arguments pointer, set to all-ones because there is n
 the allocator for and CRC32'd the *copy*, since the address handed to a microcontroller has to be one nothing
 else can move.  It stops there on purpose.  Booting the GSP from that payload also needs the write-protected
 region and the resource manager's image in place, and a half-written boot is a machine that comes back to a
-black screen with no log; so the payload is built, staged, described on the panel and never put on the wire.
-The one thing this leaves unproven is also the reason it is left: `kgspImageListCopyToVid` - the GSPRM half -
-is not implemented in this tree, so there is nothing for the handover to be a prelude to yet.
+black screen with no log.  Sending the payload without those is exactly what a card can refuse, and the refusal
+is the reason the send is conditioned on an answer rather than on a hope: `kgspImageListCopyToVid` - the GSPRM
+half - is not implemented in this tree, so a handover that the FSP *accepted* would still leave nothing for it
+to be a prelude to.  What the acceptance itself is evidence for is the coprocessor's lock, and that is measured
+before and after, not inferred.
 
 The probe is gated on the vendor.  Every offset above is where an NVIDIA chip decodes it inside an NVIDIA
 function's BAR0, and a machine whose display adapter is somebody else's has three pages at the same distances
@@ -980,7 +982,7 @@ error model, and the parts that are the vendor's are their register positions an
 thing no reimplementation may invent.
 
 Measured: `tools/tests/gpu_fsp_host.c` compiles the kernel file straight in against a model of the register
-file and reports 72 checks, 0 failures, under ASan and UBSan
+file and reports 91 checks, 0 failures, under ASan and UBSan
 (`python3 tools/tests/test_gpu_fsp.py`, which also pins the published offsets and the payload's field positions
 independently of the harness, since a test deriving its constants from the file it tests could only ever prove
 that both are wrong in the same direction).  The model is what found the two real defects in the first draft of
@@ -993,3 +995,72 @@ requires the difference to leave room for the widest engine inventory a module c
 is the case that has both.  Neither boot's log mentions the FSP at all, because the probe stopped at the vendor
 gate on a cirrus display function: correctly, and verifiably, since the paragraph that says so is 445 bytes of
 the 3667.
+
+## The handover goes on the wire: r-cot-send
+
+The previous section stopped at `built, staged and never sent`.  That stopped being true, and the reason it is
+worth the change is that `never sent` was a decision about a *risk nobody had measured*: the payload's contents
+were verified against the published layout by the host model, the FSP's answer vocabulary is published, and the
+half-boot this OS was afraid of producing is a state the card's own security processor reports in one dword.
+
+**The gate.**  `probe_mailbox()` sends the query and, only if the reply is framed as NVIDIA's, contains the
+task/command/error triple, answers the query that was asked, and carries error 0, calls `hand_over_fmc()`.  The
+payload also has to be staged and defect-free (`cot_ready && !cot_defect`), which is the same set of conditions
+that used to be required for the panel to say `staged and ready`.  There is no opt-out file and no timer: a
+channel that has not answered a read is not a channel to write a firmware image into, and that is the whole of
+the policy.
+
+**What the answer is.**  The FSP replies with one of the falcon return values, published as a list of names in
+`flcnretval.h` rather than as anything generic.  `gpu_fsp.c` carries the subset this message can receive and
+`gpu_fsp_flcn_name()` exposes it, so the panel prints `error 0xdf (FLCN_ERR_FMC_BOOT_FROM_INVALID_WPR)` instead
+of a number a reader has to go and look up - and an unnamed code is printed as a number, never as the nearest
+name.  `FLCN_OK` means the FSP accepted the image; `0xdd` means the address in the payload is not something it may
+read from; `0xdb` means the container's own authentication blobs did not survive the trip.
+
+**What is measured around it.**  A reply is a claim, so the two words a boot would change are re-read afterwards
+and printed as a pair: `NV_PGSP_HWCFG2` (BAR0+0x1100f4, the coprocessor's capability word, which is the register
+every reader so far has been refused) and `NV_THERM_FSP_BOOT_COMPLETE` (BAR0+0x200bc).  `gsp_released` is that
+comparison and nothing else, and `queues_idle_after` says whether the channel fell idle again - which is what a
+second message would need.  The host model is what makes the pair mean something: it moves `HWCFG2` *only* when
+it has accepted a handover whose payload it checked, so a driver that reported a release without one would be
+caught by the test rather than by a card.
+
+**The clock and the doorbell, measured where this generation puts them.**  Alongside the mailbox, `gpu_fsp.c`
+reads two pages it did not read before, and both are on the panel:
+
+* `NV_PTIMER_TIME_1` then `NV_PTIMER_TIME_0` then `_1` again at BAR0+0x9410/0x9400, the high-low-high rule the
+  published `dev_timer.ref` gives - the GPU's own clock, read twice with a spin between to see whether it moves.
+* `NV_VIRTUAL_FUNCTION_PRIV_CPU_INTR_LEAF(0)`, `_TOP(0)` and `_MAILBOX_SCRATCH(0..3)` at BAR0+0x1000, 0x1600
+  and 0x2100, from `blackwell/gb100/dev_vm.h`, the page whose doorbell `NV_VIRTUAL_FUNCTION_PRIV_DOORBELL`
+  0x2200 lives in.  The doorbell is documented `-W-4R`: write-only.  It is named in the report and neither read
+  nor written here, because reading it is undefined and ringing it for a channel that does not exist is a way to
+  hang a card.
+
+This exists because an earlier build read the *legacy user-mode page* at 0x810000 for both questions and reported
+"clock frozen" from it.  `kern_gpu_tu102.c` says why that page cannot answer: from Turing onwards NVIDIA does not
+use `NV_USERMODE` at all - "going away long term, and doesn't support any of the new remap type features ... we
+will start using the physical registers through NV_VIRTUAL_FUNCTION even on host".  A silent 0x810000 is a fact
+about a deprecated page, and the module now says exactly that, pointing at the timer block instead.
+
+**A refusal is not content.**  `0xbadf5040` was reported as an answer.  It is not: `flcnretval.h` defines the
+family as `FLCN_CSB_PRIV_PRI_ERROR_CODE 0xBADF0000` under `MASK 0xFFFF0000`, and the code in bits 31:8 is one of
+`NV_PPRIV_SYS_PRI_ERROR_CODE`'s names in `gm107/dev_pri_ringstation_sys.h` - `0xBADF50` is `FECS_PRI_CLIENT_ERR`,
+with a low byte the vendor's driver notes "has extra error information" and masks off.  So the family test is
+0xFFFF0000 and the lookup is 0xFFFFFF00, and the module harness fails if those two masks are ever unified:
+the first draft of the fix used the wide mask for both, found no name, and fell through to calling the fault
+content again - which is the same mistake, re-derived, and caught only because the test asserted the sentence.
+`FSP_NOT_CONTENT()` in `gpu_fsp.c` is the family test for the same reason.  One consequence worth stating: while
+the decoupler holds a region, reads return *0*, which is why four zero scratch words are reported as the
+decoupler answering rather than as debug words, and why no host-side unlock is claimed anywhere.
+
+Measured: `tools/tests/gpu_fsp_host.c` reports 91 checks, 0 failures.  The model now takes the *second* packet,
+judges it as a card would (the payload's version and size words, an address naming the copy that was actually
+made, the three authentication blobs at their published offsets) and answers with the falcon code for whichever
+of those failed - so the handover is tested against a card that refuses things, not one that says yes.  It also
+had to become asynchronous: the driver writes the queue tail and then the head, as `_kfspUpdateQueueHeadTail`
+does, and a model that completed the packet between those two writes left the head at the zero the driver had
+just written, which made a second message in one boot impossible *in the model* and hid the fact that this port
+would never have sent one.  Building that card found a stale-window bug in the kernel as well: `map_mailbox_pages`
+did not clear the windows before re-mapping, so a second note in one boot would have read a mapping the first
+note had taken.  `tools/tests/test_gpu_fsp.py` is 6 tests, and the panel's tail is now all-or-nothing against a
+5120-byte floor, with `graphics fsp` as the narrow surface that prints those paragraphs alone.

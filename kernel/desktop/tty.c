@@ -218,6 +218,7 @@ static void tty_exec(char *cmd)
             "  appstrt <app>   launch a GUI app (needs wm; binds you back to it)\n"
             "  appuninstall <id>  confirmed removal of a user app (keeps data)\n"
             "  graphics        detected GPUs and renderer status\n"
+            "  graphics fsp    the firmware intake and FSP mailbox paragraphs alone\n"
             "  wm              return to the desktop / start the WM\n"
             "  dmesg           kernel log ring (USB, input, fb, mm...)\n"
             "  free            memory pool + allocator counters\n"
@@ -581,7 +582,12 @@ static void tty_exec(char *cmd)
         } else tty_print("kill: no such pid");
     }
     else if(!strcmp(args[0],"appuninstall")){char result[256];if(nargs!=2||!strcmp(args[1],"--help"))tty_print("Usage: appuninstall <app-id> (keeps projects/data)");else{app_uninstall(args[1],result,sizeof(result));tty_print(result);}}
-    else if(!strcmp(args[0],"graphics")){char result[SCOS_GRAPHICS_REPORT];if(nargs!=1)tty_print("Usage: graphics");else{graphics_report(result,sizeof(result));tty_print(result);}}
+    else if(!strcmp(args[0],"graphics")){
+        char result[SCOS_GRAPHICS_REPORT];
+        if(nargs>2)tty_print("Usage: graphics | graphics fsp");
+        else if(nargs==2&&!strcmp(args[1],"fsp")){graphics_fsp_report(result,sizeof(result));tty_print(result);}
+        else{graphics_report(result,sizeof(result));tty_print(result);}
+    }
     else if (!strcmp(args[0], "appstrt")) {
         if (nargs < 2) {
             tty_print("appstrt <app>: about blackjack browser calendar "

@@ -15,7 +15,8 @@ fixture cannot show that the read, the check and the handover survive the filesy
 2560-byte panel buffer at the same time.
 
 What none of this claims: that a real 570.144 blob was staged and booted.  The files are not distributed
-here, and no image is handed to the card by this build, which is what the panel itself says.
+here.  Whether an image is then handed to the card is the FSP's answer to a query, which is what the
+panel's own paragraph reports, and this file reads that paragraph off a booted machine.
 """
 import importlib.util
 import re
@@ -458,7 +459,46 @@ def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
                    'the sections the boot sequence reads are not reported as it read them: ' \
                    + panel[-1200:]
             assert 'crc32 0x' in panel, 'no checksum to compare against the copy on another machine'
-            assert 'not yet what it can do to the card' in panel, panel[-1400:]
+            assert 'not what it can do to the card - the paragraph below says which of the ' in panel, \
+                   'the intake paragraph claims more or less than the handover does: ' + panel[-1400:]
+
+            # The all-or-nothing tail, exercised for real: called with a buffer too small for the three tail
+            # paragraphs, the report must say so with both numbers and point at the narrow command - and must
+            # not be a clipped copy of the same text.  This is the branch that decides whether a long panel on a
+            # real card arrives whole or arrives halfway, so it is tested against a booted kernel rather than
+            # against the source.
+            cut = panel.index('GSP firmware:')         # where the three tail paragraphs begin
+            spare = len(panel) - cut                   # everything the guard has to fit, plus what follows it
+            assert spare > 800, 'the tail this guard exists for is only %d bytes: the paragraphs have been ' \
+                               'shortened somewhere, which is the thing being tested' % spare
+            half = cut + 1000                          # room for some of it, which is the failure mode
+            g.call('graphics_report', g.scratch, half)
+            tight = g.string(g.scratch, half)
+            assert 'Firmware intake and FSP mailbox: not printed' in tight, \
+                   'a buffer with room for 1000 of the tail printed a clipped copy instead of declining: ' \
+                   + tight[-400:]
+            assert 'graphics fsp' in tight, \
+                   'the notice does not say where the rest went: ' + tight[tight.index('not printed'):][:400]
+            # And the numbers in that notice have to be the kernel's own measurement, in the right relation:
+            # it declines only when what is needed is more than what is left.  Read them back rather than
+            # restating them here, because the tail's length is a property of the card, not of this test.
+            stated = re.search(r'They need (\d+) bytes and this buffer has only (\d+) left', tight)
+            assert stated, 'the notice does not carry both numbers: ' + tight[tight.index('not printed'):][:400]
+            assert int(stated.group(1)) > int(stated.group(2)), \
+                   'it declined a tail of %s bytes that would have fitted in %s' % stated.groups()
+            assert 'GSP firmware: 5 of 5' not in tight, 'the clipped call printed the paragraphs anyway'
+            assert tight.startswith(panel[:40]), \
+                   'the report above the guard changed between the two calls, so one of them measured a ' \
+                   'different boot'
+
+            g.call('graphics_fsp_report', g.scratch, cap)
+            narrow = g.string(g.scratch, cap)
+            assert 'GSP firmware: 5 of 5 image(s) staged' in narrow and 'FSP mailbox: ' in narrow, \
+                   'the narrow report does not carry the paragraphs it was written for: ' + narrow[:400]
+            assert 'Renderer:' not in narrow and 'Detection' not in narrow, \
+                   'the narrow report is the whole panel under another name, which is the truncation it ' \
+                   'exists to avoid'
+            assert len(narrow) < cap, 'the narrow report fills its buffer, which is the failure it prevents'
             # Headroom, measured rather than assumed: the longest thing above this paragraph is a driver
             # module's own inventory, bounded by gpu_module_state's describe[1152] on a real card.  If the
             # report plus that much text does not fit the caller's buffer, the panel a user pastes is missing

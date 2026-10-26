@@ -16,11 +16,12 @@
  * into pages this kernel owns, so the address given to a microcontroller is one nothing else can move or
  * edit while it is being read.
  *
- * What does not happen here: the handover is not sent.  Booting the GSP from this OS needs the write-protected
- * region and the resource manager image in place as well, and a half-written boot is a machine that comes back
- * with a black screen, so the payload is built, staged and reported, and not put on the wire.  The only
- * registers this file writes are the channel's offset, its data window and the two queue pointers, and the
- * report counts them instead of leaving that to be inferred.
+ * What happens last: the handover.  The FMC image this OS was given is staged in pages of its own, described
+ * by an 860-byte payload, and - only if the FSP answered a read-only query first, cleanly - put in the channel
+ * and rung.  A card asked to boot a firmware image either does or refuses, and both are answers, so the two
+ * words that would change either way are re-read after the attempt and reported beside the values they had
+ * before it.  The registers this file writes are the channel's offset, its data window and the four queue
+ * pointers, and the report counts them instead of leaving that to be inferred.
  *
  * Provenance, in full, because this kernel is its own and not a copy of anything: the offsets, field positions
  * and message framing are NVIDIA's, from `src/common/inc/swref/published/hopper/gh100/dev_fsp_pri.h` (the
@@ -62,6 +63,12 @@
 #define FSP_EMEM_CHANNEL_BYTES            1024u
 #define FSP_EMEM_DWORDS_PER_BLOCK           64u      /* so an offset is a block number and a dword within it */
 #define FSP_REFUSED(v)                   (((v) & 0xffffff00u) == 0xbadf4100u)
+/* Any value in the 0xBADF.... family, of which the line above is the one cause.  The coprocessor's driver
+ * masks a read against FLCN_CSB_PRIV_PRI_ERROR_CODE 0xBADF0000 under 0xFFFF0000 before it believes a value
+ * (flcnretval.h), because the family is what the bus returns when a read could not be served at all; only
+ * one member of it is the code it waits on the FSP to clear.  This file uses FSP_REFUSED for that one and
+ * this test everywhere a value could otherwise be read as content by accident. */
+#define FSP_NOT_CONTENT(v)               (((v) & 0xffff0000u) == 0xbadf0000u)
 #define FSP_HEADER_BYTES                    8u      /* the MCTP transport dword and the NVDM dword */
 #define FSP_POLL_LIMIT                 200000u       /* looks at a pair of registers, and on the reply wait a
                                                          * TSC deadline on top of them: an MMIO read dominates
@@ -115,7 +122,27 @@ struct fsp_window {
 };
 
 static struct gpu_fsp_state fsp_state;
-static struct fsp_window w_therm, w_fsp, w_gsp;
+/* The timer block and the virtual-function page.  Both are published for generations before Blackwell and both
+ * answer a question this OS cannot ask anywhere else: `NV_PTIMER_TIME_1'/_0 at 0x9410/0x9400 is the GPU's own
+ * clock read the way NVIDIA's driver reads it (high, low, high again, repeating if the high half moved, because
+ * a low-half carry between two reads could otherwise be taken for a time in the future), and the page at
+ * BAR0+0x0000..0x2FFFF is `NV_VIRTUAL_FUNCTION_PRIV' in blackwell/gb100/dev_vm.h - the region whose doorbell,
+ * mailbox scratch words and interrupt tree the host is allowed to reach while the coprocessor holds everything
+ * else.  The legacy user-mode page at 0x810000 is the one NVIDIA's own source calls a thing "going away long
+ * term" from Turing onwards, so a page there that shows nothing says nothing about this card; these two do. */
+#define NV_VF_PAGE_BASE            0x0000u
+#define NV_VF_PAGE_BYTES           0x3000u   /* enough for the four words read below, not the whole 192 KiB */
+#define NV_VF_INTR_LEAF0           0x1000u   /* NV_VIRTUAL_FUNCTION_PRIV_CPU_INTR_LEAF(0) */
+#define NV_VF_INTR_TOP0            0x1600u   /* ..._CPU_INTR_TOP(0) */
+#define NV_VF_SCRATCH0             0x2100u   /* ..._PRIV_MAILBOX_SCRATCH(i), sixteen of them */
+#define NV_VF_DOORBELL             0x2200u   /* ..._PRIV_DOORBELL, -W-4R: named here, never read or written */
+#define NV_TIMER_PAGE_BASE         0x9000u
+#define NV_TIMER_PAGE_BYTES        0x1000u
+#define NV_TIMER_TIME_0            0x9400u   /* NV_PTIMER_TIME_0, absolute like every name here */
+#define NV_TIMER_TIME_1            0x9410u   /* NV_PTIMER_TIME_1: read first and last, per the ref */
+#define NV_TIMER_NSEC_STEP         32u       /* the field is NSEC 31:5, so one step is 32 ns */
+
+static struct fsp_window w_therm, w_fsp, w_gsp, w_vf, w_timer;
 
 const struct gpu_fsp_state *gpu_fsp_state(void)
 {
@@ -171,6 +198,14 @@ static void write32(struct fsp_window *w, uint32_t offset, uint32_t value)
  * not a second set of attributes on the same memory - which is why none of these ask for write combining. */
 static void map_mailbox_pages(uint64_t bar0)
 {
+    /* Cleared before anything is asked for: a second note in one boot would otherwise leave a window pointing
+     * at the mapping the first one took, and reads of a device that refused to be mapped again would be served
+     * out of memory this kernel mapped an hour of uptime ago.  The host model found this. */
+    memset(&w_therm, 0, sizeof w_therm);
+    memset(&w_fsp, 0, sizeof w_fsp);
+    memset(&w_gsp, 0, sizeof w_gsp);
+    memset(&w_vf, 0, sizeof w_vf);
+    memset(&w_timer, 0, sizeof w_timer);
     uint64_t mapped;
     void *page;
 
@@ -183,6 +218,19 @@ static void map_mailbox_pages(uint64_t bar0)
     mapped = 0;
     page = device_map(bar0 + 0x110000u, 0x1000u, 0, &mapped);
     if (page && mapped >= 0x1000u) { w_gsp.page = page; w_gsp.base = 0x110000u; w_gsp.length = mapped; }
+    page = device_map(bar0 + NV_VF_PAGE_BASE, NV_VF_PAGE_BYTES, 0, &mapped);
+    if (page && mapped >= NV_VF_PAGE_BYTES) { w_vf.page = page; w_vf.base = NV_VF_PAGE_BASE; w_vf.length = mapped; }
+    page = device_map(bar0 + NV_TIMER_PAGE_BASE, NV_TIMER_PAGE_BYTES, 0, &mapped);
+    if (page && mapped >= NV_TIMER_PAGE_BYTES) {
+        w_timer.page = page; w_timer.base = NV_TIMER_PAGE_BASE; w_timer.length = mapped;
+    }
+    /* Two windows of the same aperture, both read-only in this file, both named by a published
+     * Blackwell header: see the defines above for why these two and not the legacy page. */
+    /* Two of the five decide whether anything below runs at all; the other three are recorded as reachable or
+     * not, because a reader needs the difference between "the chip refused" and "this kernel could not get a
+     * window there". */
+    fsp_state.vf_readable = w_vf.page != 0;
+    fsp_state.timer_readable = w_timer.page != 0;
     fsp_state.mapped = w_therm.page && w_fsp.page;
     /* The GSP page is a bonus rather than a requirement: it is the page that has answered 0xbadf4100 to
      * every reader so far, and the first thing that changes if a boot ever succeeds is that it stops.  Not
@@ -237,11 +285,13 @@ static int reply_waiting(void)
  * waits for the order of tens of milliseconds, bounded by the count of reads below and by the cycle counter,
  * whichever expires first.  Both counts are reported, because "it did not answer in time" is only a fact once
  * a reader can see how much time that was. */
-static int wait_for(int (*condition)(void))
+static int wait_for(int (*condition)(void), int *count)
 {
     uint64_t deadline = fsp_ticks() + 50000000ull;
     for (unsigned i = 0; i < FSP_POLL_LIMIT; i++) {
-        fsp_state.reply_polls++;                        /* the panel quotes this for the reply, and `polled'
+        (*count)++;                                     /* every wait says how long it took, because "it did not
+                                                           * answer" is only a fact once the reader can see what
+                                                           * was waited on and for how long; `polled'
                                                            * above for the send, because they are two different
                                                            * waits and one number would be either vague or wrong */
         if (condition()) return 1;
@@ -304,21 +354,21 @@ static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type
  * carries the two header dwords first: the transport one says where the message starts and ends, the NVDM
  * one says whose message it is, and only after those eight bytes does the payload begin - with the type of
  * the response, then task, command and error as the vendor's own response struct lays them out. */
-static int read_reply(uint8_t *buffer, uint32_t capacity)
+static int read_reply(uint8_t *buffer, uint32_t capacity, struct gpu_fsp_reply *reply)
 {
     uint32_t size, transport, message;
 
     size = (fsp_state.msgq_tail - fsp_state.msgq_head) + 4u;
     if (size < 4u) return -1;
-    if (size > capacity) { fsp_state.reply_oversize = (int)size; return 0; }
+    if (size > capacity) { reply->oversize = (int)size; return 0; }
 
     emem_seek(0, 0, 1);
     for (uint32_t i = 0; i + 4 <= size; i += 4) store32(buffer + i, read32(&w_fsp, NV_PFSP_EMEMD));
-    fsp_state.reply_bytes = size;
+    reply->bytes = size;
     /* The read has to have walked as many dwords as it claims to have returned, for the same reason the
      * write does: the packet came out of one register, and only the offset proves they were different dwords
      * of the channel rather than the same one read back five times. */
-    fsp_state.reply_delta_ok = emem_offset_dwords() == size / 4u;
+    reply->delta_ok = emem_offset_dwords() == size / 4u;
     /* Acknowledge by pulling the tail up to the head, which is the FSP's cue that the channel is free
      * again.  The head is written back unchanged because the reference driver writes both: a mailbox this
      * unforgiving is not where saving one register write is worth the argument. */
@@ -327,20 +377,59 @@ static int read_reply(uint8_t *buffer, uint32_t capacity)
 
     transport = load32(buffer);
     message = load32(buffer + 4);
-    fsp_state.reply_som = (int)((transport >> 31) & 1u);
-    fsp_state.reply_eom = (int)((transport >> 30) & 1u);
-    fsp_state.framed_ok = size >= FSP_HEADER_BYTES && (message & 0x7fu) == MCTP_TYPE_VENDOR_PCI &&
-                          ((message >> 8) & 0xffffu) == MCTP_VENDOR_ID_NVIDIA;
-    if (!fsp_state.framed_ok || !fsp_state.reply_delta_ok) return 0;
-    fsp_state.reply_type = (int)(message >> 24);
+    reply->som = (int)((transport >> 31) & 1u);
+    reply->eom = (int)((transport >> 30) & 1u);
+    reply->framed = size >= FSP_HEADER_BYTES && (message & 0x7fu) == MCTP_TYPE_VENDOR_PCI &&
+                    ((message >> 8) & 0xffffu) == MCTP_VENDOR_ID_NVIDIA;
+    if (!reply->framed || !reply->delta_ok) return 0;
+    reply->type = (int)(message >> 24);
     if (size >= FSP_HEADER_BYTES + 1u + 12u) {
-        fsp_state.reply_kind = buffer[FSP_HEADER_BYTES];
-        fsp_state.reply_task = load32(buffer + FSP_HEADER_BYTES + 1u);
-        fsp_state.reply_command = load32(buffer + FSP_HEADER_BYTES + 5u);
-        if (size >= FSP_HEADER_BYTES + 1u + 16u) fsp_state.reply_error = load32(buffer + FSP_HEADER_BYTES + 9u);
-        fsp_state.reply_complete = 1;
+        reply->kind = buffer[FSP_HEADER_BYTES];
+        reply->task = load32(buffer + FSP_HEADER_BYTES + 1u);
+        reply->command = load32(buffer + FSP_HEADER_BYTES + 5u);
+        if (size >= FSP_HEADER_BYTES + 1u + 16u) reply->error = load32(buffer + FSP_HEADER_BYTES + 9u);
+        reply->complete = 1;
     }
     return 1;
+}
+
+/* The FSP answers with one of the falcon return values, published as a numbered list rather than as anything a
+ * caller can print generically: 0 is FLCN_OK and every other value is a named failure of the request or of the
+ * firmware image.  Only the codes this message can receive are named, and an unnamed code is printed as a
+ * number rather than dressed up as the nearest name - the two FMC entries are the ones a handover can hinge on,
+ * because they mean the image was read and rejected rather than ignored. */
+static const char *flcn_name(uint32_t code)
+{
+    switch (code) {
+        case 0x00u: return "FLCN_OK";
+        case 0x01u: return "FLCN_ERR_NOT_SUPPORTED";
+        case 0x02u: return "FLCN_ERR_INVALID_ARGUMENT";
+        case 0x03u: return "FLCN_ERR_ILLEGAL_OPERATION";
+        case 0x04u: return "FLCN_ERR_TIMEOUT";
+        case 0x05u: return "FLCN_ERR_NO_FREE_MEM";
+        case 0x19u: return "FLCN_ERR_BAR0_PRIV_READ_ERROR";
+        case 0x1au: return "FLCN_ERR_BAR0_PRIV_WRITE_ERROR";
+        case 0x21u: return "FLCN_ERR_CSB_PRIV_READ_ERROR";
+        case 0x22u: return "FLCN_ERR_CSB_PRIV_WRITE_ERROR";
+        case 0x24u: return "FLCN_ERR_PRIV_SEC_VIOLATION";
+        case 0x25u: return "FLCN_ERR_INVALID_VERSION";
+        case 0x27u: return "FLCN_ERR_GPU_IN_DEBUG_MODE";
+        case 0x35u: return "FLCN_ERR_INVALID_STATE";
+        case 0xd6u: return "FLCN_ERR_MEMERR_ERROR_VIOLATION";
+        case 0xd7u: return "FLCN_ERR_HUB_ERROR_VIOLATION";
+        case 0xd8u: return "FLCN_ERR_DIOPMP_ERROR_VIOLATION";
+        case 0xd9u: return "FLCN_ERR_RISCV_EXCEPTION_ERROR";
+        case 0xdau: return "FLCN_ERR_RISCV_BOOTLOADER_ERROR";
+        case 0xdbu: return "FLCN_ERR_FMC_BOOT_CHECK_FAIL";
+        case 0xdcu: return "FLCN_ERR_SE_HW_INIT_FAIL";
+        case 0xddu: return "FLCN_ERR_FMC_INVALID_DMA_TARGET";
+        case 0xdeu: return "FLCN_ERR_TEGRA_CRYPTO_INIT_FAIL";
+        case 0xdfu: return "FLCN_ERR_FMC_BOOT_FROM_INVALID_WPR";
+        case 0xe0u: return "FLCN_ERR_PRESYNC_TIMEOUT_ERR";
+        case 0xfeu: return "FLCN_ERR_BINARY_NOT_STARTED";
+        case 0xffu: return "FLCN_ERROR";
+        default: return 0;
+    }
 }
 
 /* The FMC image as the handover wants it: the image section copied into pages this kernel owns, and the
@@ -397,6 +486,97 @@ static void stage_fmc(void)
     fsp_state.cot_ready = 1;
 }
 
+/* The handover, sent.  Everything above this function was built to make this message possible, and it is the
+ * only write in this OS that asks the card to do something.
+ *
+ * It is reached only when the FSP has answered a read-only query with a framed reply and no error, which is
+ * this kernel's way of knowing there is somebody at the other end of the channel before a firmware image is put
+ * in front of it.  What the card does with it is the FSP's business: verify the 48-byte hash against the copy
+ * staged in this kernel's own pages, verify the signature against the public key, load the image into the
+ * protected region and start the coprocessor - or refuse, with one of the falcon error codes decoded above.
+ * The reference driver does exactly this, in this order, on this generation.
+ *
+ * What is measured afterwards is the point: the coprocessor's capability word and the FSP's boot-complete
+ * scratch are read again, because those are the two words that change when a boot has happened.  A refusal is a
+ * normal answer; an acceptance with the lock still on would be a strange one, and both are reported.  Nothing
+ * else in this boot resets, touches or reconfigures the card, so a refusal leaves the machine exactly where it
+ * was found. */
+/* One sample of the GPU's clock, read the way the reference manual says it has to be read. */
+static int read_ptimer(uint32_t *nanoseconds)
+{
+    for (int attempt = 0; attempt < 8; attempt++) {
+        uint32_t high = read32(&w_timer, NV_TIMER_TIME_1);
+        uint32_t low = read32(&w_timer, NV_TIMER_TIME_0);
+        if (read32(&w_timer, NV_TIMER_TIME_1) == high) {
+            *nanoseconds = ((uint64_t)high << 32) | low;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* What a submission would need, and whether it is there: the clock it would time itself against, and the page
+ * whose doorbell a channel is rung through.  Read-only, and deliberately not complete - this answers two
+ * questions on the panel and writes nothing. */
+static void measure_submission_surface(void)
+{
+    uint32_t words[6];
+    int answered = 0;
+
+    if (fsp_state.timer_readable) {
+        uint32_t end;
+        if (read_ptimer(&fsp_state.timer_start)) {
+            for (volatile int spin = 0; spin < 4096; spin++) ;
+            if (read_ptimer(&end)) {
+                fsp_state.timer_end = end;
+                fsp_state.timer_ticking = end > fsp_state.timer_start;
+            }
+        }
+        fsp_state.timer_dead = fsp_state.timer_start == 0xffffffffu && fsp_state.timer_end == 0xffffffffu;
+        fsp_state.timer_refused = FSP_NOT_CONTENT(fsp_state.timer_start) || FSP_NOT_CONTENT(fsp_state.timer_end);
+        if (fsp_state.timer_refused) fsp_state.timer_ticking = 0;
+    }
+    if (!fsp_state.vf_readable) return;
+    words[0] = fsp_state.vf_leaf0 = read32(&w_vf, NV_VF_INTR_LEAF0);
+    words[1] = fsp_state.vf_top0 = read32(&w_vf, NV_VF_INTR_TOP0);
+    for (unsigned i = 0; i < 4; i++)
+        words[2 + i] = fsp_state.vf_scratch[i] = read32(&w_vf, NV_VF_SCRATCH0 + i * 4u);
+    for (unsigned i = 0; i < 6; i++) {
+        if (FSP_NOT_CONTENT(words[i])) fsp_state.vf_refusals++;
+        else if (words[i] != 0 && words[i] != 0xffffffffu) answered++;
+    }
+    fsp_state.vf_answered = answered;
+}
+
+const char *gpu_fsp_flcn_name(uint32_t code)
+{
+    return flcn_name(code);
+}
+
+static void hand_over_fmc(void)
+{
+    uint8_t reply[128];
+    int idle;
+
+    fsp_state.handover_attempted = 1;
+    if (!send_packet(fsp_state.payload, COT_SIZE, NVDM_TYPE_COT)) {
+        fsp_state.handover_blocked = fsp_state.send_blocked;
+        return;
+    }
+    fsp_state.handover_sent = 1;
+    fsp_state.handover.request_bytes = fsp_state.packet_bytes;
+    if (!wait_for(reply_waiting, &fsp_state.handover_polls)) return;
+    if (read_reply(reply, sizeof reply, &fsp_state.handover) != 1) return;
+
+    fsp_state.hwcfg2_after = read32(&w_gsp, NV_PGSP_HWCFG2);
+    fsp_state.boot_scratch_after = read32(&w_therm, NV_THERM_FSP_BOOT_COMPLETE);
+    if (fsp_state.timer_readable) read_ptimer(&fsp_state.timer_after);
+    fsp_state.gsp_released = fsp_state.hwcfg2_after != 0 && fsp_state.hwcfg2_after != 0xffffffffu &&
+                             !FSP_REFUSED(fsp_state.hwcfg2_after);
+    queues(&idle);
+    fsp_state.queues_idle_after = idle == 1;
+}
+
 static void probe_mailbox(void)
 {
     int idle;
@@ -427,9 +607,17 @@ static void probe_mailbox(void)
 
         if (!send_packet(&query, 1, NVDM_TYPE_CAPS_QUERY)) return;
         fsp_state.queried = 1;
-        if (!wait_for(reply_waiting)) return;
-        read = read_reply(reply, sizeof reply);
+        fsp_state.query.request_bytes = fsp_state.packet_bytes;
+        if (!wait_for(reply_waiting, &fsp_state.reply_polls)) return;
+        read = read_reply(reply, sizeof reply, &fsp_state.query);
         fsp_state.responded = read == 1;
+        /* The one condition under which a firmware image is offered: the card asked, answered, and the answer
+         * was well-formed and clean.  Anything less is a channel with nobody behind it, and a handover written
+         * into that could not be told apart from one that was never written at all. */
+        if (fsp_state.responded && fsp_state.query.framed && fsp_state.query.complete &&
+            fsp_state.query.error == 0 && fsp_state.query.command == NVDM_TYPE_CAPS_QUERY &&
+            fsp_state.cot_ready && !fsp_state.cot_defect)
+            hand_over_fmc();
     }
 }
 
@@ -459,13 +647,20 @@ void gpu_fsp_note(const struct gpu_device *device, const struct boot_handoff *ha
         return;
     }
     fsp_state.attempted = 1;
-    probe_mailbox();
+    /* Staged first, because the handover can be sent during the probe: the payload and the pages it names have
+     * to exist before the message that describes them leaves this machine. */
+    measure_submission_surface();
     stage_fmc();
+    probe_mailbox();
     klog(FSP_LOG_PREFIX "boot scratch 0x%x, mailbox %s, query %s, reply %s, writes %u of %u reads",
          fsp_state.boot_scratch, fsp_state.mailbox_readable ? "answers" : "refuses",
          fsp_state.queried ? "sent" : "not sent", fsp_state.responded ? "read" : "none",
          (unsigned)fsp_state.writes, (unsigned)fsp_state.reads);
-    if (fsp_state.staged)
+    if (fsp_state.handover_sent)
+        klog(FSP_LOG_PREFIX "gsp-fmc handover sent: %u B reply, error 0x%x, hwcfg2 0x%x before 0x%x after",
+             (unsigned)fsp_state.handover.bytes, (unsigned)fsp_state.handover.error,
+             (unsigned)fsp_state.hwcfg2, (unsigned)fsp_state.hwcfg2_after);
+    else if (fsp_state.staged)
         klog(FSP_LOG_PREFIX "gsp-fmc handover staged and not sent: %u B image at 0x%x, crc32 0x%x",
              (unsigned)fsp_state.image_bytes, (unsigned)fsp_state.image_physical,
              (unsigned)fsp_state.image_crc32);

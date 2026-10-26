@@ -188,7 +188,8 @@ static const char *help_text =
     "appstrt   - Launch an app; its logs stream into this tab\n"
     "apps      - List installed apps and running instances\n"
     "appuninstall <id> - Remove a user app (confirmed; keeps data)\n"
-    "graphics  - Detected GPUs and actual renderer status\n"
+    "graphics [fsp]  - Detected GPUs and actual renderer status; fsp prints only the\n"
+    "                firmware intake and FSP mailbox paragraphs\n"
     "procs     - Process table with real per-task memory\n"
     "kill <pid>- Terminate an app task (see 'procs')\n"
     "tab       - new | close | <n>: terminal tabs (also Ctrl+T)\n"
@@ -704,7 +705,13 @@ static void run_command(struct term *t, const char *command)
         if(nargs!=2||!strcmp(args[1],"--help"))strcpy(response,"Usage: appuninstall <app-id> (confirmed; projects/data kept)");
         else app_uninstall(args[1],response,sizeof(response));
     }
-    else if(!strcmp(cmd,"graphics")){if(nargs!=1)strcpy(response,"Usage: graphics");else graphics_report(response,sizeof(response));}
+    else if(!strcmp(cmd,"graphics")){
+        if(nargs>2)strcpy(response,"Usage: graphics | graphics fsp   (fsp: the firmware intake and FSP mailbox "
+                                    "paragraphs, which are the end of the full report and the part a console "
+                                    "paste tends to lose)");
+        else if(nargs==2&&!strcmp(args[1],"fsp"))graphics_fsp_report(response,sizeof(response));
+        else graphics_report(response,sizeof(response));
+    }
     else if (!strcmp(cmd, "appstrt")) {
         lua_apps_refresh();
         /* r27: THE way to launch apps from the terminal. Like running a
