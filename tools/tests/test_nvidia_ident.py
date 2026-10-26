@@ -204,6 +204,11 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
     real.unlink(missing_ok=True)
     run(['make', 'gpu-modules'])
     shutil.copyfile(real, backup)
+    # This test repacks the disk image, and a staged build/gsp/ would ride along with it - which would change
+    # the panel it asserts on from `none of the images' to `1 of 5'.  Out of the way for the duration, back
+    # before the last repack, so the tree is left as it was found.
+    from qemu_support import restore_staged, stage_aside
+    held = stage_aside()
     # Everything that can raise goes inside the try below, because from this line on the build tree holds a
     # module that is not the family's driver.  When the pack and repack sat outside it, a failure there left
     # the throwaway 600-byte module in build/gpu/ with a newer timestamp than its object, `make' found nothing
@@ -283,6 +288,7 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
             assert 'link:' in report, 'every device line states the negotiated link, or says there is none'
     finally:
         shutil.copyfile(backup, real)
+        restore_staged(held)
         run(['python3', 'tools/makedisk.py', 'build'])
     print('PASS: a module that offers no engine binds, reports the chip, and leaves the CPU compositor in '
           'charge on a booted machine - measured in the serial log, the graphics panel and the report')

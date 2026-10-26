@@ -21,7 +21,7 @@ DRIVER_OBJECTS := $(patsubst kernel/drivers/%.c,$(BUILD)/driver-%.o,$(DRIVER_SOU
 # engine code running, and a ported family is added per file rather than in one blob.
 GPU_SOURCES := $(wildcard kernel/drivers/gpu/*.c)
 GPU_OBJECTS := $(patsubst kernel/drivers/gpu/%.c,$(BUILD)/gpu-%.o,$(GPU_SOURCES))
-.PHONY: all clean milestone-check gpu-modules stamp FORCE dist
+.PHONY: all clean milestone-check gpu-modules stamp FORCE dist gsp-firmware
 # The stamp rule runs on every make.  tools/buildinfo.py rewrites the header only when the repository
 # state actually moved, so nothing but the file that reads it is recompiled, and a link of unchanged
 # objects reproduces the same image bytes.  buildinfo.o is deliberately rebuilt every time: it is the
@@ -113,6 +113,16 @@ $(MODULE_DIR):
 	mkdir -p $@
 gpu-modules: $(GPU_MODULE_FILES)
 	python3 tools/build_gpu_module.py --verify
+
+# The FMC image the handover is built from, rebuilt from the arrays the open kernel module itself ships
+# (src/nvidia/generated/g_bindata_kgspGetBinArchive*.c, MIT), so a stick can carry the vendor's genuine
+# signed image without anyone mounting an ESP.  Deliberately not part of `all': it reaches github.com, and a
+# build with nothing staged still boots and says `fw 0/5' rather than pretending.
+GSP_DRIVER_VERSION ?= 615.71.10
+GSP_CHIP ?= GB202
+gsp-firmware: | $(BUILD)
+	python3 tools/gsp-firmware.py --fetch $(GSP_DRIVER_VERSION) --chip $(GSP_CHIP) --out $(BUILD)/gsp
+	python3 tools/gspcheck.py $(BUILD)/gsp
 clean:
 	rm -rf $(BUILD)
 

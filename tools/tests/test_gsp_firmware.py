@@ -19,6 +19,7 @@ here.  Whether an image is then handed to the card is the FSP's answer to a quer
 panel's own paragraph reports, and this file reads that paragraph off a booted machine.
 """
 import importlib.util
+import os
 import re
 import zlib
 import shutil
@@ -414,11 +415,10 @@ def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
     actually holds - which is the only way this feature can be tested at all before the card in question is
     in front of somebody."""
     sys.path.insert(0, str(ROOT / 'tools' / 'tests'))
-    from qemu_support import Guest
+    from qemu_support import Guest, restore_staged, stage_aside
     build = ROOT / 'build'
     gsp = build / 'gsp'
-    if gsp.exists():
-        raise AssertionError('build/gsp already exists: refusing to overwrite firmware someone staged')
+    held = stage_aside()
     nested = gsp / 'nvidia' / 'gb207' / 'gsp'
     good = build_container()
     fmc = build_fmc_image()
@@ -581,6 +581,7 @@ def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
             assert 'nothing here claims to have approved one.' in panel, panel[-400:]
     finally:
         shutil.rmtree(gsp, ignore_errors=True)
+        restore_staged(held)
         run(['python3', 'tools/makedisk.py', 'build'])
 
 

@@ -305,6 +305,31 @@ where this OS's intake contract came from:
     sudo cp /lib/firmware/nvidia/gb207/gsp/gsp-570.144.bin         /mnt/esp/SCOS/GSP.BIN
     sudo cp /lib/firmware/nvidia/gb207/gsp/bootloader-570.144.bin  /mnt/esp/SCOS/GSPBL.BIN
 
+The third route needs no driver install at all, because the open kernel module ships the image itself.
+`make gsp-firmware` takes `src/nvidia/generated/g_bindata_kgspGetBinArchiveGspRmFmcGfwProdSigned_GB202.c` (a
+GB207 is served by the GB202 arrays, exactly as it is by `nvkm/subdev/gsp/gb202.c`), lifts the four pieces out
+of the generated arrays, and writes `build/gsp/fmc-615.71.10.bin` in the container this kernel reads.  Run on
+the real thing it said this, which is the first measurement of its kind in this repository:
+
+    hash            48 B  crc32 0x77ed3815  UCODE_HASH
+    image       287304 B  crc32 0x3bbbe37c  UCODE_IMAGE
+    publickey       97 B  crc32 0x8fb251b4  UCODE_PKEY
+    signature       96 B  crc32 0x71cc5283  UCODE_SIG
+    container   287869 B  crc32 0xaeaa97e7 -> build/gsp/fmc-615.71.10.bin
+    the hash section is sha384 of the image section, byte for byte
+
+Those four sizes are the driver's own confirmation of what the handover is built to - 48, 97 and 96 for
+architectures 0x1a and 0x1b, 48, 384 and 384 for Hopper - so they are no longer a reading of a reference
+driver's source but the width of NVIDIA's signed image.  The last line is the one that says the extraction was
+faithful: a single wrong byte would stop the digest matching.  `make dist` then packs the file as
+`GSPFMC.BIN` and the panel says `fw 1/5`.  `python3 tools/gsp-firmware.py --notice` prints the provenance
+sentence, and the image bytes are the vendor's, unmodified, with only the container around them built here.
+
+What this does not do is worth stating before a flash: a genuine FMC image makes the handover real, and it does
+not give the coprocessor the vidmem WPR2 and FRTS region or the boot arguments, so the card still does not
+render.  What changes is what the next measurement can be - the falcon's own error word and the FSP's answer to
+a real container, instead of a refusal to accept a stub.
+
 `GSPFMC.BIN` is the one this build assembles a handover from; `GSP.BIN` and `GSPBL.BIN` are what the resource
 manager's own boot arguments would need, and those are not implemented here yet, so staging all three changes
 what the panel can *say* before it changes what the card does.  Say so rather than let `fw 3/5` imply more.

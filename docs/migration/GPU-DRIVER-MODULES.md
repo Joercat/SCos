@@ -1084,6 +1084,34 @@ the step that proves the mailbox, the sizes and the framing, and it is not rende
 the vidmem reservation plus `GspFwWprMeta` plus `GSP_FMC_BOOT_PARAMS`, in that order, and nouveau's
 `gh100_gsp_wpr_meta_init()` is the specification for it.
 
+### Where the image comes from, measured on the driver's own arrays
+
+The four buffers the handover is built from are not only in `/lib/firmware`: the open kernel module carries them
+as generated C arrays, and their declared sizes are the widths this build asks the FSP to verify.  Measured on
+`615.71.10`, chip GB202, in `g_bindata_kgspGetBinArchive*.c`:
+
+| archive | label | bytes | how stored | becomes |
+|---|---|---|---|---|
+| `GspRmFmcGfwProdSigned` | `UCODE_HASH` | 48 | raw | section `hash`, and it is SHA-384 of the image |
+| `GspRmFmcGfwProdSigned` | `UCODE_PKEY` | 97 | raw, in 13 words | section `publickey` |
+| `GspRmFmcGfwProdSigned` | `UCODE_SIG` | 96 | raw | section `signature` |
+| `GspRmFmcGfwProdSigned` | `UCODE_IMAGE` | 287304 | raw | section `image` |
+| `ConcatenatedFMC` | `UCODE_IMAGE_PROD` | 503808 | zlib | FMC RISC-V image + the 287304-byte GFW image |
+| `GspRmBoot` | `UCODE_IMAGE_PROD` / `UCODE_DESC_PROD` | 290816 / 92 | raw / zlib | the RM's own boot pair |
+| `BooterLoadUcode`, `BooterUnloadUcode` | - | - | - | absent for this generation: they stop at AD102 |
+
+Three things follow, and each is a fact rather than an inference.  The public key occupying 104 bytes of array
+for 97 bytes of key is why the extractor bounds an entry by its declared size and not by the array - the word
+padding is not firmware.  The absence of the booter pair for Blackwell is why those two ESP roles are staged and
+named, not held to the FMC contract, by `tools/gspcheck.py`.  And the SHA-384 relation is why
+`tools/gsp-firmware.py` prints it: it is the check that the bytes it put in the container are the bytes the
+driver boots.
+
+The big resource-manager image is *not* among these arrays, so `GSP.BIN` still has to come off a machine with
+the driver installed - `build/gsp/` or the ESP, either way.  What is here is enough to make the handover real,
+and nothing more: the vidmem WPR2 and FRTS reservation, the radix-3 page table and `GSP_FMC_BOOT_PARAMS` are the
+next work, and until they exist the coprocessor has no memory to boot into, however genuine its image is.
+
 ## What a report is allowed to say about itself
 
 The card's own `Engine:` line - the one a user pastes - is built by the module into `struct inventory::text`
