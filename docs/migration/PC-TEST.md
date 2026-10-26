@@ -501,3 +501,22 @@ installed is 570.144, so both version strings are in the intake path and nothing
 For any other machine, `python3 tools/gspcheck.py <dir> --dump` prints each file's own header hex and every
 section row as the file states it - name, type, flags, offset, size, `sh_info`, and the first sixteen bytes of
 each section - which is the difference between a corrupt file and a file read wrongly, in one paste.
+
+A staged `build/gsp` makes the suites that build their own disk image unbootable
+-------------------------------------------------------------------------------
+
+`tools/makedisk.py` derives the firmware it packs from the build directory it is handed (`firmware_blobs()` reads
+`<directory>/gsp`, recursively, so a per-chip layout works), which is how `make dist` gets `GSPFMC.BIN` onto the
+stick without a flag.  It also means every *test* image built from `build/` gets the same firmware whether or not
+the test asked for it - and a fixture image sized for one behaviour cannot hold a real 287 kB container next to
+the kernel, so it comes out unbootable and QEMU drops into the UEFI shell instead of the OS.
+
+That cost a wrong conclusion once already: a one-pass rewrite of the stub's firmware intake was reverted because
+`test_gsp_firmware`, `test_compositor` and `test_gpu_detect` all failed with the shell while the same build booted
+in five seconds when the image was packed by hand.  The suites were the problem, not the stub.  `test_gsp_firmware`
+and `test_nvidia_ident` move `build/gsp` aside for their run (`stage_aside()` in `tools/tests/qemu_support.py`) and
+put it back afterwards, which is why they survive it; `test_compositor` and `test_gpu_detect` do not, so they pass
+only while nothing is staged.  The open fix is to make the firmware source an argument a caller passes rather than
+a directory makedisk guesses - and to have makedisk refuse with the file's name and the free space when the payload
+it was handed cannot fit, instead of writing a disk that cannot boot.  Until then, `mv build/gsp build/gsp.off` is
+the workaround, and a suite failure that reads as a boot failure should be checked against it first.
