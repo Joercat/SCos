@@ -422,10 +422,19 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
     put(w, f->booted ? ", which is the value that means it has finished booting, so the mailbox behind it is "
                       "worth asking"
                      : ", which is not 0xFF: the FSP has not reported itself booted, and until it does "
-                       "nothing is reading the channel.  The reference driver waits up to four seconds for "
-                       "this after resetting a chip; this OS does not reset one, so on a machine where the "
-                       "firmware on the card never got this far the wait would end the same way"
-       );
+                       "nothing is reading the channel");
+    if (!f->booted) {
+        /* The wait is counted rather than described, because the only honest way to say "it did not answer in
+         * time" is to say how much time that was - and this early in a boot the time this kernel can measure is
+         * a number of reads of an uncached register, not a clock it can read. */
+        put(w, ".  That was waited for: ");
+        put_number(w, (unsigned)f->boot_polls);
+        put(w, " looks at one uncached register, which is tens of milliseconds on a modern core, and then "
+               "stopped rather than holding a boot open.  The reference driver waits up to four seconds here, "
+               "because it has just reset the chip and is training the coprocessor's loader; this OS does "
+               "neither, so on a card whose own firmware never got this far the wait ends the same way however "
+               "long it is");
+    }
     if (!f->mailbox_readable) {
         put(w, ".  The mailbox queue registers themselves refused, so no request was attempted: the "
                "capability query below was never started, and that is the honest order of the two facts.\n");

@@ -915,7 +915,11 @@ has a mailbox of its own, reachable *while the lock is still on*, and this kerne
 `kernel/drivers/gpu/gpu_fsp.c` is that conversation.  Three windows, each its own `device_map` request rather
 than one 14 MiB mapping the kernel would refuse: BAR0+0x20000 for one page (the therm scratch, whose
 `NV_THERM_I2CS_SCRATCH` low byte reads 0xFF once the FSP has finished booting itself), BAR0+0x8f0000 for four
-pages (the FSP's own register group: its mailbox at +0x2ac0 from there, its queue pointers at +0x2c00 and
+pages.  That first register is *waited* on - two hundred thousand looks at it, which is tens of milliseconds of
+real device latency, and the count reaches the panel - because a report written inside the window in which the
+FSP has not yet come up would be a measurement of the wrong moment, and because a refusal to answer stops the
+wait immediately rather than spending the whole budget on it.  The reference driver waits up to four seconds at
+the same point; it is also resetting the chip and training the falcon, which this OS does not do (the FSP's own register group: its mailbox at +0x2ac0 from there, its queue pointers at +0x2c00 and
 +0x2c80, its ucode version and fuse check at +0x334 and +0x33c), and BAR0+0x110000 for one page (the falcon
 whose capability word has been refusing every reader since the first boot on real hardware).  Four pages for
 the second window, not one, because the queue pointers sit 11 KiB past its base - which is worth recording

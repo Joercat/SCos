@@ -212,7 +212,7 @@ struct gpu_fsp_state {
     int mapped, mailbox_readable;            /* the windows exist; the queue registers answer at all */
     int gsp_readable;                        /* the coprocessor's own block no longer refuses a reader */
     uint32_t boot_scratch;                   /* 0xFF in the low byte once the FSP has finished booting */
-    int booted;
+    int booted, boot_polls;                   /* and how many looks at it the wait took */
     uint32_t ucode_version;                  /* NV_PFSP_FSP_UCODE_VERSION, 11:0 */
     uint32_t fuse_check;                     /* the FSP's own fuse-consistency word: 0 means it passed */
     uint32_t hwcfg2;                         /* the capability word whose refusal was the blocker */

@@ -440,6 +440,8 @@ static void test_the_gates(void)
     check("and the refusals are counted where they happened, register by register",
           fsp_state.reads == model.reads && fsp_state.refusal_reads == model.refusals && model.refusals > 0);
     check("nothing whatsoever is written to a card that is refusing", model.writes == 0 && fsp_state.writes == 0);
+    check("a scratch register that refuses is not polled to the limit: the wait stops at the refusal",
+          fsp_state.boot_polls == 1);
     check("the coprocessor's own block is reported as still locked, which is the fact the panel leads with",
           !fsp_state.gsp_readable && fsp_state.hwcfg2 == 0xbadf4100u);
 
@@ -456,6 +458,8 @@ static void test_the_gates(void)
           !fsp_state.queried && model.writes == 0);
     check("the FSP's version and fuse check are read whether or not a request is possible",
           fsp_state.ucode_version == 42 && fsp_state.fuse_check == 0);
+    check("and the wait for a boot that never happens is the bound the file says it is, not a hang",
+          fsp_state.boot_polls == FSP_BOOT_POLL_LIMIT);
 
     model_reset(M_BUSY);
     ((uint32_t *)model_fsp)[R_QUEUE_TAIL] = 4;              /* a packet the FSP has not finished with */

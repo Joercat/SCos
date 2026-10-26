@@ -63,7 +63,15 @@
 #define FSP_EMEM_DWORDS_PER_BLOCK           64u      /* so an offset is a block number and a dword within it */
 #define FSP_REFUSED(v)                   (((v) & 0xffffff00u) == 0xbadf4100u)
 #define FSP_HEADER_BYTES                    8u      /* the MCTP transport dword and the NVDM dword */
-#define FSP_POLL_LIMIT                 200000u       /* iterations, and a TSC deadline on top of them */
+#define FSP_POLL_LIMIT                 200000u       /* looks at a pair of registers, and on the reply wait a
+                                                         * TSC deadline on top of them: an MMIO read dominates
+                                                         * either bound, so both are counts of work rather
+                                                         * than promises about time, and the panel prints how
+                                                         * many looks each wait took */
+#define FSP_BOOT_POLL_LIMIT            200000u       /* looks at one register for the FSP to report itself
+                                                         * booted: tens of milliseconds on a modern core, and
+                                                         * bounded by the device's own latency rather than by
+                                                         * a clock this early in a boot cannot read */
 #define FSP_IMAGE_MAX            (8u * 1024u * 1024u)
 
 #define NVDM_TYPE_COT                    0x14u
@@ -224,12 +232,14 @@ static int reply_waiting(void)
     return 1;
 }
 
+/* The reference driver waits up to four seconds at the point it has just trained the falcon.  This OS trains
+ * nothing - it never resets a chip, so on a machine where the FSP is going to come up it already has - and so
+ * waits for the order of tens of milliseconds, bounded by the count of reads below and by the cycle counter,
+ * whichever expires first.  Both counts are reported, because "it did not answer in time" is only a fact once
+ * a reader can see how much time that was. */
 static int wait_for(int (*condition)(void))
 {
-    uint64_t deadline = fsp_ticks() + 4000000ull;      /* a few milliseconds, bounded twice over: the limit
-                                                        * on iterations means a machine with a dead counter
-                                                        * still stops, and a machine with a live one does not
-                                                        * spend 200,000 looks finding out */
+    uint64_t deadline = fsp_ticks() + 50000000ull;
     for (unsigned i = 0; i < FSP_POLL_LIMIT; i++) {
         fsp_state.reply_polls++;                        /* the panel quotes this for the reply, and `polled'
                                                            * above for the send, because they are two different
@@ -391,8 +401,16 @@ static void probe_mailbox(void)
 {
     int idle;
 
-    fsp_state.boot_scratch = read32(&w_therm, NV_THERM_FSP_BOOT_COMPLETE);
-    fsp_state.booted = (fsp_state.boot_scratch & 0xffu) == 0xffu;
+    /* Wait for the FSP to say it is up, because on a card that is going to answer there is a window in which
+     * it has not yet, and a report written inside that window would be a measurement of the wrong moment. */
+    for (unsigned i = 0; i < FSP_BOOT_POLL_LIMIT; i++) {
+        fsp_state.boot_polls = (int)i;
+        fsp_state.boot_scratch = read32(&w_therm, NV_THERM_FSP_BOOT_COMPLETE);
+        fsp_state.booted = (fsp_state.boot_scratch & 0xffu) == 0xffu;
+        if (fsp_state.booted || FSP_REFUSED(fsp_state.boot_scratch)) break;
+        for (volatile int spin = 0; spin < 64; spin++) __asm__ volatile("pause");
+    }
+    fsp_state.boot_polls++;
     fsp_state.ucode_version = read32(&w_fsp, NV_PFSP_UCODE_VERSION) & 0x7ffu;
     fsp_state.fuse_check = read32(&w_fsp, NV_PFSP_FUSE_ERROR_CHECK);
     fsp_state.hwcfg2 = read32(&w_gsp, NV_PGSP_HWCFG2);

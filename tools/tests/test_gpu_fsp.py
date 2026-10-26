@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-FSP_CHECKS = 72                     # the modelled mailbox, pinned: a dropped case is a silent loosening
+FSP_CHECKS = 74                     # the modelled mailbox, pinned: a dropped case is a silent loosening
 
 # The published register description, transcribed rather than read out of the file under test:
 # src/common/inc/swref/published/hopper/gh100/dev_fsp_pri.h, which is the header GB100's hardware-abstraction
