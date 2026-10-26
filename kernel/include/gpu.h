@@ -130,6 +130,33 @@ struct gpu_module_state {
     int refusal;                     /* nonzero predicate code when present == 0 */
     int self_test_pixels, self_test_matches;
 };
+/* The coprocessor's firmware set as the boot volume offered it, passed up from the firmware through
+ * struct boot_firmware.  Every number here is a measurement the kernel is repeating on the boot stub's
+ * word, because the bytes themselves were read and released by the stub - boot/uefi/gsp_fw.h explains why
+ * they are not kept - which is exactly why this struct carries what `gpu_firmware_state' recomputed rather
+ * than what it copied: the counts are re-added from the per-file records here, and a record set whose own
+ * summary disagrees with them is reported as inconsistent instead of quietly believed. */
+#define GPU_FIRMWARE_ROLES BOOT_FIRMWARE_ROLES
+struct gpu_firmware_role {
+    unsigned state;                  /* BOOT_FIRMWARE_STATE_ABSENT / _STAGED / _TOO_BIG / _UNREADABLE */
+    uint32_t bytes;                  /* as the stub read it off the disk */
+    uint32_t crc32;                  /* over those bytes */
+    uint32_t flags;                  /* BOOT_FIRMWARE_ELF64 and friends */
+    uint32_t payload_bytes;          /* .fwimage, the payload the falcon is started from */
+    uint32_t signature_bytes;        /* whatever the image calls its signature section */
+    uint32_t sections;               /* section headers walked: 0 of them is a different fact from "missing one" */
+};
+struct gpu_firmware_state {
+    int present;                     /* any role at all was found on the volume */
+    unsigned staged;                 /* roles the stub could open, whatever the outcome */
+    unsigned complete;               /* all five, and the first holds both sections the boot sequence reads */
+    unsigned consistent;             /* the stub's summary agrees with the records it came with */
+    uint32_t total_bytes, flags;
+    char signature_name[24];         /* the name the staged image gives its signature section */
+    struct gpu_firmware_role role[GPU_FIRMWARE_ROLES];
+};
+const struct gpu_firmware_state *gpu_firmware_state(void);
+const char *gpu_firmware_role_name(unsigned role);
 const struct gpu_module_state *gpu_module_state(void);
 const struct scos_gpu_engine_ops *gpu_module_ops(void);
 int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handoff);

@@ -794,21 +794,61 @@ not be mapped* is reported as this build's bound rather than as a chip that answ
 is only pointed at on a part whose v2 device table decoded, because that address is published for this
 generation and no other.
 
-What this rules out is worth stating as plainly as what it rules in, because it cancels a promise made in the
-previous section.  Staging a firmware image cannot be the next step, and the reason is in the same function:
-the code that releases the lock is the FSP, and the FSP is commanded by the vendor's boot sequence - a signed
-descriptor payload, offsets in system memory, and a doorbell that gb100 publishes as one write-only register
-(`NV_PFSP_MNOC_RX_FIFO_DATA`, `-W-4A`).  A `.bin` on the ESP changes none of that, so the intake was not
-built: it would have been a file, a checksum and a sentence about how far the work got, in front of a card
-that will not answer the door.  The measured ceiling on this generation is therefore that its engines are
-reachable through a resource manager that boots the coprocessor, and that a driver which is not that
-resource manager is told so by an error code.  If a card's `Engine:` line says instead that the LCE block
-*answers*, that conclusion does not hold for that card and the register-level work resumes - the fixture
-carries that case too, with the coprocessor still refusing beside it, so one live target cannot launder
-another's refusal into a mood about the BAR.  The idle-GPU notice was re-worded in the same commit for the
-same reason: it used to point at the panel as if a longer look would find a way in.
+What this rules out, and what it turned out not to.  The paragraph written here before this commit said that
+staging a firmware image could not be the next step, because the lock is released by the FSP and the FSP is
+commanded by a vendor boot sequence, and that the measured ceiling on this generation was "its engines are
+reachable through a resource manager that boots the coprocessor, and a driver which is not that resource
+manager is told so by an error code".  The measurements in it are all still true; the inference is not, and it
+was wrong in the direction that matters, so it is corrected here rather than quietly dropped.
 
-Measured: 122 host checks, 0 failures, five of them the refusal replayed as one machine's answers -
+The inference that failed was *because we cannot do this from a cold register map, nobody can*.  The open stack
+does it on Linux today, on exactly this chip class, with no vendor kernel module: NVK is a conformant Vulkan
+1.4 driver for consumer Blackwell (Mesa's own driver page names the RTX 5000 series, and Zink makes it the
+default OpenGL path for Turing and newer), and NVK runs on the **nouveau kernel driver**, which on those
+generations brings the card up by booting the GSP itself from firmware files.  What was missing here was not a
+secret and not a lock: it was the boot sequence, and the boot sequence is published - in MIT-licensed code in
+`NVIDIA/open-gpu-kernel-modules` (`src/nvidia/src/kernel/gpu/gsp/kernel_gsp*.c`, `gpu/fsp/`) and in the
+GPL `nvkm/subdev/gsp/` tree in Linux.  Those two directories are 20 906 lines counted rather than estimated,
+which is also the honest answer to "why is this not one commit".
+
+So the intake exists now, and it is shaped by what that stack consumes rather than by a format invented here.
+nouveau's `nvkm/subdev/gsp/priv.h` declares the set as
+`nvidia/<chip>/gsp/{gsp,fmc,bootloader,booter_load,booter_unload}-<version>.bin`, `base.c` asks for each part
+under the name `gsp/<name>-<version>`, and `gb202.c` pins the chip in the machine this was written for - GB207 -
+to version **570.144** with signature section `.fwsignature_gb20x`.  A FAT32 ESP cannot carry those paths, so
+`boot/uefi/main.c` reads the five roles from `GSP.BIN`, `GSPFMC.BIN`, `GSPBL.BIN`, `GSPBTL.BIN` and
+`GSPBTU.BIN` in the SCOS directory, and `tools/makedisk.py` copies and names them from an unpacked package
+(`build/gsp/`, searched recursively, with an ambiguous or oversized set refused at image time instead of
+arriving as a mystery on a panel).
+
+What the stub does with them is a *shape* check, and the check is the loader's own: `r535_gsp.c` takes the
+payload out of the image with `r535_gsp_elf_section()`, which walks the ELF64 section table from `e_shoff` and
+resolves names through the string table at `e_shstrndx`.  `boot/uefi/gsp_fw.c` walks the same table the same
+way, with a bound on every read, and reports the section count, the `.fwimage` size, and the name the image
+gives its own signature section - so a file that is an HTML login page, a tar member, or a copy interrupted
+halfway is named as that, on the panel, before anything is asked of the card.  It is not a signature check and
+nothing claims it is: the blobs inside the signature section are verified by the hardware, which is the only
+party able to do that.  The record reaches the kernel through the boot handoff, whose ABI went to v5 by
+*appending* 200 bytes (asserted, so no field a previous kernel read at some offset moved - and the record
+lands in what used to be four bytes of tail padding, which is why the size is pinned rather than derived), and
+the kernel re-adds the stub's arithmetic before repeating it: where the two disagree the panel says so instead
+of smoothing it over.
+
+What is still not done is the whole of what stands between this and a screen the GPU paints: nothing hands the
+staged image to the coprocessor.  The boot stub reads a file, checks it and lets it go, because parking
+megabytes in the boot arena would take that memory from the kernel for an image nothing consumes yet; the
+FSP's single read-back register (`NV_PFSP_MNOC_RX_FIFO_DATA`, write-only as gb100 publishes it) and the RPC
+sequence behind it are the next increment, ported from the two published trees above.  The panel says all of
+this in its own words - `GSP firmware:` for what the disk holds, `GSP firmware intake:` for what this build
+does with it - because the panel is the only channel a machine like this has.
+
+Measured: 114 host checks of the examiner alone (`tools/tests/gsp_fw_host.c`, under ASan and UBSan, six of
+them in a second mode that examines the same container the python test builds - two builders describing
+different shapes cost a debugging session before anybody else would have noticed), plus two booted machines,
+one with a complete staged set and one with a text file where the payload image belongs; and the report buffer
+sized from what those boots measured (3719 bytes with a staged set against 5120 provided, with the test
+requiring room for the longest engine inventory as well, since that is the case a real card is in).  Before
+this commit: 122 host checks, 0 failures, five of them the refusal replayed as one machine's answers -
 `GSP block … refused all five reads`, the unit cross-check, the engine block refusing the same way, the FSP
 refusing, three mappings and no store - and the widest report the format can now produce is 888 bytes
 against a describe field grown from 768 to 1152 for exactly these clauses.

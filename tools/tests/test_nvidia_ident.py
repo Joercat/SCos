@@ -246,6 +246,12 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
             # to them and that no firmware is involved yet.
             assert 'GSP path: the clause above quotes' in panel, panel[-1400:]
             assert 'the door is held by the card' in panel, panel[-1400:]
+            # Which brings the firmware line onto this panel too.  On a disk that stages nothing it has to say
+            # so and name the five roles, because that is the one thing the person standing at this machine can
+            # change without a rebuild, and this panel is the only place they will read it.
+            assert 'GSP firmware: none of the images the open driver loads' in panel, panel[-1400:]
+            for esp in ('GSP.BIN', 'GSPFMC.BIN', 'GSPBL.BIN', 'GSPBTL.BIN', 'GSPBTU.BIN'):
+                assert esp in panel, 'the panel never names %s, so nobody can be told to stage it' % esp
             # `Device access: none' on its own was read as "nobody has touched my card" on the one machine
             # where a module had read twenty-odd registers of it.  The line has to name whose access is
             # absent, and it is long enough to have been clipped before the wrap: both halves of that are

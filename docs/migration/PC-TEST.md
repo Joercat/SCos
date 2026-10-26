@@ -270,3 +270,17 @@ the microcontroller whose release the lock waits for.
 
 Paste the `Engine:` line whole, these clauses included: the window answer, the coprocessor's state and the
 engine block's reply are three different facts, and the next move depends on which of them this machine gave.
+
+The firmware line is the one part of this report you can change without rebuilding anything, and it is worth
+changing on a machine whose panel says the coprocessor refused.  The five images the open path loads go in the
+SCOS directory at the root of the ESP, named `GSP.BIN`, `GSPFMC.BIN`, `GSPBL.BIN`, `GSPBTL.BIN` and
+`GSPBTU.BIN`; upstream they are
+`nvidia/gb207/gsp/{gsp,fmc,bootloader,booter_load,booter_unload}-570.144.bin`, and running
+`python3 tools/makedisk.py build` with those files (or that whole tree) under `build/gsp/` names them for you.
+`GSP firmware: none of the images the open driver loads` is therefore a statement about the disk and not a
+refusal; once files are there the panel answers with sizes, checksums and the sections a boot sequence would
+read - `ELF64 4s +.fwimage 3375008 +.fwsignature_gb20x 3384` for an image that is what it claims, `no
+container` for one that is not an image at all, `unreadable` for one the firmware could not open, and `set
+incomplete` until all five are present.  Paste the `GSP firmware:` and `GSP firmware intake:` lines beside the
+`Engine:` line: the first says what the stick holds, the second says what this build does not yet do with it,
+and those are different questions a reader has to be able to tell apart.

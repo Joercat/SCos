@@ -45,10 +45,18 @@ def test_the_walk_is_header_only_and_its_bounds_are_its_own():
 def test_the_handoff_carries_the_scan_counts():
     """The kernel refuses a handoff of the wrong size, so the ABI note and the assert must agree."""
     boot = (ROOT / 'kernel/include/boot.h').read_text()
-    assert '#define BOOT_VERSION 4' in boot, 'the handoff grew and its version was not raised'
+    assert '#define BOOT_VERSION 5' in boot, 'the handoff grew and its version was not raised'
     assert 'pci_functions_seen,pci_buses_scanned,pci_display_functions' in boot
-    assert 'sizeof(struct boot_handoff)==208' in boot, \
+    assert 'sizeof(struct boot_handoff)==408' in boot, \
         'the size the stub writes must be the size the kernel accepts'
+    # v5 appended the coprocessor-firmware record, and the only way an appended field is safe is that every
+    # field a v4 kernel read kept its offset - which is what this assertion in the header is for.  Pinned
+    # here as well, because a test that only checks the size would pass on a handoff that reordered its
+    # fields into a new shape nobody could boot.
+    assert 'offsetof(struct boot_handoff,firmware)==204' in boot, \
+        'the firmware record is not where the stub and the kernel both think it is'
+    assert 'offsetof(struct boot_handoff,framebuffer)==88' in boot, \
+        'the framebuffer offset lost its assertion, and that is the one field every reader is written against'
 
 
 def test_host_harness():

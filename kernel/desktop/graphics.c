@@ -13,6 +13,11 @@
 #include "scos.h"
 #include "boot.h"
 
+/* The capacity gpu_report() is given for its per-adapter listing - one block per display function on the
+ * machine, each with its link, family, upstream entry points and path, so the bound scales with how many
+ * adapters somebody plugged in rather than with what any one of them said.  The report buffer the whole panel
+ * is assembled in is SCOS_GRAPHICS_REPORT in scos.h, sized from the measured worst case; this one only has
+ * to be big enough not to be the reason a line is missing, and the boot suites check that it is not. */
 #define DETAIL_LIMIT 2560
 #define REPORT_LIST_LIMIT 4
 
@@ -43,6 +48,119 @@ static void put_number(struct writer *w, unsigned value)
     while (i) out[n++] = digits[--i];
     out[n] = 0;
     put(w, out);
+}
+
+/* Checksums are quoted in hexadecimal because that is the base every tool that produces them prints in:
+ * `crc32 file.bin' on the machine a person copies the file from, and the number has to be comparable by
+ * eye or it is decoration. */
+static void put_hex(struct writer *w, uint32_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+    char out[9];
+    for (int i = 0; i < 8; i++) out[i] = digits[(value >> ((7 - i) * 4)) & 0xf];
+    out[8] = 0;
+    put(w, out);
+}
+
+/* One staged image, as far as the record goes: its size, its checksum, and what the walk found inside it.
+     * Deliberately terse, because the panel buffer is a fixed thing shared with the module's own inventory
+     * and every clause here is repeated once per staged file - the explanation of what a missing container
+     * means belongs to the paragraph below, which says it once. */
+static void put_firmware_role(struct writer *w, const struct gpu_firmware_state *fw, unsigned role)
+{
+    const struct gpu_firmware_role *r = &fw->role[role];
+    char number[24];
+
+    if (role) put(w, "; ");
+    put(w, gpu_firmware_role_name(role));
+    put(w, " ");
+    fmt_u32(number, r->bytes);
+    put(w, number);
+    put(w, " B");
+    if (r->state == BOOT_FIRMWARE_STATE_UNREADABLE) { put(w, ", unreadable"); return; }
+    put(w, " crc32 0x");
+    put_hex(w, r->crc32);
+    if (!(r->flags & BOOT_FIRMWARE_ELF64)) {
+        put(w, ", no container");
+        if (r->flags & BOOT_FIRMWARE_TRUNCATED) put(w, ", truncated");
+        return;
+    }
+    put(w, ", ELF64 ");
+    fmt_u32(number, r->sections);
+    put(w, number);
+    put(w, "s");
+    if (r->flags & BOOT_FIRMWARE_PAYLOAD) {
+        put(w, " +.fwimage ");
+        fmt_u32(number, r->payload_bytes);
+        put(w, number);
+    } else
+        put(w, " no .fwimage");
+    if (r->flags & BOOT_FIRMWARE_SIGNATURE) {
+        put(w, " +");
+        put(w, fw->signature_name[0] ? fw->signature_name : "sig?");
+        put(w, " ");
+        fmt_u32(number, r->signature_bytes);
+        put(w, number);
+    } else
+        put(w, " no signature section");
+}
+
+/* The firmware paragraph of the report, kept out of graphics_report()'s body because it has two states
+ * worth reading whole - nothing staged, and something staged - rather than one sentence bolted onto the
+ * end of another. */
+static void put_firmware_report(struct writer *w, const struct gpu_firmware_state *fw)
+{
+    unsigned missing = 0;
+
+    if (!fw || !fw->staged) {
+        put(w, "GSP firmware: none of the images the open driver loads to start this coprocessor is on "
+               "the boot volume - absent: ");
+        for (unsigned i = 0; i < GPU_FIRMWARE_ROLES; i++) {
+            put(w, i ? ", " : "");
+            put(w, gpu_firmware_role_name(i));
+            if (fw && fw->role[i].state == BOOT_FIRMWARE_STATE_ABSENT) missing++;
+        }
+        put(w, ". Upstream they are nvidia/<chip>/gsp/{gsp,fmc,bootloader,booter_load,booter_unload}-"
+               "<version>.bin - 570.144 for the GB207 in this machine - and on this disk they belong in the "
+               "SCOS directory at the volume root as GSP.BIN, GSPFMC.BIN, GSPBL.BIN, GSPBTL.BIN and "
+               "GSPBTU.BIN, which tools/makedisk.py will copy and name from an unpacked driver package. "
+               "Nothing is refused for wanting them: the stub reads and checks whichever of the five it "
+               "finds.\n");
+        return;
+    }
+    put(w, "GSP firmware: ");
+    put_number(w, fw->staged);
+    put(w, " of ");
+    put_number(w, (unsigned)GPU_FIRMWARE_ROLES);
+    put(w, " image(s) staged by the boot stub, ");
+    put_number(w, fw->total_bytes);
+    put(w, " B read in total, set ");
+    put(w, fw->complete ? "complete for the boot sequence to ask for" : "incomplete");
+    if (!fw->consistent)
+        put(w, " and inconsistent: the summary the stub sent disagrees with its own per-file records, so "
+               "the numbers below are the ones this kernel re-added from those records");
+    put(w, ". ");
+    for (unsigned i = 0; i < GPU_FIRMWARE_ROLES; i++) {
+        if (fw->role[i].state == BOOT_FIRMWARE_STATE_ABSENT) { missing++; continue; }
+        put_firmware_role(w, fw, i);
+    }
+    if (missing) {
+        put(w, ". Not on the disk: ");
+        for (unsigned i = 0, first = 1; i < GPU_FIRMWARE_ROLES; i++) {
+            if (fw->role[i].state != BOOT_FIRMWARE_STATE_ABSENT) continue;
+            put(w, first ? "" : ", ");
+            first = 0;
+            put(w, gpu_firmware_role_name(i));
+        }
+    }
+    put(w, "\nGSP firmware intake: every byte above was read, checked, and let go - this build has no code "
+           "that hands an image to the coprocessor, so staging firmware changes what the OS can tell you "
+           "about the disk and not yet what it can do to the card. What was checked is shape, not "
+           "signature: a role reading no container means the file is not the ELF64 image the boot sequence "
+           "takes .fwimage out of (a text file, an HTML download page, or a copy interrupted halfway), and an "
+           "unreadable one means the firmware could not open it at all, which its read caps at 16 MiB. The "
+           "blobs inside the signature section are verified by the hardware, which is the only party able to, "
+           "and nothing here claims to have approved one.\n");
 }
 
 void graphics_report(char *out, size_t capacity)
@@ -241,6 +359,7 @@ void graphics_report(char *out, size_t capacity)
         /* Where the work has to go through on this generation, and what this build does and does not do
          * about it.  Printed beside the numbers rather than in prose somewhere else, because the state of
          * the coprocessor is the thing a reader needs in order to agree or argue with the next step. */
+        put_firmware_report(&w, gpu_firmware_state());
         const struct gpu_module_state *gsp = gpu_module_state();
         if (gsp && gsp->bound) {
             put(&w, "GSP path: the clause above quotes what the chip answered to reads alone; nothing was "

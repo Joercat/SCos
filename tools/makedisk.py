@@ -111,6 +111,51 @@ def validate(efi, elf, build=Path('build')):
         raise ValueError('entry not executable')
 
 
+# Coprocessor firmware: the five images the open driver loads to start a Turing-or-later NVIDIA GSP.
+# boot/uefi/gsp_fw.h carries why there are five and what each one is for; this table is the same list in the
+# only two forms a person is likely to have: the short names the ESP holds, and the upstream file names an
+# unpacked driver package ships.  Everything here is optional, and absence is not an error - a disk without
+# them boots the same image, and the panel says which roles the volume does not have.
+FIRMWARE_ROLES = (("gsp", "GSP.BIN", "gsp"), ("fmc", "GSPFMC.BIN", "fmc"),
+                  ("bootloader", "GSPBL.BIN", "bootloader"),
+                  ("booter load", "GSPBTL.BIN", "booter_load"),
+                  ("booter unload", "GSPBTU.BIN", "booter_unload"))
+# The boot stub cannot read past this, so a bigger file is refused at build time instead of arriving on the
+# panel as "unreadable" with no size attached to it.
+FIRMWARE_MAX = 16 * 1024 * 1024
+
+
+def firmware_blobs(directory):
+    """The staged firmware, as (ESP name, bytes) pairs in role order.  build/gsp is searched recursively, so
+    copying a whole linux-firmware nvidia/ tree under it works without renaming anything; a role matched by
+    more than one file is refused rather than guessed at, because quietly choosing one chip image out of
+    several is exactly the mistake this directory exists to make impossible."""
+    root = Path(directory, "gsp")
+    blobs = []
+    if not root.is_dir():
+        return blobs
+    for role, esp, upstream in FIRMWARE_ROLES:
+        exact = root / esp
+        if exact.is_file():
+            blob = exact.read_bytes()
+        else:
+            matches = sorted(p for p in root.rglob(upstream + "-*.bin") if p.is_file())
+            if len(matches) > 1:
+                raise ValueError("firmware role %s has %d candidate files (%s); leave only the image for "
+                                 "the chip in the machine being booted"
+                                 % (role, len(matches), ", ".join(m.name for m in matches)))
+            if not matches:
+                continue
+            blob = matches[0].read_bytes()
+        if not blob:
+            raise ValueError("firmware role %s staged as %s is empty" % (role, esp))
+        if len(blob) > FIRMWARE_MAX:
+            raise ValueError("firmware %s is %d bytes, past the boot stub read cap of %d"
+                             % (esp, len(blob), FIRMWARE_MAX))
+        blobs.append((esp, blob))
+    return blobs
+
+
 def name(value):
     base, _, ext = value.partition('.')
     if len(base) > 8 or len(ext) > 3:
@@ -257,6 +302,9 @@ def main(directory):
     if len(index) > 4096:
         raise ValueError('driver index too large')
     ic = allocate(index)
+    # Appended after the modules, and deliberately kept out of the driver index: that table counts things the
+    # kernel could load as a driver, and a firmware image is not one of them.
+    firmware = firmware_blobs(directory)
     v = provenance(directory, elf)
     # The record names the modules as the ESP holds them (FAT is upper-case), which is what a reader
     # checking the stick with another OS will see, so the two must not use different spellings.
@@ -269,6 +317,8 @@ def main(directory):
             + entry('BUILD.TXT', bc, len(record_text.encode())) + entry('DRVLIST.IDX', ic, len(index)))
     for stem, blob in modules:
         scos += entry(stem + '.MOD', allocate(blob), len(blob))
+    for esp, blob in firmware:
+        scos += entry(esp, allocate(blob), len(blob))
     directory_data = [entry('EFI', dirs[1], directory=True)+entry('SCOS', dirs[3], directory=True),
                       dot(0, dirs[1])+entry('BOOT', dirs[2], directory=True),
                       dot(dirs[1], dirs[2])+entry('BOOTX64.EFI', ec, len(efi)),
@@ -284,7 +334,8 @@ def main(directory):
         temporary.replace(d/'scos.img')
     finally:
         if temporary is not None:temporary.unlink(missing_ok=True)
-    print(f'x64 UEFI GPT/ESP: {len(image)} bytes; loader {len(efi)}; ELF {len(elf)}')
+    print(f'x64 UEFI GPT/ESP: {len(image)} bytes; loader {len(efi)}; ELF {len(elf)}; '
+          f'coprocessor firmware {len(firmware)} file(s)')
 
 
 if __name__ == '__main__':

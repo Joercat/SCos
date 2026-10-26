@@ -49,6 +49,23 @@ _Static_assert(sizeof(GPU_IDLE_NOTICE) - 1 > 300,
 static void gpu_boot_notice(void)
 {
     const struct gpu_module_state *ms = gpu_module_state();
+    /* Whether the coprocessor's firmware is on the disk is the one thing about this machine a person can
+     * change without rebuilding anything, so the outcome is said out loud at boot rather than left inside a
+     * command: staged-and-shaped and staged-but-incomplete read differently, and neither one claims the card
+     * was given the image, because it was not. */
+    {
+        const struct gpu_firmware_state *fw = gpu_firmware_state();
+        if (fw && fw->staged)
+            wm_notify("GSP firmware read from the boot disk",
+                      fw->complete ?
+                          "All five images the open driver loads to start this coprocessor are on the volume, "
+                          "and the one that carries the payload holds the sections that loader reads. No image "
+                          "has been written to the card: SCos has no code yet that hands firmware to the "
+                          "coprocessor, so what changed is what the boot stub could check."
+                        : "Some of the five images are on the volume, which is enough to be read and checked "
+                          "and not enough to be a complete set. Run graphics in Terminal for which roles the "
+                          "disk is missing and what each staged file turned out to be.", 0);
+    }
     if (gpu_engine_drives_output()) {
         wm_notify("GPU 2D engine bound",
                   ms && ms->bound ? "Driver module loaded from disk and verified by readback; solid "

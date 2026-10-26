@@ -478,11 +478,79 @@ static int engine_self_test(void)
     return fill_ok && copy_ok;
 }
 
+/* ------------------------------------------------- coprocessor firmware ---- */
+
+/* The boot volume's answer about the five images the open driver loads to start the coprocessor.  The stub
+ * read them, examined them, and let them go, so all the kernel has are the numbers below and the only thing
+ * it can usefully add is arithmetic: re-sum the per-file records and say so when the summary the stub sent
+ * does not match them.  Repeating a number is believing it, and this build has been burned by believing what
+ * a handover said about hardware. */
+static struct gpu_firmware_state firmware_record;
+static const char *const firmware_role_names[GPU_FIRMWARE_ROLES] = BOOT_FIRMWARE_ROLE_NAMES;
+
+const char *gpu_firmware_role_name(unsigned role)
+{
+    return role < GPU_FIRMWARE_ROLES ? firmware_role_names[role] : "";
+}
+
+const struct gpu_firmware_state *gpu_firmware_state(void)
+{
+    return &firmware_record;
+}
+
+static void firmware_note(const struct boot_handoff *handoff)
+{
+    struct gpu_firmware_state *f = &firmware_record;
+    const struct boot_firmware *fw = &handoff->firmware;
+    unsigned i, staged = 0, complete = 1;
+    u32 bytes = 0, flags = 0;
+
+    for (i = 0; i < GPU_FIRMWARE_ROLES; i++) {
+        const struct boot_firmware_role *r = &fw->role[i];
+        f->role[i].state = r->state;
+        f->role[i].bytes = r->bytes;
+        f->role[i].crc32 = r->crc32;
+        f->role[i].flags = r->flags;
+        f->role[i].payload_bytes = r->payload_bytes;
+        f->role[i].signature_bytes = r->signature_bytes;
+        f->role[i].sections = r->sections;
+        if (r->state == BOOT_FIRMWARE_STATE_ABSENT) { complete = 0; continue; }
+        if (r->state > BOOT_FIRMWARE_STATE_UNREADABLE) { complete = 0; continue; }
+        staged++;
+        bytes += r->bytes;
+        flags |= r->flags;
+    }
+    /* "Complete" is the same predicate the stub used, computed independently: the whole set, and an image
+     * the boot sequence could actually take sections out of.  Anything the kernel's own walk contradicts is
+     * reported, never smoothed over - hence `consistent' below rather than a quiet AND. */
+    complete = complete && (f->role[0].flags & BOOT_FIRMWARE_ELF64)
+             && (f->role[0].flags & BOOT_FIRMWARE_PAYLOAD)
+             && (f->role[0].flags & BOOT_FIRMWARE_SIGNATURE)
+             && !(f->role[0].flags & (BOOT_FIRMWARE_BAD_MAGIC | BOOT_FIRMWARE_TRUNCATED
+                                      | BOOT_FIRMWARE_NO_STRINGS));
+    for (i = 0; i < sizeof f->signature_name && fw->signature_name[i]; i++)
+        f->signature_name[i] = fw->signature_name[i];
+    f->signature_name[i] = 0;
+    f->staged = staged;
+    f->present = staged ? 1 : 0;
+    f->total_bytes = bytes;
+    f->flags = flags;
+    f->complete = complete ? 1 : 0;
+    f->consistent = (staged == fw->staged && bytes == fw->total_bytes && flags == fw->flags
+                     && complete == (fw->complete ? 1u : 0u)) ? 1 : 0;
+    if (staged) {
+        klog(MODULE_LOG_PREFIX "gsp firmware: %u of %u images read by the stub, %u B, set %s", staged,
+             (unsigned)GPU_FIRMWARE_ROLES, bytes, complete ? "complete" : "incomplete");
+        if (!f->consistent) klog(MODULE_LOG_PREFIX "gsp firmware: summary disagrees with the per-file records");
+    }
+}
+
 /* --------------------------------------------------------------- entry ---- */
 
 int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handoff)
 {
     const struct scos_gpu_module_header *header = 0;
+    firmware_note(handoff);
     record.store_count = handoff->module_store_count;
     measure_store(handoff);
     /* Say what the disk offers and what this machine opened, on every boot whether or not the module

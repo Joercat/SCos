@@ -58,7 +58,7 @@ $(BUILD)/vectors.o: $(BUILD)/vectors.S
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
 $(BUILD)/kernel.elf: $(GPU_OBJECTS) $(DRIVER_OBJECTS) $(DESKTOP_OBJECTS) $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o kernel/x86_64/linker.ld Makefile
 	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -Bsymbolic --build-id=none -z noexecstack -z max-page-size=0x1000 -T kernel/x86_64/linker.ld -o $@ $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o $(DESKTOP_OBJECTS) $(DRIVER_OBJECTS) $(GPU_OBJECTS) $(BUILD)/lua-runtime.o
-$(BUILD)/efi-main.o: boot/uefi/main.c boot/uefi/efi.h kernel/include/boot.h Makefile | $(BUILD)
+$(BUILD)/efi-main.o: boot/uefi/main.c boot/uefi/efi.h kernel/include/boot.h boot/uefi/gsp_fw.h Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
 $(BUILD)/efi-font.o: kernel/src/font.c Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
@@ -70,11 +70,13 @@ $(BUILD)/efi-gpu_match.o: kernel/drivers/gpu/gpu_match.c kernel/drivers/gpu/gpu_
 # The PCI walk is a unit of its own so that a fixture config space can exercise the bus ranges a real
 # machine has: a GPU behind a root port sits on a secondary bus, and that is exactly where a scan of bus 0
 # or an exclusive bus range loses it.  Same source, same flags, linked into the stub.
+$(BUILD)/efi-gsp_fw.o: boot/uefi/gsp_fw.c boot/uefi/gsp_fw.h kernel/include/boot.h Makefile | $(BUILD)
+	$(CC) $(EFI_CFLAGS) -c $< -o $@
 $(BUILD)/efi-pci_scan.o: boot/uefi/pci_scan.c boot/uefi/pci_scan.h kernel/include/gpu_match.h \
                          kernel/drivers/gpu/gpu_ids.h $(BUILD)/scosbuild.h Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -Ikernel/drivers/gpu -c $< -o $@
-$(BUILD)/BOOTX64.EFI: $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o
-	$(LD) -mi386pep --subsystem 10 --entry efi_main --image-base 0 --no-insert-timestamp --enable-reloc-section -o $@ $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o
+$(BUILD)/BOOTX64.EFI: $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o $(BUILD)/efi-gsp_fw.o
+	$(LD) -mi386pep --subsystem 10 --entry efi_main --image-base 0 --no-insert-timestamp --enable-reloc-section -o $@ $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o $(BUILD)/efi-gsp_fw.o
 $(BUILD)/scos.img: $(BUILD)/BOOTX64.EFI $(BUILD)/kernel.elf tools/makedisk.py
 	python3 tools/makedisk.py $(BUILD)
 

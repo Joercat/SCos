@@ -2,6 +2,7 @@
 #include "boot.h"
 #include "gpu_match.h"
 #include "pci_scan.h"
+#include "gsp_fw.h"
 static struct system_table *system;
 static struct boot_services *bs;
 static struct boot_framebuffer fatal_framebuffer;
@@ -215,6 +216,14 @@ status EFIAPI efi_main(handle image,struct system_table *table){
   * pool for now and move into the executable boot-arena region once that region exists. */
  void *module_data=0;size_t module_size=0;void *index_data=0;size_t index_size=0;
  uint32_t store_count=0,select_state=0;char selected_family[16];selected_family[0]=0;
+ /* The coprocessor's firmware set, as this volume offers it.  Read here because this is the only moment a
+  * filesystem exists, and examined rather than copied: the kernel image plus its CRC is what the arena is
+  * sized for, and parking a multi-megabyte firmware blob in it would take that much away from the memory the
+  * kernel reports as usable to itself, on a machine that has nothing else to spend it on yet.  So what
+  * survives is the shape of each file - its size, its checksum, and the sections the boot sequence will ask
+  * it for - which is enough to tell someone standing at this machine whether the disk holds what that
+  * sequence needs.  Nothing here is fatal: an absent set is the normal state of a disk that has no firmware. */
+ struct boot_firmware gsp_fw;memset(&gsp_fw,0,sizeof(gsp_fw));
  unsigned pci_functions_seen=0,pci_buses_scanned=0,pci_display_seen=0;
  {
   struct pci_display_scan scan;
@@ -252,6 +261,44 @@ status EFIAPI efi_main(handle image,struct system_table *table){
     if(bytes>BOOT_INDEX_MAX)bytes=BOOT_INDEX_MAX;
     index_data=index;index_size=bytes;store_count=*(uint32_t*)index;
    }else if(index)bs->free_pool(index);}
+  /* The five images, one role at a time.  A role that is not on the disk leaves zeros behind and is
+   * reported as absent; one the firmware could not open is reported as unreadable, because "too big for
+   * the stub to read" and "not there" are different things a person can act on differently. */
+  for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
+   const char *file=gsp_fw_role_file(role);
+   char16 path[24];unsigned i=0;
+   const char16 *prefix=u"\\SCOS\\";while(*prefix)path[i++]=*prefix++;
+   while(i<22&&*file)path[i++]=(char16)*file++;
+   path[i]=0;
+   void *blob=0;size_t bytes=0;
+   status got=read_file(root,path,&blob,&bytes);
+   struct boot_firmware_role *slot=&gsp_fw.role[role];
+   if(FAILED(got)){
+    if((uint64_t)(int64_t)got!=0x800000000000000Eull)slot->state=BOOT_FIRMWARE_STATE_UNREADABLE;
+    continue;
+   }
+   slot->state=BOOT_FIRMWARE_STATE_STAGED;
+   slot->bytes=(uint32_t)bytes;
+   slot->crc32=gsp_fw_crc32((const uint8_t*)blob,bytes);
+   /* The signature-section name is a fact about the payload image, which is role 0: the other four are
+    * passed a null destination, because the examiner clears its output buffer on every call and letting a
+    * signatureless bootloader overwrite the RM image's name is how the panel ended up saying "(name
+    * unreadable)" for a file that said perfectly well what it was called. */
+   gsp_fw_examine(blob,bytes,slot,role==0?gsp_fw.signature_name:0,role==0?sizeof(gsp_fw.signature_name):0);
+   bs->free_pool(blob);
+  }
+  for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
+   const struct boot_firmware_role *e=&gsp_fw.role[role];
+   if(e->state==BOOT_FIRMWARE_STATE_ABSENT)continue;
+   gsp_fw.staged++;gsp_fw.total_bytes+=e->bytes;gsp_fw.flags|=e->flags;
+  }
+  /* "Complete" is the whole five-file set with the first file carrying both sections the boot sequence
+   * reads out of it.  Anything less is a disk that cannot be booted from, and says so role by role. */
+  {const struct boot_firmware_role *rm=&gsp_fw.role[0];
+   uint32_t wanted=BOOT_FIRMWARE_ELF64|BOOT_FIRMWARE_PAYLOAD|BOOT_FIRMWARE_SIGNATURE;
+   if(gsp_fw.staged==BOOT_FIRMWARE_ROLES&&rm->state==BOOT_FIRMWARE_STATE_STAGED&&(rm->flags&wanted)==wanted
+      &&!(rm->flags&(BOOT_FIRMWARE_BAD_MAGIC|BOOT_FIRMWARE_TRUNCATED|BOOT_FIRMWARE_NO_STRINGS)))
+    gsp_fw.complete=1;}
  }
  {status close=root->close(root);root=0;if(!FAILED(s)&&FAILED(close)){phase="close boot volume";s=close;}}
  if(FAILED(s))goto fail;
@@ -281,6 +328,10 @@ status EFIAPI efi_main(handle image,struct system_table *table){
   unsigned n=0;while(n<15&&selected_family[n]){h->module_name[n]=selected_family[n];n++;}
   h->module_name[n]=0;
  }else h->module_state=select_state?select_state:0;
+ h->firmware=gsp_fw;
+ if(gsp_fw.staged)
+  log(gsp_fw.complete?"GSP firmware: all five images staged, the set the open driver loads\r\n"
+      :"GSP firmware staged, set incomplete; see the kernel report\r\n");
  if(index_data&&index_size){
   memcpy((void*)(uintptr_t)BOOT_INDEX_ADDRESS(arena),index_data,index_size);
   h->index_address=BOOT_INDEX_ADDRESS(arena);h->module_index_size=(uint32_t)index_size;

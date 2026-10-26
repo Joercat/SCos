@@ -557,6 +557,21 @@ void wm_notify(const char *title,const char *text,int warning);
 void graphics_init(const struct boot_framebuffer *fb);
 #include "gpu.h"
 void gpu_init(const struct boot_framebuffer *fb);
+/* The buffer every consumer of graphics_report() provides, named because the report outgrew an unnamed one.
+ * The panel carries the detection lines, the whole inventory a driver module read from the chip (up to
+ * 1152 bytes of it, which is the chip's decision and not this file's), and the paragraph about the
+ * coprocessor's firmware - and with all three present on a booted machine the report measured 2559 bytes
+ * into a 2560 buffer, i.e. it was clipped by one byte of headroom.
+ *
+ * It is 5120 for the measured reason in the test rather than a comfortable-looking one: with a complete
+ * firmware set staged the report came to 3719 bytes on a booted machine, and
+ * tools/tests/test_gsp_firmware.py requires the buffer to hold that *plus* the longest inventory a driver
+ * module can print (1152 bytes, struct gpu_module_state's describe), because a card with both is the machine
+ * this ships for.  The cost is stack and it was measured too: the terminal's command dispatcher went from a
+ * 9344-byte frame to a 10880-byte one against the 64 KiB kernel stack entry.S gives it.  The buffers stay
+ * locals rather than statics because six consoles and a window manager share this path, and a static report
+ * buffer would be shared the same way. */
+#define SCOS_GRAPHICS_REPORT 5120
 void graphics_report(char *out,size_t capacity);
 
 #endif /* SCOS_H */

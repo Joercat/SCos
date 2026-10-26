@@ -28,6 +28,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from qemu_support import Guest, RESULTS
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# The capacity the desktop and the TTY hand to graphics_report(), read from the header instead of repeated
+# here: a test that asks for a smaller report than the machine shows is a test of a buffer nobody uses, and
+# when this suite asked for 4096 with the real consumers at 5120 it "found" a clipped panel of its own making.
+REPORT_CAP = int(re.search(r'#define SCOS_GRAPHICS_REPORT (\d+)',
+                           (ROOT / 'kernel/include/scos.h').read_text()).group(1))
 HAIKU = Path(os.environ.get('SCOS_HAIKU', '/home/user/gpu-2d/sources/haiku'))
 FLAGS = ['-m64', '-O1', '-std=c11', '-Wall', '-Wextra',
          '-Wno-builtin-declaration-mismatch', '-Ikernel/include']
@@ -201,8 +207,8 @@ def test_tampered_module_is_refused():
             # The refusal must also reach the user, not just the log: that notice is the whole reason a
             # missing or refused driver is a legible state instead of a silently slow machine.
             assert 'No 2D engine bound' in log and 'No supported 2D engine was matched' in log, log[-2500:]
-            g.call('graphics_report', g.scratch, 4096)
-            report = g.string(g.scratch, 4096)
+            g.call('graphics_report', g.scratch, REPORT_CAP)
+            report = g.string(g.scratch, REPORT_CAP)
             print(report)
             assert 'unavailable (no driver module loaded for this chip)' in report, report
             assert 'verified by device readback' not in report, report
@@ -273,8 +279,8 @@ def test_qemu_emulated_adapters():
         assert g.call('gpu_device_count') >= 1 + len(CASES), 'an emulated adapter was missed'
         assert g.call('gpu_match_id_total') > 900, 'the generated tables did not link in'
 
-        g.call('graphics_report', g.scratch, 4096)
-        report = g.string(g.scratch, 4096)
+        g.call('graphics_report', g.scratch, REPORT_CAP)
+        report = g.string(g.scratch, REPORT_CAP)
         print(report)
         assert 'Detection is not driver support' in report, report
         assert 'config writes during detection: 0' in report, report
