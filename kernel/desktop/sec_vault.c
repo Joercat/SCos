@@ -57,6 +57,10 @@ void vault_lock(void)
 void vault_reset(void)
 {
     memset(hdr, 0, sizeof(hdr));
+    /* A brand-new vault (first boot, or after the owner switched encryption
+     * off and back on) must not look OLDER than the off-image anti-rollback
+     * anchor, or the next boot would refuse its own freshly created image. */
+    put32(hdr + 20, rollback_high_water());
     sc_burn(vek, sizeof(vek));
     hdr_valid = 0;
     image_pending = 0;
