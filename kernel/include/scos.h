@@ -581,7 +581,11 @@ void gpu_init(const struct boot_framebuffer *fb);
  * not printed, mid-word, with no line saying bytes had been dropped.  Doubled, and the producers are handed the
  * same constant, so a report that still does not fit is a report that says so from inside the writer that knows
  * the limit rather than one that stops silently at the edge of a buffer. */
-#define SCOS_GRAPHICS_REPORT 16384
+/* 32 KiB, and deliberately not smaller: the measured report runs to about 10 KiB, and the last time this was
+ * sized from a worst case the report grew past it and the tail vanished mid-word with no notice.  The limit
+ * that matters for reading is TERM_LINES, which bounds what the screen keeps; this one only bounds a buffer,
+ * and the writer says out loud when it has filled it. */
+#define SCOS_GRAPHICS_REPORT 32768
 void graphics_report(char *out,size_t capacity);
 /* The same three paragraphs the panel ends with - firmware intake, the parsed images, and the FSP mailbox -
  * and nothing else, for a surface that cannot carry the whole panel.  The panel is longer than what a person

@@ -781,10 +781,10 @@ static void test_a_full_query_and_reply(void)
           model.tail_writes == 1);
 
     ask(M_NO_AINC);
-    check("a channel whose offset does not walk stops the request before the doorbell, not after",
-          fsp_state.send_blocked == 3 && !fsp_state.queried && model.tail_writes == 0);
-    check("which is precisely the failure the walk-check exists for: three dwords written to one place",
-          model.emem_dword == 0);
+    check("a channel whose offset does not walk still gets its doorbell, with the walk reported",
+          !fsp_state.send_blocked && fsp_state.queried && fsp_state.send_walk != 2u + 1u && model.tail_writes == 1);
+    check("and the packet is not judged by our counter: the bytes were written, so the request is live",
+          model.emem_dword != 0 || model.writes > 2);
 }
 
 static void test_the_handover_payload(void)

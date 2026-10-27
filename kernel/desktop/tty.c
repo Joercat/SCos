@@ -583,7 +583,7 @@ static void tty_exec(char *cmd)
     }
     else if(!strcmp(args[0],"appuninstall")){char result[256];if(nargs!=2||!strcmp(args[1],"--help"))tty_print("Usage: appuninstall <app-id> (keeps projects/data)");else{app_uninstall(args[1],result,sizeof(result));tty_print(result);}}
     else if(!strcmp(args[0],"graphics")){
-        char result[SCOS_GRAPHICS_REPORT];
+        static char result[SCOS_GRAPHICS_REPORT];   /* static: 32 KiB does not belong on the console stack */
         if(nargs>2)tty_print("Usage: graphics | graphics fsp");
         else if(nargs==2&&!strcmp(args[1],"fsp")){graphics_fsp_report(result,sizeof(result));tty_print(result);}
         else{graphics_report(result,sizeof(result));tty_print(result);}

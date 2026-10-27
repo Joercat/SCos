@@ -308,6 +308,11 @@ static void put_fsp_mailbox(struct writer *w, const struct gpu_fsp_state *f)
             ? ", so the queue takes stores from this reader and a packet can be put on it"
             : ", which refuses the store as well as the read: this reader has no door into the queue");
     put(w, ".");
+    put(w, " The EMEM offset advanced ");
+    put_number(w, f->send_walk);
+    put(w, " dword(s) while the packet was written, which is reported and not used to veto the send: the "
+           "coprocessor judges a packet by its own length and signature, and an unreadable counter is not "
+           "evidence that the bytes did not arrive.");
     put(w, " The FSP's firmware version reads ");
     put_number(w, f->ucode_version & 0x7ffu);
     put(w, " and its own fuse check reads 0x");

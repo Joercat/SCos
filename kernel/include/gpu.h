@@ -244,6 +244,7 @@ struct gpu_fsp_state {
      * words on receive and never tests whether it is allowed to read them first; we gated every write on a
      * readable pair, which is how a card can finish a whole boot with writes 0 because nobody ever tried. */
     uint32_t reset_head, reset_tail;
+    uint32_t send_walk;                    /* dwords the EMEM offset advanced by, recorded and not obeyed */
     int queue_writable;                  /* the value we wrote came back, whatever the read said before */
     int queried, responded, send_blocked;     /* a request went into the channel, a reply was read back off
                                                * it, and why a request could not go in */

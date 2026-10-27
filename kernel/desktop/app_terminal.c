@@ -11,7 +11,10 @@
  */
 #include "scos.h"
 
-#define TERM_LINES 512
+/* A display limit, stated as one: this is how many lines the scrollback keeps and renders, and nothing a
+ * command prints is dropped for being long - the buffer a response is assembled in is separately bounded and
+ * says so when it fills.  Raising it costs memory per tab and no correctness. */
+#define TERM_LINES 1000
 #define TERM_LINE 256
 #define HIST 16
 #define TERM_MAX_TABS 6
@@ -308,7 +311,10 @@ static void run_command(struct term *t, const char *command)
     if (!nargs) return;
 
     const char *cmd = args[0];
-    char response[SCOS_GRAPHICS_REPORT];   /* holds the GPU detection report, which lists every adapter */
+    /* Static rather than a local: at 32 KiB it does not belong on a task stack, and the terminal's command loop
+     * is one thread at a time, so one buffer per app is honest.  The size is generous on purpose - the whole
+     * report is written out or the writer says what it could not fit; a response is never silently clipped. */
+    static char response[SCOS_GRAPHICS_REPORT];   /* holds the GPU detection report, which lists every adapter */
     response[0] = 0;
     int typed = 1;
 

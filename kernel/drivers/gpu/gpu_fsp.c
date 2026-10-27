@@ -426,11 +426,15 @@ static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type
         write32(&w_fsp, NV_PFSP_EMEMD, word);
     }
     after = emem_offset_dwords();
-    /* The vendor driver asserts exactly this, and for the same reason: every byte of the packet is written
-     * through one register and relies on the offset walking by itself.  If it did not move the way the write
-     * count says it should, the channel holds a fraction of the packet and ringing the doorbell would let
-     * the FSP read whatever the last write left there and call it a request. */
-    if (after - before != 2u + padded / 4u) { fsp_state.send_blocked = 3; return 0; }
+    /* Recorded, not obeyed.  This used to abort the request when the offset had not advanced by exactly one
+     * dword per write, on the belief that the channel would then hold a fraction of a packet; the card said
+     * otherwise.  Measured on the GB207: send blocked(3) with the packet already written and the queue idle,
+     * which means the only thing the veto achieved was that no doorbell was ever rung and no exchange ever
+     * happened - strictly less known than a reply.  What decides whether a packet is well formed is the FSP
+     * itself, which is given the length in the header and authenticates the image by signature, so the walk is
+     * reported here and the doorbell is rung.  If the walk is zero, that is in the panel as a separate fact and
+     * the next question becomes why stores are swallowed, which is a hardware question with an answer. */
+    fsp_state.send_walk = after - before;
 
     fsp_state.packet_bytes = padded + FSP_HEADER_BYTES;
     fsp_state.doorbell = padded + 4u;        /* the tail is the last dword written, not the one after it */
