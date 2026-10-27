@@ -3,7 +3,12 @@ LUA_OBJS := $(addprefix $(BUILD)/lua-,$(addsuffix .o,$(LUA_NAMES)))
 LUA_FLAGS := $(filter-out -mgeneral-regs-only,$(CFLAGS)) -mno-avx -fno-strict-aliasing -ffunction-sections -fdata-sections -Wno-unused-but-set-variable -Wno-parentheses -Wno-sign-compare -DSCOS_LUA -Ithird_party/lua -Ithird_party/stb -Ikernel/lua -include kernel/lua/port.h
 MUSL_SRC := $(wildcard third_party/musl/math/*.c) third_party/musl/internal/floatscan.c
 MUSL_OBJS := $(patsubst %.c,$(BUILD)/%.o,$(MUSL_SRC))
-$(BUILD)/lua-%.o: third_party/lua/%.c $(wildcard third_party/lua/*.h) kernel/lua/port.h kernel/lua/runtime.mk Makefile | $(BUILD)
+# The same Lua objects are linked TWICE - into the kernel for the owner's
+# unisolated host, and into build/userland.elf for the CPL3 host - and the build
+# stamp has to be identical in both, or tools/makedisk.py rightly refuses to pack
+# a kernel whose stamp disagrees with the disk record.  The stamp header is
+# therefore an order-only prerequisite here as well.
+$(BUILD)/lua-%.o: third_party/lua/%.c $(wildcard third_party/lua/*.h) kernel/lua/port.h kernel/lua/runtime.mk Makefile | $(BUILD) $(BUILD)/scosbuild.h
 	$(CC) $(LUA_FLAGS) -Wno-unused-function -c $< -o $@
 $(BUILD)/third_party/musl/%.o: third_party/musl/%.c kernel/lua/port.h kernel/lua/runtime.mk Makefile $(wildcard third_party/musl/internal/*.h third_party/musl/math/*.h)
 	mkdir -p $(dir $@)

@@ -123,11 +123,15 @@ USER_CFLAGS := -m64 -ffreestanding -fno-pie -fno-PIE -fno-stack-protector -fno-b
                -fno-asynchronous-unwind-tables -mno-red-zone -mno-avx \
                -fno-strict-aliasing -O2 -Wall -Wextra -Werror -std=c11 \
                -mcmodel=large -Ikernel/user
-$(BUILD)/user-%.o: kernel/user/%.c kernel/user/user_syscalls.h | $(BUILD)
+# The CPL3 image carries the same build stamp as the kernel (see
+# kernel/src/../include/scos.h), so it must be built AFTER the stamp is written;
+# otherwise the embedded image keeps the previous commit string and the packer
+# refuses the image as misreporting itself.
+$(BUILD)/user-%.o: kernel/user/%.c kernel/user/user_syscalls.h | $(BUILD) $(BUILD)/scosbuild.h
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 $(BUILD)/user-start.o: kernel/user/start.S | $(BUILD)
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
-$(BUILD)/user-cat.o: kernel/user/cat_user.c kernel/user/user_syscalls.h | $(BUILD)
+$(BUILD)/user-cat.o: kernel/user/cat_user.c kernel/user/user_syscalls.h | $(BUILD) $(BUILD)/scosbuild.h
 	$(CC) $(USER_CFLAGS) -Ithird_party/lua -Ikernel/lua -c $< -o $@
 $(BUILD)/userland.elf: $(BUILD)/user-start.o $(BUILD)/user-app.o $(BUILD)/user-ulibc.o $(BUILD)/user-cat.o $(BUILD)/lua-runtime.o kernel/user/user.ld
 	$(LD) -m elf_x86_64 --no-dynamic-linker --build-id=none -z noexecstack \
