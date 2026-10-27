@@ -459,7 +459,7 @@ def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
                    'the sections the boot sequence reads are not reported as it read them: ' \
                    + panel[-1200:]
             assert 'crc32 0x' in panel, 'no checksum to compare against the copy on another machine'
-            assert 'not what it can do to the card - the paragraph below says which of the ' in panel, \
+            assert 'the paragraph below answers it with the stores it lists' in panel, \
                    'the intake paragraph claims more or less than the handover does: ' + panel[-1400:]
 
             # The all-or-nothing tail, exercised for real: called with a buffer too small for the three tail

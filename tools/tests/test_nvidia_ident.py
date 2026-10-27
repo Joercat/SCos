@@ -264,8 +264,8 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
             # actually put on the wire.  On this disk, with no firmware staged, the panel has to pick the short
             # of the two branches, and it has to say so in the sentence rather than by omission.
             assert 'GSP path: the clause above quotes' in panel, panel[-1400:]
-            assert '- one query, no boot' in panel, \
-                   'a machine that asked nothing still describes itself as having asked for a boot: ' + panel[-1400:]
+            assert 'nothing was written at all' in panel, \
+                   'a machine that asked nothing still describes itself as having asked for anything: ' + panel[-1400:]
             assert 'assembles the handover, and asks the FSP to use it' in panel, panel[-1400:]
             # Which brings the firmware line onto this panel too.  On a disk that stages nothing it has to say
             # so and name the five roles, because that is the one thing the person standing at this machine can

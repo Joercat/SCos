@@ -1234,8 +1234,16 @@ void graphics_report(char *out, size_t capacity)
             if (fs && fs->handover_sent)
                 put(&w, ", including one handover of a firmware image the boot volume supplied - what the card "
                         "made of it is in the two measurements taken around it, not in this sentence");
+            else if (fs && fs->handover_attempted)
+                /* The state a GB207 is in today: the packet is on the card's side of the wire and nothing has
+                 * come back, which is not the same finding as "this OS declined to write". */
+                put(&w, ", and one handover the card has taken and not answered - which of the two it is, "
+                        "written or not, is answered by the stores the paragraph below lists one by one");
+            else if (fs && fs->queried)
+                put(&w, " - one query, no handover");
             else
-                put(&w, " - one query, no boot");
+                put(&w, "; on this machine nothing was written at all, and the paragraph below gives the reason "
+                        "rather than leaving it to be guessed");
             put(&w, ".  Beyond that sits the card's own firmware boot: this build reads the firmware off the "
                     "boot volume if it is given it, assembles the handover, and asks the FSP to use it, and an "
                     "engine whose coprocessor was not started for it is an engine this build cannot give work "
