@@ -485,7 +485,7 @@ static void put_fsp_headline(struct writer *w, const struct gpu_fsp_state *f)
     if ((f->boot_scratch & 0xffff0000u) == 0xbadf0000u) {
         put(w, "window refused the read 0x");
         put_hex(w, f->boot_scratch);
-        put(w, f->booted ? ", reported booted anyway, " : ", nothing to wait for, ");
+        put(w, f->booted ? ", reported booted anyway, " : ", nothing to wait for (waited ");
     } else {
         put(w, "0x");
         put_hex(w, f->boot_scratch);

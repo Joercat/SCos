@@ -786,7 +786,15 @@ static void probe_mailbox(void)
      * read-back is reported so a refusal is a measurement and not an assumption. */
     if (!queue_readable && !fsp_state.queue_writable) return;  /* no mailbox this reader can use at all */
     fsp_state.mailbox_readable = 1;
-    if (!fsp_state.booted) return;        /* until the FSP says it is up, nothing on the other end is reading */
+    /* Send when the queue itself says it is empty, whether or not the boot scratch agreed.  Measured on the
+     * GB207: the FSP scratch at 0x8f0320 answers four zeros and its clock never ticks, which the reference
+     * driver describes as a *decoupled* window - the CPU is simply not permitted to see it - while the queue
+     * registers answer and report themselves idle.  Requiring the scratch was therefore waiting on a signal this
+     * reader cannot observe, and it is the reason the last two pastes end with the same number: writes 0, not
+     * one store tried.  The pair of head/tail words is the condition the reference driver checks before it
+     * writes QUEUE_TAIL, so that is the condition we check, and `booted' stays in the report as what it is: a
+     * read of a window, not a permission to send. */
+    if (!fsp_state.booted && !(queue_readable && idle == 1)) return;
 
     {
         uint8_t query = (uint8_t)NVDM_TYPE_CLOCK_BOOST;   /* which capability to ask about; asking is not

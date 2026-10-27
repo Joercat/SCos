@@ -575,7 +575,13 @@ void gpu_init(const struct boot_framebuffer *fb);
  * against the 64 KiB kernel stack entry.S sets up.  The buffers stay
  * locals rather than statics because six consoles and a window manager share this path, and a static report
  * buffer would be shared the same way. */
-#define SCOS_GRAPHICS_REPORT 8192
+/* A command's whole response, in one buffer, in both the terminal window and the TTY.  8192 was set from a
+ * measured worst case that has since grown: the panel plus the FSP paragraphs plus the detection list now runs
+ * past it, and what the old size did with the overflow was nothing at all - the tail of the report was simply
+ * not printed, mid-word, with no line saying bytes had been dropped.  Doubled, and the producers are handed the
+ * same constant, so a report that still does not fit is a report that says so from inside the writer that knows
+ * the limit rather than one that stops silently at the edge of a buffer. */
+#define SCOS_GRAPHICS_REPORT 16384
 void graphics_report(char *out,size_t capacity);
 /* The same three paragraphs the panel ends with - firmware intake, the parsed images, and the FSP mailbox -
  * and nothing else, for a surface that cannot carry the whole panel.  The panel is longer than what a person

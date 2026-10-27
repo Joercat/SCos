@@ -648,8 +648,13 @@ static void test_the_gates(void)
     gpu_fsp_note(&device, &empty);
     check("a mailbox that answers while the FSP is still booting is recorded as answering",
           fsp_state.mailbox_readable && !fsp_state.booted && fsp_state.boot_scratch == 0x12345600u);
-    check("and nothing is sent, because a channel nobody is reading is not a question",
-          !fsp_state.queried && model.writes == 0);
+    /* The contract changed here, on the strength of a real card's paste rather than of a preference.  The boot
+     * scratch read all four zeros and never ticked on a GB207 whose queue answered and reported itself idle,
+     * because that window is decoupled from CPU reads - so a rule that required the scratch before writing was
+     * a rule that guaranteed writes 0 forever.  The idle head/tail pair is the condition the reference driver
+     * uses before it stores QUEUE_TAIL, so that is the condition, and the scratch stays a reported fact. */
+    check("and a request is sent when the queue is idle, even while the boot scratch has not agreed",
+          fsp_state.queried && model.writes > 0);
     check("the FSP's version and fuse check are read whether or not a request is possible",
           fsp_state.ucode_version == 42 && fsp_state.fuse_check == 0);
     /* Two bounds exist on a wait and the file states both: the count of reads, and - when the device's own

@@ -170,8 +170,17 @@ def test_the_panel_says_what_was_asked_and_what_was_not():
     assert "more than this build's own tail buffer of " in panel, 'a tail longer than its own scratch is ' \
         'not reported as its own finding'
     assert 'Run `graphics fsp`' in panel, 'the notice that replaces them does not say where the rest went'
-    assert 'SCOS_GRAPHICS_REPORT 8192' in source('kernel/include/scos.h'), \
-        'the caller buffer moved, and the tail scratch is sized against it'
+    # The size is read back out of the header rather than repeated here, because this pin exists to notice when
+    # the caller's buffer and the tail scratch stop agreeing - and it did its job: the report grew past 8192 and
+    # the tail was being dropped mid-word with no notice, so the buffer is 24576 now and must stay comfortably
+    # above the scratch the panel writes its tail into.
+    hdr = source('kernel/include/scos.h')
+    cap = re.search(r'#define\s+SCOS_GRAPHICS_REPORT\s+(\d+)', hdr)
+    assert cap, 'the caller buffer is no longer a named constant, so the tail scratch is sized against nothing'
+    assert int(cap.group(1)) >= 16384, \
+        'the caller buffer is %s bytes, and the measured report needs room for the tail as well' % cap.group(1)
+    assert 'FSP_TAIL_LIMIT 6144' in source('kernel/desktop/graphics.c'), \
+        'the tail scratch no longer states its own size, so a clipped tail is not knowable'
 
     boot = source('kernel/drivers/gpu/gpu_detect.c')
     assert 'gpu_fsp_note(&devices[pick], handoff);' in boot, \
