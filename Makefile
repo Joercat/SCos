@@ -26,8 +26,13 @@ GPU_OBJECTS := $(patsubst kernel/drivers/gpu/%.c,$(BUILD)/gpu-%.o,$(GPU_SOURCES)
 # state actually moved, so nothing but the file that reads it is recompiled, and a link of unchanged
 # objects reproduces the same image bytes.  buildinfo.o is deliberately rebuilt every time: it is the
 # kernel's only copy of the stamp, and if it were ever cached, the OS would misreport itself.
-$(BUILD)/desktop-buildinfo.o: FORCE
+$(BUILD)/desktop-buildinfo.o: $(BUILD)/scosbuild.h FORCE
 	$(CC) $(APP_CFLAGS) -c kernel/desktop/buildinfo.c -o $@
+# The stamp header is a NORMAL prerequisite, not an order-only one: every object
+# #includes it and prints the commit, so a changed stamp must rebuild them.  It
+# is order-only only where the file is not read (nothing right now).  Make
+# rewrites the header only when the tree identity changes, so an unchanged tree
+# still rebuilds nothing.
 stamp: $(BUILD)/scosbuild.h
 $(BUILD)/scosbuild.h: $(BUILD) FORCE
 	@python3 tools/buildinfo.py --header $@
@@ -48,7 +53,7 @@ dist: all
 .PHONY: dist
 $(BUILD):
 	mkdir -p $@
-$(BUILD)/%.o: kernel/src/%.c kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD) $(BUILD)/scosbuild.h
+$(BUILD)/%.o: kernel/src/%.c kernel/include/kernel.h kernel/include/boot.h Makefile $(BUILD)/scosbuild.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/entry.o: kernel/x86_64/entry.S | $(BUILD)
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
@@ -127,11 +132,11 @@ USER_CFLAGS := -m64 -ffreestanding -fno-pie -fno-PIE -fno-stack-protector -fno-b
 # kernel/src/../include/scos.h), so it must be built AFTER the stamp is written;
 # otherwise the embedded image keeps the previous commit string and the packer
 # refuses the image as misreporting itself.
-$(BUILD)/user-%.o: kernel/user/%.c kernel/user/user_syscalls.h | $(BUILD) $(BUILD)/scosbuild.h
+$(BUILD)/user-%.o: kernel/user/%.c kernel/user/user_syscalls.h $(BUILD)/scosbuild.h | $(BUILD)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 $(BUILD)/user-start.o: kernel/user/start.S | $(BUILD)
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
-$(BUILD)/user-cat.o: kernel/user/cat_user.c kernel/user/user_syscalls.h | $(BUILD) $(BUILD)/scosbuild.h
+$(BUILD)/user-cat.o: kernel/user/cat_user.c kernel/user/user_syscalls.h $(BUILD)/scosbuild.h | $(BUILD)
 	$(CC) $(USER_CFLAGS) -Ithird_party/lua -Ikernel/lua -c $< -o $@
 $(BUILD)/userland.elf: $(BUILD)/user-start.o $(BUILD)/user-app.o $(BUILD)/user-ulibc.o $(BUILD)/user-cat.o $(BUILD)/lua-runtime.o kernel/user/user.ld
 	$(LD) -m elf_x86_64 --no-dynamic-linker --build-id=none -z noexecstack \
@@ -145,13 +150,13 @@ $(BUILD)/desktop-usermode.o: $(BUILD)/userland_image.h
 $(BUILD)/desktop-usermode.o: APP_CFLAGS += -I$(BUILD)
 
 APP_CFLAGS := $(filter-out -mgeneral-regs-only,$(CFLAGS)) -mno-avx -fno-strict-aliasing
-$(BUILD)/desktop-%.o: kernel/desktop/%.c kernel/include/scos.h kernel/include/security.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD) $(BUILD)/scosbuild.h
+$(BUILD)/desktop-%.o: kernel/desktop/%.c kernel/include/scos.h kernel/include/security.h kernel/include/kernel.h kernel/include/boot.h Makefile $(BUILD)/scosbuild.h | $(BUILD)
 	$(CC) $(APP_CFLAGS) -c $< -o $@
 # Every callback reachable from a hardware IRQ remains general-register-only.
 $(BUILD)/desktop-kbd.o $(BUILD)/desktop-mouse.o $(BUILD)/desktop-cpumeter.o $(BUILD)/desktop-klog.o $(BUILD)/desktop-platform.o: APP_CFLAGS = $(CFLAGS) -fno-strict-aliasing
-$(BUILD)/driver-%.o: kernel/drivers/%.c kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD) $(BUILD)/scosbuild.h
+$(BUILD)/driver-%.o: kernel/drivers/%.c kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile $(BUILD)/scosbuild.h | $(BUILD)
 	$(CC) $(CFLAGS) -fno-strict-aliasing -c $< -o $@
-$(BUILD)/gpu-%.o: kernel/drivers/gpu/%.c kernel/drivers/gpu/gpu_ids.h kernel/include/gpu.h kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD) $(BUILD)/scosbuild.h
+$(BUILD)/gpu-%.o: kernel/drivers/gpu/%.c kernel/drivers/gpu/gpu_ids.h kernel/include/gpu.h kernel/include/scos.h kernel/include/kernel.h kernel/include/boot.h Makefile $(BUILD)/scosbuild.h | $(BUILD)
 	$(CC) $(CFLAGS) -fno-strict-aliasing -c $< -o $@
 
 include kernel/lua/runtime.mk
