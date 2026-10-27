@@ -39,8 +39,12 @@ def test_the_isolation_engine_is_wired():
         'VFS no longer enforces the process namespace or per-account files'
     assert 'int vfs_access' in vfs
     lua = (ROOT / 'kernel/desktop/lua_apps.c').read_text()
-    assert 'proc_private_alloc' in lua and 'cat_isolation_guard' in lua, \
-        'CAT packages no longer use a private heap domain'
+    assert 'proc_private_alloc' in lua and 'cat_isolation_guard' in lua
+    assert 'd->usermode' in lua and 'user_run_event' in lua, \
+        'isolated CAT packages are not dispatched through the CPL3 runtime'
+    assert 'sc_syscall_entry' in (ROOT / 'kernel/x86_64/usermode.S').read_text()
+    assert 'usermode_cpu_init' in (ROOT / 'kernel/src/interrupt.c').read_text()
+    assert 'SC_NR_EXIT' in (ROOT / 'kernel/user/user_syscalls.h').read_text()
     api = (ROOT / 'kernel/desktop/lua_api.inc').read_text()
     assert 'PROC_CAP_THEME' in api and 'PROC_CAP_IPC' in api and 'PROC_CAP_APPCTL' in api
     assert 'proc_cap_allowed(PROC_CAP_THEME)' in (ROOT / 'kernel/desktop/theme.c').read_text()
@@ -80,20 +84,25 @@ def test_a_booted_guest_enforces_isolation():
         assert g.call('proc_count') == 2 and g.call('proc_isolation_count') == 2
         d1, d2 = g.call('proc_domain', p1), g.call('proc_domain', p2)
         assert d1 and d2 and d1 != d2, 'both apps share one page-table domain'
-        v1, v2 = g.call('proc_arena_va', p1), g.call('proc_arena_va', p2)
-        assert v1 and v2 and v1 != v2
-        assert g.call('proc_kernel_root') not in (0, v1, v2)
-
-        # A real CR3 switch and read: p1 can see its own marker, p2 has NO
-        # mapping for those pages at all.  This is a hardware boundary, not a
-        # boolean that a package can ignore.
+        # Every CPL3 process sees USER_BASE at ITS OWN physical frames.  The
+        # same virtual address therefore contains a different marker in each
+        # process, and no VA in p2's PML4 resolves to p1's frames.
+        user0 = 0x600000000000
         out = s + 4096
-        assert g.call('proc_pid_probe', p1, v1, out) == 1
-        assert int.from_bytes(d.read(out, 8), 'little') == MARKER + p1
-        assert g.call('proc_pid_probe', p2, v1, out) == 0, \
-            'another process can read this app\'s private memory'
-        assert g.call('proc_pid_mapped', p1, v1) == 1
-        assert g.call('proc_pid_mapped', p2, v1) == 0
+        assert g.call('proc_pid_probe', p1, user0, out) == 1
+        first = int.from_bytes(d.read(out, 8), 'little')
+        assert first == MARKER + p1
+        assert g.call('proc_pid_probe', p2, user0, out) == 1
+        second = int.from_bytes(d.read(out, 8), 'little')
+        assert second == MARKER + p2 and second != first, \
+            'both processes resolve USER_BASE to the same physical memory'
+        assert g.call('proc_kernel_root') not in (0, user0)
+        # The CPL3 image, stack and shared page are present; an address past
+        # the mapped slot is not.
+        assert g.call('user_pid_mapped', p1, 0x600000040000) == 1
+        assert g.call('user_pid_mapped', p1, 0x600000700000) == 0
+        assert g.call('user_image_entry') == 0x600000040000
+        assert g.call('usermode_enabled') == 1
 
         # Capabilities are kernel-held and cannot be forged by app code.
         assert g.call('proc_pid_cap_allowed', p1, PROC_CAP_VFS_READ) == 1
@@ -109,6 +118,15 @@ def test_a_booted_guest_enforces_isolation():
         assert g.call('proc_pid_access', p1, put(512, 'home/appdata/notepad/x'), 1) == 1
         assert g.call('proc_pid_access', p1, put(512, 'home/appdata/notepad'), 1) == 1
         assert g.call('proc_pid_access', 0, put(512, 'home/documents/welcome.txt'), 0) == 1
+        # A real mount namespace: vfs_lookup honours "..", so traversal,
+        # nested paths and "." segments must all be refused before any lookup.
+        for escape in ('home/appdata/notepad/../about/x',
+                       'home/appdata/notepad/./x',
+                       'home/appdata/notepad/sub/x',
+                       'home/appdata/notepad/../../documents/welcome.txt',
+                       'home/apps/notepad.cat/../x'):
+            assert g.call('proc_pid_access', p1, put(512, escape), 1) == 0, \
+                'namespace traversal accepted: ' + escape
 
         # Per-account private files: root can use home/users/root/**, but not
         # another account's tree, even with no app running.
@@ -138,12 +156,12 @@ def test_a_booted_guest_enforces_isolation():
         g.run(0.5)
         p4 = g.call('proc_pid_for_window', w4)
         assert g.call('proc_pid_isolated', p4) == 1
-        v4 = g.call('proc_arena_va', p4)
-        assert g.call('proc_pid_mapped', p4, v4 + 16 * 4096) == 1, \
-            'the Lua heap is not in the private domain'
-        assert g.call('proc_pid_mapped', p4, v1) == 0, 'the CAT app can see a native app arena'
+        assert g.call('user_pid_mapped', p4, 0x600000040000) == 1
         assert g.state(w4) == (0, ''), g.state(w4)
         assert g.read('home/appdata/iso-app/iso.txt') == b'private data'
+        # Its Lua VM, heap and bytecode executed at CPL3 through syscalls.
+        assert g.call('user_syscall_count') > 0
+        assert g.call('user_fault_count') == 0
 
         # The shell reports the same state to the owner.
         assert 'isolated with private page-table domains' in shell(g, 'security')

@@ -237,14 +237,16 @@ also charge/check C-library work; expensive calls can fail even without a long
 Lua loop. These are conservative responsiveness limits, not hard real-time
 scheduling guarantees or a proof that arbitrary code can never expose a bug.
 
-**This is not ring-3 isolation.** Apps still run at CPL0 inside the cooperative
-kernel. When the owner isolates an app, its Lua heap lives in a private PML4
-domain, its files are restricted to `home/appdata/<id>/`, and global theme /
-notification / icon operations are refused by the kernel-held capability set
-(`docs/migration/SECURITY.md` §5). That is real page-table and capability
-isolation, but an interpreter/adapter bug is still a CPL0 bug, and a deliberately
-malicious native C app could execute privileged instructions. Do not treat an
-isolated package as a boundary against hostile code that can escape the VM.
+**Isolated CAT packages run at CPL3.** When the owner isolates an app, the
+whole Lua 5.4.9 VM, its heap, the bytecode and the app's state live in a
+user-mode process with its own PML4. Kernel memory is supervisor-only there;
+`mov cr3`, `wrmsr`, `cli` and port I/O are privileged instructions at CPL3 and
+are contained as app crashes. Every `scos.*` function is a syscall checked
+against a default-deny allowlist, a private mount root, capabilities and
+resource limits (`docs/USERMODE.md`, `docs/migration/SECURITY.md` §5). An
+interpreter bug is still a bug, but it is a **CPL3** bug - it cannot read the
+kernel or another app. Unisolated packages keep the original in-kernel path.
+Built-in native C apps remain trusted CPL0 kernel components.
 
 ## Native C app registration
 

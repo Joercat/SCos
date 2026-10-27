@@ -337,13 +337,15 @@ static void identity_restore(uintptr_t phys)
  * text/rodata stay read-only too.  Physical pages are allocated on demand, so
  * an unisolated desktop pays nothing. */
 #define DOMAIN_SLOT   192
-#define DOMAIN_BASE   0x0000600000000000ULL
-#define DOMAIN_STRIDE 0x0000000000400000ULL   /* two PD entries = 4 MiB */
-#define DOMAIN_PAGES  1024
+#define DOMAIN_BASE   0x0000600000000000ULL   /* also USER_BASE for CPL3 apps */
+#define DOMAIN_STRIDE 0x0000000000800000ULL   /* four PD entries = 8 MiB */
+#define DOMAIN_PT     4
+#define DOMAIN_PAGES  (512 * DOMAIN_PT)
 #define DOMAIN_MAX    24
+#define USER_BIT      4                       /* U/S: accessible at CPL3 */
 
 struct domain {
-    uint64_t *pml4, *pdpt, *pd, *pt[2];
+    uint64_t *pml4, *pdpt, *pd, *pt[DOMAIN_PT];
     int used, pages;
 };
 static struct domain domains[DOMAIN_MAX];
@@ -365,6 +367,11 @@ uint64_t memory_current_root(void) { return read_cr3() & ADDRESS; }
 uintptr_t memory_domain_base(void) { return (uintptr_t)DOMAIN_BASE; }
 uintptr_t memory_domain_stride(void) { return (uintptr_t)DOMAIN_STRIDE; }
 
+/* A domain sees its own frames at DOMAIN_BASE + page*4K (this is USER_BASE for
+ * CPL3 apps, so an absolute-linked user image needs no relocation).  The
+ * kernel root sees every domain's frames at DOMAIN_BASE + slot*8MiB, which is
+ * how the compositor and the process manager reach them.  Both views point at
+ * the SAME page tables; no other domain references them. */
 int memory_domain_create(void)
 {
     int i;
@@ -380,45 +387,87 @@ int memory_domain_create(void)
         kernel_dpdpt[0] = (uintptr_t)kernel_dpd | 3;
     }
     struct domain *d = &domains[i];
-    d->pml4 = domain_table(); d->pdpt = domain_table();
-    d->pd = domain_table();   d->pt[0] = domain_table(); d->pt[1] = domain_table();
-    if (!d->pml4 || !d->pdpt || !d->pd || !d->pt[0] || !d->pt[1]) {
-        if (d->pml4)  pages_release((uintptr_t)d->pml4, 1);
-        if (d->pdpt)  pages_release((uintptr_t)d->pdpt, 1);
-        if (d->pd)    pages_release((uintptr_t)d->pd, 1);
-        if (d->pt[0]) pages_release((uintptr_t)d->pt[0], 1);
-        if (d->pt[1]) pages_release((uintptr_t)d->pt[1], 1);
+    d->pml4 = domain_table(); d->pdpt = domain_table(); d->pd = domain_table();
+    for (int k = 0; k < DOMAIN_PT; k++) d->pt[k] = domain_table();
+    int ok = d->pml4 && d->pdpt && d->pd;
+    for (int k = 0; k < DOMAIN_PT; k++) ok = ok && d->pt[k];
+    if (!ok) {
+        if (d->pml4) pages_release((uintptr_t)d->pml4, 1);
+        if (d->pdpt) pages_release((uintptr_t)d->pdpt, 1);
+        if (d->pd)   pages_release((uintptr_t)d->pd, 1);
+        for (int k = 0; k < DOMAIN_PT; k++)
+            if (d->pt[k]) pages_release((uintptr_t)d->pt[k], 1);
         memset(d, 0, sizeof(*d));
         return 0;
     }
-    d->pdpt[0] = (uintptr_t)d->pd | 3;
-    d->pd[i * 2]     = (uintptr_t)d->pt[0] | 3;
-    d->pd[i * 2 + 1] = (uintptr_t)d->pt[1] | 3;
-    kernel_dpd[i * 2]     = (uintptr_t)d->pt[0] | 3;  /* kernel manages arenas */
-    kernel_dpd[i * 2 + 1] = (uintptr_t)d->pt[1] | 3;
+    /* U/S must be set at EVERY level of the walk: a user PTE under a
+     * supervisor-only PD/PDPT/PML4 entry is still inaccessible at CPL3. */
+    d->pdpt[0] = (uintptr_t)d->pd | 7;
+    for (int k = 0; k < DOMAIN_PT; k++) {
+        d->pd[k] = (uintptr_t)d->pt[k] | 7;
+        kernel_dpd[i * DOMAIN_PT + k] = (uintptr_t)d->pt[k] | 3;
+    }
     d->pages = 0;
     d->used = 1;
     domain_flush();
-    return i + 1;                          /* pid: 0 is the kernel */
+    return i + 1;
 }
 
-/* Map `pages` 4 KiB frames into this domain's private virtual slot.  Both the
- * kernel root and the domain root reference the SAME page table, so one write
- * serves both; no other domain references it. */
-int memory_domain_map(int pid, int pages)
+/* Map frames [first, first+count).  `hide` removes the identity-map alias and
+ * is used for CPL0-only native arenas; CPL3 domains rely on U/S instead, so
+ * the kernel can still fill a user page through its physical address. */
+static int domain_map_range(int pid, int first, int count, int hide, int user)
 {
-    if (pid < 1 || pid > DOMAIN_MAX || pages < 1 || pages > DOMAIN_PAGES) return 0;
+    if (pid < 1 || pid > DOMAIN_MAX || first < 0 || count < 1 ||
+        first + count > DOMAIN_PAGES) return 0;
     struct domain *d = &domains[pid - 1];
     if (!d->used) return 0;
-    for (int i = d->pages; i < pages; i++) {
+    for (int i = first; i < first + count; i++) {
+        if (d->pt[i / 512][i % 512] & 1) continue;
         uintptr_t p = pages_allocate(1);
         if (!p) return 0;
-        d->pt[i / 512][i % 512] = p | 3 | NX;
-        identity_hide(p);              /* no identity-map alias survives */
-        d->pages++;
+        d->pt[i / 512][i % 512] = p | 3 | NX | (user ? USER_BIT : 0);
+        if (hide) identity_hide(p);
+        if (i >= d->pages) d->pages = i + 1;
     }
     domain_flush();
     return 1;
+}
+
+/* Native CPL0 arena: supervisor-only, and no identity-map alias. */
+int memory_domain_map(int pid, int pages)
+{
+    if (pid < 1 || pid > DOMAIN_MAX || pages < 1 || pages > DOMAIN_PAGES) return 0;
+    return domain_map_range(pid, domains[pid - 1].pages, pages - domains[pid - 1].pages, 1, 0);
+}
+
+/* CPL3 mapping: U/S=1 so ring-3 code can use it, identity alias left intact
+ * (U/S=0 there) so the kernel can initialise it from CPL0. */
+int memory_domain_user_map(int pid, int first, int count)
+{
+    return domain_map_range(pid, first, count, 0, 1);
+}
+int memory_domain_user_exec(int pid, int first, int count)
+{
+    if (pid < 1 || pid > DOMAIN_MAX || first < 0 || count < 1 ||
+        first + count > DOMAIN_PAGES) return 0;
+    struct domain *d = &domains[pid - 1];
+    if (!d->used) return 0;
+    for (int i = first; i < first + count; i++) {
+        uint64_t *slot = &d->pt[i / 512][i % 512];
+        if (!(*slot & 1)) return 0;
+        *slot = (*slot & ~NX) | USER_BIT;   /* executable, still user */
+    }
+    domain_flush();
+    return 1;
+}
+uintptr_t memory_domain_phys(int pid, int index)
+{
+    if (pid < 1 || pid > DOMAIN_MAX || index < 0 || index >= DOMAIN_PAGES) return 0;
+    struct domain *d = &domains[pid - 1];
+    if (!d->used) return 0;
+    uint64_t e = d->pt[index / 512][index % 512];
+    return (e & 1) ? (uintptr_t)(e & ADDRESS) : 0;
 }
 
 void memory_domain_destroy(int pid)
@@ -434,10 +483,10 @@ void memory_domain_destroy(int pid)
             pages_release(p, 1);
         }
     }
-    kernel_dpd[(pid - 1) * 2] = 0;
-    kernel_dpd[(pid - 1) * 2 + 1] = 0;
-    pages_release((uintptr_t)d->pt[0], 1);
-    pages_release((uintptr_t)d->pt[1], 1);
+    for (int k = 0; k < DOMAIN_PT; k++) {
+        kernel_dpd[(pid - 1) * DOMAIN_PT + k] = 0;
+        pages_release((uintptr_t)d->pt[k], 1);
+    }
     pages_release((uintptr_t)d->pd, 1);
     pages_release((uintptr_t)d->pdpt, 1);
     pages_release((uintptr_t)d->pml4, 1);
@@ -445,8 +494,7 @@ void memory_domain_destroy(int pid)
     domain_flush();
 }
 
-/* 1 when `va` resolves to a present leaf in this domain's page tables.  This
- * is the observable proof that another process's arena is genuinely absent. */
+/* 1 when `va` resolves to a present leaf in this domain's page tables. */
 int memory_domain_mapped(int pid, uintptr_t va)
 {
     uint64_t *pml4;
@@ -456,7 +504,7 @@ int memory_domain_mapped(int pid, uintptr_t va)
         if (!domains[pid - 1].used) return 0;
         pml4 = domains[pid - 1].pml4;
         memcpy(pml4, root, 4096);
-        pml4[DOMAIN_SLOT] = (uintptr_t)domains[pid - 1].pdpt | 3;
+        pml4[DOMAIN_SLOT] = (uintptr_t)domains[pid - 1].pdpt | 7;
     }
     uint64_t e = pml4[(va >> 39) & 511];
     if (!(e & 1)) return 0;
@@ -475,7 +523,7 @@ void memory_domain_switch(int pid)
     if (pid > 0 && pid <= DOMAIN_MAX && domains[pid - 1].used) {
         struct domain *d = &domains[pid - 1];
         memcpy(d->pml4, root, 4096);
-        d->pml4[DOMAIN_SLOT] = (uintptr_t)d->pdpt | 3;
+        d->pml4[DOMAIN_SLOT] = (uintptr_t)d->pdpt | 7;
         r = d->pml4;
     }
     __asm__ volatile("mov %0,%%cr3"::"r"((uintptr_t)r):"memory");

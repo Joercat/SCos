@@ -44,6 +44,8 @@ Read §2 before treating any of this as a boundary against a determined attacker
 | `kernel/desktop/sec_choices.c` | **User security choices** and per-app isolation choices, persisted and authenticated. |
 | `kernel/include/process.h`, `kernel/desktop/process.c` | **Process isolation engine**: process table, per-app PML4 domains, private arenas, kernel-held capability sets, VFS namespaces. |
 | `kernel/src/memory.c` | Page-table domain manager: separate CR3 per app, huge-leaf splitting, identity-map removal for private pages. |
+| `kernel/include/usermode.h`, `kernel/desktop/usermode.c` | **CPL3 syscall gate**, seccomp-style allowlist, mount/PID/IPC namespaces, cgroup-style limits. |
+| `kernel/x86_64/usermode.S`, `kernel/user/*` | `SYSCALL`/`SYSRET` boundary and the embedded CPL3 app server (Lua VM + API v2 host). See [USERMODE.md](../USERMODE.md). |
 | `kernel/desktop/sec_vault.c` | Encrypted disk header, key slots, volume-key lifetime, seal/open. |
 | `kernel/desktop/security.c` | Accounts, sessions, lockout, audit, roles, shell commands, entropy pool. |
 | `kernel/desktop/login.c` | **Plain TTY-style secure console** (login, setup, lock, recovery) and the lock-screen app API. |
@@ -104,15 +106,16 @@ check only. **Nothing verifies the boot files cryptographically, by design.**
   no measured boot, no keys. Anyone who can write the ESP can replace
   `BOOTX64.EFI`, `KERNEL.ELF` or any `.MOD`. The owner asked for this; do not
   describe the image as "secure boot" or "verified boot".
-* **Isolation is NOT a ring-3 user-mode boundary.** All app code still runs at
-  CPL0 in a cooperative kernel. A deliberately malicious *native C* app can
-  execute privileged instructions (`mov cr3`, MSR writes) or reach kernel
-  globals that are mapped in every domain; it is contained against reading
-  another process's private arena and against the mediated VFS/theme/IPC APIs,
-  not against arbitrary CPL0 machine instructions. Loaded GPU modules are part
-  of the kernel and are never isolated. Real CPL3 execution with a syscall gate
-  is the remaining step for a hard boundary. CAT packages are contained by the
-  Lua VM *plus* their private page-table domain, but a VM escape is still CPL0.
+* **Built-in native C apps are still CPL0.** Installed/third-party apps get a
+  **real ring-3 boundary** (§5, `docs/USERMODE.md`): CPL3, a private PML4, a
+  syscall gate with a default-deny allowlist, and hardware-contained faults.
+  The built-in native apps, however, are compiled into the kernel image - like
+  Linux kernel modules, they are trusted OS components, not sandboxed
+  applications. They get private domains, mount namespaces, capabilities and
+  resource limits, but a deliberately malicious built-in could still execute a
+  privileged instruction. Porting one to CPL3 means compiling it into the user
+  image against the documented syscall ABI. Loaded GPU modules are part of the
+  kernel and are never isolated.
 * **Per-user file isolation is access control, not separate encryption.** One
   volume key encrypts the whole tree, so someone who can unwrap the vault
   offline and parse the FS2 image can read every account's files. Inside the
@@ -299,6 +302,16 @@ process (§5).
 
 ### What "isolated" actually does
 
+**Installed CAT packages run at CPL3.** `lua_apps.c` becomes a thin dispatcher:
+`user_run_event()` fills a shared page with the event and the package source,
+and `user_enter()` SYSRETs into an embedded user-mode image containing the Lua
+5.4.9 VM and the whole API v2 `scos` table. The app's code, bytecode, heap and
+stack live in that process's own PML4; kernel memory is supervisor-only there.
+Every service is a numbered syscall checked against a default-deny allowlist,
+a private mount root, a capability set and resource limits. Escaping the Lua
+VM still leaves you at CPL3, not in the kernel. See
+[USERMODE.md](../USERMODE.md) for the ABI, syscall table and fault handling.
+
 The flag no longer just sits on the window. `proc_create()` registers a
 **process** with its own hardware memory domain, and the WM switches into it
 around **every** app callback (`APP_T0` / `APP_T1` in `wm.c`):
@@ -329,11 +342,11 @@ around **every** app callback (`APP_T0` / `APP_T1` in `wm.c`):
    are absent at lookup and denied at read/write. This applies to native C apps
    too — the check is in `vfs.c`, not in an app-facing helper.
 
-Native C apps are still compiled-in ring-0 code and are trusted not to execute
-`mov cr3` themselves; all app code shares kernel globals. GPU modules are part
-of the kernel and are never isolated. See the honest boundary in §2. An app the
-owner chose **never** to isolate gets `PROC_CAP_ALL`, no domain and the original
-unrestricted behaviour — nothing is forced.
+Built-in native C apps are compiled-in ring-0 OS components; they keep the
+page-table domains, mount namespace, capabilities and resource limits above but
+not the CPL3 boundary (§2). GPU modules are part of the kernel and are never
+isolated. An app the owner chose **never** to isolate gets `PROC_CAP_ALL`, no
+domain and the original unrestricted behaviour — nothing is forced.
 
 Owner-facing commands: `isolation` lists pid, app, owner, isolated state,
 domain and capability mask; `security` reports the number of isolated domains.
@@ -460,6 +473,14 @@ Passwords are never command arguments.
   proof that choices default on, actually change behaviour, survive a reboot,
   that `vault.encryption=off` writes a plain image, and that the WM shows the
   first-launch isolation prompt and stores the answer.
+* `tools/tests/test_usermode.py` — source-level wiring checks for CPL3
+  (`EFER.SCE`/`STAR`/`LSTAR`/`SFMASK`, DPL-3 GDT descriptors, fault return,
+  seccomp, mount namespace, cgroups) plus a booted guest that runs real
+  instructions at ring 3: reading/writing kernel memory, `mov cr3`, `wrmsr`,
+  `cli`, `outb`, reading another address space, an unlisted syscall and a path
+  outside the mount namespace. Every escape is contained as a CPU exception,
+  the fault counter increments, and the kernel does not panic. A second guest
+  proves an installed CAT package runs its Lua VM, heap and callbacks at CPL3.
 * `tools/tests/test_isolation.py` — source-level wiring checks for the process
   engine plus a booted guest that opens two isolated native apps and an isolated
   CAT package, then proves: each has a distinct PML4; a `proc_pid_probe()` CR3
@@ -479,7 +500,7 @@ Passwords are never command arguments.
   `test_affordances`, `test_management`, `test_cat` (including ATA save/reboot),
   `test_compositor`, `test_memory`, `test_buildinfo`, `test_verify_stick`,
   `test_gpu_render`, `test_gpu_detect`, `test_nvidia_ident`, `test_pci_scan`,
-  `test_isolation`, `test_delivery`. The GPU module-tamper test is back to its original form
+  `test_isolation`, `test_usermode`, `test_delivery`. The GPU module-tamper test is back to its original form
   (no signing to work around).
 * `make dist` refreshes image/record/checksum; `tools/check_delivery.py` passes.
 * **Emulator success is not physical-PC acceptance.** No claim about SMP,

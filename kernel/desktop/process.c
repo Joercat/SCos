@@ -18,6 +18,7 @@
 #include "scos.h"
 #include "process.h"
 #include "security.h"
+#include "usermode.h"
 
 int vfs_access(const char *path, int write);   /* kernel/desktop/vfs.c */
 
@@ -37,7 +38,7 @@ static int depth;
 struct saved_state { int proc, domain; };
 static struct saved_state saved[8];
 
-void proc_init(void) { memset(&P, 0, sizeof(P)); cur = 0; depth = 0; }
+void proc_init(void) { memset(&P, 0, sizeof(P)); cur = 0; depth = 0; usermode_init(); }
 
 static int index_of(struct window *w)
 {
@@ -82,6 +83,7 @@ int proc_create(struct window *w)
             volatile uint64_t *mark = (volatile uint64_t *)proc_arena_va(i + 1);
             *mark = UINT64_C(0x53434f5350524f43) + (uint64_t)(i + 1);
         }
+        user_attach(i + 1, w);
     }
     return i + 1;
 }
@@ -91,6 +93,7 @@ void proc_destroy(struct window *w)
     int i = index_of(w);
     if (i < 0) return;
     if (cur == i + 1) proc_deactivate();
+    user_detach(i + 1);
     if (P[i].domain) memory_domain_destroy(P[i].domain);
     memset(&P[i], 0, sizeof(P[i]));
 }
@@ -180,8 +183,9 @@ int proc_cap_allowed(uint32_t cap) { return proc_pid_cap_allowed(cur, cap); }
  * native C apps as well as Lua packages. */
 int proc_pid_path_allowed(int pid, const char *path, int write)
 {
-    const char *p, *rest, *slash;
-    size_t n;
+    char norm[256], own[64], prefix[64];
+    const char *p, *rest, *q;
+    size_t len, n, own_len;
     (void)write;
     if (!pid) return 1;
     if (pid < 1 || pid > PROC_MAX || !P[pid - 1].used) return 1;
@@ -189,40 +193,47 @@ int proc_pid_path_allowed(int pid, const char *path, int write)
     if (!path) return 0;
     p = path;
     while (*p == '/') p++;
-    if (!sc_neq(p, "./", 2)) p += 2;
-    /* vfs_parent_path() produces parents with a trailing slash ("home/");
-     * normalise it so directory traversal is not mistaken for an escape. */
-    {
-        size_t len = sc_len(p);
-        char norm[256];
-        while (len && p[len - 1] == '/') len--;
-        if (len >= sizeof(norm)) return 0;
-        memcpy(norm, p, len); norm[len] = 0;
-        p = norm;
-        if (sc_eq(p, "home") || sc_eq(p, "home/appdata")) return 1;
-        /* The runtime loader must read the app's OWN package to start it.
-         * That is code, not another app's data: only <id>.cat in the two
-         * package directories, and only for the matching id. */
-        {
-            static const char *const dirs[] = { "home/apps/", "home/demos/", 0 };
-            for (int k = 0; dirs[k]; k++) {
-                size_t dn = sc_len(dirs[k]);
-                if (sc_neq(p, dirs[k], dn)) continue;
-                const char *f = p + dn;
-                size_t idlen = sc_len(P[pid - 1].app_id);
-                if (!sc_neq(f, P[pid - 1].app_id, idlen) &&
-                    sc_eq(f + idlen, ".cat")) return 1;
-            }
-        }
-        if (sc_neq(p, "home/appdata/", 13)) return 0;
-        rest = p + 13;
-        slash = rest;
+    /* vfs_parent_path() produces parents with a trailing slash; normalise it.
+     * A trailing slash is harmless, but "." / ".." / empty segments are NOT:
+     * vfs_lookup() honours "..", so allowing one would escape the namespace. */
+    len = sc_len(p);
+    while (len && p[len - 1] == '/') len--;
+    if (!len || len >= sizeof(norm)) return 0;
+    memcpy(norm, p, len); norm[len] = 0;
+    for (q = norm; *q;) {
+        const char *slash = q;
         while (*slash && *slash != '/') slash++;
-        n = (size_t)(slash - rest);
-        return n == sc_len(P[pid - 1].app_id) &&
-               !sc_neq(rest, P[pid - 1].app_id, n);
+        n = (size_t)(slash - q);
+        if (!n || (n == 1 && q[0] == '.') ||
+            (n == 2 && q[0] == '.' && q[1] == '.')) return 0;
+        q = *slash ? slash + 1 : slash;
     }
+    sc_copy(own, sizeof(own), "home/appdata/");
+    sc_cat(own, sizeof(own), P[pid - 1].app_id);
+    own_len = sc_len(own);
+    sc_copy(prefix, sizeof(prefix), own);
+    sc_cat(prefix, sizeof(prefix), "/");
+    if (sc_eq(norm, "home") || sc_eq(norm, "home/appdata") || sc_eq(norm, own))
+        return 1;
+    /* The runtime loader may read its OWN package, and nothing else, from the
+     * two package directories.  No subdirectories, no traversal. */
+    static const char *const dirs[] = { "home/apps/", "home/demos/", 0 };
+    for (int k = 0; dirs[k]; k++) {
+        size_t dn = sc_len(dirs[k]);
+        if (sc_neq(norm, dirs[k], dn)) continue;
+        const char *f = norm + dn;
+        size_t idlen = sc_len(P[pid - 1].app_id);
+        if (!sc_neq(f, P[pid - 1].app_id, idlen) && sc_eq(f + idlen, ".cat"))
+            return 1;
+    }
+    if (sc_neq(norm, prefix, own_len + 1)) return 0;
+    rest = norm + own_len + 1;
+    if (!*rest) return 1;
+    /* A private root: exactly one filename, never a nested path. */
+    for (q = rest; *q; q++) if (*q == '/') return 0;
+    return 1;
 }
+
 int proc_path_allowed(const char *path, int write)
 {
     return proc_pid_path_allowed(cur, path, write);

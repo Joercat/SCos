@@ -19,8 +19,13 @@ print('''    movq %rsp,%rdi
     movq %rsp,%rbx
     andq $-16,%rsp
     call interrupt_dispatch
+    /* A contained CPL3 fault abandons the interrupt frame entirely:
+     * sc_user_fault_return adopts the kernel continuation that user_enter
+     * saved.  IRETQ cannot be used for a CPL3->CPL0 frame rewrite. */
+    cmpl $0, user_fault_taken(%rip)
+    jne 2f
     movq %rbx,%rsp''')
 for r in reversed(regs): print(f'    popq %{r}')
-print('    addq $16,%rsp\n    iretq\n.section .data.rel.ro,"aw"\n.balign 8\n.globl isr_stubs\nisr_stubs:')
+print('    addq $16,%rsp\n    iretq\n2:  movl $0,user_fault_taken(%rip)\n    jmp sc_user_fault_return\n.section .data.rel.ro,"aw"\n.balign 8\n.globl isr_stubs\nisr_stubs:')
 for n in range(256): print(f'    .quad isr_{n}')
 print('.section .note.GNU-stack,"",@progbits')

@@ -56,8 +56,10 @@ $(BUILD)/vectors.S: tools/gen_vectors.py | $(BUILD)
 	python3 $< > $@
 $(BUILD)/vectors.o: $(BUILD)/vectors.S
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
-$(BUILD)/kernel.elf: $(GPU_OBJECTS) $(DRIVER_OBJECTS) $(DESKTOP_OBJECTS) $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o kernel/x86_64/linker.ld Makefile
-	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -Bsymbolic --build-id=none -z noexecstack -z max-page-size=0x1000 -T kernel/x86_64/linker.ld -o $@ $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o $(DESKTOP_OBJECTS) $(DRIVER_OBJECTS) $(GPU_OBJECTS) $(BUILD)/lua-runtime.o
+$(BUILD)/usermode.o: kernel/x86_64/usermode.S | $(BUILD)
+	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
+$(BUILD)/kernel.elf: $(GPU_OBJECTS) $(DRIVER_OBJECTS) $(DESKTOP_OBJECTS) $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o $(BUILD)/usermode.o kernel/x86_64/linker.ld Makefile $(BUILD)/userland_image.h
+	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -Bsymbolic --build-id=none -z noexecstack -z max-page-size=0x1000 -T kernel/x86_64/linker.ld -o $@ $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o $(BUILD)/usermode.o $(DESKTOP_OBJECTS) $(DRIVER_OBJECTS) $(GPU_OBJECTS) $(BUILD)/lua-runtime.o
 $(BUILD)/efi-main.o: boot/uefi/main.c boot/uefi/efi.h kernel/include/boot.h Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
 $(BUILD)/efi-font.o: kernel/src/font.c Makefile | $(BUILD)
@@ -113,6 +115,30 @@ gpu-modules: $(GPU_MODULE_FILES)
 	python3 tools/build_gpu_module.py --verify
 clean:
 	rm -rf $(BUILD)
+
+# ---------------------------------------------------------- CPL3 app-server image ----
+# A second, absolute-linked image that runs at ring 3.  The kernel embeds it so
+# the code behind the syscall boundary cannot be swapped from the ESP.
+USER_CFLAGS := -m64 -ffreestanding -fno-pie -fno-PIE -fno-stack-protector -fno-builtin \
+               -fno-asynchronous-unwind-tables -mno-red-zone -mno-avx \
+               -fno-strict-aliasing -O2 -Wall -Wextra -Werror -std=c11 \
+               -mcmodel=large -Ikernel/user
+$(BUILD)/user-%.o: kernel/user/%.c kernel/user/user_syscalls.h | $(BUILD)
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+$(BUILD)/user-start.o: kernel/user/start.S | $(BUILD)
+	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
+$(BUILD)/user-cat.o: kernel/user/cat_user.c kernel/user/user_syscalls.h | $(BUILD)
+	$(CC) $(USER_CFLAGS) -Ithird_party/lua -Ikernel/lua -c $< -o $@
+$(BUILD)/userland.elf: $(BUILD)/user-start.o $(BUILD)/user-app.o $(BUILD)/user-ulibc.o $(BUILD)/user-cat.o $(BUILD)/lua-runtime.o kernel/user/user.ld
+	$(LD) -m elf_x86_64 --no-dynamic-linker --build-id=none -z noexecstack \
+	      -T kernel/user/user.ld -o $@ $(BUILD)/user-start.o $(BUILD)/user-app.o \
+	      $(BUILD)/user-cat.o $(BUILD)/user-ulibc.o $(BUILD)/lua-runtime.o
+$(BUILD)/userland.bin: $(BUILD)/userland.elf
+	objcopy -O binary $< $@
+$(BUILD)/userland_image.h: $(BUILD)/userland.bin tools/embed_userland.py
+	python3 tools/embed_userland.py $< $@
+$(BUILD)/desktop-usermode.o: $(BUILD)/userland_image.h
+$(BUILD)/desktop-usermode.o: APP_CFLAGS += -I$(BUILD)
 
 APP_CFLAGS := $(filter-out -mgeneral-regs-only,$(CFLAGS)) -mno-avx -fno-strict-aliasing
 $(BUILD)/desktop-%.o: kernel/desktop/%.c kernel/include/scos.h kernel/include/security.h kernel/include/kernel.h kernel/include/boot.h Makefile | $(BUILD) $(BUILD)/scosbuild.h

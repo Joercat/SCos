@@ -6,6 +6,7 @@
 #include "scos.h"
 #include "cat.h"
 #include "process.h"
+#include "usermode.h"
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
@@ -31,6 +32,8 @@ struct lua_window {
     /* Append new fields here: SysMon and the guest tests read failed/error at
      * fixed offsets, so the layout above must not shift. */
     int private_arena;          /* arena lives in this process's private PML4 */
+    int usermode;               /* callbacks execute at CPL3 with a syscall ABI */
+    char pkg_path[192];         /* CAT package path for the CPL3 host */
 };
 static struct lua_window *context(lua_State *L) {
     return *(struct lua_window **)lua_getextraspace(L);
@@ -77,6 +80,30 @@ static void budget(struct lua_window *d) {
     d->budget=100000;d->deadline=(u32)tick_count+10;d->pixels=4000000;
     lua_sethook(d->L,hook,LUA_MASKCOUNT,100);
 }
+/* An isolated CAT package runs ENTIRELY at CPL3: the kernel-side Lua VM is
+ * not created.  Only this thin dispatcher and the error/status record remain
+ * in kernel memory; all app code and state live in the process's PML4. */
+static int cat_usermode(struct window *w, int event)
+{
+    struct lua_window *d = w->data;
+    struct lua_app *a = (struct lua_app *)w->app;
+    struct cat_info m;
+    char err[160];
+    u32 n = 0;
+    char *bytes;
+    int pid, r;
+    if (!d || !d->usermode || !a) return 0;
+    bytes = vfs_read(a->path, &n);
+    if (!cat_validate(bytes, n, &m, err, sizeof(err))) { d->failed = 1; return 1; }
+    pid = proc_current();
+    r = user_run_event(pid, event, m.source, m.length, a->id);
+    if (r < 0) { d->failed = 1; sc_copy(d->error, sizeof(d->error),
+                                       "CPL3 app faulted (contained)"); }
+    else if (user_last_result()) { d->failed = 1;
+        sc_copy(d->error, sizeof(d->error), "CPL3 app reported an error"); }
+    return 1;
+}
+
 static void fail(struct lua_window *d,const char *s) {
     strncpy(d->error,s?s:"Lua error",sizeof(d->error)-1);d->error[sizeof(d->error)-1]=0;
     d->failed=1;d->w->dirty=1;app_log(d->w,d->error);
@@ -215,6 +242,13 @@ static int load_app(lua_State *L) {
 static void script_open(struct window *w,void *arg) {
     (void)arg;struct lua_window *d=palloc(sizeof(*d));if(!d)return;
     memset(d,0,sizeof(*d));w->data=d;d->w=w;d->ref=LUA_NOREF;d->interval=10;
+    if (proc_isolated() && proc_domain(proc_current())) {
+        struct lua_app *a=(struct lua_app *)w->app;
+        d->usermode=1;
+        sc_copy(d->pkg_path,sizeof(d->pkg_path),a?a->path:"");
+        cat_usermode(w,USER_EVENT_OPEN);
+        return;
+    }
     if (proc_isolated() && proc_domain(proc_current()))
         { d->arena=proc_private_alloc(ARENA_SIZE); d->private_arena=d->arena?1:0; }
     if(!d->arena){d->arena=palloc(ARENA_SIZE);d->private_arena=0;}
@@ -231,14 +265,33 @@ static void script_open(struct window *w,void *arg) {
 static void script_paint(struct window *w){
     struct lua_window *d=w->data;if(!d)return;
     s_fill(&w->surf,0,0,w->surf.w,w->surf.h,0x101820);
-    if(!d->failed){d->painting=1;struct invocation i={.name="paint"};invoke(d,&i);d->painting=0;}
+    if(!d->failed){
+        if(d->usermode)cat_usermode(w,USER_EVENT_PAINT);
+        else{d->painting=1;struct invocation i={.name="paint"};invoke(d,&i);d->painting=0;}
+    }
     if(d->failed){s_text(&w->surf,12,12,"Lua app stopped",0xff7777);s_clip_text(&w->surf,12,36,d->error,0xffffff,w->surf.w-24);s_text(&w->surf,12,60,"Close, fix the source, then launch again.",0xcccccc);}
 }
-static void script_key(struct window *w,struct key_event *e){struct invocation i={.name="key",.key=e};invoke(w->data,&i);}
-static void script_mouse(struct window *w,struct mouse_event *e,int x,int y){struct lua_window *d=w->data;d->mouse_x=x;d->mouse_y=y;d->mouse_buttons=e->buttons;struct invocation i={.name="mouse",.mouse=e,.x=x,.y=y};invoke(w->data,&i);}
-static void script_tick(struct window *w){struct lua_window *d=w->data;if((i32)((u32)tick_count-d->next_tick)<0)return;d->next_tick=(u32)tick_count+(u32)d->interval;struct invocation i={.name="tick"};invoke(d,&i);}
+static void script_key(struct window *w,struct key_event *e){
+    struct lua_window *d=w->data;if(!d)return;
+    if(d->usermode){user_set_input(USER_EVENT_KEY,e->keycode,e->pressed,e->shift,e->ctrl,e->alt,0,0,0);cat_usermode(w,USER_EVENT_KEY);return;}
+    struct invocation i={.name="key",.key=e};invoke(d,&i);
+}
+static void script_mouse(struct window *w,struct mouse_event *e,int x,int y){
+    struct lua_window *d=w->data;if(!d)return;
+    d->mouse_x=x;d->mouse_y=y;d->mouse_buttons=e->buttons;
+    if(d->usermode){user_set_input(USER_EVENT_MOUSE,0,0,0,0,0,x,y,e->buttons);cat_usermode(w,USER_EVENT_MOUSE);return;}
+    struct invocation i={.name="mouse",.mouse=e,.x=x,.y=y};invoke(d,&i);
+}
+static void script_tick(struct window *w){
+    struct lua_window *d=w->data;if(!d)return;
+    if((i32)((u32)tick_count-d->next_tick)<0)return;
+    d->next_tick=(u32)tick_count+(u32)d->interval;
+    if(d->usermode){cat_usermode(w,USER_EVENT_TICK);return;}
+    struct invocation i={.name="tick"};invoke(d,&i);
+}
 static void script_close(struct window *w){
     struct lua_window *d=w->data;if(!d)return;
+    if(d->usermode)cat_usermode(w,USER_EVENT_CLOSE);
     /* The arena owns everything, and the API creates no external handles.
      * Do not execute user __gc/__close code while destroying a window. */
     /* A private arena is released with its memory domain by proc_destroy().

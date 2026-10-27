@@ -32,10 +32,11 @@ are not executable. The file extension alone cannot turn source into a CAT.
 
 These files are transparent source containers, **not signatures, encryption,
 native ELF files or exported Lua bytecode**. Someone can modify a package and
-recalculate CRC; only run code you trust. The Lua VM plus the optional per-app
-page-table domain and capability set (see `docs/migration/SECURITY.md` §5)
-contain an isolated package's files and memory; they are not CPL3 ring-3
-isolation, since all app code still runs at CPL0.
+recalculate CRC; only run code you trust. An isolated package's Lua VM and files
+are confined at **CPL3** in its own PML4 with a syscall gate, seccomp allowlist
+and mount namespace (`docs/USERMODE.md`, `docs/migration/SECURITY.md` §5). The
+CRC is integrity, not authenticity; isolation does not make a malicious package
+safe if you approve it.
 
 Custom themes use `/home/themes/user-<name>.theme`: 48 bytes comprising
 `SCOSTH1` plus NUL (8 bytes), then ten LE32 values: main, bg_top, bg_bot,

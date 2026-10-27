@@ -19,11 +19,14 @@ The full security subsystem — accounts/sign-in, a plain TTY-style secure
 console, user-controlled security choices, a per-app **process isolation
 engine** (separate PML4s, private arenas, capability-gated VFS/theme/IPC) and
 the AES-256 encrypted filesystem vault — is documented in
-[SECURITY.md](SECURITY.md). Isolation is real page-table isolation, but all app
-code still runs at CPL0: CPL3 user mode with a syscall gate remains future work,
-as noted in the table below. Boot verification / Secure Boot was deliberately left out at the
-owner's request - like Linux without Secure Boot, only a CRC32 integrity check
-remains. A TPM and rollback protection are also out of scope. The shipped
+[SECURITY.md](SECURITY.md). Isolation is real hardware isolation: installed
+apps run at **CPL3** with their own PML4 and a syscall gate; built-in native
+apps are trusted CPL0 kernel components with complete namespace/capability
+isolation. See [USERMODE.md](../USERMODE.md). Boot verification / Secure Boot
+was deliberately left out at the owner's request - like Linux without Secure
+Boot, only a CRC32 integrity check remains. A TPM and full rollback protection
+are also out of scope (an off-image generation anchor detects image replay).
+The shipped
 default login is `root` / `scos`, an ordinary account with the highest role; all
 accounts have top-level permission unless `roles.enabled` is turned on to
 enforce lower-power user/guest roles. Isolated apps get separate page tables,

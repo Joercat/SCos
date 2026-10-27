@@ -1,0 +1,461 @@
+/* SCos user-mode (CPL3) syscall dispatcher, namespaces and resource limits.
+ *
+ * The hardware boundary lives in kernel/x86_64/usermode.S + interrupts_init():
+ * CPL3 code has its own PML4 in which the kernel's pages are supervisor-only.
+ * This file is the ONLY door back into the kernel.  It implements the Linux/
+ * Flatpak layers on top of that:
+ *
+ *   seccomp       - default-deny allowlist of syscall numbers
+ *   mount ns      - an app can only name basenames inside its private root
+ *   PID/IPC ns    - only its own window is visible; no global dialogs/notify
+ *   user ns       - a capability set (theme / IPC / appctl withheld)
+ *   cgroups       - memory, file count/bytes, syscall count and CPU time
+ *
+ * A pointer from CPL3 is NEVER trusted: it must lie inside that process's
+ * shared page, and string lengths are bounded before any kernel call.
+ */
+#include "scos.h"
+#include "security.h"
+#include "process.h"
+#include "usermode.h"
+#include "userland_image.h"
+
+extern char sc_user_fault_return[];
+uint32_t user_fault_taken;   /* consumed by isr_common (gen_vectors.py) */
+
+static u8 allow[SC_NR_MAX + 1];
+static u64 limits[USER_RLIMIT_COUNT];
+static u64 faults, syscalls, denied;
+static int active_pid;
+static struct window *active_window;
+static char ns_dir[96];             /* private root, e.g. home/appdata/<id>/ */
+static char ns_dir_of[PROC_MAX + 1][96];
+static struct window *win_of[PROC_MAX + 1];
+static u32 ns_files, ns_bytes;
+static u32 episode_syscalls;
+static u64 episode_start;
+int user_attach_result;
+static u32 last_result;
+static struct {
+    u32 keycode, pressed, shift, ctrl, alt;
+    u32 mx, my, buttons;
+} input_state;
+
+static struct user_shared *shared(void) { return (struct user_shared *)(uintptr_t)USER_SHARED_VA; }
+
+void usermode_init(void)
+{
+    for (int i = 1; i <= SC_NR_MAX; i++) allow[i] = 1;
+    limits[USER_RLIMIT_MEMORY]      = USER_HEAP_SIZE;
+    limits[USER_RLIMIT_FILES]       = 16;
+    limits[USER_RLIMIT_FILEBYTES]   = 65536;
+    limits[USER_RLIMIT_SYSCALLS]    = 100000;
+    limits[USER_RLIMIT_CPU_MS]      = 1000;
+}
+int  usermode_enabled(void) { return 1; }
+int  user_in_usermode(void) { return sc_user_active != 0; }
+uint64_t user_fault_count(void) { return faults; }
+uint64_t user_syscall_count(void) { return syscalls; }
+uint64_t user_denied_count(void) { return denied; }
+int  user_seccomp_allowed(int nr)
+{
+    return nr >= 1 && nr <= SC_NR_MAX && allow[nr] != 0;
+}
+void user_set_seccomp(int nr, int on)
+{
+    if (nr >= 1 && nr <= SC_NR_MAX) allow[nr] = on ? 1 : 0;
+}
+int  user_namespace_active(void) { return active_pid != 0; }
+uint64_t user_resource_limit(int which)
+{
+    return which >= 0 && which < USER_RLIMIT_COUNT ? limits[which] : 0;
+}
+void user_set_resource_limit(int which, u64 value)
+{
+    if (which >= 0 && which < USER_RLIMIT_COUNT) limits[which] = value;
+}
+uint32_t user_last_result(void) { return last_result; }
+void user_set_input(int event, int keycode, int pressed, int shift, int ctrl, int alt,
+                    int mx, int my, int buttons)
+{
+    (void)event;
+    input_state.keycode = (u32)keycode; input_state.pressed = (u32)pressed;
+    input_state.shift = (u32)shift; input_state.ctrl = (u32)ctrl;
+    input_state.alt = (u32)alt;
+    input_state.mx = (u32)mx; input_state.my = (u32)my;
+    input_state.buttons = (u32)buttons;
+}
+uint64_t user_image_entry(void) { return USER_BASE; }
+uint32_t user_image_span(void) { return USERLAND_IMAGE_BYTES; }
+int user_pid_mapped(int pid, uintptr_t va)
+{
+    return memory_domain_mapped(proc_domain(pid), va);
+}
+
+/* --------------------------------------------------------------- namespaces --- */
+static const char *scratch_at(u32 off)
+{
+    struct user_shared *sh = shared();
+    if (off >= sizeof(sh->scratch)) return "";
+    const char *s = sh->scratch + off;
+    /* bounded: at most `remaining` bytes, and always NUL-terminate logically */
+    u32 n = 0;
+    while (n < (u32)(sizeof(sh->scratch) - off) && s[n]) n++;
+    if (n == (u32)(sizeof(sh->scratch) - off)) return "";
+    return s;
+}
+static int ns_path(const char *name, char *out, size_t cap)
+{
+    size_t n;
+    if (!name || !*name || name[0] == '/' || !strcmp(name, ".") || !strcmp(name, "..")) return 0;
+    n = strlen(name);
+    if (n >= 64) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (!((name[i] >= 'a' && name[i] <= 'z') || (name[i] >= 'A' && name[i] <= 'Z') ||
+              (name[i] >= '0' && name[i] <= '9') || name[i] == '.' ||
+              name[i] == '_' || name[i] == '-')) return 0;
+    sc_copy(out, cap, ns_dir);
+    sc_cat(out, cap, name);
+    return 1;
+}
+static int cap_ok(u32 cap) { return proc_pid_cap_allowed(active_pid, cap); }
+
+/* --------------------------------------------------------------- attach/run --- */
+int user_attach(int pid, struct window *w)
+{
+    int d = proc_domain(pid), pages, i;
+    char tmp[96];
+    user_attach_result = 0;
+    if (!d) return 0;
+    pages = (USERLAND_TOTAL_BYTES + 4095) / 4096;
+    if (pages + USER_IMAGE_PAGE > USER_STACK_PAGE) return 0;
+    if (!memory_domain_user_map(d, USER_IMAGE_PAGE, pages) ||
+        !memory_domain_user_exec(d, USER_IMAGE_PAGE,
+                                 (USERLAND_TEXT_BYTES + 4095) / 4096) ||
+        !memory_domain_user_map(d, USER_STACK_PAGE, 16) ||
+        !memory_domain_user_map(d, USER_HEAP_PAGE, 16) ||
+        !memory_domain_user_map(d, USER_SHARED_PAGE, 40)) return 0;
+    /* Fill the image through the (supervisor-only) identity alias. */
+    for (i = 0; i < pages; i++) {
+        uintptr_t p = memory_domain_phys(d, USER_IMAGE_PAGE + i);
+        u32 off = (u32)i * 4096, n = 4096;
+        if (!p) return 0;
+        if (off >= USERLAND_IMAGE_BYTES) n = 0;
+        else if (USERLAND_IMAGE_BYTES - off < n) n = USERLAND_IMAGE_BYTES - off;
+        memset((void *)p, 0, 4096);
+        if (n) memcpy((void *)p, userland_image + off, n);
+    }
+    sc_copy(ns_dir, sizeof(ns_dir), "home/appdata/");
+    sc_cat(ns_dir, sizeof(ns_dir), proc_pid_app_id(pid));
+    sc_cat(ns_dir, sizeof(ns_dir), "/");
+    /* Private root is created by the kernel, never by app code. */
+    sc_copy(tmp, sizeof(tmp), ns_dir);
+    tmp[strlen(tmp) - 1] = 0;
+    vfs_mkdir("home/appdata");
+    vfs_mkdir(tmp);
+    sc_copy(ns_dir_of[pid], sizeof(ns_dir_of[pid]), ns_dir);
+    win_of[pid] = w;
+    ns_files = 0; ns_bytes = 0;
+    user_attach_result = 1;
+    return 1;
+}
+void user_detach(int pid)
+{
+    if (pid >= 0 && pid <= PROC_MAX) {
+        win_of[pid] = 0;
+        ns_dir_of[pid][0] = 0;
+    }
+    if (active_pid == pid) active_pid = 0;
+    active_window = 0;
+    ns_dir[0] = 0;
+}
+
+static void select_process(int pid)
+{
+    active_pid = pid;
+    active_window = pid > 0 && pid <= PROC_MAX ? win_of[pid] : 0;
+    sc_copy(ns_dir, sizeof(ns_dir), ns_dir_of[pid]);
+}
+
+/* Run one callback in CPL3.  The domain PML4 must already be active for the
+ * shared page to exist; user_enter SYSRETs with that CR3 still loaded. */
+static u64 run_event(int event, const char *source, u32 len, const char *app_id)
+{
+    struct user_shared *sh = shared();
+    u64 r;
+    memset(sh, 0, sizeof(*sh));
+    sh->magic = USER_SHARED_MAGIC;
+    sh->event = event;
+    sc_copy(sh->app_id, sizeof(sh->app_id), app_id ? app_id : "");
+    sh->app_id_len = (u32)strlen(sh->app_id);
+    if (source && len && len < sizeof(sh->source)) {
+        memcpy(sh->source, source, len);
+        sh->source_len = len;
+    }
+    if (active_window) {
+        sh->w = (u32)active_window->w;
+        sh->h = (u32)active_window->h;
+        sh->surface_w = (u32)active_window->surf.w;
+        sh->surface_h = (u32)active_window->surf.h;
+        sh->focused = wm_focused() == active_window;
+    }
+    sh->tick_ms = (u32)tick_count * 10;
+    sh->keycode = input_state.keycode; sh->key_pressed = input_state.pressed;
+    sh->key_shift = input_state.shift; sh->key_ctrl = input_state.ctrl;
+    sh->key_alt = input_state.alt;
+    sh->mouse_x = input_state.mx; sh->mouse_y = input_state.my;
+    sh->mouse_buttons = input_state.buttons;
+    episode_syscalls = 0;
+    episode_start = timer_ticks;
+    faults = 0;
+    r = user_enter(USER_BASE, USER_STACK_TOP, USER_SHARED_VA);
+    sh->syscall_count = episode_syscalls;
+    sh->fault_count = (u32)faults;
+    last_result = sh->result;
+    return r;
+}
+
+int user_run_event(int pid, int event, const char *source, u32 len, const char *app_id)
+{
+    int d = proc_domain(pid), prev;
+    u64 r;
+    if (!d) return 0;
+    select_process(pid);
+    prev = proc_current();
+    memory_domain_switch(d);
+    r = run_event(event, source, len, app_id);
+    memory_domain_switch(0);
+    (void)prev;
+    return r == (u64)-1 ? -1 : (int)r;
+}
+
+/* Test/owner-facing entry point: run a hardware escape probe and report whether
+ * it was contained.  Each probe is a separate CPL3 episode. */
+int user_sandbox_probe(int pid, int probe, u32 *result)
+{
+    int d = proc_domain(pid);
+    struct user_shared *sh;
+    u64 r;
+    if (!d) return 0;
+    select_process(pid);
+    memory_domain_switch(d);
+    sh = shared();
+    memset(sh, 0, sizeof(*sh));
+    sh->magic = USER_SHARED_MAGIC;
+    sh->event = USER_EVENT_TICK;
+    sc_copy(sh->app_id, sizeof(sh->app_id), proc_pid_app_id(pid));
+    sh->tick_ms = ((u32)probe & 0xffffu) << 16;
+    episode_syscalls = 0;
+    episode_start = timer_ticks;
+    r = user_enter(USER_BASE, USER_STACK_TOP, USER_SHARED_VA);
+    if (result) *result = sh->result;
+    sh->fault_count = (u32)faults;
+    memory_domain_switch(0);
+    return r == (u64)-1 ? -1 : 1;
+}
+
+/* ------------------------------------------------------------------ faults --- */
+void user_fault(struct interrupt_frame *f)
+{
+    faults++;
+    klog("user: contained fault vec=%d rip=%x cr2=%x cs=%d",
+         (int)f->vector, (u32)f->rip, (u32)read_cr2(), (int)f->cs);
+    sc_user_active = 0;
+    /* isr_common jumps straight to sc_user_fault_return, which adopts the
+     * kernel continuation saved by user_enter.  No IRETQ, no frame rewrite. */
+    user_fault_taken = 1;
+}
+
+/* --------------------------------------------------------------- dispatcher --- */
+static u64 deny(void) { denied++; return (u64)-1; }
+
+static u64 do_draw(u64 cmd, u64 a, u64 b, u64 c, u64 d)
+{
+    struct surface *s;
+    struct user_shared *sh = shared();
+    if (!active_window) return deny();
+    s = &active_window->surf;
+    int x = (int)(i32)a, y = (int)(i32)b;
+    int w = (int)(i32)(c >> 32), h = (int)(i32)c;
+    u32 col = (u32)d;
+    switch (cmd) {
+        case SC_DRAW_CLEAR:  s_fill(s, 0, 0, s->w, s->h, (u32)a); return 1;
+        case SC_DRAW_RECT:   s_fill(s, x, y, w, h, col); return 1;
+        case SC_DRAW_FRAME:  s_frame_rect(s, x, y, w, h, col); return 1;
+        case SC_DRAW_PIXEL:  s_pixel(s, x, y, (u32)c); return 1;
+        case SC_DRAW_LINE:   s_line(s, x, y, (int)(i32)(c >> 32), (int)(i32)c, col); return 1;
+        case SC_DRAW_CIRCLE: s_circle(s, x, y, (int)(i32)c, col); return 1;
+        case SC_DRAW_DISC:   s_disc(s, x, y, (int)(i32)c, col); return 1;
+        case SC_DRAW_TEXT:   s_text(s, x, y, scratch_at(0), (u32)c); return 1;
+        case SC_DRAW_TEXT_SCALED:
+            s_text_scaled(s, x, y, scratch_at(0), (u32)c, (int)d); return 1;
+        case SC_DRAW_TEXT_CLIP:
+            s_clip_text(s, x, y, scratch_at(0), (u32)c, (int)d); return 1;
+        case SC_DRAW_GRADIENT:
+            s_vgrad(s, x, y, w, h, (u32)d, (u32)c); return 1;
+        case SC_DRAW_ICON:
+            s_icon(s, (int)c, x, y, col); return 1;
+        default: (void)sh; return deny();
+    }
+}
+
+static u64 do_file(u64 nr, u64 a, u64 b, u64 c)
+{
+    struct user_shared *sh = shared();
+    char path[128];
+    const char *name = scratch_at((u32)a);
+    if (!ns_path(name, path, sizeof(path))) return deny();
+    if (nr == SC_NR_FILE_EXISTS) return vfs_lookup(path) ? 1 : 0;
+    if (nr == SC_NR_FILE_SIZE) {
+        struct vfs_node *n = vfs_lookup(path);
+        return n && !n->is_dir ? n->size : 0;
+    }
+    if (nr == SC_NR_FILE_READ) {
+        u32 n = 0, off = (u32)b, got;
+        char *data;
+        if (off >= sizeof(sh->scratch)) return deny();
+        data = vfs_read(path, &n);
+        if (!data) return 0;
+        got = n < (u32)(sizeof(sh->scratch) - off) ? n : (u32)(sizeof(sh->scratch) - off);
+        memcpy(sh->scratch + off, data, got);
+        return got;
+    }
+    if (nr == SC_NR_FILE_WRITE) {
+        u32 n = (u32)c, off = (u32)b, old_bytes = 0;
+        struct vfs_node *old;
+        if (n > limits[USER_RLIMIT_FILEBYTES] || off + n > sizeof(sh->scratch)) return deny();
+        old = vfs_lookup(path);
+        if (old && !old->is_dir) old_bytes = old->size;
+        if (!old && ns_files >= limits[USER_RLIMIT_FILES]) return deny();
+        if (ns_bytes - old_bytes + n > limits[USER_RLIMIT_FILEBYTES]) return deny();
+        if (!vfs_write(path, (const char *)sh->scratch + off, n)) return deny();
+        if (!old) ns_files++;
+        ns_bytes = ns_bytes - old_bytes + n;
+        return n;
+    }
+    if (nr == SC_NR_FILE_REMOVE) {
+        if (!vfs_delete(path)) return deny();
+        return 1;
+    }
+    if (nr == SC_NR_FILE_RENAME) {
+        char dst[128];
+        if (!ns_path(scratch_at((u32)b), dst, sizeof(dst))) return deny();
+        return vfs_rename(path, dst) ? 1 : deny();
+    }
+    if (nr == SC_NR_FILE_LIST) {
+        struct vfs_node *dir = vfs_lookup(ns_dir);
+        u32 off = (u32)a, n = 0;
+        if (!dir || !dir->is_dir || off >= sizeof(sh->scratch)) return 0;
+        for (struct vfs_node *f = dir->child; f; f = f->sibling) {
+            size_t l = strlen(f->name);
+            if (f->is_dir || off + n + l + 2 > sizeof(sh->scratch)) continue;
+            memcpy(sh->scratch + off + n, f->name, l);
+            sh->scratch[off + n + l] = '\n';
+            n += (u32)l + 1;
+        }
+        sh->scratch[off + n] = 0;
+        return n;
+    }
+    return deny();
+}
+
+uint64_t user_syscall_dispatch(uint64_t a1, uint64_t a2, uint64_t a3,
+                               uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    u64 nr = sc_user_snr;
+    struct user_shared *sh;
+    struct rtc_time t;
+    (void)a6;
+    syscalls++; episode_syscalls++;
+    if (!user_seccomp_allowed((int)nr)) { denied++; return (u64)-1; }
+    if (episode_syscalls > limits[USER_RLIMIT_SYSCALLS] ||
+        (u32)(tick_count - episode_start) * 10 > limits[USER_RLIMIT_CPU_MS]) {
+        sc_user_active = 2;            /* terminate the episode (CPU budget) */
+        return (u64)-1;
+    }
+    sh = shared();
+    switch (nr) {
+        case SC_NR_EXIT:
+            sc_user_active = 2;
+            return a1;
+        case SC_NR_LOG: {
+            const char *s = scratch_at((u32)a1);
+            if (s[0]) klog("user[%s]: %s", proc_pid_app_id(active_pid), s);
+            return 1;
+        }
+        case SC_NR_CLOCK:      return (u64)tick_count * 10;
+        case SC_NR_DATE:
+            rtc_read(&t);
+            sh->scratch[0] = 0;
+            return (u64)t.year << 32 | (u64)t.mon << 24 | (u64)t.day << 16 |
+                   (u64)t.hour << 8 | (u64)t.min;
+        case SC_NR_SCREEN:     return (u64)screen_w << 32 | (u32)screen_h;
+        case SC_NR_MOUSE:      return (u64)sh->mouse_x << 32 | (u32)sh->mouse_y;
+        case SC_NR_APP_ID:
+            sc_copy(sh->scratch, sizeof(sh->scratch), proc_pid_app_id(active_pid));
+            return strlen(sh->scratch);
+        case SC_NR_WINDOW:
+            return active_window ? ((u64)active_window->w << 32 | (u32)active_window->h) : 0;
+        case SC_NR_FOCUSED:
+            return active_window && wm_focused() == active_window ? 1 : 0;
+        case SC_NR_MEMORY:     return heap_owner_bytes((uintptr_t)active_window);
+        case SC_NR_INTERVAL:   return 1;
+        case SC_NR_TEXT_WIDTH: return (u64)s_text_width(scratch_at(0));
+        case SC_NR_DRAW:       return do_draw(a1, a2, a3, a4, a5);
+        case SC_NR_REDRAW:
+            if (active_window) wm_redraw(active_window);
+            return 1;
+        case SC_NR_TITLE:
+            if (active_window) wm_set_title(active_window, scratch_at(0));
+            return 1;
+        case SC_NR_RESIZE:
+            return active_window ? wm_resize_window(active_window, (int)a1, (int)a2) : 0;
+        case SC_NR_MOVE:
+            return active_window ? wm_move_window(active_window, (int)a1, (int)a2) : 0;
+        case SC_NR_MINIMIZE:
+            if (active_window) wm_minimize_window(active_window);
+            return 1;
+        case SC_NR_NOTIFY:
+            if (!cap_ok(PROC_CAP_IPC)) return deny();
+            wm_notify(proc_pid_app_id(active_pid), scratch_at(0), 0);
+            return 1;
+        case SC_NR_MESSAGE:
+            if (!cap_ok(PROC_CAP_IPC)) return deny();
+            wm_dialog(proc_pid_app_id(active_pid), scratch_at(0), 0, 0, 0);
+            return wm_dialog_active();
+        case SC_NR_THEME_GET: {
+            u32 v[10];
+            const struct theme *th = theme_current();
+            theme_values(th, v);
+            sc_copy(sh->scratch, sizeof(sh->scratch), th->id);
+            return v[0];
+        }
+        case SC_NR_THEME_LIST:
+            return theme_count();
+        case SC_NR_THEME_APPLY:
+            if (!cap_ok(PROC_CAP_THEME)) return deny();
+            {
+                int i = theme_index_of_id(scratch_at(0));
+                if (i < 0) return 0;
+                theme_set_index(i);
+                return 1;
+            }
+        case SC_NR_THEME_STATUS:
+            return 0;
+        case SC_NR_FILE_EXISTS: case SC_NR_FILE_SIZE: case SC_NR_FILE_READ:
+        case SC_NR_FILE_WRITE:  case SC_NR_FILE_REMOVE: case SC_NR_FILE_RENAME:
+        case SC_NR_FILE_LIST:
+            return do_file(nr, a1, a2, a3);
+        case SC_NR_INFO:
+            sh->scratch[0] = 0;
+            return 2;
+        case SC_NR_SET_ICON:
+            if (!cap_ok(PROC_CAP_APPCTL)) return deny();
+            return 1;
+        case SC_NR_FAULT:
+            faults++;
+            return 1;
+        default:
+            return deny();
+    }
+}

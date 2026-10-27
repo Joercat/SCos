@@ -1,4 +1,5 @@
 #include "kernel.h"
+#include "usermode.h"
 struct table_pointer {uint16_t limit;uint64_t address;} __attribute__((packed));
 struct gate {uint16_t low,selector;uint8_t ist,flags;uint16_t middle;uint32_t high,reserved;} __attribute__((packed));
 struct tss64 {
@@ -10,7 +11,35 @@ _Static_assert(sizeof(struct gate)==16 && sizeof(struct table_pointer)==10,"IDT 
 _Static_assert(sizeof(struct tss64)==104,"TSS ABI");
 static struct gate idt[256] __attribute__((aligned(16)));
 static struct tss64 tss;
-static uint64_t gdt[5] __attribute__((aligned(16)));
+static uint64_t gdt[7] __attribute__((aligned(16)));
+extern char user_irq_stack_top[];
+
+static void wrmsr(uint32_t msr, uint64_t value)
+{
+    __asm__ volatile("wrmsr"::"c"(msr),"a"((uint32_t)value),"d"((uint32_t)(value>>32)):"memory");
+}
+static uint64_t rdmsr(uint32_t msr)
+{
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr":"=a"(lo),"=d"(hi):"c"(msr));
+    return (uint64_t)lo | (uint64_t)hi << 32;
+}
+/* Real CPL3 segments and the SYSCALL/SYSRET MSRs.  STAR[47:32] is the kernel
+ * CS used by SYSCALL; STAR[63:48] is the base from which SYSRET derives the
+ * user CS/SS (+16/+8, ORed with RPL 3).  SFMASK clears TF/IF/DF/NT on entry. */
+void usermode_cpu_init(void)
+{
+    extern void sc_syscall_entry(void);
+    gdt[5] = UINT64_C(0x00cff3000000ffff);   /* 0x28: user data, DPL 3 */
+    gdt[6] = UINT64_C(0x00affb000000ffff);   /* 0x30: user code, DPL 3, L=1 */
+    struct table_pointer gdtr = { sizeof(gdt) - 1, (uintptr_t)gdt };
+    __asm__ volatile("lgdt (%0)"::"r"(&gdtr):"memory");
+    tss.rsp0 = (uintptr_t)user_irq_stack_top;
+    wrmsr(0xc0000080, rdmsr(0xc0000080) | 1);                 /* EFER.SCE */
+    wrmsr(0xc0000081, (UINT64_C(0x23) << 48) | (UINT64_C(0x08) << 32)); /* STAR */
+    wrmsr(0xc0000082, (uint64_t)(uintptr_t)sc_syscall_entry);  /* LSTAR */
+    wrmsr(0xc0000084, UINT64_C(0x4700));                      /* SFMASK */
+}
 extern const uintptr_t isr_stubs[256];
 extern void load_gdt(const struct table_pointer *);
 volatile uint64_t timer_ticks;
@@ -58,6 +87,7 @@ void interrupts_init(void) {
      * rather than allowing TI selectors to refer to firmware-era tables. */
     __asm__ volatile("lldt %0"::"r"((uint16_t)0):"memory");
     __asm__ volatile("ltr %0"::"r"((uint16_t)24):"memory");
+    usermode_cpu_init();
     for(size_t i=0;i<256;i++) {
         uintptr_t a=isr_stubs[i];
         idt[i]=(struct gate){a&65535,8,i==8?1:i==2?2:i==18?3:0,0x8e,(a>>16)&65535,a>>32,0};
@@ -79,6 +109,12 @@ void timer_init(void) {
     out8(0x43,0x36);out8(0x40,(uint8_t)divisor);out8(0x40,(uint8_t)(divisor>>8));
 }
 void interrupt_dispatch(struct interrupt_frame *f) {
+    /* A fault in CPL3 is an app crash, not a kernel panic.  user_fault()
+     * rewrites the frame so IRETQ returns through user_enter's continuation. */
+    if ((f->cs & 3) == 3 && f->vector < 32 && user_in_usermode()) {
+        user_fault(f);
+        return;
+    }
     if(f->vector>=32&&f->vector<48)cpu_meter_irq_enter();
     if(f->vector==39) {out8(0x20,0x0b);if(!(in8(0x20)&128))return;}
     if(f->vector==47) {out8(0xa0,0x0b);if(!(in8(0xa0)&128)){out8(0x20,0x20);return;}}

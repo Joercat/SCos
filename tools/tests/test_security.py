@@ -100,6 +100,12 @@ def test_the_gate_and_protection_are_wired():
     assert 'proc_private_alloc' in (ROOT / 'kernel/desktop/lua_apps.c').read_text()
     assert 'rollback_check(vault_generation())' in ata and 'EPOCH_LBA 64' in ata, \
         'an older authenticated vault image can be replayed without detection'
+    # A real CPL3 boundary, not a ring-0 capability flag.
+    assert 'sysretq' in (ROOT / 'kernel/x86_64/usermode.S').read_text()
+    assert 'EFER.SCE' in (ROOT / 'kernel/src/interrupt.c').read_text()
+    assert 'd->usermode' in (ROOT / 'kernel/desktop/lua_apps.c').read_text(), \
+        'isolated CAT packages are not dispatched at CPL3'
+    assert 'user_seccomp_allowed' in (ROOT / 'kernel/desktop/usermode.c').read_text()
     assert 'custom_lock_screen' in loginui
     assert 'security_choice("lock.enabled")' in loginui
     assert 'wm_launch_app_interactive' in wm and 'iso_items' in wm, \

@@ -72,19 +72,25 @@ shipped, by design.
 **Process isolation is a per-app user choice, never forced.** On the first
 user-driven launch of an app the WM prompts: always isolated / never isolated /
 isolated once (ask next time) / unisolated once (ask next time). The answer is
-saved (`choices app <id> always|never|ask`). An isolated app becomes a **real
-process**: `proc_create()` gives it its own PML4 and private physical pages
-(removed from the shared identity map), the WM switches CR3 around every app
-callback, and a kernel-held capability set denies global theme edits,
-notifications/dialogs, icon changes and every VFS path outside its own
-`home/appdata/<id>/` namespace. An isolated Lua CAT package's entire 2 MiB VM
-heap lives in that private domain. This applies to native C apps too, because
-the checks are in `vfs.c`/`theme.c`, not in an app-facing helper. `isolation`
-lists the running domains. Apps the owner chose *never* to isolate keep the
-original unrestricted behaviour. All app code is still CPL0 ring-0 code, so a
-deliberately malicious native app could execute `mov cr3` itself; real CPL3
-user mode with a syscall gate is the remaining step. Each account also gets a
-private `home/users/<name>/` tree enforced at the VFS boundary.
+saved (`choices app <id> always|never|ask`).
+
+An isolated app becomes a **real user-mode process at CPL3**. An installed CAT
+package runs its Lua VM, bytecode, heap and stack in its own PML4; kernel memory
+is supervisor-only there, so reading it, executing `mov cr3`/`wrmsr`/`cli`, or
+touching another app's pages is stopped by the CPU and contained as an app
+crash, not a kernel panic. Everything it does is a numbered syscall checked by
+a default-deny allowlist (seccomp), a private mount namespace, a capability set
+and cgroup-style memory/file/syscall/CPU limits. See [the user-mode ABI](docs/USERMODE.md).
+
+Every isolated window also gets private physical frames, a CR3 switch around
+callbacks, and kernel-held capabilities that deny global theme edits,
+notifications/dialogs, icon changes and VFS paths outside its namespace.
+`isolation` lists the running processes with their domains and capabilities.
+Apps the owner chose *never* to isolate keep the original unrestricted
+behaviour. Built-in native C apps are compiled into the kernel image (like
+Linux kernel modules): they get the domains, namespaces, capabilities and
+limits, but their C code still runs at CPL0. Each account also gets a private
+`home/users/<name>/` tree enforced at the VFS boundary.
 
 An anti-rollback anchor in a GPT-reserved sector outside the saved image lets
 boot reject an older (still authenticated) vault image after a replay.
@@ -103,9 +109,9 @@ choices are **session-only** and the default `root`/`scos` account is recreated
 at each boot. See
 [the full security design](docs/migration/SECURITY.md) for formats, commands,
 the lock-screen app contract, verification and the honest limitations: process
-isolation is page-table- and capability-based rather than ring-3 user mode,
-rollback detection uses a disk-local generation anchor rather than a TPM, and
-boot verification is CRC-only with no signing.
+CPL3 isolation for installed apps and a complete namespace/capability model for
+built-ins, disk-local (not TPM) rollback detection, and boot verification is
+CRC-only with no signing.
 
 ## Write your own apps
 
@@ -121,9 +127,10 @@ Settings selects four presets or up to eight custom palettes/backgrounds.
 See the [Studio and API guide](docs/LUA-APPS.md), [CAT format](docs/CAT-FORMAT.md),
 [current verification record](docs/migration/APP-MANAGEMENT-VERIFICATION.md), and
 [open-source provenance/licenses](third_party/README.md). This remains a
-cooperative CPL0 kernel: isolated apps get separate page tables, private memory
-and a capability-gated API, but this is not CPL3 user mode. RAM-versus-ATA
-persistence limitations still apply. The [earlier Lua verification](docs/migration/LUA-VERIFICATION.md)
+kernel: installed apps built against the CPL3 ABI run in real user-mode
+processes, while the built-in apps remain trusted CPL0 components. See
+[USERMODE.md](docs/USERMODE.md). RAM-versus-ATA persistence limitations still
+apply. The [earlier Lua verification](docs/migration/LUA-VERIFICATION.md)
 is historical, not the current package contract.
 
 ## Desktop and windows

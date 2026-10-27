@@ -16,6 +16,7 @@
 #include "scos.h"
 #include "security.h"
 #include "process.h"
+#include "usermode.h"
 
 static void user_dir_create(const char *name);   /* per-account private VFS tree */
 
@@ -1702,7 +1703,7 @@ int security_shell(const char *line, char *out, size_t cap)
         return 1;
     }
     if (sc_eq(args[0], "isolation")) {
-        ob(&b, "pid  app                  owner       isolated  domain  capabilities\n");
+        ob(&b, "pid  app                  owner       isolated  cpl3  domain  capabilities\n");
         for (int i = 1; i <= PROC_MAX; i++) {
             const char *id = proc_pid_app_id(i);
             if (!id || !id[0]) continue;
@@ -1711,6 +1712,7 @@ int security_shell(const char *line, char *out, size_t cap)
             ob(&b, proc_owner(i));
             for (int k = (int)sc_len(proc_owner(i)); k < 12; k++) ob(&b, " ");
             ob(&b, proc_pid_isolated(i) ? "yes       " : "no        ");
+            ob(&b, user_pid_mapped(i, user_image_entry()) ? "yes   " : "no    ");
             ob_num(&b, (uint64_t)proc_domain(i)); ob(&b, "       ");
             ob_num(&b, (uint64_t)proc_pid_caps(i)); ob(&b, "\n");
         }
