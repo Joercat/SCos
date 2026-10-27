@@ -11,9 +11,15 @@
 #include "process.h"
 
 #define MAX_WINDOWS 48
-#define TASKBAR_H 40
+/* scoswm-arch: bar_height is a live owner preference.  Default 40 is the
+ * original SCos geometry, so every existing layout stays byte-identical. */
+#define TASKBAR_H wm_taskbar_height()
 static void desktop_load(void);
 static void desktop_save(void);
+static void paint_all(void);
+static void draw_icon_scaled(int id, int x, int y, int size, u32 c);
+static void win_alloc_buf(struct window *w);
+static void win_free_buf(struct window *w);
 static __attribute__((noinline)) void menu_cancel(void);
 static void icon_rect(int i, int *x, int *y, int *w, int *h);
 static void desk_rename_ask(int item);
@@ -104,6 +110,58 @@ static int power_hover;
 static int picker_ids[MAX_WINDOWS];
 static char picker_labels[MAX_WINDOWS][80];
 static const char *picker_items[MAX_WINDOWS];
+
+/* ---- scoswm-arch visual window overview ---------------------------------- */
+/* Right-click on "Windows N" replaces the text picker with an MRU grid of
+ * LIVE previews: SCos owns every window's surface, so no Composite redirect
+ * or X11 capture is needed - the thumbnail IS the window's back buffer. */
+#define OV_MARGIN  24
+#define OV_HEADER  26
+#define OV_GUTTER  8
+#define OV_STRIP   24
+#define OV_MAX_PREVIEW_W 320
+#define OV_MAX_PREVIEW_H 240
+struct ov_tile { struct window *w; int x, y, w_, h; };
+static struct ov_tile ov_tiles[MAX_WINDOWS];
+static int ov_active, ov_count, ov_hover;
+static void ov_rebuild(void);
+static void ov_paint(void);
+static int  ov_hit(int x, int y);
+static void ov_focus_tile(int i);
+static void ov_move(int dir);
+
+int wm_overview_active(void) { return ov_active; }
+int wm_overview_count(void)  { return ov_count; }
+int wm_overview_hover(void)  { return ov_hover; }
+int wm_overview_tile(int index, int *x, int *y, int *w, int *h, int *win_id)
+{
+    if (!ov_active || index < 0 || index >= ov_count) return 0;
+    if (x) *x = ov_tiles[index].x;
+    if (y) *y = ov_tiles[index].y;
+    if (w) *w = ov_tiles[index].w_;
+    if (h) *h = ov_tiles[index].h;
+    if (win_id) *win_id = ov_tiles[index].w ? ov_tiles[index].w->id : -1;
+    return 1;
+}
+void wm_overview_close(void)
+{
+    if (!ov_active) return;
+    ov_active = 0; ov_count = 0; ov_hover = -1;
+    wm_full();
+}
+int wm_overview_toggle(void)
+{
+    if (!wm_desktop_pref(WMP_OVERVIEW)) { wm_overview_close(); return 0; }
+    if (ov_active) { wm_overview_close(); return 0; }
+    ov_rebuild();
+    if (!ov_count) {
+        wm_notify("Window overview", "No open windows.", 0);
+        return 0;
+    }
+    ov_active = 1; ov_hover = 0;
+    wm_full();
+    return 1;
+}
 static void picker_answer(int item,void *ud){
     (void)ud;if(item<0||item>=MAX_WINDOWS)return;
     for(int i=0;i<win_count;i++)if(wins[i]->id==picker_ids[item]){
@@ -216,19 +274,45 @@ static void tb_power_rect(int *x, int *y, int *w, int *h)
     *h = TASKBAR_H - 12;
 }
 
+/* scoswm-arch: Lock is immediate; reboot/power-off need a confirmation whose
+ * safe keyboard default is Cancel.  SCos has no systemd, so Suspend and
+ * "restart the WM" (which would reparent X11 clients) have no equivalent. */
+static void power_reboot_cb(int ok, const char *text, void *ud)
+{
+    (void)text; (void)ud;
+    if (!ok) return;
+    sleep_ms(400);
+    usb_kbd_leds_off();
+    cpu_reboot_8042();
+    for (;;) cpu_hlt();
+}
+static void power_off_cb(int ok, const char *text, void *ud)
+{
+    (void)text; (void)ud;
+    if (!ok) return;
+    sleep_ms(400);
+    usb_kbd_leds_off();
+    acpi_shutdown();                       /* may return without ACPI */
+    wm_poweroff_screen();
+    for (;;) cpu_hlt();
+}
 static void power_menu_cb(int item, void *ud)
 {
-    if(item<0)return;
     (void)ud;
-    sleep_ms(400);
-    usb_kbd_leds_off();                    /* no lit LEDs on standby power */
-    if (item == 0) {                       /* Restart */
-        cpu_reboot_8042();
-        for (;;) cpu_hlt();
-    } else {                               /* Power Off */
-        acpi_shutdown();                   /* may return without ACPI */
-        wm_poweroff_screen();
-        for (;;) cpu_hlt();
+    if (item < 0) return;
+    if (item == 0) {
+        if (security_choice("lock.enabled")) security_ui_lock();
+        wm_request_full();
+        return;
+    }
+    if (item == 1) {
+        wm_confirm("Restart", "Restart now? Unsaved changes may be lost.",
+                   "Restart", power_reboot_cb, NULL);
+        return;
+    }
+    if (item == 2) {
+        wm_confirm("Power Off", "Power off now? Unsaved changes may be lost.",
+                   "Power Off", power_off_cb, NULL);
     }
 }
 
@@ -256,6 +340,23 @@ int wm_content_w(struct window *w) { return w->w - 2; }
 int wm_content_h(struct window *w) { return w->h - WIN_TITLEBAR - 1; }
 
 void wm_redraw(struct window *w) { if (w) w->dirty = 1; dirty = 1; }
+
+/* A live taskbar-height change must not leave a window behind the bar.
+ * Only the affected windows are reallocated; the app repaints on demand. */
+void wm_reflow_windows(void)
+{
+    int limit = screen_h - TASKBAR_H;
+    for (int i = 0; i < win_count; i++) {
+        struct window *w = wins[i];
+        if (!w || !w->app || w->state == WIN_STATE_MIN) continue;
+        if (w->h > limit) {
+            win_free_buf(w); w->h = limit; win_alloc_buf(w); w->dirty = 1;
+        }
+        if (w->y + w->h > limit) w->y = limit - w->h;
+        if (w->y < 0) w->y = 0;
+    }
+    wm_full();
+}
 
 static void win_alloc_buf(struct window *w)
 {
@@ -538,6 +639,7 @@ struct window *wm_open_app(const char *app_id, void *arg)
 void wm_init(void)
 {
     proc_init();
+    wm_prefs_init();
     win_count = 0;
     focused_w = NULL;
     modal_w = NULL;
@@ -553,7 +655,10 @@ void wm_init(void)
  * wm_run()).  Without this, a reboot silently loses desktop icons and pins. */
 void wm_reload_saved_state(void)
 {
+    wm_prefs_init();
+    wm_wallpaper_invalidate();
     desktop_load();pins_load();
+    wm_reflow_windows();
     wm_full();
 }
 
@@ -608,9 +713,9 @@ static void paint_wallpaper(void)
             u32 v[10];theme_values(t,v);
             if(v[7]==0)s_fill(c,0,0,screen_w,screen_h,t->bg_top);
             else s_vgrad(c,0,0,screen_w,screen_h,t->bg_top,t->bg_bot);
-            if(v[7]>=2)for(int x=0;x<screen_w;x+=(int)v[8])
+            if(wm_desktop_pref(WMP_GRID)&&v[7]>=2)for(int x=0;x<screen_w;x+=(int)v[8])
                 s_fill(c,x,0,v[7]==3?(int)v[8]/2:1,screen_h,v[9]);
-            if(v[7]==2)for(int y=0;y<screen_h;y+=(int)v[8])
+            if(wm_desktop_pref(WMP_GRID)&&v[7]==2)for(int y=0;y<screen_h;y+=(int)v[8])
                 s_fill(c,0,y,screen_w,1,v[9]);
             wp_valid = 1;
         }
@@ -1166,9 +1271,10 @@ static void paint_icons(void)
             icon_hover = i;
             s_fill(&screen, x, y, w, h, blend(t->bg_top, t->main, 18));
         }
-        s_icon(&screen, ditem_icon(&items[i]), x + (w - 24) / 2, y + 8, t->main);
+        int isz = wm_desktop_pref(WMP_ICON_SIZE);
+        draw_icon_scaled(ditem_icon(&items[i]), x + (w - isz) / 2, y + 8, isz, t->main);
         int tw = s_text_width(items[i].label);if(tw>w)tw=w;
-        s_clip_text(&screen, x + (w - tw) / 2, y + 40, items[i].label, t->text, w);
+        s_clip_text(&screen, x + (w - tw) / 2, y + 16 + isz, items[i].label, t->text, w);
     }
     if (band_active) {
         int x = band_x0 < band_x1 ? band_x0 : band_x1;
@@ -1263,6 +1369,7 @@ static void damage_add(int x, int y, int w, int h)
  * an entire overlapping window. Cached app surfaces remain independent. */
 static __attribute__((noinline)) void paint_partial(void)
 {
+    if (ov_active) { paint_all(); return; }
     if(cur_have){damage_add(cur_bx,cur_by,cur_bw,cur_bh);cur_restore();}
     if(icons_dirty)damage_add(0,0,screen_w,icon_band);
     if(tb_dirty)damage_add(0,screen_h-TASKBAR_H,screen_w,TASKBAR_H);
@@ -1438,12 +1545,266 @@ static void paint_launcher(void)
 }
 
 
+/* ---------------------------------------------------------------------------
+ * scoswm-arch window overview + edge snapping
+ * Ported from the Linux X11 WM (src/scoswm.c: overview_rebuild/draw_overview).
+ * SCos owns each window's back buffer, so the preview is a nearest-neighbour
+ * scale of w->surf.px - no Composite redirect, no X11 capture, no daemon.
+ * ------------------------------------------------------------------------- */
+static u32 ov_icon_pixels[24 * 24];
+
+static void draw_icon_scaled(int id, int x, int y, int size, u32 c)
+{
+    struct surface tmp = { ov_icon_pixels, 24, 24 };
+    if (size <= 24) { s_icon(&screen, id, x + (size - 24) / 2, y, c); return; }
+    memset(ov_icon_pixels, 0, sizeof(ov_icon_pixels));
+    s_icon(&tmp, id, 0, 0, c);
+    for (int j = 0; j < size; j++)
+        for (int i = 0; i < size; i++) {
+            u32 px = ov_icon_pixels[(j * 24 / size) * 24 + (i * 24 / size)];
+            if (px) s_pixel(&screen, x + i, y + j, px);
+        }
+}
+
+static void ov_rebuild(void)
+{
+    struct window *order[MAX_WINDOWS];
+    int n = 0;
+    for (int i = 0; i < win_count; i++)
+        if (wins[i] && wins[i]->app && wins[i]->app->id[0] != '_')
+            order[n++] = wins[i];
+    /* Most-recently-used first: wm_focus() bumps z on every activation. */
+    for (int i = 1; i < n; i++) {
+        struct window *k = order[i];
+        int j = i - 1;
+        while (j >= 0 && order[j]->z < k->z) { order[j + 1] = order[j]; j--; }
+        order[j + 1] = k;
+    }
+    ov_count = n;
+    if (!n) return;
+    int ax = OV_MARGIN, ay = OV_MARGIN + OV_HEADER;
+    int aw = screen_w - OV_MARGIN * 2;
+    int ah = screen_h - TASKBAR_H - ay - OV_MARGIN;
+    if (aw < 1 || ah < 1) { ov_count = 0; return; }
+    for (int i = 0; i < n; i++) {
+        struct ov_tile *t = &ov_tiles[i];
+        t->w = order[i];
+        if (n == 1) {
+            t->x = ax; t->y = ay; t->w_ = aw; t->h = ah;
+        } else if (n <= 3) {
+            int left = aw * 3 / 5;
+            if (!i) { t->x = ax; t->y = ay; t->w_ = left - OV_GUTTER / 2; t->h = ah; }
+            else {
+                int rows = n - 1;
+                t->x = ax + left + OV_GUTTER / 2;
+                t->y = ay + (i - 1) * (ah / rows);
+                t->w_ = aw - left - OV_GUTTER / 2;
+                t->h = ah / rows - OV_GUTTER;
+                if (i == n - 1) t->h = ay + ah - t->y;
+            }
+        } else {
+            int cols = 3, rows = 2, span = n == 4 ? 1 : 2;
+            while (cols * rows - 2 * span < n - 1) {
+                if (rows >= cols) cols++; else rows++;
+            }
+            int cw = aw / cols, ch = ah / rows;
+            if (!i) {
+                t->x = ax + OV_GUTTER / 2; t->y = ay + OV_GUTTER / 2;
+                t->w_ = cw * 2 - OV_GUTTER; t->h = ch * span - OV_GUTTER;
+            } else {
+                int slot = 0, col = 0, row = 0;
+                for (int k = 1; k <= i; k++) {
+                    while (slot < cols * rows) {
+                        col = slot % cols; row = slot / cols;
+                        if (col < 2 && row < span) slot++;
+                        else break;
+                    }
+                    if (k < i) slot++;
+                }
+                t->x = ax + col * cw + OV_GUTTER / 2;
+                t->y = ay + row * ch + OV_GUTTER / 2;
+                t->w_ = cw - OV_GUTTER; t->h = ch - OV_GUTTER;
+            }
+        }
+        if (t->x < ax) t->x = ax;
+        if (t->y < ay) t->y = ay;
+        if (t->w_ < 1) t->w_ = 1;
+        if (t->h < 1) t->h = 1;
+        if (t->w_ > ax + aw - t->x) t->w_ = ax + aw - t->x;
+        if (t->h > ay + ah - t->y) t->h = ay + ah - t->y;
+    }
+    if (ov_hover >= n) ov_hover = n - 1;
+}
+
+static int ov_hit(int x, int y)
+{
+    for (int i = 0; i < ov_count; i++)
+        if (in_rect(x, y, ov_tiles[i].x, ov_tiles[i].y,
+                    ov_tiles[i].w_, ov_tiles[i].h)) return i;
+    return -1;
+}
+
+static void ov_focus_tile(int i)
+{
+    if (i < 0 || i >= ov_count) return;
+    struct window *w = ov_tiles[i].w;
+    int alive = 0;
+    for (int k = 0; k < win_count; k++) if (wins[k] == w) alive = 1;
+    wm_overview_close();
+    if (!alive) return;
+    if (w->state == WIN_STATE_MIN)
+        w->state = w->restore_state == WIN_STATE_MAX ? WIN_STATE_MAX : WIN_STATE_NORMAL;
+    wm_focus(w);
+}
+
+static void ov_move(int dir)
+{
+    if (ov_count < 1) return;
+    ov_hover = (ov_hover + dir + ov_count) % ov_count;
+    wm_full();
+}
+
+static void ov_paint(void)
+{
+    const struct theme *t = theme_current();
+    /* Re-blit the cached wallpaper: the desktop icons were painted just
+     * before us and must be covered by the overview. */
+    paint_wallpaper();
+    char hint[96];
+    strcpy(hint, "Window overview - ");
+    char num[12]; fmt_u32(num, (u32)ov_count); strcat(hint, num);
+    strcat(hint, " windows");
+    s_text(&screen, OV_MARGIN, OV_MARGIN - 12, hint, t->main);
+    s_clip_text(&screen, OV_MARGIN + 240, OV_MARGIN - 12,
+                "Click a tile to focus - Esc or right-click closes",
+                screen_w - OV_MARGIN * 2 - 240, t->text);
+    for (int i = 0; i < ov_count; i++) {
+        struct ov_tile *tile = &ov_tiles[i];
+        struct window *w = tile->w;
+        int lit = i == ov_hover;
+        s_fill(&screen, tile->x, tile->y, tile->w_, tile->h, t->win_bg);
+        if (tile->w_ < 40 || tile->h < OV_STRIP + 8) {
+            s_frame_rect(&screen, tile->x, tile->y, tile->w_, tile->h, t->main);
+            continue;
+        }
+        /* Bright title strip in the accent colour: primary content, never
+         * hover-only decoration (same rule as the Linux overview). */
+        s_fill(&screen, tile->x + 1, tile->y + 1, tile->w_ - 2, OV_STRIP, t->main);
+        int tx = tile->x + 8;
+        if (w->app) { s_icon(&screen, w->app->icon, tile->x + 6, tile->y + 2, t->title_text); tx += 22; }
+        char title[96];
+        strcpy(title, w->state == WIN_STATE_MIN ? "[-] " : "");
+        strncat(title, w->title, 88 - strlen(title));
+        s_clip_text(&screen, tx, tile->y + 6, title,
+                    tile->x + tile->w_ - 8 - tx, t->title_text);
+        int cw = tile->w_ - 4, ch = tile->h - OV_STRIP - 4;
+        if (w->state == WIN_STATE_MIN || !w->surf.px) {
+            s_fill(&screen, tile->x + 2, tile->y + OV_STRIP + 2, cw, ch, t->bg_bot);
+            s_text(&screen, tile->x + 8, tile->y + OV_STRIP + 8,
+                   "Minimised - click to restore", t->text);
+        } else {
+            if (w->dirty && w->app && w->app->paint) {
+                { APP_T0(w); w->app->paint(w); APP_T1(w); }
+                w->dirty = 0;
+            }
+            struct surface *src = &w->surf;
+            int pw = cw, ph = ch;
+            if (pw * src->h / (src->w ? src->w : 1) > ph)
+                pw = ph * src->w / (src->h ? src->h : 1);
+            else
+                ph = pw * src->h / (src->w ? src->w : 1);
+            if (pw > OV_MAX_PREVIEW_W) pw = OV_MAX_PREVIEW_W;
+            if (ph > OV_MAX_PREVIEW_H) ph = OV_MAX_PREVIEW_H;
+            if (pw < 1) pw = 1;
+            if (ph < 1) ph = 1;
+            int px0 = tile->x + 2 + (cw - pw) / 2;
+            int py0 = tile->y + OV_STRIP + 2 + (ch - ph) / 2;
+            for (int yy = 0; yy < ph; yy++) {
+                int sy = yy * src->h / ph;
+                for (int xx = 0; xx < pw; xx++) {
+                    int sx = xx * src->w / pw;
+                    int dx = px0 + xx, dy = py0 + yy;
+                    if (dx < 0 || dy < 0 || dx >= screen_w || dy >= screen_h) continue;
+                    screen.px[dy * screen_w + dx] = src->px[sy * src->w + sx];
+                }
+            }
+        }
+        /* Paint all four edges last so a preview can never leave a strip. */
+        s_frame_rect(&screen, tile->x, tile->y, tile->w_, tile->h,
+                     lit ? t->title_text : t->main);
+        if (lit) s_frame_rect(&screen, tile->x + 1, tile->y + 1,
+                              tile->w_ - 2, tile->h - 2, t->main);
+    }
+}
+
+/* Snap layouts.  side: 1 left, 2 right, 3 top/maximise, 4 restore. */
+int wm_snap_window(struct window *w, int side)
+{
+    if (!w || !w->app || side < 1 || side > 4 || !wm_desktop_pref(WMP_SNAP)) return 0;
+    if (w == drag_win || w == resize_win) return 0;
+    if (w->state == WIN_STATE_MIN) w->state = WIN_STATE_NORMAL;
+    if (w->state == WIN_STATE_MAX) {
+        w->x = w->px; w->y = w->py; w->w = w->pw; w->h = w->ph;
+        w->state = WIN_STATE_NORMAL;
+        w->snapped = 0;
+        win_free_buf(w); win_alloc_buf(w); w->dirty = 1; wm_full();
+    }
+    if (side == 4) {
+        if (!w->snapped) return 1;
+        w->x = w->px; w->y = w->py; w->w = w->pw; w->h = w->ph;
+        w->snapped = 0;
+        win_free_buf(w); win_alloc_buf(w); w->dirty = 1; wm_full();
+        return 1;
+    }
+    if (!w->snapped) {
+        w->px = w->x; w->py = w->y; w->pw = w->w; w->ph = w->h;
+        w->snapped = 1;
+    }
+    int half = screen_w / 2;
+    if (half < 320) half = 320;
+    win_free_buf(w);
+    if (side == 1) { w->x = 0; w->y = 0; w->w = half; }
+    else if (side == 2) { w->x = screen_w - half; w->y = 0; w->w = half; }
+    else { w->x = 0; w->y = 0; w->w = screen_w; w->state = WIN_STATE_MAX; }
+    w->h = screen_h - TASKBAR_H;
+    win_alloc_buf(w);
+    w->dirty = 1; wm_full();
+    return 1;
+}
+
+/* Return 1 when the overview consumed the event; 0 lets the taskbar act. */
+static int overview_mouse(struct mouse_event *e)
+{
+    if (e->type == MEV_MOVE) {
+        int sens = prefs_get()->mouse_sens;
+        mx += e->dx * sens / 3; my -= e->dy * sens / 3;
+        if (mx < 0) mx = 0;
+        if (my < 0) my = 0;
+        if (mx > screen_w - 1) mx = screen_w - 1;
+        if (my > screen_h - 1) my = screen_h - 1;
+        int h = ov_hit(mx, my);
+        if (h != ov_hover) { ov_hover = h; wm_full(); }
+        return 1;
+    }
+    if (e->type == MEV_WHEEL) { ov_move(e->wheel > 0 ? -1 : 1); return 1; }
+    if (!e->down) return 1;
+    if (my >= screen_h - TASKBAR_H) { wm_overview_close(); return 0; }
+    if (e->button == MBTN_RIGHT) { wm_overview_close(); return 1; }
+    if (e->button == MBTN_LEFT) {
+        int h = ov_hit(mx, my);
+        if (h >= 0) ov_focus_tile(h); else wm_overview_close();
+    }
+    return 1;
+}
+
 static __attribute__((noinline)) void paint_all(void)
 {
     paint_wallpaper();
     in_full = 1;
     paint_icons();
     in_full = 0;
+    if (ov_active) ov_paint();
+    else {
     /* windows in z order (bottom first) */
     static u8 drawn[MAX_WINDOWS];
     for (int i = 0; i < win_count; i++) drawn[i] = 0;
@@ -1461,10 +1822,11 @@ static __attribute__((noinline)) void paint_all(void)
         }
         paint_window(lowest);
     }
+    }
     paint_taskbar();
     paint_menu();
     if (launch.active) paint_launcher();
-    paint_notices();
+    if (!ov_active) paint_notices();   /* tiles own the whole work area */
     paint_dnd();                /* the full and the damaged path must agree, or a drag leaves a trail */
     tb_dirty = 0; icons_dirty = 0; menu_dirty = 0; launch_dirty = 0; dnd_dirty = 0; ndmg = 0;
     for (int i = 0; i < win_count; i++) wins[i]->chrome_dirty = 0;
@@ -1786,6 +2148,7 @@ static void desktop_context(void)
 
 static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
 {
+    if (ov_active && overview_mouse(e)) { dirty = 1; return; }
     if (e->type == MEV_MOVE) {
         /* pre-move geometry for the interaction damage union */
         int omx = mx, omy = my;
@@ -1979,6 +2342,13 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
     /* buttons */
     if(e->down&&!app_capture&&!drag_win&&!resize_win){int notice=notice_at(mx,my);if(notice>=0){if(e->button==MBTN_LEFT)notice_remove(notice);return;}}
     mbuttons = e->buttons;
+    if (e->down && e->button == MBTN_RIGHT && !ov_active &&
+        wm_desktop_pref(WMP_OVERVIEW) && my >= screen_h - TASKBAR_H &&
+        in_rect(mx, my, 48, screen_h - TASKBAR_H + 6, 110, TASKBAR_H - 12)) {
+        wm_overview_toggle();
+        wm_full();
+        return;
+    }
     if (e->down) {
         static u64 last_down_tick;
         static int last_down_x, last_down_y, last_down_btn;
@@ -2064,6 +2434,13 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
                         desk_sel |= (1u << i);
                 }
             }
+        }
+        if (drag_win && wm_desktop_pref(WMP_SNAP) && !e->buttons) {
+            int side = 0;
+            if (mx <= 4) side = 1;
+            else if (mx >= screen_w - 5) side = 2;
+            else if (my <= 4) side = 3;
+            if (side) wm_snap_window(drag_win, side);
         }
         drag_win = NULL;
         resize_flush(1);          /* r36: apply the final resize target */
@@ -2245,8 +2622,8 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
         int px, py, pw, ph;
         tb_power_rect(&px, &py, &pw, &ph);
         if (in_rect(mx, my, px, py, pw, ph)) {
-            static const char *items[2] = { "Restart", "Power Off" };
-            wm_menu(px - 140, py - 2 * 24 - 8, items, 2, power_menu_cb, NULL);
+            static const char *items[3] = { "Lock", "Restart", "Power Off" };
+            wm_menu(px - 140, py - 3 * 24 - 8, items, 3, power_menu_cb, NULL);
             dirty = 1;
             return;
         }
@@ -2255,8 +2632,126 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
     dirty = 1;
 }
 
-static void handle_key(struct key_event *e)
+/* scoswm-arch: Alt+Tab MRU cycling and Alt+F10 maximise toggle. */
+/* A real Alt+Tab captures the MRU order when the cycle STARTS and walks that
+ * captured list: wm_focus() bumps z, so re-sorting on every press would make
+ * Alt+Shift+Tab jump to the oldest window instead of stepping back one. */
+static struct window *cycle_list[MAX_WINDOWS];
+static int cycle_n, cycle_pos, cycle_active;
+void wm_cycle_reset(void) { cycle_active = 0; cycle_n = 0; }
+
+static int cycle_list_valid(void)
 {
+    if (!cycle_active || cycle_n != win_count || !win_count) return 0;
+    for (int i = 0; i < cycle_n; i++) {
+        int found = 0;
+        for (int j = 0; j < win_count; j++) if (wins[j] == cycle_list[i]) found = 1;
+        if (!found) return 0;
+    }
+    return 1;
+}
+
+static void wm_cycle_focus(int dir)
+{
+    if (!win_count) return;
+    if (!cycle_list_valid()) {
+        for (int i = 0; i < win_count; i++) cycle_list[i] = wins[i];
+        cycle_n = win_count;
+        for (int i = 1; i < cycle_n; i++) {
+            struct window *k = cycle_list[i];
+            int j = i - 1;
+            while (j >= 0 && cycle_list[j]->z < k->z) { cycle_list[j + 1] = cycle_list[j]; j--; }
+            cycle_list[j + 1] = k;
+        }
+        cycle_pos = 0;
+        cycle_active = 1;
+    }
+    cycle_pos = (cycle_pos + dir + cycle_n) % cycle_n;
+    struct window *w = cycle_list[cycle_pos];
+    if (w->state == WIN_STATE_MIN)
+        w->state = w->restore_state == WIN_STATE_MAX ? WIN_STATE_MAX : WIN_STATE_NORMAL;
+    wm_focus(w);
+}
+
+static void wm_toggle_maximize(struct window *w)
+{
+    if (!w || !w->app) return;
+    if (w->state == WIN_STATE_MAX) {
+        win_free_buf(w);
+        w->x = w->px; w->y = w->py; w->w = w->pw; w->h = w->ph;
+        w->state = WIN_STATE_NORMAL; w->snapped = 0;
+        win_alloc_buf(w);
+    } else {
+        if (w->state == WIN_STATE_MIN) w->state = WIN_STATE_NORMAL;
+        w->px = w->x; w->py = w->y; w->pw = w->w; w->ph = w->h;
+        win_free_buf(w);
+        w->x = 0; w->y = 0;
+        w->w = screen_w; w->h = screen_h - TASKBAR_H;
+        w->state = WIN_STATE_MAX;
+        win_alloc_buf(w);
+    }
+    w->dirty = 1;
+    wm_full();
+}
+
+static void toggle_launcher(void)
+{
+    lua_apps_refresh();
+    launch.offset = 0;
+    launch.active = !launch.active;
+    launch_press = -1;
+    launch.q[0] = 0; launch.qpos = 0;
+    wm_full();
+}
+
+static __attribute__((noinline)) void handle_key(struct key_event *e)
+{
+    /* ---- scoswm-arch global hotkeys (owner choice WMP_HOTKEYS) ----
+     * Same bindings as the Linux WM: Alt+Tab / Alt+Shift+Tab, Alt+F4,
+     * Alt+F9, Alt+F10, Super+D, Super+Enter, Super+M, Super+, and Super+Q.
+     * Super+arrows drive the snap layouts.  A full-screen lock/dialog keeps
+     * its own keys, so these never fire while modal. */
+    if (!e->pressed && (e->keycode == KEY_LALT || e->keycode == KEY_RALT))
+        wm_cycle_reset();
+    if (wm_desktop_pref(WMP_HOTKEYS) && e->pressed && !modal_w) {
+        int k = e->keycode;
+        if (ov_active) {
+            if (k == 27) wm_overview_close();
+            else if (k == KEY_RIGHT || k == KEY_DOWN || k == '\t') ov_move(1);
+            else if (k == KEY_LEFT || k == KEY_UP) ov_move(-1);
+            else if (k == '\n' || k == '\r') ov_focus_tile(ov_hover);
+            wm_full();
+            return;
+        }
+        if (e->alt && !e->ctrl && !e->super && (k == '\t')) {
+            wm_cycle_focus(e->shift ? -1 : 1); return;
+        }
+        if (e->alt && !e->ctrl && !e->super && k == KEY_F4) {
+            if (focused_w) wm_close_window(focused_w);
+            return;
+        }
+        if (e->alt && !e->ctrl && !e->super && k == KEY_F9) {
+            if (focused_w) wm_minimize_window(focused_w);
+            return;
+        }
+        if (e->alt && !e->ctrl && !e->super && k == KEY_F10) {
+            wm_toggle_maximize(focused_w); return;
+        }
+        if (e->super && !e->ctrl && !e->alt) {
+            if (k == 'd' || k == 'D') { toggle_launcher(); return; }
+            if (k == 'q' || k == 'Q') {
+                if (focused_w) wm_close_window(focused_w);
+                return;
+            }
+            if (k == 'm' || k == 'M') { wm_launch_app_interactive("sysmon", NULL); return; }
+            if (k == ',') { wm_launch_app_interactive("settings", NULL); return; }
+            if (k == '\n' || k == '\r') { wm_launch_app_interactive("terminal", NULL); return; }
+            if (k == KEY_LEFT)  { wm_snap_window(focused_w, 1); return; }
+            if (k == KEY_RIGHT) { wm_snap_window(focused_w, 2); return; }
+            if (k == KEY_UP)    { wm_snap_window(focused_w, 3); return; }
+            if (k == KEY_DOWN)  { wm_snap_window(focused_w, 4); return; }
+        }
+    }
     /* Ctrl+Alt+Del: the escape hatch firmware used to provide */
     if (e->pressed && e->ctrl && e->alt &&
         (e->keycode == KEY_DELETE || e->keycode == 0x7F)) {
@@ -2481,7 +2976,7 @@ void wm_run(void)
         }
         if (dirty && (u32)tick_count - last_paint_tick >= 2) {  /* 50 fps cap */
             last_paint_tick = (u32)tick_count;
-            if (full_dirty) { paint_all(); full_dirty = 0; }
+            if (full_dirty || ov_active) { paint_all(); full_dirty = 0; }
             else paint_partial();
             dirty = 0;
         }
@@ -2501,6 +2996,8 @@ struct dialog_data {
     int  has_input;
     int  pos;
     int  resolved;
+    char label[32];             /* button text ("OK" or the action name) */
+    int  safe_default;          /* 1: Enter cancels, only explicit y/OK acts */
     dialog_cb cb;
     void *ud;
 };
@@ -2534,9 +3031,14 @@ static void dlg_paint(struct window *w)
     y = s->h - 40;
     s_fill(s, DLG_OK_X, y, 70, 26, blend(t->win_bg, t->main, 25));
     s_frame_rect(s, DLG_OK_X, y, 70, 26, t->main);
-    s_text(s, DLG_OK_X + 22, y + 5, "OK", t->text);
-    s_fill(s, DLG_CANCEL_X, y, 80, 26, blend(t->win_bg, t->main, 12));
+    s_clip_text(s, DLG_OK_X + 6, y + 5, d->label[0] ? d->label : "OK",
+                58, t->text);
+    /* On a safe-default confirmation Cancel is outlined twice: the keyboard
+     * default must be visible on screen as well as in dlg_key(). */
+    s_fill(s, DLG_CANCEL_X, y, 80, 26,
+           d->safe_default ? blend(t->win_bg, t->main, 40) : blend(t->win_bg, t->main, 12));
     s_frame_rect(s, DLG_CANCEL_X, y, 80, 26, t->main);
+    if (d->safe_default) s_frame_rect(s, DLG_CANCEL_X + 2, y + 2, 76, 22, t->title_text);
     s_text(s, DLG_CANCEL_X + 16, y + 5, "Cancel", t->text);
 }
 
@@ -2571,8 +3073,14 @@ static void dlg_key(struct window *w, struct key_event *e)
                             * typed dialog input was invisible until OK */
         return;
     }
-    if (e->pressed && (e->keycode == '\n' || e->keycode == 27))
-        dlg_resolve(w, e->keycode == '\n');
+    if (e->pressed && e->keycode == 27) { dlg_resolve(w, 0); return; }
+    if (e->pressed && (e->keycode == '\n' || e->keycode == '\r')) {
+        /* Cancel is the safe keyboard default for destructive actions. */
+        dlg_resolve(w, d->safe_default ? 0 : 1);
+        return;
+    }
+    if (d->safe_default && e->pressed &&
+        (e->keycode == 'y' || e->keycode == 'Y')) dlg_resolve(w, 1);
 }
 
 static void dlg_close(struct window *w)
@@ -2589,8 +3097,9 @@ static struct app dialog_app = {
     .paint = dlg_paint, .key = dlg_key, .mouse = dlg_mouse, .close = dlg_close,
 };
 
-void wm_dialog(const char *title, const char *message, const char *input,
-               dialog_cb cb, void *ud)
+static void dialog_open(const char *title, const char *message, const char *input,
+                        const char *label, int safe_default,
+                        dialog_cb cb, void *ud)
 {
     struct window *w = wm_open_app("_dialog", NULL);
     if (!w) { if (cb) cb(0, NULL, ud); return; }
@@ -2605,6 +3114,8 @@ void wm_dialog(const char *title, const char *message, const char *input,
         d->pos = (int)strlen(d->input);
     }
     d->cb = cb; d->ud = ud;
+    d->safe_default = safe_default;
+    if (label) strncpy(d->label, label, sizeof(d->label) - 1);
     w->data = d;
     int lines=dialog_text(NULL,d->message,390,4096,0);
     wm_resize_window(w,420,lines*18+90+(d->has_input?36:0));
@@ -2612,6 +3123,18 @@ void wm_dialog(const char *title, const char *message, const char *input,
     modal_w = w;
     wm_full();
     wm_focus(w);
+}
+
+void wm_dialog(const char *title, const char *message, const char *input,
+               dialog_cb cb, void *ud)
+{
+    dialog_open(title, message, input, "OK", 0, cb, ud);
+}
+
+void wm_confirm(const char *title, const char *message, const char *label,
+                dialog_cb cb, void *ud)
+{
+    dialog_open(title, message, NULL, label, 1, cb, ud);
 }
 
 /* -------------------------------------------------------- error popups --- */

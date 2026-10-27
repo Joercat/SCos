@@ -141,6 +141,28 @@ Use Applications to launch, pin/unpin or uninstall external apps. Drag with eith
 on the desktop to select icons; a stationary right click opens the context menu
 on release. Installed CAT apps get a desktop shortcut and a launcher entry.
 
+The interaction layer from the [Linux `scoswm-arch` experiment](https://github.com/Joercat/scoswm-arch/tree/arena/bb6dd9f1-scoswm-arch)
+is back in native SCos:
+
+* **Right-click "Windows N"** for a full-screen MRU **visual window overview**
+  with live previews of every window's own framebuffer ([screenshot](docs/migration/wm-overview.png)).
+  Click a tile to focus it; arrow keys/Tab move the selection; Esc or another
+  right-click closes it. The taskbar stays visible and notices step aside.
+* **Global hotkeys**: `Alt+Tab` / `Alt+Shift+Tab` cycle, `Alt+F4` closes,
+  `Alt+F9` minimises, `Alt+F10` maximises, `Super+D` opens the launcher,
+  `Super+Enter` Terminal, `Super+M` SysMon, `Super+,` Settings, `Super+Q`
+  closes. `Super+←/→/↑/↓` and dragging a titlebar to a screen edge **snap**
+  windows to halves / maximise / restore.
+* **Live desktop preferences** in Settings: taskbar height, desktop icon
+  size, wallpaper grid, and switches for hotkeys, the overview and snapping.
+  They persist in `home/desktop.cfg` (inside the encrypted vault) and default
+  to the original SCos geometry.
+* **Power menu**: Lock is immediate; Restart and Power Off go through a
+  confirmation whose safe keyboard default is **Cancel**.
+
+See [the port notes](docs/migration/WM-PORT.md) for the full mapping and what
+X11/Linux-specific pieces were deliberately left behind.
+
 The compositor reconstructs clipped damage regions from the wallpaper upward,
 and GOP scanout uses write-combining rather than uncached pixel writes. This is
 still a one-active-CPU kernel, not SMP, and GOP does not provide a hardware-vsync

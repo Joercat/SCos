@@ -13,8 +13,11 @@ unnumbered foundation, not a replacement desktop release. The user deferred
 numbering until conversion starts on their PC. New driver/library integration
 still requires separate permission after the existing core is converted.
 
-See [hardware/browser research](HARDWARE-AND-BROWSER.md) and
-[host QEMU tooling](EMULATOR.md); no researched guest component is imported.
+See [hardware/browser research](HARDWARE-AND-BROWSER.md),
+[host QEMU tooling](EMULATOR.md) and the
+[`scoswm-arch` port notes](WM-PORT.md) (visual MRU window overview, global
+Alt/Super hotkeys, snap layouts, live persisted desktop preferences and a
+Cancel-default power menu); no researched guest component is imported.
 The full security subsystem — accounts/sign-in, a plain TTY-style secure
 console, user-controlled security choices, a per-app **process isolation
 engine** (separate PML4s, private arenas, capability-gated VFS/theme/IPC) and

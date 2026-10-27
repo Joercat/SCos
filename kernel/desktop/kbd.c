@@ -11,7 +11,7 @@ int input_guard_armed;            /* set when WM starts; ignores boot-time BAT/A
 static struct key_event queue[QUEUE];
 static volatile int q_head, q_tail;
 
-static u8 shift_on, ctrl_on, alt_on, caps_on;
+static u8 shift_on, ctrl_on, alt_on, caps_on, super_on;
 /* r39: lock-key state. NumLock defaults ON so the keypad types digits
  * out of the box; LED output reports require a separate descriptor-aware implementation. */
 static u8 num_on = 1, scroll_on;
@@ -83,7 +83,7 @@ static void kbd_sc(u8 sc)
 {
     struct key_event e;
     e.scancode = sc;
-    e.ctrl = ctrl_on; e.alt = alt_on; e.shift = shift_on;
+    e.ctrl = ctrl_on; e.alt = alt_on; e.shift = shift_on; e.super = super_on;
     e.pressed = (sc & 0x80) ? 0 : 1;
     u8 make = sc & 0x7f;
 
@@ -91,6 +91,11 @@ static void kbd_sc(u8 sc)
     case 0x2a: case 0x36: shift_on = e.pressed; e.keycode = KEY_LSHIFT; kbd_enqueue(&e); return;
     case 0x1d: ctrl_on = e.pressed; e.keycode = KEY_LCTRL; kbd_enqueue(&e); return;
     case 0x38: alt_on = e.pressed; e.keycode = KEY_LALT; kbd_enqueue(&e); return;
+    /* E0 5B / E0 5C: the GUI (Super) modifier.  Set-1 delivers the make
+     * code after the E0 prefix; this decoder intentionally ignores the
+     * prefix, so the two codes are unambiguous here. */
+    case 0x5b: super_on = e.pressed; e.keycode = KEY_LSUPER; kbd_enqueue(&e); return;
+    case 0x5c: super_on = e.pressed; e.keycode = KEY_RSUPER; kbd_enqueue(&e); return;
     case 0x3a:
         if (e.pressed) caps_on = !caps_on;
         e.keycode = KEY_CAPS; kbd_enqueue(&e);

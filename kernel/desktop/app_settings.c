@@ -6,17 +6,42 @@ struct settings_ui { int hover_tile, hover_reset, hover_pref, scroll; };
 #define TILE_W 120
 #define TILE_H 80
 
+/* scoswm-arch: live window-manager preferences, in the same Settings panel
+ * the Linux WM used.  Six rows, each with a -/+ pair at the same x as the
+ * mouse preferences above, so the geometry stays predictable. */
+#define WM_ROWS 6
+#define WM_FIRST_ID 5
+#define WM_LAST_ID  (WM_FIRST_ID + WM_ROWS * 2 - 1)
+static const char *const wm_labels[WM_ROWS] = {
+    "Taskbar height:", "Desktop icon size:", "Wallpaper grid:",
+    "Global hotkeys:", "Visual overview:", "Edge snapping:"
+};
+static const int wm_keys[WM_ROWS] = {
+    WMP_BAR_HEIGHT, WMP_ICON_SIZE, WMP_GRID,
+    WMP_HOTKEYS, WMP_OVERVIEW, WMP_SNAP
+};
+static int wm_section_y(int sy) { return sy + 116; }
+static int wm_info_y(int sy) { return wm_section_y(sy) + 22 + WM_ROWS * 26 + 16; }
+
 /* prefs section geometry: top y, reset-button y */
 static void st_layout(struct surface *s, int *sy, int *ry)
 {
     (void)s;
     int iy = 60 + ((theme_count() + 3) / 4) * (TILE_H + 12) + 16;
     *sy = iy + 70;
-    *ry = *sy + 186;
+    *ry = wm_info_y(*sy) + 70;
 }
-/* hover_pref ids: 0/1 sens -/+, 2/3 dbl -/+, 4 restore icons */
+/* hover_pref ids: 0/1 sens -/+, 2/3 dbl -/+, 4 restore icons,
+ * 5..16 six WM rows (-/+ each). */
 static void st_pref_rect(int id, int sy, int *x, int *y, int *w, int *h)
 {
+    if (id >= WM_FIRST_ID) {
+        int n = id - WM_FIRST_ID;
+        *y = wm_section_y(sy) + 22 + (n / 2) * 26;
+        *x = (n % 2) ? 326 : 210;
+        *w = 24; *h = 20;
+        return;
+    }
     int row = (id < 2) ? 0 : (id < 4 ? 1 : 2);
     *y = sy + 22 + row * 30;
     if (id == 0 || id == 2) { *x = 210; *w = 24; *h = 20; }
@@ -110,7 +135,31 @@ static void st_paint(struct window *w)
                ui->hover_pref == 4 ? t->title_text : t->main);
     }
 
-    int iy = sy + 116;
+    int wy = wm_section_y(sy + ui->scroll) - ui->scroll;
+    s_text(s, 16, wy, "Window manager", t->main);
+    for (int r = 0; r < WM_ROWS; r++) {
+        int rowy = wy + 22 + r * 26;
+        s_text(s, 16, rowy + 4, wm_labels[r], t->text);
+        int v = wm_desktop_pref(wm_keys[r]);
+        char txt[24];
+        if (wm_keys[r] == WMP_BAR_HEIGHT || wm_keys[r] == WMP_ICON_SIZE) {
+            fmt_u32(txt, (u32)v); strcat(txt, " px");
+        } else strcpy(txt, v ? "On" : "Off");
+        s_text(s, 250, rowy + 4, txt, t->main);
+        for (int k = 0; k < 2; k++) {
+            int id = WM_FIRST_ID + r * 2 + k;
+            int x, y, ww, hh;
+            st_pref_rect(id, sy + ui->scroll, &x, &y, &ww, &hh);
+            y -= ui->scroll;
+            u32 bg = ui->hover_pref == id ? t->main : color_blend(t->win_bg, t->main, 15);
+            s_fill(s, x, y, ww, hh, bg);
+            s_frame_rect(s, x, y, ww, hh, t->main);
+            s_text(s, x + 8, y + 4, k ? "+" : "-",
+                   ui->hover_pref == id ? t->title_text : t->main);
+        }
+    }
+
+    int iy = wm_info_y(sy + ui->scroll) - ui->scroll;
     s_text(s, 16, iy, "System Information", t->main);
     char line[96];
     strcpy(line, "OS Version: unnumbered x64 development");
@@ -188,7 +237,7 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
     int sy, ry;
     st_layout(s, &sy, &ry);
     ui->hover_pref = -1;
-    for (int id = 0; id < 5; id++) {
+    for (int id = 0; id <= WM_LAST_ID; id++) {
         int hx, hy, hw, hh;
         st_pref_rect(id, sy, &hx, &hy, &hw, &hh);
         if (x >= hx && y >= hy && x < hx + hw && y < hy + hh) ui->hover_pref = id;
@@ -223,6 +272,16 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
         wm_redraw(w);
     } else if (ui->hover_pref == 4) {
         wm_desktop_restore();
+        wm_redraw(w);
+    } else if (ui->hover_pref >= WM_FIRST_ID && ui->hover_pref <= WM_LAST_ID) {
+        int n = ui->hover_pref - WM_FIRST_ID;
+        int row = n / 2, plus = n % 2;
+        int key = wm_keys[row];
+        int v = wm_desktop_pref(key);
+        if (key == WMP_BAR_HEIGHT) v += plus ? 4 : -4;
+        else if (key == WMP_ICON_SIZE) v += plus ? 8 : -8;
+        else v = plus ? 1 : 0;
+        wm_desktop_pref_set(key, v);
         wm_redraw(w);
     } else if (ui->hover_reset == 1) {
         char message[256];

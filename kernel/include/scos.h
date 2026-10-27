@@ -153,14 +153,15 @@ enum {
     KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
     KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
     KEY_LSHIFT, KEY_RSHIFT, KEY_LCTRL, KEY_RCTRL, KEY_LALT, KEY_RALT,
-    KEY_CAPS, KEY_NUM, KEY_SCROLL
+    KEY_CAPS, KEY_NUM, KEY_SCROLL,
+    KEY_LSUPER, KEY_RSUPER       /* the Super/Windows modifier (E0 5B / E0 5C) */
 };
 
 struct key_event {
     u8   scancode;      /* raw set-1 code (make code; +0x80 when released) */
     u16  keycode;       /* ascii or KEY_* code */
     u8   pressed;
-    u8   shift, ctrl, alt;
+    u8   shift, ctrl, alt, super;
 };
 
 void kbd_init(void);
@@ -410,6 +411,8 @@ struct window {
                                      * Never forced.  Native C apps are not
                                      * sandboxed; Lua CAT apps honour it by
                                      * refusing filesystem/theme writes. */
+    int  snapped;                   /* scoswm-arch: 1 while a snap layout owns
+                                     * the geometry; px/py/pw/ph hold restore. */
 };
 
 int  wm_win_count(void);
@@ -542,6 +545,37 @@ int  wm_desk_action_index(int item, const char *label);
 int  wm_app_minimized(const char *app_id);      /* 1 put away, 0 on screen, -1 not running */
 void wm_wallpaper_invalidate(void);
 void system_reset(void);
+
+/* ----------------------------------------------- scoswm-arch WM port ---- */
+/* Live desktop preferences, persisted in home/desktop.cfg.  All of them are
+ * owner choices; nothing here is forced on.  Default values reproduce the
+ * original SCos desktop exactly (40 px taskbar, 24 px icons, grid on). */
+#define WMP_BAR_HEIGHT   0
+#define WMP_ICON_SIZE    1
+#define WMP_GRID         2
+#define WMP_HOTKEYS      3
+#define WMP_OVERVIEW     4
+#define WMP_SNAP         5
+#define WMP_COUNT        6
+int  wm_taskbar_height(void);
+void wm_reflow_windows(void);   /* clamp windows after a work-area change */
+void wm_prefs_init(void);
+int  wm_desktop_pref(int key);
+int  wm_desktop_pref_set(int key, int value);
+const char *wm_desktop_pref_name(int key);
+void wm_prefs_save(void);
+/* Visual MRU window overview (right-click "Windows N"). */
+int  wm_overview_active(void);
+int  wm_overview_count(void);
+int  wm_overview_tile(int index, int *x, int *y, int *w, int *h, int *win_id);
+int  wm_overview_toggle(void);
+void wm_overview_close(void);
+int  wm_overview_hover(void);
+/* Snap a window: 1 left, 2 right, 3 top/maximise, 4 restore. */
+int  wm_snap_window(struct window *w, int side);
+/* Cancel-default confirmation dialog (destructive power actions). */
+void wm_confirm(const char *title, const char *message, const char *label,
+                void (*cb)(int ok, const char *text, void *ud), void *ud);
 
 
 /* Shared shell confirmation and real compositor stop. */

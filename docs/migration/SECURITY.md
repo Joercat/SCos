@@ -502,6 +502,11 @@ Passwords are never command arguments.
   `test_gpu_render`, `test_gpu_detect`, `test_nvidia_ident`, `test_pci_scan`,
   `test_isolation`, `test_usermode`, `test_delivery`. The GPU module-tamper test is back to its original form
   (no signing to work around).
+* `tools/tests/test_wm_port.py` — source-level wiring checks for the
+  `scoswm-arch` WM port plus a booted guest that verifies the MRU live-preview
+  overview (non-overlapping in-bounds tiles, MRU tile first), real Alt/Super
+  key events, snap geometry, clamped and persisted desktop preferences, and
+  that pressing Enter on the power confirmation cancels instead of rebooting.
 * `make dist` refreshes image/record/checksum; `tools/check_delivery.py` passes.
 * **Emulator success is not physical-PC acceptance.** No claim about SMP,
   hardware vsync, or new GPU/NIC/browser capability.
