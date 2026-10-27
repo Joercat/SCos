@@ -617,7 +617,8 @@ static void test_the_gates(void)
           fsp_state.booted && fsp_state.mapped && !fsp_state.mailbox_readable && !fsp_state.queried);
     check("and the refusals are counted where they happened, register by register",
           fsp_state.reads == model.reads && fsp_state.refusal_reads == model.refusals && model.refusals > 0);
-    check("nothing whatsoever is written to a card that is refusing", model.writes == 0 && fsp_state.writes == 0);
+    check("a refusing card is written to exactly once, by the probe that asks whether the queue takes stores",
+          model.writes == 2 && fsp_state.writes == 2 && !fsp_state.queue_writable);
     check("a scratch register that refuses is not polled to the limit: the wait stops at the refusal",
           fsp_state.boot_polls == 1);
     check("the coprocessor's own block is reported as still locked, which is the fact the panel leads with",

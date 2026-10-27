@@ -240,6 +240,11 @@ struct gpu_fsp_state {
     uint32_t fuse_check;                     /* the FSP's own fuse-consistency word: 0 means it passed */
     uint32_t hwcfg2;                         /* the capability word whose refusal was the blocker */
     uint32_t queue_head, queue_tail, msgq_head, msgq_tail;
+    /* What the queue says after we store to it without being invited.  The reference driver zeroes both head
+     * words on receive and never tests whether it is allowed to read them first; we gated every write on a
+     * readable pair, which is how a card can finish a whole boot with writes 0 because nobody ever tried. */
+    uint32_t reset_head, reset_tail;
+    int queue_writable;                  /* the value we wrote came back, whatever the read said before */
     int queried, responded, send_blocked;     /* a request went into the channel, a reply was read back off
                                                * it, and why a request could not go in */
     int polled, reply_polls;                  /* how many looks each of the two waits took */

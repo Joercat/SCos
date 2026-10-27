@@ -133,9 +133,10 @@ def test_the_probe_is_gated_and_the_doorbell_is_counted():
     for call in re.finditer(r'device_map\([^;]*?\)', text, re.S):
         assert ', 0, &mapped)' in call.group(0), \
             'a mailbox window asked for write combining: %s' % call.group(0).replace('\n', ' ')
-    assert len(re.findall(r'write32\(&w_', text)) == 8, \
-        'this file writes the card with %d call sites, and the eight it should have are one control, three ' \
-        'data, two queue pointers out, and two reply pointers back' % len(re.findall(r'write32\(&w_', text))
+    assert len(re.findall(r'write32\(&w_', text)) == 10, \
+        'this file writes the card with %d call sites, and the ten it should have are one control, three data, ' \
+        'two queue pointers out, two reply pointers back, and the pair that clears the reply queue when a ' \
+        'refusal has left us no way to tell whether a store would land at all' % len(re.findall(r'write32\(&w_', text))
     # The two queue registers are written, and the only other writes are to the channel.  Pinned as a count of
     # write32 call sites because "how many registers did the OS touch" is the question this whole feature turns
     # on, and it should be answerable from the source before it is answerable from a card.

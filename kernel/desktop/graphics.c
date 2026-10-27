@@ -297,6 +297,17 @@ static void put_firmware_report(struct writer *w, const struct gpu_firmware_stat
  */
 static void put_fsp_mailbox(struct writer *w, const struct gpu_fsp_state *f)
 {
+    /* The one question that can only be answered by trying: the queue pair is zeroed the way the reference
+     * driver zeroes it on receive, and what comes back is the fact.  Before this, a card that refuses reads was
+     * never written to at all, and the report could only say nobody answered without saying nobody asked. */
+    put(w, " The reply queue was written 0 in both words and read back 0x");
+    put_hex(w, f->reset_head);
+    put(w, "/0x");
+    put_hex(w, f->reset_tail);
+    put(w, f->queue_writable
+            ? ", so the queue takes stores from this reader and a packet can be put on it"
+            : ", which refuses the store as well as the read: this reader has no door into the queue");
+    put(w, ".");
     put(w, " The FSP's firmware version reads ");
     put_number(w, f->ucode_version & 0x7ffu);
     put(w, " and its own fuse check reads 0x");

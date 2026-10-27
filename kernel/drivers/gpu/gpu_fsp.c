@@ -733,6 +733,26 @@ static void hand_over_fmc(void)
     fsp_state.queues_idle_after = idle == 1;
 }
 
+/* Does the queue accept a store from us?  Asked by storing, not by reading: the pair is zeroed the same way
+ * the reference driver zeroes it on receive (gh100's nvkm_fsp_recv clears QUEUE_HEAD and QUEUE_TAIL together),
+ * and the answer is what comes back afterwards.  A register that returns what was written to it is a register
+ * this OS can submit through even when it will not disclose its previous value; a register that answers
+ * 0xbadf... to the read-back has told us, at the only moment that matters, that the store did not land. */
+static void probe_queue_write_access(void)
+{
+    if (!w_fsp.page) return;
+    /* The *reply* queue, deliberately: writing the submit doorbell before anything is staged would be a packet
+     * nobody asked for, and these two words are the ones the reference driver clears when it receives. */
+    write32(&w_fsp, NV_PFSP_MSGQ_TAIL, 0);
+    write32(&w_fsp, NV_PFSP_MSGQ_HEAD, 0);
+    fsp_state.reset_head = read32(&w_fsp, NV_PFSP_MSGQ_HEAD);
+    fsp_state.reset_tail = read32(&w_fsp, NV_PFSP_MSGQ_TAIL);
+    fsp_state.queue_writable = !FSP_NOT_CONTENT(fsp_state.reset_tail) && fsp_state.reset_tail == 0;
+    klog(FSP_LOG_PREFIX "the reply queue was written 0 in both words and read back head 0x%x tail 0x%x, which "
+         "the queue %s", fsp_state.reset_head, fsp_state.reset_tail,
+         fsp_state.queue_writable ? "accepted" : "refused");
+}
+
 static void probe_mailbox(void)
 {
     int idle;
@@ -757,7 +777,14 @@ static void probe_mailbox(void)
     fsp_state.gsp_released = fsp_state.lockdown == 0;
     fsp_state.gsp_mailbox0 = read32(&w_gsp, NV_PGSP_MAILBOX0);
     fsp_state.gsp_mailbox1 = read32(&w_gsp, NV_PGSP_MAILBOX1);
-    if (!queues(&idle)) return;                        /* refused: there is no mailbox to send through */
+    int queue_readable = queues(&idle);
+    if (!queue_readable) probe_queue_write_access();   /* a refusing card gets asked the one question that is
+                                                           left; a card that answers is not reset under itself */
+    /* The gate used to be "can we read the pair"; on a card that answers 0xbadf... to reads and would take a
+     * store, that turned into a boot where nothing was ever written and nothing was ever learned.  It is now
+     * "can we read the pair, or did the write we made stick": either one is enough to try the query, and the
+     * read-back is reported so a refusal is a measurement and not an assumption. */
+    if (!queue_readable && !fsp_state.queue_writable) return;  /* no mailbox this reader can use at all */
     fsp_state.mailbox_readable = 1;
     if (!fsp_state.booted) return;        /* until the FSP says it is up, nothing on the other end is reading */
 
