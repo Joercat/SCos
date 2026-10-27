@@ -106,7 +106,7 @@ def open_power_menu(g, item):
 def test_the_fixes_are_wired():
     wm = (ROOT / 'kernel/desktop/wm.c').read_text()
     for needle in ('win_is_dialog', 'wm_modal_dismiss', 'hover_btn_win',
-                   'bar_hover_at', 'int nbtn = dlg ? 1 : 3'):
+                   'bar_hover_at', 'int nbtn = dlg ? 1 : 3', 'notice_hover'):
         assert needle in wm, needle + ' is missing from the WM'
     assert '!in_rect(mx, my, modal_w->x, modal_w->y, modal_w->w, modal_w->h)' in wm, \
         'an outside click no longer dismisses a confirmation'
@@ -254,6 +254,20 @@ def test_titlebar_and_taskbar_hit_testing():
         assert g.call('bar_hover_at', px + 2, py + 2) == 0xfffffffc   # -4
         assert g.call('bar_hover_at', 50, sh - bar + 10) == 0xfffffffd   # -3
         assert g.call('bar_hover_at', 200, sh - bar - 20) == BAR_HOVER_NONE
+
+        # A notification is pressable ("Click to dismiss"), so it highlights
+        # too - and the highlight follows the pointer off the box again.
+        g.debug.write(g.scratch + 2000, b'Notice\0')
+        g.debug.write(g.scratch + 2100, b'Hover me\0')
+        g.call('wm_notify', g.scratch + 2000, g.scratch + 2100, 1)
+        g.call('paint_all')
+        g.run(0.1)
+        mouse(g, 1, sw - 330 + 160, 10 + 20)
+        assert g.value('notice_hover', 4) == 0, 'a notification did not highlight'
+        g.call('paint_all')
+        g.snapshot('notice-hover')
+        mouse(g, 1, 40, sh - bar - 200)
+        assert g.value('notice_hover', 4) == 0xffffffff, 'the notice stayed highlighted'
         assert 'panic' not in g.serial().lower()
     print('PASS: titlebar hover/hit testing, window menu, double-click maximise '
           'and taskbar targets all agree with what is drawn', flush=True)

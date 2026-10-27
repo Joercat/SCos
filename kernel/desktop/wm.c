@@ -114,6 +114,9 @@ static int icon_hover = -1;
 #define TB_CLOCK_W 68
 #define TB_POWER_W 34
 static int bar_hover = -99;   /* see bar_hover_at() */
+/* A notification is dismissible, so it is also a pressable surface and gets the
+ * same highlight as a menu row.  -1 = none. */
+static int notice_hover = -1;
 static int picker_ids[MAX_WINDOWS];
 static char picker_labels[MAX_WINDOWS][80];
 static const char *picker_items[MAX_WINDOWS];
@@ -253,7 +256,7 @@ static int notice_top(int index)
     return y;
 }
 
-static void notice_remove(int i){if(i<0||i>=notice_count)return;for(int j=i;j<notice_count-1;j++)notices[j]=notices[j+1];notice_count--;wm_full();}
+static void notice_remove(int i){if(i<0||i>=notice_count)return;for(int j=i;j<notice_count-1;j++)notices[j]=notices[j+1];notice_count--;notice_hover=-1;wm_full();}
 /* Hit-testing walks the same heights, so a click lands on the notice the user can see rather than on the
  * fourth box in a stack of shorter ones. */
 static int notice_at(int x,int y){
@@ -266,7 +269,10 @@ static void paint_notices(void){
     for(int i=0;i<notice_count;i++){
         struct notice *n=&notices[i];int y=notice_top(i),h=notice_height(n),rows=notice_rows(n);
         u32 accent=n->warning?0xffbb55:t->main;
-        s_fill(&screen,x,y,NOTICE_W,h,t->win_bg);s_frame_rect(&screen,x,y,NOTICE_W,h,accent);
+        int hot = notice_hover == i;
+        s_fill(&screen,x,y,NOTICE_W,h,hot?color_blend(t->win_bg,accent,14):t->win_bg);
+        s_frame_rect(&screen,x,y,NOTICE_W,h,accent);
+        if(hot)s_frame_rect(&screen,x+1,y+1,NOTICE_W-2,h-2,accent);
         s_clip_text(&screen,x+NOTICE_PAD,y+6,n->title,accent,NOTICE_W-2*NOTICE_PAD);
         /* One surface, one layout: the box was sized by notice_rows() and the text is painted by the
          * shared paragraph painter, both of them wrapping at the same width.  A sub-surface clipped to the
@@ -275,7 +281,15 @@ static void paint_notices(void){
          * callers agree because they call the same function, and if they ever stop agreeing, a row is drawn
          * past the frame in a screenshot rather than being silently cut. */
         s_text_wrap(&screen,x+NOTICE_PAD,y+NOTICE_HEAD,NOTICE_W-2*NOTICE_PAD,n->text,t->text);
-        s_text(&screen,x+NOTICE_PAD,y+NOTICE_HEAD+rows*FONT_H+4,"Click to dismiss",t->main);
+        /* The dismiss line is the pressable part, so it is the part that
+         * inverts under the pointer. */
+        if(hot){
+            s_fill(&screen,x+NOTICE_PAD-3,y+NOTICE_HEAD+rows*FONT_H+1,
+                   s_text_width("Click to dismiss")+6,FONT_H+6,accent);
+            s_text(&screen,x+NOTICE_PAD,y+NOTICE_HEAD+rows*FONT_H+4,"Click to dismiss",t->win_bg);
+        }else{
+            s_text(&screen,x+NOTICE_PAD,y+NOTICE_HEAD+rows*FONT_H+4,"Click to dismiss",t->main);
+        }
     }
 }
 
@@ -2465,7 +2479,12 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
         if(app_capture&&(!modal_w||modal_w==app_capture)){
             struct window *c=app_capture;if(c->app&&c->app->mouse){APP_T0(c);c->app->mouse(c,e,mx-c->x-1,my-c->y-WIN_TITLEBAR);APP_T1(c);}cur_move();return;
         }
-        if(notice_at(mx,my)>=0){cur_move();return;}
+        {   /* A notification under the pointer highlights, and only a change
+             * of target repaints the desktop. */
+            int nh = notice_at(mx,my);
+            if(nh != notice_hover){notice_hover = nh; wm_full();}
+            if(nh >= 0){cur_move();return;}
+        }
         struct window *hw = NULL;
         int zone = move_needs_composite(&hw);
         /* hover signature: composite only when the hover TARGET changes,
