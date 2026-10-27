@@ -1,5 +1,8 @@
-"""Real guest application lifecycle, Files shortcut, pin and notification checks."""
-import ctypes as C,struct
+"""Real guest application lifecycle, Files shortcut, pin and notification checks.
+
+The report probe below is sized from kernel/include/scos.h rather than guessed: a suite that asks the panel for fewer bytes than the machine prints ends up asserting against a truncation of its own making, and this one did."""
+import ctypes as C,struct,re
+from pathlib import Path
 from qemu_support import Guest,RESULTS
 from test_cat import package
 from test_compositor import event,pointer,image
@@ -35,12 +38,21 @@ def crop(pixels,x,y,w,h,screen_width):return b''.join(pixels[((y+r)*screen_width
 def test():
   for ide in [False,True]:
     with Guest('manage-ide' if ide else 'manage-usb',ide=ide) as g:
-      g.call('graphics_report',g.scratch,1024);report=g.string(g.scratch,1024)
+      cap=int(re.search(r'#define\s+SCOS_GRAPHICS_REPORT\s+(\d+)',
+                        (Path(__file__).resolve().parents[2]/'kernel/include/scos.h').read_text()).group(1))
+      g.call('graphics_report',g.scratch,cap);report=g.string(g.scratch,cap)
       # 'no hardware backend linked' used to be the only negative SCos could state.  A driver can now
       # be a file on the disk, so the report has to say which of the two negatives this is; on this
       # machine nothing matched the console's adapter at all, and the notification the user saw at boot
       # has to agree with it rather than reassure.
       assert 'CPU software' in report and 'no driver module loaded for this chip' in report and 'QEMU' in report,report
+      # The other half of the same promise, measured rather than asserted about: a reader who asks for less than
+      # the report needs is told so, in the text itself, with both numbers.  Before this existed a clipped panel
+      # and a complete one were indistinguishable, which is why three debugging rounds were spent on a report
+      # that had never lost anything at all.
+      g.call('graphics_report',g.scratch,1024);small=g.string(g.scratch,1024)
+      assert 'more byte(s) than this 1024-byte buffer' in small,small[-600:]
+      assert 'so it ends here' in small and small.rstrip().endswith('scrollback.'),small[-600:]
       assert g.value('notice_count')>=1
       g.call('paint_all');initial=crop(image(g,'warning'),g.value('screen_w')-330,10,320,108,g.value('screen_w'))
       # A notification must overlay a modal, and dismiss without resolving it.

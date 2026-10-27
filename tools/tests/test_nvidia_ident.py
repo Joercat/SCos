@@ -22,6 +22,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# The capacity the terminal and the TTY hand to graphics_report(), read from the header: asking for less than
+# the machine shows is measuring a buffer nobody uses, and with the writer now saying out loud how many bytes it
+# could not fit, a probe sized to 4096 would spend its last lines on that sentence instead of on the panel it is
+# checking.
+REPORT_CAP = int(re.search(r'#define\s+SCOS_GRAPHICS_REPORT\s+(\d+)',
+                           (ROOT / 'kernel/include/scos.h').read_text()).group(1))
+
 MODULE_CFLAGS = [
     '-m64', '-ffreestanding', '-fno-stack-protector', '-fno-builtin',
     '-fno-asynchronous-unwind-tables', '-mno-red-zone', '-O2',
@@ -238,8 +245,8 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
             assert 'notification: GPU is not rendering' in serial, serial[-1500:]
             assert 'No 2D engine bound' not in serial, \
                    'a bound module that implements no engine is not "nothing was matched": ' + serial[-800:]
-            g.call('graphics_report', g.scratch, 4096)
-            panel = g.string(g.scratch, 4096)
+            g.call('graphics_report', g.scratch, REPORT_CAP)
+            panel = g.string(g.scratch, REPORT_CAP)
             # The first line a user reads has to carry the outcome, not a narrative about registers: this
             # is the state where a module is resident, the chip was read, and nothing was drawn, and a
             # reader should not have to infer "not rendering" from a paragraph.
