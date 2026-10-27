@@ -1,10 +1,10 @@
 {
  "branch": "arena/01058b59-scos",
  "build_tag": "x64-dev",
- "built": "2026-10-27T23:54:24Z",
- "commit": "46bb5d7eeab8",
+ "built": "2026-10-27T23:55:18Z",
+ "commit": "d5a72cfd3e16",
  "kernel_bytes": 1252176,
- "kernel_sha256": "1415088396073cae29fcfbf6b4af0e1cc924c4934af367ea22d621a8adc5432f",
+ "kernel_sha256": "f71ef7b4bbfc1b40a059374a6f6adee5653c5af7d04b1fe62a62de7bee5b2cf9",
  "modules": [
   {
    "bytes": 13536,
