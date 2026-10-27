@@ -214,6 +214,12 @@ static void write32(struct fsp_window *w, uint32_t offset, uint32_t value)
     if (within + 4 > w->length) return;
     gpu_io_write32(w->page, within, value);
     fsp_state.writes++;
+    /* And into the ring, because the total answers "how many" and the panel has to answer "which".  The last
+     * eight stores are the whole story of a submission - the seek, the dwords, the tail, the head - and the
+     * next paste can be read without arithmetic on a counter. */
+    fsp_state.stores[fsp_state.store_count % GPU_FSP_STORE_LOG].offset = offset;
+    fsp_state.stores[fsp_state.store_count % GPU_FSP_STORE_LOG].value = value;
+    fsp_state.store_count++;
 }
 
 /* The FSP's registers sit 14 MiB into BAR0 and the therm scratch 128 KiB in, so each is reached through its
@@ -645,9 +651,10 @@ static void stage_fmc(void)
 /* The handover, sent.  Everything above this function was built to make this message possible, and it is the
  * only write in this OS that asks the card to do something.
  *
- * It is reached only when the FSP has answered a read-only query with a framed reply and no error, which is
- * this kernel's way of knowing there is somebody at the other end of the channel before a firmware image is put
- * in front of it.  What the card does with it is the FSP's business: verify the 48-byte hash against the copy
+ * It used to be reached only after a read-only query had answered cleanly, which was this kernel's way of
+ * knowing there was somebody at the other end of the channel before a firmware image was put in front of it; the
+ * reference driver asks no such question, and a gate that keeps the only meaningful message from ever being sent
+ * has now cost three builds of silence, so it is gone.  What the card does with the packet is the FSP's business: verify the 48-byte hash against the copy
  * staged in this kernel's own pages, verify the signature against the public key, load the image into the
  * protected region and start the coprocessor - or refuse, with one of the falcon error codes decoded above.
  * The reference driver does exactly this, in this order, on this generation.
@@ -813,19 +820,31 @@ static void probe_mailbox(void)
         uint8_t reply[128];
         int read;
 
+        /* The handover goes first, because that is the order the reference driver uses and the only order that
+         * has ever put a firmware image in front of this coprocessor: nvkm_fsp_boot_gsp_fmc() is the FSP
+         * subdev's sole client on this generation, gh100_fsp_send_sync() is entered straight from it, and no
+         * query of any kind comes before it.  Requiring a clean answer to a capability query first was the
+         * third condition this file invented and the card contradicted - the boot scratch came first (writes
+         * 0), the EMEM walk second (writes 4 and a send blocked at home) - and it is what has kept 868 bytes off
+         * the wire since, for a message the FSP has no reason to answer at all: NVDM_TYPE_CAPS_QUERY does not
+         * appear in the driver that boots this chip, which only ever sends NVDM_TYPE_COT.  The query is not
+         * dropped, it is moved, and moving it makes it measure something the old order could not: whether the
+         * coprocessor answers once it has been handed an image, rather than whether it answers a question
+         * nobody else asks it.
+         *
+         * What a declined handover costs is stated where it is owed: this payload still declines the FRTS
+         * region and the boot arguments, because this OS reserves no frame-buffer heap and has no resource
+         * manager descriptor to point at, so the likeliest answer to what follows is a refusal naming the
+         * image as unusable.  A refusal is a reply, and a reply is the first thing this card has ever said about
+         * firmware - which is more than silence about a packet it was never given. */
+        if (fsp_state.cot_ready && !fsp_state.cot_defect) hand_over_fmc();
+
         if (!send_packet(&query, 1, NVDM_TYPE_CAPS_QUERY)) return;
         fsp_state.queried = 1;
         fsp_state.query.request_bytes = fsp_state.packet_bytes;
         if (!wait_for(reply_waiting, &fsp_state.reply_polls)) return;
         read = read_reply(reply, sizeof reply, &fsp_state.query);
         fsp_state.responded = read == 1;
-        /* The one condition under which a firmware image is offered: the card asked, answered, and the answer
-         * was well-formed and clean.  Anything less is a channel with nobody behind it, and a handover written
-         * into that could not be told apart from one that was never written at all. */
-        if (fsp_state.responded && fsp_state.query.framed && fsp_state.query.complete &&
-            fsp_state.query.error == 0 && fsp_state.query.command == NVDM_TYPE_CAPS_QUERY &&
-            fsp_state.cot_ready && !fsp_state.cot_defect)
-            hand_over_fmc();
     }
 }
 

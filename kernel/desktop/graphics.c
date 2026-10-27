@@ -213,12 +213,19 @@ static void put_firmware_image(struct writer *w, const struct gpu_firmware_state
             }
         } else {
             put(w, image->fmc_template ? ", FMC header exact" : ", FMC header mismatched");
-            put(w, image->fmc_sections ? ", every section legal and its CRC32 verified"
+            /* "legal" and "verified" are two different findings and used to be claimed in one breath, which is
+             * how a count of four mismatches ended up printed straight after a sentence saying every CRC32 had
+             * been verified.  The genuine NVIDIA file carries a sh_info word per section that is not the CRC32
+             * of that section's bytes - measured on fmc-570.144.bin - so the count is the container's bookkeeping
+             * and not an integrity failure, and the coprocessor's own check is the signature over the hash. */
+            put(w, image->fmc_sections ? ", every section's type, flags and range legal"
                                        : ", sections rejected");
             fmt_u32(number, image->crc_failures);
             put(w, ", ");
             put(w, number);
-            put(w, " CRC32 mismatch(es)");
+            put(w, " section(s) whose sh_info word is not the CRC32 of their bytes, reported and not obeyed: "
+                   "that field is packaging bookkeeping, and what authenticates the image is the signature over "
+                   "the hash, which is the coprocessor's check to make");
             if (image->fmc_named) {
                 put(w, "; image ");
                 fmt_u32(number, image->image_bytes);
@@ -241,14 +248,51 @@ static void put_firmware_image(struct writer *w, const struct gpu_firmware_state
     }
     if (held && !skipped) put(w, "; every image the boot sequence kept was parsed");
     if (skipped) {
+        /* Two different shortages used to share one sentence: this clause said "more on the disk than the boot
+         * allocation could keep" on a volume where the four missing images are not on the disk at all, which is
+         * the opposite finding - one asks for a bigger allocation, the other asks for files.  The record keeps
+         * which of the two it is, so the report says which. */
+        unsigned kept_out = 0, absent = 0;
+        for (unsigned i = 0; i < GPU_FIRMWARE_ROLES; i++) {
+            if (fw->image[i].resident) continue;
+            if (fw->image[i].bytes) kept_out++;
+            else absent++;
+        }
         put(w, "; ");
-        fmt_u32(number, skipped);
-        put(w, number);
-        put(w, " more on the disk than the boot allocation could keep");
+        if (absent) {
+            fmt_u32(number, absent);
+            put(w, number);
+            put(w, " of the five roles this volume does not carry at all, so no allocation of any size could "
+                   "have kept them");
+        }
+        if (kept_out) {
+            put(w, absent ? ", and " : "");
+            fmt_u32(number, kept_out);
+            put(w, number);
+            put(w, " read off the disk and then dropped for want of a page to keep them in");
+        }
     }
-    put(w, ". Nothing was written to the card: the command that would consume these images is not implemented "
-           "in this OS, so what this line describes is memory SCos is holding, not a coprocessor that was "
-           "told anything.\n");
+    /* Whether these bytes reached the card is a fact about this boot, and it used to be stated as a standing
+     * excuse - "the command that would consume these images is not implemented in this OS" - three builds after
+     * the command was written, sent, and answered with silence.  A reader who is being told what the card saw
+     * has to be told what the card saw, so the three states are named separately: held and sent, held and
+     * attempted, held and not attempted.  gpu_fsp_state() is the same record the mailbox paragraph quotes two
+     * lines later, so the two cannot drift apart. */
+    {
+        const struct gpu_fsp_state *fs = gpu_fsp_state();
+        if (fs && fs->handover_sent)
+            put(w, ".  These bytes did not stop at being held: the handover they describe was written to the "
+                   "FSP's channel this boot, and the card's answer - reply or none - is the mailbox paragraph "
+                   "below, which is where the measurement lives rather than in this sentence.\n");
+        else if (fs && fs->handover_attempted)
+            put(w, ".  A handover was attempted from these bytes and did not reach an answer, which is the "
+                   "difference this paragraph exists to draw: the image is in memory, the packet went as far as "
+                   "the card let it, and the next paragraph says how far that was.\n");
+        else
+            put(w, ".  Nothing was written to the card from these bytes this boot: the payload they describe was "
+                   "not assembled, and the mailbox paragraph below gives the reason rather than leaving it to "
+                   "be guessed.\n");
+    }
 }
 
 /* The firmware paragraph of the report, kept out of graphics_report()'s body because it has two states
@@ -824,23 +868,72 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
         put(w, ", which is the address the payload carries, and its CRC32 over the copy the card would read is "
                "0x");
         put_hex(w, (uint32_t)f->image_crc32);
-        put(w, " (the container's own checksum covers the file, not the copy).  Hash 48 bytes, public key 384, "
-               "signature 384 were taken out of the FMC's sections and placed where the published payload puts "
-               "them, and the resume store is described as absent, which is how the reference driver encodes a "
-               "machine that has nothing to resume.  It goes on the wire only after the FSP has answered the "
-               "query above cleanly, because an answer is what tells this kernel there is a reader at the other "
-               "end of the channel; without one, a handover would be a write whose effect cannot be told apart "
-               "from its absence, and a card that half-reads a firmware image is a machine that comes back to a "
-               "black screen with no log.  Neither of those happened here: the payload was assembled, staged and "
-               "left in memory.\n");
+        put(w, " (the container's own checksum covers the file, not the copy).  Hash ");
+        put_number(w, f->cot_hash_bytes);
+        put(w, " bytes, public key ");
+        put_number(w, f->cot_pkey_bytes);
+        put(w, " bytes and signature ");
+        put_number(w, f->cot_sig_bytes);
+        put(w, " bytes were taken out of the FMC's sections and placed where the published payload puts them - "
+               "the widths are the ones this architecture's own table gives, quoted here rather than remembered, "
+               "because Hopper's is 48/384/384 and Blackwell's is not, and a report that recites the older line "
+               "describes a card that is not in the machine.  The resume store is described as absent, which is "
+               "how the reference driver encodes a machine that has nothing to resume.  It went on the wire "
+               "first and without conditions, because that is what the driver that boots this chip does: no "
+               "capability query, no permission, one packet and the doorbell.  ");
+        if (f->handover_sent)
+            put(w, "The card answered it, and the answer is in the numbers below.");
+        else if (f->handover_attempted)
+            put(w, "The card did not answer the handover (it was written, and the reply queue's two pointers "
+                    "never separated); the payload also names no FRTS region and no boot arguments, which is "
+                    "what this OS can honestly offer today ");
+        else
+            /* The one case left after the gate came out: a queue that says it is busy.  The reference driver
+             * waits on that same pair of pointers before it touches QUEUE_TAIL, so this is the condition the
+             * file still declines on, and it is named as itself rather than as a policy about firmware. */
+            put(w, "It was never written: the queue did not report itself free at the moment of sending, and "
+                   "this driver does not submit into a queue that says it is busy.");
+        put(w, "\n");
+        /* Which stores actually reached the card, as opposed to how many: the total has twice been the whole
+         * argument in a debugging round, and a total cannot distinguish a doorbell rung from a payload written
+         * and the queue left alone. */
+        {
+            unsigned n = f->store_count < GPU_FSP_STORE_LOG ? (unsigned)f->store_count : GPU_FSP_STORE_LOG;
+            unsigned first = (unsigned)(f->store_count - n);
+            put(w, " The last ");
+            put_number(w, n);
+            put(w, " store(s) this driver issued, oldest first, as BAR0 offset and value:");
+            for (unsigned i = 0; i < n; i++) {
+                const struct gpu_fsp_store *st = &f->stores[(first + i) % GPU_FSP_STORE_LOG];
+                put(w, i ? ", 0x" : " 0x");
+                put_hex(w, st->offset);
+                put(w, "=0x");
+                put_hex(w, st->value);
+            }
+            if (f->store_count > n) {
+                put(w, ", of ");
+                put_number(w, (unsigned)f->store_count);
+                put(w, " issued in all");
+            }
+            put(w, ".  The channel is 0x8f2ac0 and its window 0x8f2ac4, the queue tail - the doorbell - is "
+                    "0x8f2c04 and the head 0x8f2c00: a tail in this list whose value is one dword short of the "
+                    "packet's length is a card that was asked, whatever it said, and a list that ends at a "
+                    "payload dword is a driver that stopped before asking.  Which of the two happened is no "
+                    "longer something this report has to be argued about.\n");
+        }
     } else if (f->fmc_seen) {
         put(w, "the FMC image on the boot volume was read, but it cannot be described in this payload: ");
         switch (f->cot_defect) {
             case 1: put(w, "its hash section is not 48 bytes, and the published payload has 12 words for a "
                             "SHA-384 and no room for any other size"); break;
-            case 2: put(w, "its public key section is not 384 bytes, which the published payload has no room "
-                            "for any other size of"); break;
-            case 3: put(w, "its signature section is not 384 bytes, and the same limit applies to it"); break;
+            case 2: put(w, "its public key section is not the ");
+                    put_number(w, f->cot_pkey_bytes);
+                    put(w, " bytes this architecture's FSP table asks for, and the published payload has no room "
+                           "for any other size of"); break;
+            case 3: put(w, "its signature section is not the ");
+                    put_number(w, f->cot_sig_bytes);
+                    put(w, " bytes this architecture's FSP table asks for, and the same limit applies to it");
+                    break;
             case 4: put(w, "its image section is empty or larger than the 8 MiB this kernel will copy"); break;
             case 5: put(w, "the container's sections are not all individually verifiable, so there is no "
                             "authenticated image to point the FSP at"); break;

@@ -831,12 +831,12 @@ static void test_the_handover_payload(void)
           "the page of padding that follows them",
           fsp_state.image_crc32 == gpu_firmware_crc32(model_pages, IMAGE_BYTES) &&
           fsp_state.image_crc32 != gpu_firmware_crc32(model_pages, 0x1000u));
-    check("the query's own size is kept as the query's, not overwritten by the second message's: twelve bytes "
-          "went out for the query and 868 for the handover, and the panel quotes the first in its sentence",
+    check("each message keeps its own size now that the handover is the one that goes first: 868 for it, twelve "
+          "bytes for the query that follows, and the shared packet counter left holding the last one sent",
           fsp_state.query.request_bytes == 12 && fsp_state.handover.request_bytes == FSP_HEADER_BYTES + COT_SIZE &&
-          fsp_state.packet_bytes == FSP_HEADER_BYTES + COT_SIZE);
-    check("because the card answered that query cleanly, the handover left too: the model took a second packet, "
-          "and it is the driver's payload with nothing changed in it",
+          fsp_state.packet_bytes == 12u);   /* the query is one byte, padded to a dword, framed by two of them */
+    check("the handover left without waiting for anything, and the model took it: the packet is the driver's "
+          "payload with nothing changed in it",
           model.cot_seen == 1 && model.cot_bytes == FSP_HEADER_BYTES + COT_SIZE &&
           memcmp((const uint8_t *)model.cot + FSP_HEADER_BYTES, fsp_state.payload, COT_SIZE) == 0);
     check("which is the sentence that has to be true before any of this is sent to real silicon: the bytes the "
@@ -919,9 +919,11 @@ static void test_the_handover_answers(void)
           fsp_state.hwcfg2_after == 0 && !fsp_state.gsp_released);
 
     ask_with(M_BUSY, 48, 97, 96, -1, 0);
-    check("a card still holding the queue open from the query is not sent a second message, and the reason is "
-          "kept rather than flattened into a silence",
-          !fsp_state.handover_sent && fsp_state.handover_attempted == 0);
+    check("a card that takes a packet and never consumes it still gets the handover, because nothing is waited "
+          "for before the first message but its queue being free at the moment of writing - and the message that "
+          "would have followed is declined with its reason kept: blocked(1), not silence",
+          fsp_state.handover_attempted == 1 && fsp_state.handover_sent && fsp_state.handover.bytes == 0 &&
+          !fsp_state.queried && fsp_state.send_blocked == 1);
 }
 
 /* The two things a submission needs, measured where this generation publishes them.  The legacy user-mode page

@@ -226,6 +226,16 @@ struct gpu_fsp_reply {
 /* What the card's flight security processor said when this OS asked.  Every field is a register read, a byte
  * count or a staging decision; nothing here is inferred, and a zero `reads' means the file never got as far as
  * touching the hardware.  See kernel/drivers/gpu/gpu_fsp.c for what each number is and who published it. */
+/* One store this driver put on the card, kept so the panel can name it: a total number of writes cannot tell
+ * "the doorbell was rung" from "the payload was written and the queue was left alone", which is the difference
+ * between a card that ignored us and a driver that never asked. */
+struct gpu_fsp_store {
+    uint32_t offset;                             /* BAR0-relative, so it can be looked up in the published page */
+    uint32_t value;
+};
+
+#define GPU_FSP_STORE_LOG 8u
+
 struct gpu_fsp_state {
     int present, attempted;                  /* a display function was there; the probe ran on it */
     int nvidia;                              /* the vendor is the one whose decode these offsets are */
@@ -244,6 +254,8 @@ struct gpu_fsp_state {
      * words on receive and never tests whether it is allowed to read them first; we gated every write on a
      * readable pair, which is how a card can finish a whole boot with writes 0 because nobody ever tried. */
     uint32_t reset_head, reset_tail;
+    struct gpu_fsp_store stores[GPU_FSP_STORE_LOG];  /* the last writes, oldest first, wrapped */
+    uint32_t store_count;                            /* writes issued, not writes kept: the log is shorter */
     uint32_t send_walk;                    /* dwords the EMEM offset advanced by, recorded and not obeyed */
     int queue_writable;                  /* the value we wrote came back, whatever the read said before */
     int queried, responded, send_blocked;     /* a request went into the channel, a reply was read back off

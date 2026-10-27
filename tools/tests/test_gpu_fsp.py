@@ -149,10 +149,12 @@ def test_the_panel_says_what_was_asked_and_what_was_not():
     for needle in ('FSP mailbox: ', 'not asked, and not because anything failed',
                    '0xbadf4100 refusal that says the coprocessor',
                    # The handover's three endings, each of which has to stay sayable: sent and the block opened,
-                   # sent and it did not, and staged but not sent because the query did not come back clean.  The
-                   # last of the three is the one that used to claim the command was unimplemented, which is no
-                   # longer true, so it is pinned to the sentence that replaced it.
-                   'It goes on the wire only after the FSP has answered the ',
+                   # sent and it did not, and not sent because the queue said it was busy.  The middle clause of
+                   # the first sentence used to read "only after the FSP has answered a query cleanly", which was
+                   # the third self-written precondition this card disproved - it guaranteed the one message that
+                   # matters was never put on the wire - so the pin is now the sentence that replaced it, and the
+                   # reason for replacing it.
+                   'first and without conditions, because that is what the driver that boots this chip does',
                    'the block that refused every read on this panel is answering',
                    'still the locked-target refusal - the FSP took the message ',
                    'A submission also needs a clock and a doorbell',

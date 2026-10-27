@@ -542,14 +542,19 @@ def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
             assert 'FSP mailbox: not asked, and not because anything failed' in panel, panel[-2400:]
             assert 'vendor 0x00001013' in panel, 'the paragraph never names whose card this is: ' + panel[-2400:]
             assert "so no byte of this function's BAR was read, and none was written" in panel, panel[-2400:]
-            assert ('fmc: ELF32 %d B, 6 sections, FMC header exact, every section legal and its CRC32 '
-                    'verified, 0 CRC32 mismatch(es); image 512 B at 0x' % len(fmc)) in panel, panel[-1800:]
+            assert ('fmc: ELF32 %d B, 6 sections, FMC header exact, every section\'s type, flags and range '
+                    'legal, 0 section(s) whose sh_info word is not the CRC32 of their bytes' % len(fmc)) in panel, \
+                    panel[-1800:]
+            # And the four numbers the verify command is given, in the same clause, because a staged set that
+            # could not be described to the FSP has to be distinguishable from one that could.
+            assert 'image 512 B at 0x00000268, hash 32, publickey 4, signature 256 B - the four numbers the FSP ' \
+                   'verify command is given' in panel, panel[-1800:]
             assert 'hash 32, publickey 4, signature 256 B - the four numbers the FSP verify command is given' \
                 in panel, panel[-1800:]
             assert 'gsp: ELF64 %d B, 4 sections, .fwimage 1024 B at 0x' % len(good) in panel, panel[-1800:]
             assert '.fwsignature_gb20x 512 B at 0x' in panel, panel[-1800:]
             assert 'every image the boot sequence kept was parsed' in panel, panel[-1800:]
-            assert 'Nothing was written to the card' in panel, panel[-1800:]
+            assert 'Nothing was written to the card from these bytes this boot' in panel, panel[-1800:]
             assert 'image(s) held at 0x' in serial, 'the kernel log never says the bytes were kept: ' + serial[-900:]
             print('   measured report length with a complete set staged: %d bytes' % len(panel))
     finally:
