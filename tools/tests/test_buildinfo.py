@@ -118,6 +118,50 @@ def test_makedisk_refuses_a_kernel_that_misreports_itself():
             raise AssertionError('makedisk packed an image with no build stamp to check against')
 
 
+def test_one_make_after_a_commit_packs_an_honest_image():
+    """The stamp is only trustworthy if `make` keeps it in step with every object.
+
+    Two real failures hid here.  Order-only prerequisites are never compared by
+    timestamp, so no object that #includes build/scosbuild.h was rebuilt when the
+    commit moved: the kernel kept the previous stamp and the packer refused it
+    (correctly) - you had to run `make` twice and hope.  And
+    desktop-buildinfo.o had FORCE but no dependency on the header it reads, so it
+    could be compiled against the header make was about to replace.
+    """
+    makefile = (ROOT / 'Makefile').read_text()
+    runtime = (ROOT / 'kernel' / 'lua' / 'runtime.mk').read_text()
+    stamp = '$(BUILD)/scosbuild.h'
+    for name, text in (('Makefile', makefile), ('kernel/lua/runtime.mk', runtime)):
+        for line in text.splitlines():
+            if line.startswith('#') or ':' not in line or '$(' not in line:
+                continue
+            _, _, prereqs = line.partition(':')
+            _, bar, order_only = prereqs.partition('|')
+            if not bar or 'scosbuild.h' not in order_only:
+                continue
+            raise AssertionError(
+                '%s: the stamp header is an ORDER-ONLY prerequisite of "%s", so a commit does '
+                'not rebuild what #includes it' % (name, line))
+    # Every object rule that compiles a file which reads the stamp must list it.
+    for rule in ('$(BUILD)/%.o:', '$(BUILD)/desktop-%.o:', '$(BUILD)/driver-%.o:',
+                 '$(BUILD)/gpu-%.o:', '$(BUILD)/user-%.o:', '$(BUILD)/user-cat.o:'):
+        line = next(l for l in makefile.splitlines() if l.startswith(rule))
+        assert stamp in line or 'runtime.mk' in line, (rule, line)
+    lua_rule = next(l for l in runtime.splitlines() if l.startswith('$(BUILD)/lua-%.o:'))
+    assert stamp in lua_rule, lua_rule
+    buildinfo = next(l for l in makefile.splitlines()
+                     if l.startswith('$(BUILD)/desktop-buildinfo.o:'))
+    assert stamp in buildinfo and 'FORCE' in buildinfo, buildinfo
+    # And the artifact on disk right now must be the stamp the tree describes.
+    header = stamp_of(HEADER)
+    elf = (ROOT / 'build' / 'kernel.elf').read_bytes()
+    for field in ('COMMIT', 'DATE'):
+        assert header[field].encode() in elf, \
+            'the packed kernel does not contain the %s it reports (%s)' % (field, header[field])
+    print('PASS: the stamp is a real prerequisite everywhere it is read, and the packed kernel '
+          'contains the stamp the tree describes')
+
+
 def test_the_running_kernel_answers_with_the_same_stamp():
     """`version`, `graphics`, the About panel and the log all read these two functions."""
     if not (ROOT / '.tools' / 'qemu' / 'bin' / 'qemu-system-x86_64').exists():
@@ -156,6 +200,7 @@ def test():
     test_the_disk_record_matches_the_bytes_it_was_generated_from()
     test_the_image_carries_the_record_a_third_party_can_read()
     test_makedisk_refuses_a_kernel_that_misreports_itself()
+    test_one_make_after_a_commit_packs_an_honest_image()
     test_the_running_kernel_answers_with_the_same_stamp()
 
 
