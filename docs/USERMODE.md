@@ -133,6 +133,7 @@ what the package's own code does. Both hosts are therefore the same API v2:
 | `interval(ms)` | 100 … 60000 ms scheduling | stored per process, honoured by the scheduler |
 | drawing | 4,000,000-pixel budget per callback, `drawing budget exceeded` | same budget per episode, same error |
 | data files | `home/appdata/<id>/`, 16 files / 64 KiB | same namespace via syscalls |
+| `scos.api_info().isolated` | true only when the window really is sandboxed | always true here |
 
 Capabilities are the only difference, and they are the owner's choice: an
 isolated process holds `VFS_READ|VFS_WRITE` only, so `theme_apply`, `notify`,
@@ -149,7 +150,7 @@ cannot drift apart silently.
 `apps/examples/isolation.lua` ships as `/home/demos/isolation.cat`. It is an app
 whose only job is to try to break out of its own sandbox and report what
 happened on screen and in `home/appdata/isolation/report.txt`. It attempts
-about fifty distinct attacks: `..`/absolute/backslash/NUL/long-name traversal in
+about seventy distinct attacks: `..`/absolute/backslash/NUL/long-name traversal in
 every file call, other-app and cross-account reads, theme takeover, notification
 and dialog spam from a process without the capability, out-of-range geometry,
 huge radius/scale/text, the 16-file and 64 KiB quotas, a memory bomb, drawing
@@ -158,6 +159,12 @@ of `load`, `dofile`, `os`, `io`, `package`, `debug`, `coroutine` or a raw
 syscall handle. Each result is `CONTAINED` or `BREAKOUT`; pressing `R` reruns
 the suite. The build's own test requires `breakout=0`, no CPU fault and no file
 left outside the app's namespace.
+
+Launched without isolation it says so and probes nothing: a normal app is allowed
+to change the theme and raise dialogs, so "testing" there would be pestering the
+owner rather than testing the boundary. The app reads
+`scos.api_info().isolated` for that, which the desktop sets from the kernel-held
+process state the package cannot write.
 
 Only install packages you trust: a checksum is not a signature. Isolation limits
 what a hostile package can reach; it is not a promise that the package is safe.

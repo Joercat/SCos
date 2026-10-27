@@ -71,6 +71,8 @@ def test_the_escape_app_finds_no_way_out():
         total = int(text.split('total=')[1].split()[0])
         contained = int(text.split('contained=')[1].split()[0])
         assert total >= 40 and contained == total, (total, contained)
+        assert 'api_info_isolation=CONTAINED' in text, \
+            'the API did not report the sandbox it is running in'
 
         # Nothing the app tried may exist outside its own data directory.
         for path in ('escape.txt', 'home/escape.txt', 'home/evil.txt',
@@ -208,6 +210,52 @@ def test_a_spinning_package_is_stopped_and_the_desktop_survives():
           'the timer budget, and the desktop keeps running', flush=True)
 
 
+NOT_ISOLATED = """
+-- The same app, launched by the owner without isolation, must say so instead of
+-- asking a normal app to take over the system theme.
+return {
+    open = function() scos.interval(200) end,
+    paint = function(w, h)
+        local t = scos.theme()
+        scos.clear(t.win_bg)
+        local info = scos.api_info()
+        scos.text(10, 10, info.isolated and "sandboxed" or "not sandboxed", t.main)
+    end,
+}
+"""
+
+
+def test_an_unisolated_launch_does_not_probe_or_ask_for_the_theme():
+    """The escape app runs its probes only where probes mean something."""
+    from qemu_support import Guest
+
+    with Guest('not-isolated') as g:
+        ident = install(g, 'nonew', NOT_ISOLATED)
+        assert g.call('security_app_isolation_set', ident, SC_ISO_NEVER) == 1
+        w = g.call('wm_open_app', ident, 0)
+        pid = g.call('proc_pid_for_window', w)
+        assert g.call('proc_pid_isolated', pid) == 0
+        g.run(0.4)
+        # No capability dialog appeared: an unisolated launch never probes.
+        assert g.call('wm_dialog_active') == 0
+
+        # And the shipped escape app, run unisolated, writes no report and
+        # raises no dialog either.
+        source = (ROOT / 'apps' / 'examples' / 'isolation.lua').read_text()
+        ident = install(g, 'isolation', source)
+        assert g.call('security_app_isolation_set', ident, SC_ISO_NEVER) == 1
+        w = g.call('wm_open_app', ident, 0)
+        assert w
+        g.run(1.0)
+        assert g.call('wm_dialog_active') == 0, 'an unisolated launch asked for something'
+        assert g.read('home/appdata/isolation/report.txt') is None, \
+            'an unisolated launch still ran the escape probes'
+        assert g.call('user_fault_count') == 0
+        assert 'panic' not in g.serial().lower()
+    print('PASS: an unisolated launch explains itself instead of probing the '
+          'machine it is allowed to change', flush=True)
+
+
 def test_the_escape_app_is_shipped_as_a_demo():
     """The attack app has to be reachable by the owner, not just by the tests."""
     inc = ROOT / 'build' / 'lua_examples.h'
@@ -225,6 +273,7 @@ def test():
     test_the_escape_app_finds_no_way_out()
     test_isolated_and_normal_hosts_expose_the_same_api()
     test_a_spinning_package_is_stopped_and_the_desktop_survives()
+    test_an_unisolated_launch_does_not_probe_or_ask_for_the_theme()
     test_the_escape_app_is_shipped_as_a_demo()
 
 

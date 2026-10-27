@@ -260,6 +260,10 @@ static int a_info(lua_State *L)
   lua_pushinteger(L,65536); lua_setfield(L,-2,"data_limit");
   lua_pushinteger(L,16); lua_setfield(L,-2,"data_files");
   lua_pushinteger(L,0); lua_setfield(L,-2,"theme_permission");
+  /* This host only ever runs at CPL3 with a capability set, which is what the
+   * kernel-side host calls "isolated".  A package can therefore tell whether
+   * its sandbox is active without being able to change it. */
+  lua_pushboolean(L,1); lua_setfield(L,-2,"isolated");
   return 1; }
 static int a_icons(lua_State *L)
 { static const char *n[]={"folder","terminal","notepad","browser","calendar","settings","info","cards","chart","solitaire"};

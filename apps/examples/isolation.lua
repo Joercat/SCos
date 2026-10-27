@@ -39,6 +39,16 @@ end
 
 local function has_field(name) return rawget(_G, name) ~= nil end
 
+-- The desktop API reports whether this window is actually sandboxed.  Running
+-- these probes WITHOUT isolation would be asking a normal app to try to take
+-- over the system theme and raise dialogs, which is not a test - it is a
+-- nuisance - so an unisolated launch explains itself and stops.
+local ISOLATED = false
+do
+    local ok, info = pcall(scos.api_info)
+    if ok and info and info.isolated then ISOLATED = true end
+end
+
 -- ------------------------------------------------- leaving the namespace ----
 probes[#probes + 1] = function() return must_refuse("traversal_write", function() return scos.write("../escape.txt", "x") end) end
 probes[#probes + 1] = function() return must_refuse("traversal_write2", function() return scos.write("../../home/escape.txt", "x") end) end
@@ -204,6 +214,13 @@ probes[#probes + 1] = function()
     return "app_id=BREAKOUT reported " .. tostring(id)
 end
 probes[#probes + 1] = function()
+    -- The API must not advertise a sandbox that is not running.
+    local ok, info = pcall(scos.api_info)
+    if not ok or not info then return "api_info_isolation=BREAKOUT api_info failed" end
+    if info.isolated == true then return "api_info_isolation=CONTAINED" end
+    return "api_info_isolation=BREAKOUT reports unisolated while sandboxed"
+end
+probes[#probes + 1] = function()
     -- Theme names must be real IDs, not list indices.
     local ok, list = pcall(scos.themes)
     if not ok or type(list) ~= "table" or #list < 1 then return "theme_names=BREAKOUT no theme list" end
@@ -309,6 +326,7 @@ local function write_report()
 end
 
 local function step()
+    if not ISOLATED then return false end
     if read_file("done.txt") then return false end
     local at = tonumber(read_file(CURSOR) or "") or 1
     if at > #probes then return false end
@@ -330,6 +348,7 @@ local function step()
 end
 
 local function run_paint_probes()
+    if not ISOLATED then return end
     if read_file("painted.txt") then return end
     if not read_file(CURSOR) then return end       -- tick side not started yet
     write_file("painted.txt", "1")
@@ -350,6 +369,15 @@ local function paint_summary(w, h)
     scos.clear(t.win_bg)
     local accent = breakout > 0 and 0xff4444 or t.main
     scos.text(16, 14, "Isolation test", accent)
+    if not ISOLATED then
+        scos.text(16, 44, "This window is NOT isolated.", 0xffbb55)
+        scos.text(16, 66, "There is no sandbox here to test, so nothing was", t.text)
+        scos.text(16, 86, "probed. Close this and launch it isolated:", t.text)
+        scos.text(16, 106, "right-click its icon or taskbar row and choose", t.main)
+        scos.text(16, 126, "\"Launch isolated\", or", t.main)
+        scos.text(16, 146, "  choices app isolation always", t.main)
+        return
+    end
     scos.text(16, 38, string.format("%d contained, %d breakout (%d probes)",
                                     contained, breakout, total), t.text)
     if breakout > 0 then
