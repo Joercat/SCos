@@ -305,6 +305,39 @@ def test_the_time_bounds_are_the_working_driver_s():
         'story about time'
 
 
+def test_no_silent_cap_between_a_measurement_and_the_screen():
+    """The report was cut off in the terminal twice, and both times the reason was a fixed-size copy sitting in
+    the middle of the path rather than the buffer at either end: the panel writer clipped against its buffer and
+    said so in words, while the terminal's typewriter held `pending[2048]' and said nothing, so the last clause
+    - the one with the answer in it - disappeared inside a display component.  A buffer may be bounded if it
+    announces it; a copy may not.  These are the places a byte can be dropped on the way from a register read to
+    a pixel, each pinned to either be unbounded or to report its own limit, and the transport version the card
+    is sent, which is why a query answered nothing at all."""
+    panel = source('kernel/desktop/graphics.c')
+    detection = source('kernel/drivers/gpu/gpu_detect.c')
+    terminal = source('kernel/desktop/app_terminal.c')
+    for name, text in (('the panel writer', panel), ('the detection report', detection)):
+        assert 'w->dropped += n - room;' in text, name + ' still has a put() that can lose bytes without counting them'
+        assert text.count('put_note(') >= 3, name + ' counts lost bytes but never tells the reader how many'
+    assert not re.search(r'^\s+char pending\[', terminal, re.M), \
+        'the terminal is back to holding typewriter text in a fixed array, which clips a long response in silence'
+    assert 'palloc_owned(len + 1, HEAP_WM)' in terminal, \
+        'term_type() is not allocating the answer to its own length'
+    assert 'char pbuf[512]' not in terminal, 'the preview of a response is capped at 512 bytes again'
+    rows = re.search(r'#define\s+TERM_LINES\s+(\d+)', terminal)
+    assert rows and int(rows.group(1)) >= 1000, 'the scrollback is bounded below a screenful of the GPU report'
+    report = re.search(r'#define\s+SCOS_GRAPHICS_REPORT\s+(\d+)', source('kernel/include/scos.h'))
+    assert report and 'static char detail[' in panel and \
+        'detail[SCOS_GRAPHICS_REPORT]' in panel, 'the report is handed to the terminal through a smaller ' \
+        'buffer than the one it was assembled in, which is where 2560 used to bite'
+    fsp = source('kernel/drivers/gpu/gpu_fsp.c')
+    version = re.search(r'#define\s+MCTP_VERSION\s+(\d+)u', fsp)
+    assert version and version.group(1) == '0', \
+        'the MCTP transport header is being sent with a version the specification does not define; the ' \
+        'reference driver leaves bits 3:0 clear, and a packet dropped for its version comes back as silence ' \
+        'rather than as an error code'
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith('test_') and callable(f)]
     for name, fn in tests:

@@ -104,7 +104,14 @@
 #define NVDM_TYPE_CAPS_QUERY             0x16u
 #define NVDM_TYPE_CLOCK_BOOST            0x20u      /* the capability asked about, which is what the vendor
                                                        * driver asks about before it has done anything else */
-#define MCTP_VERSION                       1u
+/* MCTP's transport header carries a four-bit version in bits 3:0 and the only version the specification
+ * defines is zero, which is also all the reference driver sends: gh100_fsp_boot_gsp_fmc() declares its message
+ * `= {}' and then sets SOM, EOM, SEID and SEQ and nothing else, so bits 3:0 stay clear.  This driver sent 1
+ * here, and 1 is a version the transport is permitted to drop without replying - which is what the card
+ * reported after the veto came out: `query sent, no reply read' with six writes landed and the queue idle.  A
+ * coprocessor that rejects a packet's version does not answer with an error, it answers with nothing, so this
+ * now matches the reference bit for bit. */
+#define MCTP_VERSION                       0u
 #define MCTP_TYPE_VENDOR_PCI            0x7eu
 #define MCTP_VENDOR_ID_NVIDIA         0x10deu
 

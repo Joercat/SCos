@@ -484,15 +484,32 @@ int gpu_link_state(int index, unsigned *generation, unsigned *lanes)
 /* ------------------------------------------------------------ reporting ---- */
 
 struct writer {
+    char *start;                       /* the buffer's first byte, so the tail can be measured from it */
     char *at;
     size_t left;
+    size_t dropped;                    /* bytes put() could not write, and therefore has to be reported */
 };
 
 static void put(struct writer *w, const char *text)
 {
-    while (*text && w->left > 1) { *w->at++ = *text++; w->left--; }
+    /* The lost bytes are counted, not swallowed.  Every long report in this tree used to be able to stop
+     * mid-word in silence, and twice now the clause that fell off the end was the one saying what to do next
+     * - so the writer, which is the only place that can see both the text and the space, keeps a tally that
+     * the caller prints as a sentence.  A bounded buffer with a loud edge is a limit; a bounded buffer
+     * without one is a lie about the hardware. */
+    size_t n = 0;
+    while (text[n]) n++;
+    if (n + 1u > w->left) {
+        size_t room = w->left > 1u ? w->left - 1u : 0u;
+        for (size_t i = 0; i < room; i++) *w->at++ = text[i];
+        w->left -= room;
+        w->dropped += n - room;
+    } else {
+        while (*text) { *w->at++ = *text++; w->left--; }
+    }
     *w->at = 0;
 }
+
 
 static void put_number(struct writer *w, unsigned value)
 {
@@ -505,6 +522,24 @@ static void put_number(struct writer *w, unsigned value)
     out[n] = 0;
     put(w, out);
 }
+
+/* Released at the end of every public report: the reservation it spends is why each entry point hands the
+ * writer `capacity - REPORT_NOTE_BYTES' rather than `capacity'. */
+#define REPORT_NOTE_BYTES 448
+
+static void put_note(struct writer *w, size_t capacity)
+{
+    if (!w->dropped) return;
+    w->left = capacity - (size_t)(w->at - w->start);
+    put(w, "\nThe report above needed ");
+    put_number(w, (unsigned)w->dropped);
+    put(w, " more byte(s) than this ");
+    put_number(w, (unsigned)capacity);
+    put(w, "-byte buffer, so it ends here - which is the limit of the buffer and not of what was measured.  "
+           "Everything above was printed from the chip's own replies and the driver's own reads; `graphics fsp' "
+           "prints these paragraphs on their own, and the terminal keeps the whole thing in its scrollback.");
+}
+
 
 static void put_hex(struct writer *w, uint16_t value)
 {
@@ -529,7 +564,9 @@ static void put_line(struct writer *w, const char *text)
 
 void gpu_report(char *out, size_t capacity)
 {
-    struct writer w = {out, capacity};
+    if (!out || capacity == 0) return;
+    size_t room = capacity > REPORT_NOTE_BYTES ? capacity - REPORT_NOTE_BYTES : capacity;
+    struct writer w = {.start = out, .at = out, .left = room, .dropped = 0};
     char number[24];
 
     put_line(&w, "GPU detection (exact device matching; no BAR sizing, no modeset)");
@@ -540,6 +577,7 @@ void gpu_report(char *out, size_t capacity)
     put_line(&w, "");
     if (!device_count) {
         put_line(&w, "No PCI display function found; firmware scanout retained.");
+        put_note(&w, capacity);
         return;
     }
     for (int i = 0; i < device_count && i < REPORT_DEVICE_LIMIT; i++) {
@@ -724,4 +762,5 @@ void gpu_report(char *out, size_t capacity)
     put(&w, "  detection issued ");
     put_number(&w, (unsigned)gpu_config_writes_during_detect());
     put_line(&w, " PCI config-space write(s); 0 means nothing was reprogrammed");
+    put_note(&w, capacity);
 }

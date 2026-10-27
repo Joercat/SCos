@@ -41,7 +41,8 @@ struct term {
     int hcount, hindex;
     char cwd[128];
     /* typewriter effect */
-    char pending[2048];
+    char *pending;                  /* the typewriter's text, allocated to its exact length - no cap on output */
+    size_t pend_cap;                /* the size palloc_owned was asked for, which pfree must be given back */
     int pend_len, pend_shown, pending_active;
     char aliases[8][2][64];
     int nalias;
@@ -120,11 +121,35 @@ static void term_print(struct term *t, const char *s)   /* immediate */
     term_push_line(t, s);
 }
 
+static void term_release(struct term *t)
+{
+    if (!t->pending) return;
+    if (t->win) wm_track_mem(t->win, -(int)allocation_bytes(t->pending));
+    pfree(t->pending, t->pend_cap);
+    t->pending = 0;
+    t->pend_cap = 0;
+    t->pend_shown = t->pend_len = t->pending_active = 0;
+}
+
 static void term_type(struct term *t, const char *s)    /* typewriter */
 {
-    strncpy(t->pending, s, sizeof(t->pending) - 1);
-    t->pending[sizeof(t->pending) - 1] = 0;
-    t->pend_len = (int)strlen(t->pending);
+    /* The text is allocated to its own length, and that is the whole point of this rewrite.  The field used to
+     * be `char pending[2048]' and the copy was a strncpy, so any answer longer than two thousand characters
+     * came back cut at 2047 with nothing printed about it - twice in a row the missing tail was the last
+     * clause of the GPU report, which is where the finding lives.  A display may bound what it keeps (that is
+     * what TERM_LINES is for) and a buffer may bound what it holds, but a limit sitting in the middle of the
+     * path from one to the other, silent, is the bug.  If the allocation fails the text is printed at once:
+     * losing the typing animation is cosmetic, losing bytes is what happened before. */
+    size_t len = strlen(s);
+
+    term_release(t);
+    if (!len) { t->pend_len = t->pend_shown = t->pending_active = 0; return; }
+    t->pending = (char *)palloc_owned(len + 1, HEAP_WM);
+    if (!t->pending) { term_print(t, s); return; }
+    t->pend_cap = len + 1;
+    memcpy(t->pending, s, len + 1);
+    if (t->win) wm_track_mem(t->win, (int)allocation_bytes(t->pending));
+    t->pend_len = (int)len;
     t->pend_shown = 0;
     t->pending_active = 1;
 }
@@ -1325,6 +1350,7 @@ static void term_close_tab(struct window *w, int i)
     if (i < 0 || i >= tw->ntabs || tw->ntabs <= 1) return;
     struct term *t = tw->tabs[i];
     wm_clear_console(t);
+    term_release(t);            /* the typewriter's text, if any, is the tab's to hand back */
     wm_track_mem(w, -(int)sizeof(struct term));
     pfree(t, sizeof(struct term));
     for (int k = i; k < tw->ntabs - 1; k++) tw->tabs[k] = tw->tabs[k + 1];
@@ -1571,8 +1597,10 @@ static void term_paint(struct window *w)
     term_paint_tabstrip(w);      /* after the background clear */
 
     int rows = term_visible_rows(w);
-    /* pending typewriter text may span several lines */
-    char pbuf[512];
+    /* pending typewriter text may span several lines.  The preview is as wide as the largest response the
+     * terminal can be handed, because a 512-byte preview of a 30 KB answer was another silent clip - it
+     * showed the first third of a report and called it the report. */
+    static char pbuf[SCOS_GRAPHICS_REPORT];
     int plines = 0;
     if (t->pending_active) {
         int n = t->pend_shown;
@@ -1650,7 +1678,7 @@ static void term_key(struct window *w, struct key_event *e)
     /* never swallow keystrokes: finish any typewriter output instantly */
     if (t->pending_active) {
         term_push_line(t, t->pending);
-        t->pending_active = 0;
+        term_release(t);
     }
 
     if (e->keycode == '\n') {
@@ -1740,7 +1768,7 @@ static void term_tick(struct window *w)
         t->pend_shown += 40;                     /* typewriter speed */
         if (t->pend_shown >= t->pend_len) {
             term_push_line(t, t->pending);
-            t->pending_active = 0;
+            term_release(t);
         }
         wm_redraw(w);
     }

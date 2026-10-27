@@ -688,7 +688,7 @@ static void test_the_request_bytes(void)
 
     check("a one-byte capability query is sent", send_packet(&query, 1, NVDM_TYPE_CAPS_QUERY) == 1);
     check("the transport header is version 1, both message flags set, and nothing else: no endpoint ids, "
-          "no tag, no sequence, because this is the whole message", packet[0] == 0xc0000001u);
+          "no tag, no sequence, and no version - the reference leaves bits 3:0 clear", packet[0] == 0xc0000000u);
     check("the NVDM header is vendor-defined-PCI, NVIDIA's vendor id, and the capability-query type",
           packet[1] == ((uint32_t)NVDM_TYPE_CAPS_QUERY << 24 | 0x10deu << 8 | 0x7eu));
     check("the payload is the one byte a capability query carries, zero-padded up to a dword",

@@ -32,15 +32,32 @@ void graphics_init(const struct boot_framebuffer *fb)
 }
 
 struct writer {
+    char *start;                       /* the buffer's first byte, so the tail can be measured from it */
     char *at;
     size_t left;
+    size_t dropped;                    /* bytes put() could not write, and therefore has to be reported */
 };
 
 static void put(struct writer *w, const char *text)
 {
-    while (*text && w->left > 1) { *w->at++ = *text++; w->left--; }
+    /* The lost bytes are counted, not swallowed.  Every long report in this tree used to be able to stop
+     * mid-word in silence, and twice now the clause that fell off the end was the one saying what to do next
+     * - so the writer, which is the only place that can see both the text and the space, keeps a tally that
+     * the caller prints as a sentence.  A bounded buffer with a loud edge is a limit; a bounded buffer
+     * without one is a lie about the hardware. */
+    size_t n = 0;
+    while (text[n]) n++;
+    if (n + 1u > w->left) {
+        size_t room = w->left > 1u ? w->left - 1u : 0u;
+        for (size_t i = 0; i < room; i++) *w->at++ = text[i];
+        w->left -= room;
+        w->dropped += n - room;
+    } else {
+        while (*text) { *w->at++ = *text++; w->left--; }
+    }
     *w->at = 0;
 }
+
 
 static void put_number(struct writer *w, unsigned value)
 {
@@ -51,6 +68,24 @@ static void put_number(struct writer *w, unsigned value)
     out[n] = 0;
     put(w, out);
 }
+
+/* Released at the end of every public report: the reservation it spends is why each entry point hands the
+ * writer `capacity - REPORT_NOTE_BYTES' rather than `capacity'. */
+#define REPORT_NOTE_BYTES 448
+
+static void put_note(struct writer *w, size_t capacity)
+{
+    if (!w->dropped) return;
+    w->left = capacity - (size_t)(w->at - w->start);
+    put(w, "\nThe report above needed ");
+    put_number(w, (unsigned)w->dropped);
+    put(w, " more byte(s) than this ");
+    put_number(w, (unsigned)capacity);
+    put(w, "-byte buffer, so it ends here - which is the limit of the buffer and not of what was measured.  "
+           "Everything above was printed from the chip's own replies and the driver's own reads; `graphics fsp' "
+           "prints these paragraphs on their own, and the terminal keeps the whole thing in its scrollback.");
+}
+
 
 /* Checksums are quoted in hexadecimal because that is the base every tool that produces them prints in:
  * `crc32 file.bin' on the machine a person copies the file from, and the number has to be comparable by
@@ -838,26 +873,29 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
  * are the same calls the panel makes, in the same order, so the two cannot disagree with each other. */
 void graphics_fsp_report(char *out, size_t capacity)
 {
-    struct writer w = {out, capacity};
-
     if (!out || capacity == 0) return;
+    size_t room = capacity > REPORT_NOTE_BYTES ? capacity - REPORT_NOTE_BYTES : capacity;
+    struct writer w = {.start = out, .at = out, .left = room, .dropped = 0};
+
     *out = 0;
     put(&w, "FSP and GSP firmware, in the words the boot panel prints:\n");
     put_fsp_headline(&w, gpu_fsp_state());
     put_firmware_report(&w, gpu_firmware_state());
     put_firmware_image(&w, gpu_firmware_state());
     put_fsp_report(&w, gpu_fsp_state());
+    put_note(&w, capacity);
 }
 
 void graphics_report(char *out, size_t capacity)
 {
-    struct writer w = {out, capacity};
     char number[24];
     const struct gpu_driver *engine = gpu_bound_driver();
     const struct gpu_device *owner = gpu_scanout_device();
 
     if (!out || capacity == 0) return;
-    *out = 0;                     /* every write below goes through put(), which bounds */
+    size_t room = capacity > REPORT_NOTE_BYTES ? capacity - REPORT_NOTE_BYTES : capacity;
+    struct writer w = {.start = out, .at = out, .left = room, .dropped = 0};
+    *out = 0;                     /* every write below goes through put(), which bounds and counts */
 
     /* Three states, described differently on purpose: an engine that paints the console, an engine
      * that works but sits on a function that does not feed the console, and no engine at all.  The
@@ -1033,7 +1071,11 @@ void graphics_report(char *out, size_t capacity)
     if (!gpu_device_count()) {
         put(&w, "No PCI display function found; firmware scanout retained.\n");
     } else {
-        char detail[DETAIL_LIMIT];
+        /* Static and as large as the buffer the panel prints into: a local at 32 KiB is a stack overflow
+         * waiting for a taller report, and 2560 bytes was a cliff the middle of a sentence fell off.  As a
+         * `static' the size costs nothing on the stack and stops being a limit anyone has to remember to
+         * raise; the report's own writer counts anything it cannot fit either way. */
+        static char detail[SCOS_GRAPHICS_REPORT];
         gpu_report(detail, sizeof detail);
         put(&w, detail);
     }
@@ -1057,7 +1099,7 @@ void graphics_report(char *out, size_t capacity)
          * from the same three functions, so the rest is always available. */
         {
             char tail[FSP_TAIL_LIMIT];
-            struct writer tw = { tail, sizeof tail };
+            struct writer tw = {.start = tail, .at = tail, .left = sizeof tail, .dropped = 0};
             size_t need;
 
             *tail = 0;
@@ -1118,4 +1160,5 @@ void graphics_report(char *out, size_t capacity)
         put_number(&w, (unsigned)owner->function);
         put(&w, " identified from its BAR address alone.\n");
     }
+    put_note(&w, capacity);
 }
