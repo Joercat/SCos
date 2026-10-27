@@ -195,7 +195,7 @@ static uint32_t read32(const struct fsp_window *w, uint32_t offset)
     if (within + 4 > w->length) return 0xffffffffu;      /* outside the mapping this window is: no guess */
     value = gpu_io_read32(w->page, within);
     fsp_state.reads++;
-    if (FSP_REFUSED(value)) fsp_state.refusal_reads++;
+    if (FSP_NOT_CONTENT(value)) fsp_state.refusal_reads++;   /* the whole family: 0xbadf4100 and 0xbadf1100 */
     return value;
 }
 
@@ -369,7 +369,12 @@ static int wait_for(int (*condition)(void), int *count)
 static int boot_ready(void)
 {
     fsp_state.boot_scratch = read32(&w_therm, NV_THERM_FSP_BOOT_COMPLETE);
-    if (FSP_REFUSED(fsp_state.boot_scratch) || fsp_state.boot_scratch == 0xffffffffu) return 1;
+    /* Any 0xbadf.... answer is an answer, not a state to wait out.  Measured on a GB207: the FSP scratch
+     * window replies 0xbadf1100 - a different member of the family from the 0xbadf4100 that names a locked
+     * PRIV target - and waiting on it burned the whole 4000 ms budget (the panel read "waited 4056 of 4000 ms")
+     * for an event this reader can never see.  The reference driver stops on a refusal and reports it as an
+     * error, which is the only honest thing to do with a window that says it will not be decoded. */
+    if (FSP_NOT_CONTENT(fsp_state.boot_scratch) || fsp_state.boot_scratch == 0xffffffffu) return 1;
     return fsp_state.boot_scratch == FSP_BOOT_COMPLETE_SUCCESS;
 }
 
@@ -732,8 +737,15 @@ static void probe_mailbox(void)
 {
     int idle;
 
+    /* The queue first, and before any waiting: on a card that refuses the FSP's message page outright, a
+     * readiness poll has nothing to become ready for and still costs the caller the whole budget.  Measured on
+     * a GB207 that was 4056 ms of desktop for a handover that was staged and never sent (reads 94, writes 0),
+     * and the desktop's first interactions are the thing that pays it. */
     /* Wait for the FSP to say it is up, because on a card that is going to answer there is a window in which
-     * it has not yet, and a report written inside that window would be a measurement of the wrong moment. */
+     * it has not yet, and a report written inside that window would be a measurement of the wrong moment.
+     * A refusal ends that wait on its first look (see boot_ready), which is the whole of the fix for the
+     * 4056 ms measured on a GB207 whose FSP window answers 0xbadf1100: the budget is not the thing being spent
+     * when a page says it will not be decoded, the polling is, and polling stops at the answer. */
     fsp_state.boot_ms = FSP_WAIT_BOOT_MS;
     (void)wait_for_timed(boot_ready, &fsp_state.boot_polls, FSP_WAIT_BOOT_MS, &fsp_state.boot_ms_used);
     /* No ++ here: the wait already counted the look that answered, and a count that adds one for the

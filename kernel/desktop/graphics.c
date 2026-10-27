@@ -468,9 +468,18 @@ static void put_fsp_headline(struct writer *w, const struct gpu_fsp_state *f)
         put_number(w, f->cot_version);
         put(w, ", ");
     }
-    put(w, "boot 0x");
-    put_hex(w, f->boot_scratch);
-    put(w, f->booted ? " booted, " : " not booted (waited ");
+    /* A 0xbadf.... reply is not a boot status, and printing it as one made the panel read as though the card
+     * had answered "not booted" when nothing that could be decoded had been decoded. */
+    put(w, "boot ");
+    if ((f->boot_scratch & 0xffff0000u) == 0xbadf0000u) {
+        put(w, "window refused the read 0x");
+        put_hex(w, f->boot_scratch);
+        put(w, f->booted ? ", reported booted anyway, " : ", nothing to wait for, ");
+    } else {
+        put(w, "0x");
+        put_hex(w, f->boot_scratch);
+        put(w, f->booted ? " booted, " : " not booted (waited ");
+    }
     if (!f->booted) {
         if (f->wait_clocked) {
             put_number(w, (unsigned)f->boot_ms_used);
