@@ -1,10 +1,26 @@
 {
  "branch": "arena/01a09dfd-scos",
  "build_tag": "x64-dev",
- "built": "2026-10-27T01:35:43Z",
- "commit": "bef149ba09de",
+ "built": "2026-10-26T22:16:36Z",
+ "commit": "45cecadc618c",
  "kernel_bytes": 886392,
- "kernel_sha256": "0d8dd6a30d75cc3b443431942952bdb3fe439acd0930f4cf243f7075179a2653",
- "modules": [],
+ "kernel_sha256": "7eacd92c47b40f80aa282d141a96470d2f108e8c620ae9d411e23bad8b2c8015",
+ "modules": [
+  {
+   "bytes": 13536,
+   "name": "ATI.MOD",
+   "sha256": "6e7c79c5969f087b33068af09912748fa2987a074565d972d344066bb32becb0"
+  },
+  {
+   "bytes": 7216,
+   "name": "CIRRUS.MOD",
+   "sha256": "1671b52f3d963c1e811160df6b882cf8403580080c49dcc9f9d06f26476bbda4"
+  },
+  {
+   "bytes": 41416,
+   "name": "NVIDIA.MOD",
+   "sha256": "0a596c005f8829b1afc56d45290639d8d118f6208dd340f481c69e10a03678d8"
+  }
+ ],
  "tree": "clean"
 }
