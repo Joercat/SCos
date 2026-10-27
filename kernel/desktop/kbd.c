@@ -42,7 +42,7 @@ u32 input_key_enqueued, input_key_dropped;
 
 static void kbd_enqueue(struct key_event *e)
 {
-    if (input_guard_armed) input_last_tick = tick_count;
+    security_note_activity();   /* ANY key event counts, press or release */
     int next = (q_head + 1) % QUEUE;
     if (next == q_tail) { input_key_dropped++; return; }      /* full: drop */
     input_key_enqueued++;

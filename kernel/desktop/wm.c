@@ -197,10 +197,16 @@ static void pins_load(void){
     }
 }
 static char pin_menu_id[32];
+static const char *pin_choices[5];
 static void pin_menu_answer(int item,void *ud){(void)ud;
-    if(item==0)wm_launch_app_interactive(pin_menu_id,NULL);
-    else if(item==1)pin_remove(pin_menu_id);
-    else if(item==2)wm_desk_show_app(pin_menu_id);
+    const char *c;
+    if(item<0||item>=5||!pin_choices[item])return;
+    c = pin_choices[item];
+    if(!strcmp(c,"Open"))wm_launch_app_interactive(pin_menu_id,NULL);
+    else if(!strcmp(c,"Unpin from bar"))pin_remove(pin_menu_id);
+    else if(!strcmp(c,"Put its icon back"))wm_desk_show_app(pin_menu_id);
+    else if(!strcmp(c,"Launch isolated"))wm_launch_app_override(pin_menu_id,NULL,1);
+    else if(!strcmp(c,"Launch unisolated"))wm_launch_app_override(pin_menu_id,NULL,0);
 }
 
 #define NOTICE_MAX 3
@@ -530,6 +536,16 @@ void wm_close_window(struct window *w)
 /* The owner decides per app, on first launch, whether it should be isolated.
  * Four answers: always / never (persisted), or isolated / unisolated once with
  * the same question next time.  No app is forced into isolation. */
+static char launch_iso_id[SC_APP_ID_MAX];
+static const char *launch_iso_items[2] = { "Launch isolated", "Launch unisolated" };
+static void launch_iso_answer(int item, void *ud)
+{
+    (void)ud;
+    if (item == 0) wm_launch_app_override(launch_iso_id, NULL, 1);
+    else if (item == 1) wm_launch_app_override(launch_iso_id, NULL, 0);
+    wm_full();
+}
+
 static const char *iso_items[4] = {
     "Always launch isolated",
     "Never launch isolated",
@@ -553,10 +569,37 @@ static void iso_answer(int item, void *ud)
     iso_once = -1;
 }
 
+/* System apps are part of the OS: they are trusted, so they never ask and
+ * never start isolated by default.  Keyed on the `external` flag rather than
+ * a hard-coded list, so ANY built-in app added later is covered too.  An
+ * internal WM client ("_...") is always a system app. */
+int wm_app_is_system(const char *app_id)
+{
+    struct app *a;
+    if (!app_id) return 1;
+    if (app_id[0] == '_') return 1;
+    a = app_find(app_id);
+    return !a || !a->external;
+}
+
+void wm_launch_app_override(const char *app_id, void *arg, int isolated)
+{
+    struct app *a;
+    if (!app_id || app_id[0] == '_') return;
+    a = app_find(app_id);
+    if (!a) return;
+    iso_once = isolated ? 1 : 0;
+    /* Remember one-time choices for installed apps only; a system app must
+     * never inherit a previous isolated launch. */
+    if (a->external) security_app_launch_isolated(app_id, isolated);
+    wm_open_app(app_id, arg);
+    iso_once = -1;
+}
+
 void wm_launch_app_interactive(const char *app_id, void *arg)
 {
-    if (!app_id || app_id[0] == '_' || !security_initialized() ||
-        !security_choice("isolation.prompt") ||
+    if (!security_initialized() || !security_choice("isolation.prompt") ||
+        wm_app_is_system(app_id) ||
         !security_app_isolation_pending(app_id)) {
         iso_once = -1;
         wm_open_app(app_id, arg);
@@ -569,6 +612,10 @@ void wm_launch_app_interactive(const char *app_id, void *arg)
 
 struct window *wm_open_app(const char *app_id, void *arg)
 {
+    /* Consume the one-launch override IMMEDIATELY.  An app's open() may open
+     * its own dialog/window, and that nested window must not inherit it. */
+    int once = iso_once;
+    iso_once = -1;
     /* console hand-off: `appstrt` parks the launching terminal tab here so
      * the app's open()-time log lines already reach it */
     void *cons = pending_console;
@@ -594,8 +641,10 @@ struct window *wm_open_app(const char *app_id, void *arg)
     w->console = cons;
     w->app = app;
     {
-        int mode = app_id && app_id[0] != '_' ? security_app_isolation(app_id) : SC_ISO_NEVER;
-        w->isolated = iso_once >= 0 ? iso_once :
+        int mode = security_app_isolation(app_id);
+        int system = wm_app_is_system(app_id);
+        w->isolated = once >= 0 ? once :
+                      system ? 0 :
                       mode == SC_ISO_ALWAYS ? 1 :
                       mode == SC_ISO_NEVER ? 0 : security_app_last_isolated(app_id);
     }
@@ -921,7 +970,7 @@ static void desk_reveal(const char *path)
  * and hidden, a shortcut to a file can be followed and forgotten, and a built-in is never offered an
  * "Uninstall" it would refuse.  The labels come from the same table the actions run, so the menu, the
  * keyboard paths and the test suite cannot drift into three descriptions of the same desktop. */
-static char desk_labels[6][40];
+static char desk_labels[8][40];
 /* "Open with..." needs a list that outlives the call that builds it, because the menu hands the answer
  * back later; one list is enough, since only one menu can be raised at a time. */
 static char desk_openwith_path[300];
@@ -937,7 +986,8 @@ int wm_desk_actions(int item, const char **labels, int max)
 /* Each line is written into storage that outlives this call (a menu keeps the pointer until it is
  * answered) and counted in a separate statement, because `labels[n++] = desk_labels[n - 1]` reads and
  * writes n without a sequence point in between. */
-#define DESK_LINE(text) do { strcpy(desk_labels[n], (text)); labels[n] = desk_labels[n]; n++; } while (0)
+#define DESK_LINE(text) do { if (n >= max || n >= 8) return n; \
+    strcpy(desk_labels[n], (text)); labels[n] = desk_labels[n]; n++; } while (0)
     DESK_LINE("Open");
     if (a) DESK_LINE(wm_taskbar_pinned(a->id) ? "Unpin from taskbar" : "Pin to taskbar");
     else DESK_LINE("Show folder in Files");
@@ -949,14 +999,20 @@ int wm_desk_actions(int item, const char **labels, int max)
     /* Built-in apps are not removable, so the line is not offered for them at all; the uninstall
      * request itself still refuses, because a menu is a convenience and not the protection. */
     if (a && a->external) DESK_LINE("Uninstall app");
+    /* Right-click is the ONLY way to isolate a system app, and the explicit
+     * opposite override for an installed app that already has a choice. */
+    if (a && max >= 8) {
+        DESK_LINE("Launch isolated");
+        DESK_LINE("Launch unisolated");
+    }
 #undef DESK_LINE
     return n;
 }
 
 int wm_desk_invoke(int item, int action)
 {
-    const char *labels[6];
-    int n = wm_desk_actions(item, labels, 6);
+    const char *labels[8];
+    int n = wm_desk_actions(item, labels, 8);
     if (n < 0 || action < 0 || action >= n) return -1;
     struct app *a = items[item].kind == 0 ? app_find(items[item].app) : 0;
     if (action == 0) {
@@ -981,6 +1037,12 @@ int wm_desk_invoke(int item, int action)
             return 0;
         }
         if (!strcmp(labels[action], "Uninstall app")) { app_request_uninstall(a->id); return 0; }
+        if (!strcmp(labels[action], "Launch isolated")) {
+            wm_launch_app_override(a->id, NULL, 1); return 0;
+        }
+        if (!strcmp(labels[action], "Launch unisolated")) {
+            wm_launch_app_override(a->id, NULL, 0); return 0;
+        }
         return -1;
     }
     if (!strcmp(labels[action], "Show folder in Files")) { desk_reveal(items[item].path); return 0; }
@@ -1216,8 +1278,8 @@ int wm_desk_pos(int vis_idx, int *gx, int *gy)
 
 int wm_desk_action_index(int item, const char *label)
 {
-    const char *labels[6];
-    int n = wm_desk_actions(item, labels, 6);
+    const char *labels[8];
+    int n = wm_desk_actions(item, labels, 8);
     if (n < 0 || !label) return -1;
     for (int i = 0; i < n; i++)
         if (!strcmp(labels[i], label)) return i;
@@ -1378,7 +1440,7 @@ static __attribute__((noinline)) void paint_partial(void)
     if(dnd.active&&dnd_dirty){int dx,dy,dw,dh;dnd_rect(&dx,&dy,&dw,&dh);damage_add(dx,dy,dw,dh);}
     for(int i=0;i<win_count;i++){
         struct window *w=wins[i];if(w->state==WIN_STATE_MIN)continue;
-        if(w->dirty&&w->app&&w->app->paint){APP_T0(w);w->app->paint(w);APP_T1(w);damage_add(w->x+1,w->y+WIN_TITLEBAR,w->surf.w,w->surf.h);w->dirty=0;}
+        if(w->dirty&&w->surf.px&&w->app&&w->app->paint){APP_T0(w);w->app->paint(w);APP_T1(w);damage_add(w->x+1,w->y+WIN_TITLEBAR,w->surf.w,w->surf.h);w->dirty=0;}
         if(w->chrome_dirty){damage_add(w->x,w->y,w->w+4,w->h+4);w->chrome_dirty=0;}
     }
     damage_add(mx,my,CUR_W,CUR_H);
@@ -1703,7 +1765,7 @@ static void ov_paint(void)
             s_text(&screen, tile->x + 8, tile->y + OV_STRIP + 8,
                    "Minimised - click to restore", t->text);
         } else {
-            if (w->dirty && w->app && w->app->paint) {
+            if (w->dirty && w->surf.px && w->app && w->app->paint) {
                 { APP_T0(w); w->app->paint(w); APP_T1(w); }
                 w->dirty = 0;
             }
@@ -1816,7 +1878,7 @@ static __attribute__((noinline)) void paint_all(void)
         }
         if (!lowest) break;
         for(int di=0;di<win_count;di++)if(wins[di]==lowest){drawn[di]=1;break;}
-        if (lowest->dirty && lowest->app && lowest->app->paint) {
+        if (lowest->dirty && lowest->surf.px && lowest->app && lowest->app->paint) {
             { APP_T0(lowest); lowest->app->paint(lowest); APP_T1(lowest); }
             lowest->dirty = 0;
         }
@@ -1945,7 +2007,7 @@ static void resize_flush(int force)
     w->w = nw; w->h = nh;
     w->surf.px = np; w->surf.w = cw; w->surf.h = ch;
     memset(np, 0, (u32)cw * ch * 4);
-    if (w->app && w->app->paint) { APP_T0(w); w->app->paint(w); APP_T1(w); }
+    if (w->surf.px && w->app && w->app->paint) { APP_T0(w); w->app->paint(w); APP_T1(w); }
     w->dirty = 0;
     interact_repaint(w->x,w->y,(oldw>nw?oldw:nw)+4,(oldh>nh?oldh:nh)+4);
 }
@@ -2131,8 +2193,8 @@ static void desktop_context(void)
         }
         if (hit >= 0) {
             if (!(desk_sel & (1u << hit))) desk_sel = (1u << hit);
-            static const char *m[6];
-            int n = wm_desk_actions(hit, m, 6);
+            static const char *m[8];
+            int n = wm_desk_actions(hit, m, 8);
             wm_menu(mx, my, m, n > 0 ? n : 1, desk_item_menu_cb, (void *)(intptr_t)hit);
         } else if (desk_sel) {
             static const char *m[2] = { "Remove from Desktop", "Clear Selection" };
@@ -2148,6 +2210,12 @@ static void desktop_context(void)
 
 static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
 {
+    /* Any interaction that reaches the WM resets the idle timer, including
+     * injected/programmatic events that never passed through a device driver. */
+    security_note_activity();
+    { static u32 mix_skip;
+      if ((++mix_skip & 15) == 0)
+          security_mix_event((uint8_t)(e->type ^ e->buttons ^ (e->dx & 0xff))); }
     if (ov_active && overview_mouse(e)) { dirty = 1; return; }
     if (e->type == MEV_MOVE) {
         /* pre-move geometry for the interaction damage union */
@@ -2474,6 +2542,13 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
                 launch_press = hit;
                 launch_press_x = mx;
                 launch_press_y = my;
+            } else if (hit >= 0 && e->button == MBTN_RIGHT) {
+                struct app *la = app_at(hit);
+                if (la) {
+                    sc_copy(launch_iso_id, sizeof(launch_iso_id), la->id);
+                    launch.active = 0;
+                    wm_menu(mx, my, launch_iso_items, 2, launch_iso_answer, NULL);
+                }
             }
             wm_full();
             return;
@@ -2581,13 +2656,17 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
             if(e->button==MBTN_RIGHT){
                 /* One more line, only when it would do something: an app whose desktop icon was put away
                  * can have it back from the bar it is already pinned to. */
-                static const char *choices[3];
                 int n = 0;
-                choices[n++] = "Open";
-                choices[n++] = "Unpin from bar";
-                if (wm_desk_app_state(task_pins[i]) == 1) choices[n++] = "Put its icon back";
+                pin_choices[n++] = "Open";
+                pin_choices[n++] = "Unpin from bar";
+                if (wm_desk_app_state(task_pins[i]) == 1) pin_choices[n++] = "Put its icon back";
+                pin_choices[n++] = "Launch isolated";
+                pin_choices[n++] = "Launch unisolated";
+                int count = n;
+                while (n < 5) pin_choices[n++] = 0;
                 strcpy(pin_menu_id, task_pins[i]);
-                wm_menu(168 + i * 40, screen_h - TASKBAR_H - (n * 24 + 8), choices, n, pin_menu_answer, NULL);
+                wm_menu(168 + i * 40, screen_h - TASKBAR_H - (count * 24 + 8),
+                        pin_choices, count, pin_menu_answer, NULL);
             }
             else if(e->button==MBTN_LEFT&&e->down){
                 /* The bar's own double-click: put that application's window away, or bring it back.
@@ -2706,6 +2785,8 @@ static void toggle_launcher(void)
 
 static __attribute__((noinline)) void handle_key(struct key_event *e)
 {
+    security_note_activity();
+    security_mix_event((uint8_t)(e->keycode ^ e->scancode));
     /* ---- scoswm-arch global hotkeys (owner choice WMP_HOTKEYS) ----
      * Same bindings as the Linux WM: Alt+Tab / Alt+Shift+Tab, Alt+F4,
      * Alt+F9, Alt+F10, Super+D, Super+Enter, Super+M, Super+, and Super+Q.
@@ -2952,7 +3033,7 @@ void wm_run(void)
         interrupt_poll();
         usb_poll(); /* foreground only: never drive USB from SIMD-free IRQs */
         struct mouse_event me;
-        while (mouse_poll(&me)) handle_mouse(&me);
+        while (mouse_poll(&me)) { security_note_activity(); handle_mouse(&me); }
         resize_flush(0);           /* r36: once-per-frame resize apply */
         if (tty_request) {         /* r36: kernel maintenance console */
             tty_select(tty_request);
@@ -2961,7 +3042,11 @@ void wm_run(void)
             wm_full();             /* tty repainted both buffers */
         }
         struct key_event ke;
-        while (kbd_poll(&ke)) {handle_key(&ke);if(tty_request||wm_stop_requested)break;}
+        while (kbd_poll(&ke)) {
+            security_note_activity();
+            handle_key(&ke);
+            if(tty_request||wm_stop_requested)break;
+        }
         if (wm_stop_requested) goto stopped;
         /* Security work happens here, after every window callback has returned:
          * full-screen password/lock flows are safe to open at this point and

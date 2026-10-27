@@ -8,6 +8,15 @@ extern struct app * const __scos_apps_start[], * const __scos_apps_end[];
 int app_register(struct app *a)
 {
     if(!a||!a->id||!a->title||!a->id[0]||strlen(a->id)>31||strlen(a->title)>39||(a->desktop_label&&strlen(a->desktop_label)>39)||reg_count>=APP_LIMIT)return 0;
+    /* App ids become VFS directory names (home/appdata/<id>/) and per-app
+     * choice keys.  Reject separators and dot segments at the single registry
+     * gate, so any system app added later cannot escape its namespace. */
+    for(const char *p=a->id;*p;p++){
+        char c=*p;
+        if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||
+             c=='-'||c=='_'||c=='.'))return 0;
+    }
+    if(!strcmp(a->id,".")||!strcmp(a->id,"..")||strstr(a->id,".."))return 0;
     for(int i=0;i<reg_count;i++)if(!strcmp(registry[i]->id,a->id))return registry[i]==a;
     registry[reg_count++]=a;return 1;
 }

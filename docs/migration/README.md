@@ -13,7 +13,8 @@ unnumbered foundation, not a replacement desktop release. The user deferred
 numbering until conversion starts on their PC. New driver/library integration
 still requires separate permission after the existing core is converted.
 
-See [hardware/browser research](HARDWARE-AND-BROWSER.md),
+See [the security audit and fixes](HARDENING.md),
+[hardware/browser research](HARDWARE-AND-BROWSER.md),
 [host QEMU tooling](EMULATOR.md) and the
 [`scoswm-arch` port notes](WM-PORT.md) (visual MRU window overview, global
 Alt/Super hotkeys, snap layouts, live persisted desktop preferences and a

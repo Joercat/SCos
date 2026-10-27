@@ -49,7 +49,7 @@ plus a stack switch.
 | namespaces (mount) | every path is a **basename** resolved under `home/appdata/<id>/`; `/`, `..` and separators are rejected before any VFS call | `ns_path()` in `kernel/desktop/usermode.c` |
 | namespaces (PID/IPC/net) | only the app's own window is visible; no process list, no cross-app messages, no network | dispatcher `SC_NR_WINDOW`, `SC_NR_FOCUSED`, `PROC_CAP_IPC` |
 | user namespaces / capabilities | `PROC_CAP_VFS_READ/WRITE/THEME/IPC/APPCTL/SYSINFO` held in kernel memory | `process.h`, `cap_ok()` |
-| seccomp-bpf | default-deny allowlist over `SC_NR_1..SC_NR_MAX`; owner-adjustable with `user_set_seccomp()` | `allow[]`, `user_seccomp_allowed()` |
+| seccomp-bpf | default-deny allowlist over `SC_NR_1..SC_NR_MAX`; owner-adjustable with `user_set_seccomp()`. The syscall number is compared at full 64-bit width and capabilities are checked again per file syscall | `allow[]`, `user_seccomp_allowed()`, `cap_ok()` |
 | cgroups | memory, file count, file bytes, syscall count and CPU-time budgets | `limits[]`, `USER_RLIMIT_*` |
 | Landlock-style point-of-use checks | syscalls validate strings/lengths against the shared page before touching the VFS | `scratch_at()`, `ns_path()` |
 | no_new_privs | an app can never gain a capability; CPL3 cannot install a syscall entry | hardware |
@@ -130,3 +130,13 @@ of it. `test_isolation.py` additionally proves the per-process PML4s, private
 VFS roots, per-account files and anti-rollback anchor.
 
 Emulator success is not physical-PC acceptance.
+
+## Hardening notes
+
+`docs/migration/HARDENING.md` records a full audit of this boundary: a 32-bit
+truncation that let `0x100000001` act as `SC_NR_EXIT`, an `off + n` wrap that
+could write outside the shared page, missing capability checks, unclamped draw
+arguments (a CPU-render denial of service), unbounded scratch strings and
+namespace escapes through unsanitised app ids. All are fixed and covered by
+`tools/tests/test_hardening.py`, which issues the hostile syscalls from real
+CPL3 code.

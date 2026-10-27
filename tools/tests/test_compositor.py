@@ -83,7 +83,8 @@ def test():
       assert hit,'the desktop has no visible icon to right-click'
       i,kind,app,cx,cy=hit
       lab=g.scratch+8000
-      n=g.call('wm_desk_actions',i,lab,6);assert n in (3,4,5),n
+      n=g.call('wm_desk_actions',i,lab,8);assert n in (3,4,5,6,7),n
+      # The real menu also offers the two explicit per-launch isolation overrides.
       words=[g.string(g.ptr(lab+8*k),40) for k in range(n)]
       assert words[0]=='Open',words
       if kind==0:
@@ -97,6 +98,7 @@ def test():
                              'Rename shortcut'],words
       if kind==0:
           assert 'Open with...' not in words and 'Rename shortcut' not in words,words
+          assert 'Launch isolated' in words and 'Launch unisolated' in words,words
       g.call('paint_all')
       pointer(g,cx,cy);event(g,1)
       event(g,2,button=2,down=1,buttons=2);event(g,2,button=2,buttons=0)

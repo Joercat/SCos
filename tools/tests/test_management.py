@@ -196,12 +196,14 @@ def test():
       g.call('paint_all');pointer(g,px,py);event(g,1)
       event(g,2,button=2,down=1,buttons=2);event(g,2,button=2,buttons=0)
       assert g.value('menu'),'right-clicking the installed app icon raised no menu'
-      lab=g.scratch+8000;n=g.call('wm_desk_actions',target,lab,6)
+      lab=g.scratch+8000;n=g.call('wm_desk_actions',target,lab,8)
       words=[g.string(g.ptr(lab+8*k),40) for k in range(n)]
-      assert words[0]=='Open' and words[-1]=='Uninstall app',words
+      assert words[0]=='Open' and 'Uninstall app' in words,words
+      assert 'Launch isolated' in words and 'Launch unisolated' in words,words
+      uninstall_line=words.index('Uninstall app')
       mrect=struct.unpack('<4i',g.debug.read(g.base+g.symbols['menu']+4,16))
       before=g.call('wm_win_count')
-      click_desktop(g,mrect[0]+20,mrect[1]+3+(n-1)*24+12)
+      click_desktop(g,mrect[0]+20,mrect[1]+3+uninstall_line*24+12)
       assert g.call('wm_dialog_active'),'the icon menu did not raise the confirmation'
       g.snapshot('uninstall-from-icon');g.type('\n');g.run()
       assert g.read('home/apps/ui-test.cat') is None,'the confirmed uninstall left the package on disk'

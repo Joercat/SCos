@@ -27,14 +27,24 @@ static int vfs_user_private(const char *path)
     if (security_api_session() < 0) return 0;
     p = path;
     while (*p == '/') p++;
-    if (sc_neq(p, "home/users/", 11)) return 0;
+    if (sc_neq(p, "home/users", 10)) return 0;
+    /* The bare parent directory lists every account name: deny it.  A dotted
+     * id or a name that merely starts with "home/users" is denied too. */
+    if (p[10] != '/') return 1;
+    /* vfs_lookup honours "..", so reject traversal before any comparison. */
+    for (const char *q = p + 11; *q; q++) {
+        if (*q == '.' && q[1] == '.' &&
+            (q[2] == 0 || q[2] == '/')) return 1;
+        if (*q == '/' && q[1] == '.' && q[2] == '.' &&
+            (q[3] == 0 || q[3] == '/')) return 1;
+    }
     name = p + 11;
     slash = name;
     while (*slash && *slash != '/') slash++;
     n = (size_t)(slash - name);
-    if (!n) return 0;                   /* the parent directory itself */
+    if (!n) return 1;
     me = security_current_user();
-    if (!me || !*me) return 0;
+    if (!me || !*me) return 1;
     return n != sc_len(me) || sc_neq(name, me, n) != 0;
 }
 

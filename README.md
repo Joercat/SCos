@@ -74,6 +74,15 @@ user-driven launch of an app the WM prompts: always isolated / never isolated /
 isolated once (ask next time) / unisolated once (ask next time). The answer is
 saved (`choices app <id> always|never|ask`).
 
+**System apps never ask.** Built-in apps are part of the OS, so they never
+show the isolation prompt and always start **unisolated** — this is keyed on
+the `external` flag, so every system app added later is covered too. The only
+way to start one isolated is to right-click its desktop icon, launcher row or
+taskbar pin and choose **Launch isolated**. Installed apps that already have an
+`always`/`never` choice never get asked again and launch according to it; the
+same right-click menus offer **Launch unisolated** as the opposite override.
+`isolate <id> always|never|ask|isolated|normal` does the same from Terminal.
+
 An isolated app becomes a **real user-mode process at CPL3**. An installed CAT
 package runs its Lua VM, bytecode, heap and stack in its own PML4; kernel memory
 is supervisor-only there, so reading it, executing `mov cr3`/`wrmsr`/`cli`, or
@@ -156,7 +165,14 @@ is back in native SCos:
 * **Live desktop preferences** in Settings: taskbar height, desktop icon
   size, wallpaper grid, and switches for hotkeys, the overview and snapping.
   They persist in `home/desktop.cfg` (inside the encrypted vault) and default
-  to the original SCos geometry.
+  to the original SCos geometry. The same Settings window has a **Security**
+  section for auto-lock minutes, lock-on-idle, isolation prompt/default and a
+  "Lock screen now" button — no extra app or window.
+* **No timeout while in use.** The PIT runs at 100 Hz; auto-lock now uses
+  6000 ticks per minute (it used 600, so a 10-minute policy locked after one
+  minute). Every keyboard and mouse interaction — including a button release
+  with no movement — resets the idle timer. `idle` / `activity` in Terminal
+  show or reset it.
 * **Power menu**: Lock is immediate; Restart and Power Off go through a
   confirmation whose safe keyboard default is **Cancel**.
 

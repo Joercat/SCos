@@ -53,8 +53,8 @@ static void mouse_enqueue(struct mouse_event *e)
 
 static void mouse_apply(u8 btns, i32 dx, i32 dy, i32 wheel)
 {
-    if (input_guard_armed && (btns || dx || dy || wheel))
-        input_last_tick = tick_count;
+    if (((btns & 7) != button_state) || dx || dy || wheel)
+        security_note_activity();
     i32 unused = 0;
     (void)unused;
     u8 packet0_btns = btns;

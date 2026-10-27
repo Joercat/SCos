@@ -113,8 +113,12 @@ static int parse_u32(const char *s, u32 *out)
 void wm_prefs_init(void)
 {
     u32 n = 0;
-    char *data = vfs_read(CFG_PATH, &n);
-    if (!data || n > 4096) return;
+    char *src = vfs_read(CFG_PATH, &n);
+    static char data[2048];
+    /* Work on a private copy: never mutate a VFS-owned buffer in place. */
+    if (!src || !n || n >= sizeof(data)) return;
+    memcpy(data, src, n);
+    data[n] = 0;
     for (char *line = data; *line && (size_t)(line - data) < n;) {
         char *end = line;
         while (*end && *end != '\n' && *end != '\r') end++;

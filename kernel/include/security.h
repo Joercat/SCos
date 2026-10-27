@@ -342,6 +342,14 @@ void security_api_lock_session(void);
 void security_api_unlock_session(void);
 int  security_api_locked(void);
 void security_api_min_policy(struct sc_policy *p);
+/* Any real interaction resets the idle timer.  Called by the input drivers
+ * AND by the WM when it consumes an event, so no interaction path is missed. */
+int  security_api_lock_now(void);      /* queue the lock screen from an app */
+void security_note_activity(void);
+uint32_t security_idle_ticks(void);
+int  security_idle_would_lock(void);   /* no side effects; owner-visible */
+uint32_t security_api_idle_minutes(void);
+int  security_api_policy_set(const char *key, uint32_t value);
 void security_api_build_hint(char *out, size_t cap);
 
 /* Full-screen (framebuffer) flows implemented by login.c.  Every one of them

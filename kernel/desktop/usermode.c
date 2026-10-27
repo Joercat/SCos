@@ -57,8 +57,10 @@ int  user_in_usermode(void) { return sc_user_active != 0; }
 uint64_t user_fault_count(void) { return faults; }
 uint64_t user_syscall_count(void) { return syscalls; }
 uint64_t user_denied_count(void) { return denied; }
-int  user_seccomp_allowed(int nr)
+int  user_seccomp_allowed(u64 nr)
 {
+    /* Compare the FULL 64-bit value: an attacker controlling RAX must not be
+     * able to reach SC_NR_EXIT with 0x100000001 via an int truncation. */
     return nr >= 1 && nr <= SC_NR_MAX && allow[nr] != 0;
 }
 void user_set_seccomp(int nr, int on)
@@ -93,21 +95,41 @@ int user_pid_mapped(int pid, uintptr_t va)
 }
 
 /* --------------------------------------------------------------- namespaces --- */
+/* Dots are legal in filenames but must never form a whole ".." segment. */
+static int name_traversal(const char *n)
+{
+    for (const char *p = n; *p; p++) {
+        if (*p != '.') continue;
+        if ((p == n || p[-1] == '/') && p[1] == '.' &&
+            (p[2] == 0 || p[2] == '/')) return 1;
+    }
+    return 0;
+}
+#define USER_STR_MAX 256
 static const char *scratch_at(u32 off)
 {
     struct user_shared *sh = shared();
     if (off >= sizeof(sh->scratch)) return "";
     const char *s = sh->scratch + off;
-    /* bounded: at most `remaining` bytes, and always NUL-terminate logically */
-    u32 n = 0;
-    while (n < (u32)(sizeof(sh->scratch) - off) && s[n]) n++;
-    if (n == (u32)(sizeof(sh->scratch) - off)) return "";
+    /* Bounded: a 64 KiB scratch string must never become a 64 KiB syscall
+     * argument (CPU denial of service) or an unclipped text draw. */
+    u32 n = 0, cap = (u32)(sizeof(sh->scratch) - off);
+    if (cap > USER_STR_MAX) cap = USER_STR_MAX;
+    while (n < cap && s[n]) n++;
+    if (n >= cap) {
+        /* Not NUL-terminated within the bound: hand back a bounded copy. */
+        static char bounded[USER_STR_MAX + 1];
+        memcpy(bounded, s, cap - 1);
+        bounded[cap - 1] = 0;
+        return bounded;
+    }
     return s;
 }
 static int ns_path(const char *name, char *out, size_t cap)
 {
     size_t n;
-    if (!name || !*name || name[0] == '/' || !strcmp(name, ".") || !strcmp(name, "..")) return 0;
+    if (!name || !*name || name[0] == '/' || !strcmp(name, ".") ||
+        !strcmp(name, "..") || name_traversal(name)) return 0;
     n = strlen(name);
     if (n >= 64) return 0;
     for (size_t i = 0; i < n; i++)
@@ -145,9 +167,21 @@ int user_attach(int pid, struct window *w)
         memset((void *)p, 0, 4096);
         if (n) memcpy((void *)p, userland_image + off, n);
     }
-    sc_copy(ns_dir, sizeof(ns_dir), "home/appdata/");
-    sc_cat(ns_dir, sizeof(ns_dir), proc_pid_app_id(pid));
-    sc_cat(ns_dir, sizeof(ns_dir), "/");
+    {
+        char safe[SC_APP_ID_MAX];
+        const char *src = proc_pid_app_id(pid);
+        size_t k = 0;
+        for (; *src && k + 1 < sizeof(safe); src++) {
+            char c = *src;
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '-' || c == '_') safe[k++] = c;
+        }
+        safe[k] = 0;
+        if (!k) sc_copy(safe, sizeof(safe), "app");
+        sc_copy(ns_dir, sizeof(ns_dir), "home/appdata/");
+        sc_cat(ns_dir, sizeof(ns_dir), safe);
+        sc_cat(ns_dir, sizeof(ns_dir), "/");
+    }
     /* Private root is created by the kernel, never by app code. */
     sc_copy(tmp, sizeof(tmp), ns_dir);
     tmp[strlen(tmp) - 1] = 0;
@@ -269,33 +303,61 @@ void user_fault(struct interrupt_frame *f)
 /* --------------------------------------------------------------- dispatcher --- */
 static u64 deny(void) { denied++; return (u64)-1; }
 
+/* Drawing primitives loop over coordinate ranges.  Clamp every attacker
+ * controlled value BEFORE the call so a huge radius/scale/extent cannot turn
+ * one syscall into a CPU hang (CPU-render-only machines have no GPU to hide
+ * behind).  Signed overflow in x+w would also be undefined behaviour. */
+static int draw_coord(u64 v)
+{
+    i32 n = (i32)v;
+    if (n < -4096) return -4096;
+    if (n > 4096) return 4096;
+    return n;
+}
+static int draw_extent(u64 v)
+{
+    i32 n = (i32)v;
+    if (n < 0) return 0;
+    if (n > 4096) return 4096;
+    return n;
+}
+
 static u64 do_draw(u64 cmd, u64 a, u64 b, u64 c, u64 d)
 {
     struct surface *s;
-    struct user_shared *sh = shared();
-    if (!active_window) return deny();
+    int x, y, w, h;
+    u32 col;
+    if (!active_window || !active_window->surf.px) return deny();
     s = &active_window->surf;
-    int x = (int)(i32)a, y = (int)(i32)b;
-    int w = (int)(i32)(c >> 32), h = (int)(i32)c;
-    u32 col = (u32)d;
+    x = draw_coord(a); y = draw_coord(b);
+    w = draw_extent(c >> 32); h = draw_extent(c);
+    col = (u32)d;
     switch (cmd) {
         case SC_DRAW_CLEAR:  s_fill(s, 0, 0, s->w, s->h, (u32)a); return 1;
         case SC_DRAW_RECT:   s_fill(s, x, y, w, h, col); return 1;
         case SC_DRAW_FRAME:  s_frame_rect(s, x, y, w, h, col); return 1;
         case SC_DRAW_PIXEL:  s_pixel(s, x, y, (u32)c); return 1;
-        case SC_DRAW_LINE:   s_line(s, x, y, (int)(i32)(c >> 32), (int)(i32)c, col); return 1;
-        case SC_DRAW_CIRCLE: s_circle(s, x, y, (int)(i32)c, col); return 1;
-        case SC_DRAW_DISC:   s_disc(s, x, y, (int)(i32)c, col); return 1;
+        case SC_DRAW_LINE:
+            s_line(s, x, y, draw_coord(c >> 32), draw_coord(c), col); return 1;
+        case SC_DRAW_CIRCLE: s_circle(s, x, y, draw_extent(c), col); return 1;
+        case SC_DRAW_DISC:   s_disc(s, x, y, draw_extent(c), col); return 1;
         case SC_DRAW_TEXT:   s_text(s, x, y, scratch_at(0), (u32)c); return 1;
-        case SC_DRAW_TEXT_SCALED:
-            s_text_scaled(s, x, y, scratch_at(0), (u32)c, (int)d); return 1;
+        case SC_DRAW_TEXT_SCALED: {
+            int sc = draw_extent(d);
+            if (sc < 1) sc = 1;
+            if (sc > 4) sc = 4;
+            s_text_scaled(s, x, y, scratch_at(0), (u32)c, sc); return 1;
+        }
         case SC_DRAW_TEXT_CLIP:
-            s_clip_text(s, x, y, scratch_at(0), (u32)c, (int)d); return 1;
+            s_clip_text(s, x, y, scratch_at(0), (u32)c, draw_extent(d)); return 1;
         case SC_DRAW_GRADIENT:
             s_vgrad(s, x, y, w, h, (u32)d, (u32)c); return 1;
-        case SC_DRAW_ICON:
-            s_icon(s, (int)c, x, y, col); return 1;
-        default: (void)sh; return deny();
+        case SC_DRAW_ICON: {
+            int id = draw_extent(c);
+            if (id >= ICON_COUNT) id = 0;
+            s_icon(s, id, x, y, col); return 1;
+        }
+        default: return deny();
     }
 }
 
@@ -303,7 +365,14 @@ static u64 do_file(u64 nr, u64 a, u64 b, u64 c)
 {
     struct user_shared *sh = shared();
     char path[128];
-    const char *name = scratch_at((u32)a);
+    const char *name;
+    int writing = nr == SC_NR_FILE_WRITE || nr == SC_NR_FILE_REMOVE ||
+                  nr == SC_NR_FILE_RENAME;
+    /* Capabilities are held in kernel memory; the namespace alone is not the
+     * permission check.  A read-only process must not gain writes by picking
+     * a legal filename. */
+    if (!cap_ok(writing ? PROC_CAP_VFS_WRITE : PROC_CAP_VFS_READ)) return deny();
+    name = scratch_at((u32)a);
     if (!ns_path(name, path, sizeof(path))) return deny();
     if (nr == SC_NR_FILE_EXISTS) return vfs_lookup(path) ? 1 : 0;
     if (nr == SC_NR_FILE_SIZE) {
@@ -311,9 +380,10 @@ static u64 do_file(u64 nr, u64 a, u64 b, u64 c)
         return n && !n->is_dir ? n->size : 0;
     }
     if (nr == SC_NR_FILE_READ) {
-        u32 n = 0, off = (u32)b, got;
+        u32 n = 0, got;
         char *data;
-        if (off >= sizeof(sh->scratch)) return deny();
+        if (b >= sizeof(sh->scratch)) return deny();
+        u32 off = (u32)b;
         data = vfs_read(path, &n);
         if (!data) return 0;
         got = n < (u32)(sizeof(sh->scratch) - off) ? n : (u32)(sizeof(sh->scratch) - off);
@@ -321,9 +391,13 @@ static u64 do_file(u64 nr, u64 a, u64 b, u64 c)
         return got;
     }
     if (nr == SC_NR_FILE_WRITE) {
-        u32 n = (u32)c, off = (u32)b, old_bytes = 0;
+        u32 old_bytes = 0;
         struct vfs_node *old;
-        if (n > limits[USER_RLIMIT_FILEBYTES] || off + n > sizeof(sh->scratch)) return deny();
+        /* Reject on the 64-bit values.  Casting first would let off=2^32-1
+         * wrap `off + n` past the scratch size and write far out of bounds. */
+        if (b >= sizeof(sh->scratch) || c > limits[USER_RLIMIT_FILEBYTES] ||
+            c > sizeof(sh->scratch) - (u32)b) return deny();
+        u32 n = (u32)c, off = (u32)b;
         old = vfs_lookup(path);
         if (old && !old->is_dir) old_bytes = old->size;
         if (!old && ns_files >= limits[USER_RLIMIT_FILES]) return deny();
@@ -344,11 +418,16 @@ static u64 do_file(u64 nr, u64 a, u64 b, u64 c)
     }
     if (nr == SC_NR_FILE_LIST) {
         struct vfs_node *dir = vfs_lookup(ns_dir);
-        u32 off = (u32)a, n = 0;
-        if (!dir || !dir->is_dir || off >= sizeof(sh->scratch)) return 0;
+        u32 n = 0;
+        if (a >= sizeof(sh->scratch) - 1) return 0;
+        u32 off = (u32)a;
+        if (!dir || !dir->is_dir) return 0;
         for (struct vfs_node *f = dir->child; f; f = f->sibling) {
             size_t l = strlen(f->name);
-            if (f->is_dir || off + n + l + 2 > sizeof(sh->scratch)) continue;
+            if (f->is_dir) continue;
+            /* subtraction-only bound: off + n + l + 1 must leave room for NUL */
+            if (n > sizeof(sh->scratch) - off - 2 ||
+                l > sizeof(sh->scratch) - off - n - 2) continue;
             memcpy(sh->scratch + off + n, f->name, l);
             sh->scratch[off + n + l] = '\n';
             n += (u32)l + 1;
@@ -367,7 +446,9 @@ uint64_t user_syscall_dispatch(uint64_t a1, uint64_t a2, uint64_t a3,
     struct rtc_time t;
     (void)a6;
     syscalls++; episode_syscalls++;
-    if (!user_seccomp_allowed((int)nr)) { denied++; return (u64)-1; }
+    if (!user_seccomp_allowed(nr)) { denied++; return (u64)-1; }
+    /* No process context means no capabilities and no private namespace. */
+    if (!active_pid && nr != SC_NR_EXIT) { denied++; return (u64)-1; }
     if (episode_syscalls > limits[USER_RLIMIT_SYSCALLS] ||
         (u32)(tick_count - episode_start) * 10 > limits[USER_RLIMIT_CPU_MS]) {
         sc_user_active = 2;            /* terminate the episode (CPU budget) */

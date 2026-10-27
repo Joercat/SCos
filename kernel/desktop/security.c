@@ -19,6 +19,7 @@
 #include "usermode.h"
 
 static void user_dir_create(const char *name);   /* per-account private VFS tree */
+static int queue(int kind, const char *arg, int idx, int role);
 
 #define DB_MAGIC   "SCos-accounts-v1"
 #define DB_PATH    "system/security/users.db"
@@ -666,7 +667,7 @@ static void begin_session(int idx)
     S.session_epoch = (uint32_t)now_epoch();
     S.deny_until = 0;
     S.global_fails = 0;
-    input_last_tick = (u32)tick_count;
+    security_note_activity();
 }
 
 int security_api_authenticate(const char *name, const char *pw, char *msg, size_t cap)
@@ -1069,13 +1070,21 @@ void security_api_drop_session(void)
     S.force_change = 0;
 }
 
+int security_api_lock_now(void)
+{
+    if (!S.ready || S.locked || S.session < 0) return 0;
+    if (!queue(PEND_LOCK, 0, S.session, 0)) return 0;
+    audit("lock-requested", security_api_session_name());
+    return 1;
+}
+
 void security_api_lock_session(void) {
     if (security_choice("lock.enabled")) S.locked = 1;
 }
 void security_api_unlock_session(void)
 {
     S.locked = 0;
-    input_last_tick = (u32)tick_count;
+    security_note_activity();
 }
 int  security_api_locked(void) { return S.locked; }
 
@@ -1259,9 +1268,61 @@ void security_login_gate(void)
     if (S.session < 0) panic("security: sign-in gate exited without a session");
     S.locked = 0;
     S.force_change = 0;
-    input_last_tick = (u32)tick_count;
+    security_note_activity();
     persist_now();
     wm_request_full();
+}
+
+/* The PIT runs at 100 Hz (divisor 11932), so one minute is 6000 ticks.  The
+ * old 600 was six seconds per "minute": a 10-minute idle locked the machine
+ * after one minute, which felt exactly like a timeout while in use. */
+#define TICKS_PER_MINUTE 6000u
+
+void security_note_activity(void)
+{
+    input_last_tick = (u32)tick_count;
+}
+
+uint32_t security_idle_ticks(void)
+{
+    return (u32)tick_count - (u32)input_last_tick;
+}
+
+int security_idle_would_lock(void)
+{
+    if (!S.ready || S.session < 0 || S.locked) return 0;
+    if (!security_choice("lock.enabled") || !security_choice("lock.idle") ||
+        !S.policy.idle_minutes) return 0;
+    return (uint64_t)security_idle_ticks() >
+           (uint64_t)S.policy.idle_minutes * TICKS_PER_MINUTE;
+}
+
+uint32_t security_api_idle_minutes(void) { return S.policy.idle_minutes; }
+
+/* The same validated setter the shell's `policy set` uses, exposed so the
+ * Settings panel can change a policy without pretending to be a shell. */
+int security_api_policy_set(const char *key, uint32_t value)
+{
+    struct sc_policy p = S.policy;
+    uint32_t *slot = 0;
+    if (!security_is_admin() || !key) return 0;
+    if (sc_eq(key, "minlen")) slot = &p.min_len;
+    else if (sc_eq(key, "classes")) slot = &p.min_classes;
+    else if (sc_eq(key, "minbits")) slot = &p.min_bits;
+    else if (sc_eq(key, "maxfails")) slot = &p.max_fails;
+    else if (sc_eq(key, "lockbase")) slot = &p.lock_base;
+    else if (sc_eq(key, "lockmax")) slot = &p.lock_max;
+    else if (sc_eq(key, "idle")) slot = &p.idle_minutes;
+    else if (sc_eq(key, "maxage")) slot = &p.max_age_days;
+    else if (sc_eq(key, "history")) slot = &p.history;
+    else if (sc_eq(key, "iters")) slot = &p.iters;
+    if (!slot) return 0;
+    *slot = value;
+    if (!sc_policy_valid(&p)) return 0;
+    S.policy = p;
+    audit("policy-changed", key);
+    db_save();
+    return 1;
 }
 
 void security_wm_tick(void)
@@ -1276,8 +1337,7 @@ void security_wm_tick(void)
     if (S.pending) { security_run_pending(); wm_request_full(); return; }
     if (S.session >= 0 && !S.locked && security_choice("lock.enabled") &&
         security_choice("lock.idle") && S.policy.idle_minutes) {
-        uint32_t idle = t - (uint32_t)input_last_tick;
-        if (idle > S.policy.idle_minutes * 600u) {
+        if (security_idle_would_lock()) {
             audit("auto-lock", "idle timeout");
             security_ui_lock();
             wm_request_full();
@@ -1314,7 +1374,7 @@ void security_run_pending(void)
         close_all_windows();
         security_api_drop_session();
         security_ui_logout();
-        input_last_tick = (u32)tick_count;
+        security_note_activity();
         persist_now();
         break;
     case PEND_PASSWD:
@@ -1360,7 +1420,7 @@ void security_run_pending(void)
     default:
         break;
     }
-    input_last_tick = (u32)tick_count;
+    security_note_activity();
 }
 
 static int queue(int kind, const char *arg, int idx, int role)
@@ -1421,7 +1481,8 @@ int security_command_allowed(const char *line, char *out, size_t cap)
         "scinfo", "graphics", "dmesg", "klog", "free", "cpu", "uptime", "df",
         "disks", "procs", "history", "clear", "echo", "cal", "calc", "about",
         "whoami", "id", "security", "users", "audit", "policy", "passwd",
-        "lock", "logout", "su", "reauth", "choices", "isolation", 0
+        "lock", "logout", "su", "reauth", "choices", "isolation",
+        "idle", "activity", "isolate", 0
     };
     char cmd[64], arg[64];
     int role, n;
@@ -1718,6 +1779,55 @@ int security_shell(const char *line, char *out, size_t cap)
         }
         return 1;
     }
+    /* Idle/activity: every interaction already stamps the timer through
+     * security_note_activity().  These commands make that observable and let
+     * a script explicitly count as activity. */
+    if (sc_eq(args[0], "idle") || sc_eq(args[0], "activity")) {
+        uint32_t ticks = security_idle_ticks();
+        if (sc_eq(args[0], "activity")) { security_note_activity(); ticks = 0; }
+        ob(&b, "Idle: "); ob_num(&b, ticks / 100); ob(&b, " s. ");
+        if (!security_choice("lock.idle") || !security_api_idle_minutes())
+            ob(&b, "Auto-lock is off.\n");
+        else {
+            uint32_t limit = security_api_idle_minutes() * 60u;
+            ob(&b, "Auto-lock at "); ob_num(&b, limit); ob(&b, " s (choice ");
+            ob(&b, security_choice("lock.idle") ? "on" : "off"); ob(&b, ").\n");
+        }
+        return 1;
+    }
+    /* Short alias for the per-app isolation choice, plus an explicit
+     * one-launch override in either direction. */
+    if (sc_eq(args[0], "isolate")) {
+        if (argc < 2) {
+            ob(&b, "Usage: isolate <app-id> always|never|ask|isolated|normal\n");
+            return 1;
+        }
+        if (argc >= 3 && (sc_eq(args[2], "isolated") || sc_eq(args[2], "normal"))) {
+            wm_launch_app_override(args[1], NULL, sc_eq(args[2], "isolated"));
+            ob(&b, "Launched "); ob(&b, args[1]); ob(&b, sc_eq(args[2], "isolated") ?
+                " isolated for this launch.\n" : " unisolated for this launch.\n");
+            return 1;
+        }
+        int mode = SC_ISO_ASK;
+        if (!security_is_admin()) {
+            ob(&b, "Administrator rights required to change an isolation choice.\n");
+            return 1;
+        }
+        if (argc >= 3) {
+            if (sc_eq(args[2], "always")) mode = SC_ISO_ALWAYS;
+            else if (sc_eq(args[2], "never")) mode = SC_ISO_NEVER;
+            else if (!sc_eq(args[2], "ask")) {
+                ob(&b, "Usage: isolate <app-id> always|never|ask|isolated|normal\n");
+                return 1;
+            }
+        }
+        if (security_app_isolation_set(args[1], mode)) {
+            ob(&b, "Isolation choice for "); ob(&b, args[1]); ob(&b, " set.\n");
+        } else {
+            ob(&b, security_choice_error()); ob(&b, "\n");
+        }
+        return 1;
+    }
     if (sc_eq(args[0], "whoami")) {
         ob(&b, security_api_session_name());
         ob(&b, " (uid ");
@@ -1752,7 +1862,7 @@ int security_shell(const char *line, char *out, size_t cap)
         return 1;
     }
     if (sc_eq(args[0], "lock")) {
-        if (!queue(PEND_LOCK, 0, S.session, 0)) { ob(&b, "Another secure dialog is pending."); return 1; }
+        if (!security_api_lock_now()) { ob(&b, "Another secure dialog is pending."); return 1; }
         audit("lock-requested", security_api_session_name());
         ob(&b, "Locking the session on the secure screen...");
         return 1;

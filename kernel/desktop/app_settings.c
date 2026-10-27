@@ -23,6 +23,40 @@ static const int wm_keys[WM_ROWS] = {
 static int wm_section_y(int sy) { return sy + 116; }
 static int wm_info_y(int sy) { return wm_section_y(sy) + 22 + WM_ROWS * 26 + 16; }
 
+/* Security controls live in this same Settings window - no extra app, no
+ * extra menu.  They sit below the existing content and scroll with it. */
+#define SEC_ROWS 4
+#define SEC_FIRST_ID (WM_LAST_ID + 1)
+#define SEC_BUTTON_ID (SEC_FIRST_ID + SEC_ROWS * 2)
+static const char *const sec_labels[SEC_ROWS] = {
+    "Auto-lock after:", "Lock when idle:", "Ask about isolation:", "New app isolation:"
+};
+static const char *const sec_keys[SEC_ROWS] = {
+    "", "lock.idle", "isolation.prompt", "isolation.default"
+};
+static int sec_y(int sy) { return wm_info_y(sy) + 70 + 40; }
+static int st_content_bottom(int sy)
+{
+    return sec_y(sy) + 22 + SEC_ROWS * 26 + 30;
+}
+static int sec_value(int row)
+{
+    if (row == 0) return (int)security_api_idle_minutes();
+    return security_choice(sec_keys[row]);
+}
+static void sec_set(int row, int v)
+{
+    /* Policy and choice setters are administrator-only, exactly like the
+     * shell's `policy set` / `choices set`.  No extra window: a transient
+     * notice explains a refusal. */
+    if (!security_is_admin()) {
+        wm_notify("Settings", "Administrator rights required to change security settings.", 1);
+        return;
+    }
+    if (row == 0) { security_api_policy_set("idle", (u32)(v < 0 ? 0 : v > 120 ? 120 : v)); return; }
+    security_choice_set(sec_keys[row], v ? 1 : 0);
+}
+
 /* prefs section geometry: top y, reset-button y */
 static void st_layout(struct surface *s, int *sy, int *ry)
 {
@@ -35,6 +69,17 @@ static void st_layout(struct surface *s, int *sy, int *ry)
  * 5..16 six WM rows (-/+ each). */
 static void st_pref_rect(int id, int sy, int *x, int *y, int *w, int *h)
 {
+    if (id >= SEC_FIRST_ID) {
+        if (id == SEC_BUTTON_ID) {
+            *x = 16; *y = sec_y(sy) + 22 + SEC_ROWS * 26; *w = 190; *h = 24;
+            return;
+        }
+        int n = id - SEC_FIRST_ID;
+        *y = sec_y(sy) + 22 + (n / 2) * 26;
+        *x = (n % 2) ? 326 : 210;
+        *w = 24; *h = 20;
+        return;
+    }
     if (id >= WM_FIRST_ID) {
         int n = id - WM_FIRST_ID;
         *y = wm_section_y(sy) + 22 + (n / 2) * 26;
@@ -179,6 +224,40 @@ static void st_paint(struct window *w)
     s_frame_rect(s, 16, ry, 130, 26, t->main);
     s_text(s, 26, ry + 5, "Factory Reset", ui->hover_reset == 1 ? t->title_text : t->main);
 
+    int ecy = sec_y(sy + ui->scroll) - ui->scroll;
+    s_text(s, 16, ecy, "Security", t->main);
+    for (int r = 0; r < SEC_ROWS; r++) {
+        int rowy = ecy + 22 + r * 26;
+        s_text(s, 16, rowy + 4, sec_labels[r], t->text);
+        char txt[24];
+        int v = sec_value(r);
+        if (r == 0) {
+            if (!v) strcpy(txt, "Off");
+            else { fmt_u32(txt, (u32)v); strcat(txt, " min"); }
+        } else strcpy(txt, v ? "On" : "Off");
+        s_text(s, 250, rowy + 4, txt, t->main);
+        for (int k = 0; k < 2; k++) {
+            int id = SEC_FIRST_ID + r * 2 + k;
+            int x, yy, ww, hh;
+            st_pref_rect(id, sy + ui->scroll, &x, &yy, &ww, &hh);
+            yy -= ui->scroll;
+            u32 bg = ui->hover_pref == id ? t->main : color_blend(t->win_bg, t->main, 15);
+            s_fill(s, x, yy, ww, hh, bg);
+            s_frame_rect(s, x, yy, ww, hh, t->main);
+            s_text(s, x + 8, yy + 4, k ? "+" : "-",
+                   ui->hover_pref == id ? t->title_text : t->main);
+        }
+    }
+    {
+        int x, yy, ww, hh;
+        st_pref_rect(SEC_BUTTON_ID, sy + ui->scroll, &x, &yy, &ww, &hh);
+        yy -= ui->scroll;
+        u32 bg = ui->hover_pref == SEC_BUTTON_ID ? t->main : color_blend(t->win_bg, t->main, 15);
+        s_fill(s, x, yy, ww, hh, bg);
+        s_frame_rect(s, x, yy, ww, hh, t->main);
+        s_text(s, x + 10, yy + 5, "Lock screen now",
+               ui->hover_pref == SEC_BUTTON_ID ? t->title_text : t->main);
+    }
 }
 
 static void reset_confirm_cb(int ok, const char *text, void *ud)
@@ -224,7 +303,7 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
 {
     struct settings_ui *ui = w->data;
     struct surface *s = &w->surf;
-    if(e->type==MEV_WHEEL){int sy,ry;st_layout(s,&sy,&ry);int max=ry+44-s->h;if(max<0)max=0;ui->scroll-=e->wheel*32;if(ui->scroll<0)ui->scroll=0;if(ui->scroll>max)ui->scroll=max;wm_redraw(w);}
+    if(e->type==MEV_WHEEL){int sy,ry;st_layout(s,&sy,&ry);int max=st_content_bottom(sy)+44-s->h;if(max<0)max=0;ui->scroll-=e->wheel*32;if(ui->scroll<0)ui->scroll=0;if(ui->scroll>max)ui->scroll=max;wm_redraw(w);}
     y += ui->scroll;
     int oldt = ui->hover_tile, oldr = ui->hover_reset, oldp = ui->hover_pref;
     ui->hover_tile = -1;
@@ -237,7 +316,7 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
     int sy, ry;
     st_layout(s, &sy, &ry);
     ui->hover_pref = -1;
-    for (int id = 0; id <= WM_LAST_ID; id++) {
+    for (int id = 0; id <= SEC_BUTTON_ID; id++) {
         int hx, hy, hw, hh;
         st_pref_rect(id, sy, &hx, &hy, &hw, &hh);
         if (x >= hx && y >= hy && x < hx + hw && y < hy + hh) ui->hover_pref = id;
@@ -282,6 +361,18 @@ static void st_mouse(struct window *w, struct mouse_event *e, int x, int y)
         else if (key == WMP_ICON_SIZE) v += plus ? 8 : -8;
         else v = plus ? 1 : 0;
         wm_desktop_pref_set(key, v);
+        wm_redraw(w);
+    } else if (ui->hover_pref >= SEC_FIRST_ID && ui->hover_pref <= SEC_BUTTON_ID) {
+        if (ui->hover_pref == SEC_BUTTON_ID) {
+            security_api_lock_now();
+        } else {
+            int n = ui->hover_pref - SEC_FIRST_ID;
+            int row = n / 2, plus = n % 2;
+            int v = sec_value(row);
+            if (row == 0) v += plus ? 5 : -5;
+            else v = plus ? 1 : 0;
+            sec_set(row, v);
+        }
         wm_redraw(w);
     } else if (ui->hover_reset == 1) {
         char message[256];

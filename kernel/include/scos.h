@@ -456,6 +456,10 @@ struct window *wm_open_app(const char *app_id, void *arg);
  * choice prompt before opening the app.  Programmatic wm_open_app() calls do
  * not prompt, so scripts and tests keep working unchanged. */
 void wm_launch_app_interactive(const char *app_id, void *arg);
+/* Explicit per-launch isolation override from a right-click menu.  The only
+ * way a system (built-in) app can be started isolated. */
+void wm_launch_app_override(const char *app_id, void *arg, int isolated);
+int  wm_app_is_system(const char *app_id);
 void wm_close_window(struct window *w);
 void wm_set_title(struct window *w, const char *title);
 int wm_resize_window(struct window *,int,int);

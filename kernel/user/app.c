@@ -130,6 +130,25 @@ void user_main(void *arg)
                 SH->result = (u32)call2(SC_NR_FILE_READ, 0, 0); /* mount namespace */
                 break;
             }
+            /* Hostile-argument self-tests: these must be REFUSED cleanly,
+             * never wrap a 32-bit bound and never fault the kernel. */
+            case 10: {          /* off=2^32-1 + n=2 used to wrap off+n */
+                const char *p = "x.txt"; memcpy(SCRATCH, p, 6);
+                SH->result = (u32)sc(SC_NR_FILE_WRITE, 0, 0xffffffffULL, 2, 0, 0);
+                break;
+            }
+            case 11:            /* 0x100000001 used to truncate to SC_NR_EXIT */
+                SH->result = (u32)sc(0x100000001ULL, 0, 0, 0, 0, 0);
+                break;
+            case 12: {          /* FILE_LIST with a huge offset */
+                SH->result = (u32)sc(SC_NR_FILE_LIST, 0xffffffffULL, 0, 0, 0, 0);
+                break;
+            }
+            case 13: {          /* mount-namespace traversal */
+                const char *p = "../escape"; memcpy(SCRATCH, p, 10);
+                SH->result = (u32)sc(SC_NR_FILE_READ, 0, 0, 0, 0, 0);
+                break;
+            }
             default: break;
         }
         SH->result = SH->result ? SH->result : 0xff;

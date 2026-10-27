@@ -73,11 +73,11 @@ def test_a_booted_guest_enforces_isolation():
         # Two isolated native C apps.  They are compiled-in ring-0 code, so
         # isolation has to be enforced by the kernel, not by their cooperation.
         a1 = put(0, 'notepad')
-        assert g.call('security_app_isolation_set', a1, 1) == 1   # SC_ISO_ALWAYS
-        w1 = g.call('wm_open_app', a1, 0)
+        g.call('wm_launch_app_override', a1, 0, 1)
+        w1 = g.call('wm_win_at', g.call('wm_win_count') - 1)
         a2 = put(256, 'about')
-        assert g.call('security_app_isolation_set', a2, 1) == 1
-        w2 = g.call('wm_open_app', a2, 0)
+        g.call('wm_launch_app_override', a2, 0, 1)
+        w2 = g.call('wm_win_at', g.call('wm_win_count') - 1)
         assert w1 and w2
         p1, p2 = g.call('proc_pid_for_window', w1), g.call('proc_pid_for_window', w2)
         assert p1 and p2 and p1 != p2
@@ -136,8 +136,7 @@ def test_a_booted_guest_enforces_isolation():
 
         # An app the owner chose NOT to isolate keeps the full API.
         a3 = put(768, 'calendar')
-        assert g.call('security_app_isolation_set', a3, 2) == 1   # SC_ISO_NEVER
-        w3 = g.call('wm_open_app', a3, 0)
+        w3 = g.call('wm_open_app', a3, 0)   # system app: unisolated by default
         p3 = g.call('proc_pid_for_window', w3)
         assert p3 and g.call('proc_pid_isolated', p3) == 0
         assert g.call('proc_domain', p3) == 0, 'a non-isolated app was forced into a domain'

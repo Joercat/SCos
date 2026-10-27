@@ -64,7 +64,19 @@ int proc_create(struct window *w)
     memset(&P[i], 0, sizeof(P[i]));
     P[i].used = 1;
     P[i].w = w;
-    sc_copy(P[i].app_id, sizeof(P[i].app_id), w->app && w->app->id ? w->app->id : "app");
+    {
+        /* app_register() validates ids, but the namespace must not trust a
+         * pointer that could be corrupted: sanitise here too. */
+        const char *src = w->app && w->app->id ? w->app->id : "app";
+        size_t k = 0;
+        for (; *src && k + 1 < sizeof(P[i].app_id); src++) {
+            char c = *src;
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '-' || c == '_') P[i].app_id[k++] = c;
+        }
+        P[i].app_id[k] = 0;
+        if (!k) sc_copy(P[i].app_id, sizeof(P[i].app_id), "app");
+    }
     sc_copy(P[i].owner, sizeof(P[i].owner), security_current_user());
     P[i].isolated = w->isolated ? 1 : 0;
     /* Isolated apps may read/write ONLY their own namespace; the VFS boundary

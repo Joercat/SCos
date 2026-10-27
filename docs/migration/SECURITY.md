@@ -83,7 +83,10 @@ check only. **Nothing verifies the boot files cryptographically, by design.**
   `*` markers are painted; secret buffers are scrubbed.
 * An unattended session (auto-lock) and a forgotten password (a one-time
   recovery code issued by `recovery`; it also unwraps the volume key, so
-  recovery does not destroy saved data).
+  recovery does not destroy saved data). Auto-lock uses the real 100 Hz PIT
+  rate (6000 ticks/minute); **any** keyboard or mouse interaction - including a
+  button release with no movement - resets the idle timer at the driver and at
+  WM consumption. See [HARDENING.md](HARDENING.md) sections 1-2.
 * A stopped desktop: the rescue TTY requires re-authentication.
 * Privilege escalation through a newly added command: guest authorization is an
   allow-list (unless `guest.restrict` is off).
@@ -165,7 +168,7 @@ unlock. On RAM-only machines they are session-only, like accounts.
 | --- | --- | --- |
 | `login.required` | on | Password prompt before the desktop. Off = implicit session as the lowest-uid enabled account (first-run setup still runs). |
 | `lock.enabled` | on | `lock`, F-key lock and the lock console. |
-| `lock.idle` | on | Auto-lock after `policy idle` minutes (10 by default). |
+| `lock.idle` | on | Auto-lock after `policy idle` minutes (10 by default). Every interaction resets the timer; `policy idle 0` disables it. |
 | `password.policy` | on | Strong password rules. Off = minimum 4 characters only. |
 | `password.history` | on | Reject recently used passwords. |
 | `password.age` | on | Force a change after `policy maxage` days (90 by default). |
@@ -288,6 +291,16 @@ pin, pin menu), the WM shows a four-item prompt:
 2. **Never launch isolated** — stored for this app.
 3. **Isolated once (ask next time)** — no stored choice, this launch is isolated.
 4. **Unisolated once (ask next time)** — no stored choice, this launch is normal.
+
+**System apps are different:** they are part of the OS, never show this prompt,
+and always start unisolated. The rule is keyed on `struct app.external`, not a
+list, so any built-in app added later is automatically covered. The only way
+to isolate a system app is the explicit **Launch isolated** entry in the
+right-click menu of its desktop icon, launcher row or taskbar pin; installed
+apps with a stored choice also get **Launch unisolated** as the opposite
+one-launch override. `isolate <id> always|never|ask|isolated|normal` is the
+Terminal equivalent. Installed apps with a stored `always`/`never` choice are
+never asked again.
 
 `choices app <id> always|never|ask` changes it later. `isolation.prompt` off
 suppresses the prompt entirely; `isolation.default` (off) decides the flag for
@@ -507,6 +520,14 @@ Passwords are never command arguments.
   overview (non-overlapping in-bounds tiles, MRU tile first), real Alt/Super
   key events, snap geometry, clamped and persisted desktop preferences, and
   that pressing Enter on the power confirmation cancels instead of rebooting.
+* `tools/tests/test_hardening.py` — source wiring plus a booted guest that
+  verifies the 1-minute idle scale (7 s does not lock, 70 s does), that key,
+  mouse press, mouse **release** and wheel each reset the timer, that system
+  apps (including one registered at runtime) never prompt and default
+  unisolated, that installed apps honour stored choices, that a full-width
+  syscall number and four hostile syscalls issued from real CPL3 code are
+  refused without a fault, and that `home/users` enumeration/traversal is
+  denied. See [HARDENING.md](HARDENING.md) for every finding that was fixed.
 * `make dist` refreshes image/record/checksum; `tools/check_delivery.py` passes.
 * **Emulator success is not physical-PC acceptance.** No claim about SMP,
   hardware vsync, or new GPU/NIC/browser capability.

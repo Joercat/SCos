@@ -137,7 +137,7 @@ int      user_in_usermode(void);
 uint64_t user_fault_count(void);
 uint64_t user_syscall_count(void);
 uint64_t user_denied_count(void);
-int      user_seccomp_allowed(int nr);
+int      user_seccomp_allowed(uint64_t nr);
 void     user_set_seccomp(int nr, int on);
 int      user_namespace_active(void);
 uint64_t user_resource_limit(int which);

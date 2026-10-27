@@ -44,8 +44,8 @@ def test_a_booted_guest_cannot_escape_ring3():
     with Guest('usermode') as g:
         d, s = g.debug, g.scratch
         d.write(s, b'notepad\0')
-        assert g.call('security_app_isolation_set', s, 1) == 1
-        w = g.call('wm_open_app', s, 0)
+        g.call('wm_launch_app_override', s, 0, 1)
+        w = g.call('wm_win_at', g.call('wm_win_count') - 1)
         assert w
         pid = g.call('proc_pid_for_window', w)
         assert pid and g.call('proc_domain', pid)

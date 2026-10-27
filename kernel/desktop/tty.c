@@ -246,6 +246,8 @@ static void tty_exec(char *cmd)
             "  passwd          change your password (masked secure screen)\n"
             "  users/policy/audit/usermod  account administration (admin)\n"
             "  choices [show|set|app]     security choices and per-app isolation\n"
+            "  isolate <id> <mode>        per-app isolation / one-launch override\n"
+            "  idle / activity            interaction timer (auto-lock)\n"
             "  lock/logout/su/reauth  session control (masked secure screen)\n"
             "  recovery        issue a one-time administrator recovery code\n"
             "  clear           clear this console\n"

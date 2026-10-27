@@ -360,18 +360,30 @@ def test_security_are_user_choices_and_isolation_is_per_app():
         assert g.call('security_app_last_isolated', s) == 1
         assert 'always isolated' in shell('choices'), 'per-app choice is not listed'
 
-        # A real user-driven WM launch shows the four-way prompt on first open.
+        # System apps are part of the OS: they NEVER ask and start unisolated.
         d.write(s, b'files\0')
+        before = g.call('wm_win_count')
+        g.call('wm_launch_app_interactive', s, 0)
+        assert g.value('menu', 4) == 0, 'a system app showed the isolation prompt'
+        assert g.call('wm_win_count') == before + 1
+        assert g.call('proc_pid_isolated', g.call('proc_pid_for_window',
+                      g.call('wm_win_at', g.call('wm_win_count') - 1))) == 0
+        # An installed (external) app still gets the four-way first-launch
+        # prompt, and its answer is stored.
+        from test_cat import package
+        g.save('home/apps/prompt.cat', package('return {}', id='prompt'))
+        d.write(s, b'home/apps/prompt.cat\0')
+        assert g.call('lua_app_install', s)
+        d.write(s, b'prompt\0')
         assert g.call('security_app_isolation_pending', s) == 1
         g.call('wm_launch_app_interactive', s, 0)
         assert g.value('menu', 4) == 1, 'no first-launch isolation prompt in the WM'
         g.call('iso_answer', 1, 0)          # "Never launch isolated"
         assert g.call('security_app_isolation', s) == 2, 'the menu answer was not stored'
         assert g.call('wm_win_count') >= 1, 'the app did not launch after the choice'
-        d.write(s, b'sketch\0')
-        assert choice_set('isolation.prompt', 0) == 1
         assert g.call('security_app_isolation_pending', s) == 0, \
-            'the prompt choice does not disable the prompt'
+            'a stored choice must not ask again'
+        assert choice_set('isolation.prompt', 0) == 1
 
         # Encryption is a choice too: turning it off writes a plain FS2 image.
         assert choice_set('vault.encryption', 0) == 1
