@@ -119,7 +119,13 @@ void interrupt_dispatch(struct interrupt_frame *f) {
     if(f->vector==39) {out8(0x20,0x0b);if(!(in8(0x20)&128))return;}
     if(f->vector==47) {out8(0xa0,0x0b);if(!(in8(0xa0)&128)){out8(0x20,0x20);return;}}
     if(f->vector>32&&f->vector<48&&irq_rate[f->vector-32]!=UINT32_MAX)irq_rate[f->vector-32]++;
-    if(f->vector==32) {timer_ticks++;irq_storm_sweep();cpu_meter_tick();out8(0x20,0x20);return;}
+    if(f->vector==32) {
+        timer_ticks++;
+        /* A package that spins without ever making a syscall is only visible
+         * here.  Only touch the frame when the timer interrupted CPL3 code. */
+        if((f->cs&3)==3&&user_in_usermode())user_tick_budget();
+        irq_storm_sweep();cpu_meter_tick();out8(0x20,0x20);return;
+    }
     if(f->vector>32&&f->vector<48&&irq_handlers[f->vector-32]){
         irq_handlers[f->vector-32](f);
         if(f->vector>=40)out8(0xa0,0x20);

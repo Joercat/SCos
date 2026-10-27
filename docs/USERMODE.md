@@ -120,6 +120,48 @@ always|never|ask` changes it later, and `isolation` lists the live processes
 with their domains and capabilities. `isolation.default` is off by design —
 nothing is forced.
 
+## The same API, both ways
+
+An owner may run any CAT package isolated or not, and the choice must not change
+what the package's own code does. Both hosts are therefore the same API v2:
+
+| | kernel-side host (`lua_apps.c` + `lua_api.inc`) | CPL3 host (`cat_user.c`) |
+|---|---|---|
+| `scos` table | 59 entries | the same 59 entries |
+| callbacks | `open()`, `paint(w,h)`, `tick(seconds)`, `key(code,down,shift,ctrl,alt)`, `mouse(type,x,y,button,down,wheel,buttons)`, `close()` | identical argument lists |
+| theme / date | live `theme()` + `date()` table | same values through the shared page |
+| `interval(ms)` | 100 … 60000 ms scheduling | stored per process, honoured by the scheduler |
+| drawing | 4,000,000-pixel budget per callback, `drawing budget exceeded` | same budget per episode, same error |
+| data files | `home/appdata/<id>/`, 16 files / 64 KiB | same namespace via syscalls |
+
+Capabilities are the only difference, and they are the owner's choice: an
+isolated process holds `VFS_READ|VFS_WRITE` only, so `theme_apply`, `notify`,
+`message` and `set_icon` raise the same "disabled by the owner" error the kernel
+raises for any process without the capability. Reads of the theme, the date,
+the window and the mouse are never restricted.
+
+`tools/tests/test_escape.py` proves this by running one script twice (isolated
+and not) and comparing the signature it computes from the API, so the two hosts
+cannot drift apart silently.
+
+## The escape app
+
+`apps/examples/isolation.lua` ships as `/home/demos/isolation.cat`. It is an app
+whose only job is to try to break out of its own sandbox and report what
+happened on screen and in `home/appdata/isolation/report.txt`. It attempts
+about fifty distinct attacks: `..`/absolute/backslash/NUL/long-name traversal in
+every file call, other-app and cross-account reads, theme takeover, notification
+and dialog spam from a process without the capability, out-of-range geometry,
+huge radius/scale/text, the 16-file and 64 KiB quotas, a memory bomb, drawing
+outside `paint`, drawing past the pixel budget, `string.dump`, and the presence
+of `load`, `dofile`, `os`, `io`, `package`, `debug`, `coroutine` or a raw
+syscall handle. Each result is `CONTAINED` or `BREAKOUT`; pressing `R` reruns
+the suite. The build's own test requires `breakout=0`, no CPU fault and no file
+left outside the app's namespace.
+
+Only install packages you trust: a checksum is not a signature. Isolation limits
+what a hostile package can reach; it is not a promise that the package is safe.
+
 ## Verification
 
 `python3 tools/tests/test_usermode.py` boots QEMU and proves, with real
@@ -127,7 +169,9 @@ instructions, that ring-3 code cannot read or write kernel memory, execute
 `mov cr3` / `wrmsr` / `cli` / `outb`, read another address space, leave its
 mount namespace, or use an unlisted syscall — and that the kernel survives all
 of it. `test_isolation.py` additionally proves the per-process PML4s, private
-VFS roots, per-account files and anti-rollback anchor.
+VFS roots, per-account files and anti-rollback anchor. `test_escape.py` runs the
+escape app under the CPL3 host and fails if a single probe breaks out, then
+compares the API signature of an isolated and a non-isolated run.
 
 Emulator success is not physical-PC acceptance.
 

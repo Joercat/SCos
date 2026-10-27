@@ -33,7 +33,15 @@ void scos_lua_abort(void) __attribute__((noreturn));
 #define lua_writestring(s,n) ((void)(s),(void)(n))
 #define lua_writeline() ((void)0)
 #define lua_writestringerror(s,p) ((void)(s),(void)(p))
-#define LUAI_MAXCCALLS 48
+/* Nested C calls (pcall, a string.gsub callback, a table.sort comparator)
+ * consume the REAL C stack, and both hosts run on a 64 KiB stack: the kernel
+ * stack for the in-kernel host, the process stack at CPL3.  Lua's default of
+ * 200 - and even 48, which was here before - overflows that stack: at CPL3 it
+ * becomes a contained page fault that kills the app, and in the in-kernel host
+ * it overruns the stack the whole compositor is running on.  16 leaves room
+ * for the WM call chain above the VM and still raises "C stack overflow" as a
+ * catchable Lua error, which is what a package should see. */
+#define LUAI_MAXCCALLS 16
 unsigned int scos_lua_seed(void);
 struct lua_State;
 void scos_lua_checkbudget(struct lua_State *L);

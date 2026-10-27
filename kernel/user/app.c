@@ -30,6 +30,8 @@ struct user_shared {
     char app_id[32];
     char source[65536];
     char scratch[65536];
+    u32 mouse_event, mouse_button, mouse_down, mouse_wheel;
+    u32 window_x, window_y, window_state;
 };
 
 #include "user_syscalls.h"

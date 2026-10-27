@@ -24,6 +24,10 @@ static __attribute__((noinline)) void menu_cancel(void);
 static void icon_rect(int i, int *x, int *y, int *w, int *h);
 static void desk_rename_ask(int item);
 static void desk_openwith(int item);
+static int in_rect(int px, int py, int x, int y, int w, int h);
+static void wm_toggle_maximize(struct window *w);
+static void wm_cycle_focus(int dir);
+static void title_menu(struct window *w);
 #define BTN_SZ 18
 
 /* Stable slots: app/tab/dialog back-pointers must survive closing an earlier window. */
@@ -86,6 +90,9 @@ static int mouse_rx, mouse_ry, mouse_sens;
 static u8 mbuttons;
 static struct window *drag_win, *resize_win, *app_capture;
 static int drag_ox, drag_oy, resize_ox, resize_oy;
+/* Which edges a resize drag owns (1 N, 2 S, 4 W, 8 E) and the anchors that
+ * must not move.  A window edge is a real target, not only the drawn grip. */
+static int resize_edge, resize_ax, resize_ay;
 
 static struct {
     int active, x, y, w, h;
@@ -106,7 +113,7 @@ static int icon_hover = -1;
 /* ---- taskbar layout: scrollable app buttons + power button + clock ---- */
 #define TB_CLOCK_W 68
 #define TB_POWER_W 34
-static int power_hover;
+static int bar_hover = -99;   /* see bar_hover_at() */
 static int picker_ids[MAX_WINDOWS];
 static char picker_labels[MAX_WINDOWS][80];
 static const char *picker_items[MAX_WINDOWS];
@@ -280,6 +287,28 @@ static void tb_power_rect(int *x, int *y, int *w, int *h)
     *h = TASKBAR_H - 12;
 }
 
+/* scoswm-arch taskbar hover: every surface the pointer can press is
+ * highlighted while the pointer is over it, not just the power button.
+ * Returns -99 for none, -4 power, -3 the Windows picker, -2 the launcher and
+ * a pin index otherwise.  Painting and hit testing share this one function. */
+static int bar_hover_at(int x, int y)
+{
+    int px, py, pw, ph;
+    if (y < screen_h - TASKBAR_H) return -99;
+    tb_power_rect(&px, &py, &pw, &ph);
+    if (in_rect(x, y, px, py, pw, ph)) return -4;
+    if (in_rect(x, y, 48, screen_h - TASKBAR_H + 6, 110, TASKBAR_H - 12)) return -3;
+    if (in_rect(x, y, 8, screen_h - TASKBAR_H + 6, 34, TASKBAR_H - 12)) return -2;
+    {
+        int visible = pin_count, cap = wm_taskbar_capacity();
+        if (visible > cap) visible = cap;
+        for (int i = 0; i < visible; i++)
+            if (in_rect(x, y, 168 + i * 40, screen_h - TASKBAR_H + 6, 34,
+                        TASKBAR_H - 12)) return i;
+    }
+    return -99;
+}
+
 /* scoswm-arch: Lock is immediate; reboot/power-off need a confirmation whose
  * safe keyboard default is Cancel.  SCos has no systemd, so Suspend and
  * "restart the WM" (which would reparent X11 clients) have no equivalent. */
@@ -431,6 +460,9 @@ void wm_focus(struct window *w)
 void wm_minimize_window(struct window *w)
 {
     if(!w||w->state==WIN_STATE_MIN)return;
+    /* A modal that is hidden still owns the keyboard and every click, and
+     * nothing on screen says so.  It cannot be put away at all. */
+    if(w==modal_w)return;
     w->restore_state=w->state;w->state=WIN_STATE_MIN;
     if(app_capture==w)app_capture=NULL;
     if(focused_w==w){focused_w=NULL;for(int i=0;i<win_count;i++)if(wins[i]->state!=WIN_STATE_MIN&&(!focused_w||wins[i]->z>focused_w->z))focused_w=wins[i];}
@@ -735,6 +767,27 @@ void wm_menu(int x, int y, const char **items, int n, menu_cb cb, void *ud)
     if(menu.x<2)menu.x=2;
     menu_dirty = 1;
     dirty = 1;
+}
+
+/* Right-click on a titlebar: the same three actions as the buttons, named.
+ * A dialog has no such menu - it has one button and one outcome. */
+static void title_menu_cb(int item, void *ud)
+{
+    struct window *w = (struct window *)ud;
+    if (!w || item < 0) return;
+    if (item == 0) wm_minimize_window(w);
+    else if (item == 1) wm_toggle_maximize(w);
+    else if (item == 2) wm_close_window(w);
+    wm_full();
+}
+static void title_menu(struct window *w)
+{
+    static const char *items[3];
+    if (!w) return;
+    items[0] = "Minimise";
+    items[1] = (w->state == WIN_STATE_MAX) ? "Restore" : "Maximise";
+    items[2] = "Close";
+    wm_menu(mx, my, items, 3, title_menu_cb, w);
 }
 
 /* ------------------------------------------------------------- paint ---- */
@@ -1348,6 +1401,34 @@ static void paint_icons(void)
     }
 }
 
+/* What the WM's own modal/popup clients are.  Keyed on the WM-owned app ids,
+ * so no application can ask for the behaviour: a confirmation carries only a
+ * Close button, cannot be minimised, maximised, snapped or resized, and a
+ * click anywhere else dismisses it (that click is the Cancel answer).
+ *
+ * This closes a real input trap: the old confirmation was an ordinary window,
+ * so its own Minimise button could hide it while it still owned the keyboard
+ * and every click.  Nothing on screen said where the input had gone. */
+static int win_is_dialog(struct window *w)
+{
+    return w && w->app &&
+           (!strcmp(w->app->id, "_dialog") || !strcmp(w->app->id, "_error"));
+}
+
+/* A modal is dismissed, not confirmed: closing it runs the dialog's close
+ * callback, which reports "not confirmed" to whoever opened it. */
+static void wm_modal_dismiss(void)
+{
+    struct window *w = modal_w;
+    if (!w) return;
+    modal_w = NULL;
+    wm_close_window(w);
+}
+
+/* The last frame drew a button highlight; only a change forces a repaint. */
+static struct window *hover_btn_win;
+static int hover_btn;
+
 static void draw_win_button(struct surface *s, int x, int y, int kind, u32 fg)
 {
     /* kind 0 minimize, 1 maximize, 2 close */
@@ -1369,12 +1450,24 @@ static void paint_win_chrome(struct window *w)
     s_frame_rect(&screen, x, y, ww, hh, t->main);
     s_fill(&screen, x + 1, y + 1, ww - 2, WIN_TITLEBAR - 2, title_bg);
     u32 title_fg = (focused_w == w) ? t->title_text : t->text;
-    s_clip_text(&screen, x + 8, y + 5, w->title, title_fg, ww - 90);
-    for (int b = 0; b < 3; b++)
-        draw_win_button(&screen, x + ww - 22 - (2 - b) * 22, y + 3, b, title_fg);
-    u32 hz = blend(t->win_bg, t->main, 60);
-    for (int i = 0; i < 4; i++)
-        s_fill(&screen, x + ww - 12 + i * 3, y + hh - 12 + i * 3, 2, 2, hz);
+    int dlg = win_is_dialog(w);
+    int nbtn = dlg ? 1 : 3;
+    s_clip_text(&screen, x + 8, y + 5, w->title, title_fg, ww - (dlg ? 34 : 90));
+    for (int b = 0; b < nbtn; b++) {
+        int kind = dlg ? 2 : b;
+        int bx = x + ww - 22 - (2 - kind) * 22;
+        /* scoswm-arch titlebar hover: an inverse box behind the glyph.  The
+         * old hover used the focused titlebar colour as its fill, which made
+         * it literally invisible on a focused window. */
+        int hot = hover_btn_win == w && hover_btn == kind;
+        if (hot) s_fill(&screen, bx, y + 3, BTN_SZ, BTN_SZ, title_fg);
+        draw_win_button(&screen, bx, y + 3, kind, hot ? title_bg : title_fg);
+    }
+    if (!dlg) {
+        u32 hz = blend(t->win_bg, t->main, 60);
+        for (int i = 0; i < 4; i++)
+            s_fill(&screen, x + ww - 12 + i * 3, y + hh - 12 + i * 3, 2, 2, hz);
+    }
 }
 
 static void paint_win_content(struct window *w)
@@ -1471,9 +1564,10 @@ static void paint_menu(void)
     s_frame_rect(&screen, menu.x, menu.y, menu.w, menu.h, t->main);
     for (int i = 0; i < menu.n; i++) {
         int iy = menu.y + 3 + i * 24;
-        if (in_rect(mx, my, menu.x, iy, menu.w, 24))
-            s_fill(&screen, menu.x + 1, iy, menu.w - 2, 24, blend(t->win_bg, t->main, 25));
-        s_clip_text(&screen, menu.x + 10, iy + 4, menu.items[i], t->text,menu.w-20);
+        int lit = in_rect(mx, my, menu.x, iy, menu.w, 24);
+        if (lit) s_fill(&screen, menu.x + 1, iy, menu.w - 2, 24, t->main);
+        s_clip_text(&screen, menu.x + 10, iy + 4, menu.items[i],
+                    lit ? t->title_text : t->text, menu.w - 20);
     }
 }
 
@@ -1484,29 +1578,37 @@ static void paint_taskbar(void)
     s_fill(&screen, 0, y, screen_w, TASKBAR_H, t->taskbar_bg);
     s_fill(&screen, 0, y, screen_w, 1, t->main);
 
+    /* Hover is read from the live pointer, but never while a drag, menu or
+     * modal owns it: highlighting a button the click cannot reach is a lie. */
+    int bh = (drag_win || resize_win || desk_drag >= 0 || band_active ||
+              menu.active || modal_w || dnd.active) ? -99 : bar_hover_at(mx, my);
+    bar_hover = bh;
+
     /* launcher button */
-    u32 lbg = launch.active ? blend(t->taskbar_bg, t->main, 45) : blend(t->taskbar_bg, t->main, 12);
+    int launcher_lit = launch.active || bh == -2;
+    u32 lbg = launcher_lit ? blend(t->taskbar_bg, t->main, 45) : blend(t->taskbar_bg, t->main, 12);
     s_fill(&screen, 8, y + 6, 34, TASKBAR_H - 12, lbg);
     s_frame_rect(&screen, 8, y + 6, 34, TASKBAR_H - 12, blend(t->taskbar_bg, t->main, 60));
-    u32 lc = launch.active ? t->title_text : t->main;
+    u32 lc = launcher_lit ? t->title_text : t->main;
     for (int q = 0; q < 4; q++)
         s_fill(&screen, 15 + (q % 2) * 11, y + 12 + (q / 2) * 9, 8, 6, lc);
 
-    s_fill(&screen,48,y+6,110,TASKBAR_H-12,blend(t->taskbar_bg,t->main,20));
+    int win_lit = bh == -3;
+    s_fill(&screen,48,y+6,110,TASKBAR_H-12,blend(t->taskbar_bg,t->main,win_lit?45:20));
     s_frame_rect(&screen,48,y+6,110,TASKBAR_H-12,t->main);
     char label[24],count[12];strcpy(label,"Windows ");fmt_u32(count,win_count);strcat(label,count);
-    s_clip_text(&screen,56,y+12,label,t->text,94);
+    s_clip_text(&screen,56,y+12,label,win_lit?t->title_text:t->text,94);
 
     int visible=pin_count,cap=wm_taskbar_capacity();if(visible>cap)visible=cap;
     for(int i=0;i<visible;i++){int x=168+i*40;struct app *a=app_find(task_pins[i]);if(!a)continue;
         /* Dimmer when every window of that application is put away - the bar is the only place left
          * that can say so, and double-clicking the entry is how it gets undone. */
-        s_fill(&screen,x,y+6,34,TASKBAR_H-12,blend(t->taskbar_bg,t->main,wm_app_minimized(task_pins[i])==1?7:20));s_frame_rect(&screen,x,y+6,34,TASKBAR_H-12,t->main);s_icon(&screen,a->icon,x+5,y+8,t->text);}
+        int shade = bh == i ? 45 : (wm_app_minimized(task_pins[i])==1 ? 7 : 20);
+        s_fill(&screen,x,y+6,34,TASKBAR_H-12,blend(t->taskbar_bg,t->main,shade));s_frame_rect(&screen,x,y+6,34,TASKBAR_H-12,t->main);s_icon(&screen,a->icon,x+5,y+8,bh==i?t->title_text:t->text);}
     /* power button */
     int px, py, pw, ph;
     tb_power_rect(&px, &py, &pw, &ph);
-    power_hover = in_rect(mx, my, px, py, pw, ph) && !drag_win && !resize_win &&
-                  desk_drag < 0 && !band_active && !menu.active && !modal_w && !dnd.active;
+    int power_hover = bh == -4;
     s_fill(&screen, px, py, pw, ph, power_hover ? blend(t->taskbar_bg, t->main, 45) : blend(t->taskbar_bg, t->main, 12));
     s_frame_rect(&screen, px, py, pw, ph, blend(t->taskbar_bg, t->main, 60));
     u32 pc = power_hover ? t->title_text : t->main;
@@ -1595,12 +1697,14 @@ static void paint_launcher(void)
         if (!launch_match(i)) continue;
         if (skipped++ < launch.offset) continue;
         if (row >= 10) break;
-        if (in_rect(mx, my, px + 6, y - 3, pw - 12, 22)) {
+        int row_lit = in_rect(mx, my, px + 6, y - 3, pw - 12, 22);
+        if (row_lit) {
             launch.hover = i;
-            s_fill(&screen, px + 6, y - 3, pw - 12, 22, blend(t->win_bg, t->main, 25));
+            s_fill(&screen, px + 6, y - 3, pw - 12, 22, t->main);
         }
-        s_icon(&screen, app_at(i)->icon, px + 12, y, t->main);
-        s_clip_text(&screen, px + 44, y + 4, app_at(i)->title, t->text,pw-52);
+        s_icon(&screen, app_at(i)->icon, px + 12, y, row_lit ? t->title_text : t->main);
+        s_clip_text(&screen, px + 44, y + 4, app_at(i)->title,
+                    row_lit ? t->title_text : t->text, pw - 52);
         y += 24; row++;
     }
     if (!row) s_text(&screen, px + 14, y, "(no matching app)", ((t->main >> 1) & 0x7F7F7F));
@@ -1803,6 +1907,7 @@ static void ov_paint(void)
 int wm_snap_window(struct window *w, int side)
 {
     if (!w || !w->app || side < 1 || side > 4 || !wm_desktop_pref(WMP_SNAP)) return 0;
+    if (win_is_dialog(w)) return 0;      /* dialogs stay centred and their own size */
     if (w == drag_win || w == resize_win) return 0;
     if (w->state == WIN_STATE_MIN) w->state = WIN_STATE_NORMAL;
     if (w->state == WIN_STATE_MAX) {
@@ -1988,28 +2093,33 @@ static void interact_repaint(int x, int y, int w, int h)
  * Now handle_mouse only records the target geometry; resize_flush()
  * applies it at most once per ~20 ms (50 Hz) from the main loop, and
  * unconditionally (force) when the button releases. */
-static int rs_nw, rs_nh, rs_pending;
+static int rs_nw, rs_nh, rs_nx, rs_ny, rs_pending;
 static u32 rs_last;
 static void resize_flush(int force)
 {
     if (!resize_win || !rs_pending) return;
     if (!force && rs_last && (u32)tick_count - rs_last < 2) return;
     struct window *w = resize_win;
-    int nw = rs_nw, nh = rs_nh;
+    int nw = rs_nw, nh = rs_nh, nx = rs_nx, ny = rs_ny;
     rs_pending = 0;
     rs_last = (u32)tick_count;
-    if (nw == w->w && nh == w->h) return;
+    if (nw == w->w && nh == w->h && nx == w->x && ny == w->y) return;
     int cw = nw - 2, ch = nh - WIN_TITLEBAR - 1;
     u32 *np = palloc_owned((size_t)cw * ch * 4,(uintptr_t)w);
     if (!np) return;                       /* OOM: keep the old geometry */
-    int oldw=w->w,oldh=w->h;
+    int oldx=w->x,oldy=w->y,oldw=w->w,oldh=w->h;
     pfree(w->surf.px, (u32)w->surf.w * w->surf.h * 4);
-    w->w = nw; w->h = nh;
+    w->x = nx; w->y = ny; w->w = nw; w->h = nh;
     w->surf.px = np; w->surf.w = cw; w->surf.h = ch;
     memset(np, 0, (u32)cw * ch * 4);
     if (w->surf.px && w->app && w->app->paint) { APP_T0(w); w->app->paint(w); APP_T1(w); }
     w->dirty = 0;
-    interact_repaint(w->x,w->y,(oldw>nw?oldw:nw)+4,(oldh>nh?oldh:nh)+4);
+    {
+        int x0 = oldx < nx ? oldx : nx, y0 = oldy < ny ? oldy : ny;
+        int x1 = (oldx + oldw > nx + nw ? oldx + oldw : nx + nw) + 4;
+        int y1 = (oldy + oldh > ny + nh ? oldy + oldh : ny + nh) + 4;
+        interact_repaint(x0, y0, x1 - x0, y1 - y0);
+    }
 }
 
 /* Where a drag would end up if the button were released at (px,py), named in out: "app-window:<id>"
@@ -2277,8 +2387,12 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
         }
         if (resize_win) {
             struct window *w = resize_win;
-            int nw = mx - w->x + resize_ox, nh = my - w->y + resize_oy;
+            int nw = w->w, nh = w->h, nx = w->x, ny = w->y;
             int minw = 320, minh = 200;
+            if (resize_edge & 8) nw = mx - w->x;
+            else if (resize_edge & 4) nw = resize_ax - mx;
+            if (resize_edge & 2) nh = my - w->y;
+            else if (resize_edge & 1) nh = resize_ay - my;
             if (w->app) {
                 if (w->app->min_w > minw) minw = w->app->min_w;
                 if (w->app->min_h > minh) minh = w->app->min_h;
@@ -2287,10 +2401,18 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
             if (nh < minh) nh = minh;
             if (nw > screen_w) nw = screen_w;
             if (nh > screen_h - TASKBAR_H) nh = screen_h - TASKBAR_H;
-            if (nw != w->w || nh != w->h) {
+            if (resize_edge & 4) nx = resize_ax - nw;
+            if (resize_edge & 1) ny = resize_ay - nh;
+            if (nx < 0) nx = 0;
+            if (ny < 0) ny = 0;
+            if (nx + nw > screen_w) nx = screen_w - nw;
+            if (ny + nh > screen_h - TASKBAR_H) ny = screen_h - TASKBAR_H - nh;
+            if (nx < 0) nx = 0;
+            if (ny < 0) ny = 0;
+            if (nw != w->w || nh != w->h || nx != w->x || ny != w->y) {
                 /* r36: record the target only - resize_flush() applies
                  * it once per frame, throttled to ~50 Hz (see above) */
-                rs_nw = nw; rs_nh = nh; rs_pending = 1;
+                rs_nw = nw; rs_nh = nh; rs_nx = nx; rs_ny = ny; rs_pending = 1;
             }
         }
         if (drag_win || band_active || resize_win || desk_drag >= 0 || dnd.active) {
@@ -2352,7 +2474,9 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
         static struct window *last_hw;
         static int last_zone, last_icon = -2, last_tb = -2;
         static int last_mrow = -2, last_lrow = -2;
-        int icon = -1, tbz = -1, mrow = -1, lrow = -1;
+        int icon = -1, tbz = -99, mrow = -1, lrow = -1;
+        struct window *btnw = NULL;
+        int btn = -1;
         if (menu.active) {
             for (int i = 0; i < menu.n; i++)
                 if (in_rect(mx, my, menu.x, menu.y + 3 + i * 24, menu.w, 24)) mrow = i;
@@ -2360,9 +2484,7 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
                    in_rect(mx, my, 8, screen_h - TASKBAR_H - 308, 300, 308)) {
             lrow = launcher_at_point();
         } else if (my >= screen_h - TASKBAR_H) {
-            int x, y, w, h;
-            tb_power_rect(&x, &y, &w, &h);
-            tbz = in_rect(mx, my, x, y, w, h);
+            tbz = bar_hover_at(mx, my);
         } else if (!hw) {
             for (int i = 0; i < nitems; i++) {
                 if (items[i].hidden) continue;
@@ -2370,6 +2492,25 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
                 icon_rect(i, &x, &y, &ww, &hh);
                 if (in_rect(mx, my, x, y, ww, hh)) { icon = i; break; }
             }
+        }
+        /* Titlebar buttons highlight under the pointer on every window, and a
+         * dialog highlight covers only the one button it actually has. */
+        if (hw && (!modal_w || modal_w == hw)) {
+            int ry = my - hw->y, rx = mx - hw->x;
+            int nbtn = win_is_dialog(hw) ? 1 : 3;
+            if (ry >= 0 && ry < WIN_TITLEBAR) {
+                for (int b = 0; b < nbtn; b++) {
+                    int kind = win_is_dialog(hw) ? 2 : b;
+                    int bx = hw->w - 22 - (2 - kind) * 22;
+                    if (rx >= bx && rx < bx + BTN_SZ) { btnw = hw; btn = kind; }
+                }
+            }
+        }
+        if (btnw != hover_btn_win || btn != hover_btn) {
+            if (hover_btn_win) hover_btn_win->chrome_dirty = 1;
+            if (btnw) btnw->chrome_dirty = 1;
+            hover_btn_win = btnw; hover_btn = btn;
+            dirty = 1;
         }
         if (hw != last_hw || zone != last_zone || icon != last_icon ||
             tbz != last_tb || mrow != last_mrow || lrow != last_lrow) {
@@ -2400,9 +2541,14 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
     if(e->type==MEV_WHEEL&&my>=screen_h-TASKBAR_H)return;
     if (e->type == MEV_WHEEL) {
         struct window *w = win_at_point(mx, my);
-        if (w && (!modal_w||modal_w==w) && w->app && w->app->mouse) {
+        /* scoswm-arch: the wheel over the desktop or a titlebar cycles windows;
+         * inside a window it belongs to the application. */
+        int titlebar = w && my < w->y + WIN_TITLEBAR;
+        if (w && !titlebar && (!modal_w||modal_w==w) && w->app && w->app->mouse) {
             { APP_T0(w); w->app->mouse(w, e, mx - (w->x + 1), my - (w->y + WIN_TITLEBAR)); APP_T1(w); }
             w->dirty = 1;            /* app scrolled: repaint its content */
+        } else if (!modal_w && !w) {
+            wm_cycle_focus(e->wheel > 0 ? -1 : 1);
         }
         dirty = 1;
         return;
@@ -2410,6 +2556,15 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
     /* buttons */
     if(e->down&&!app_capture&&!drag_win&&!resize_win){int notice=notice_at(mx,my);if(notice>=0){if(e->button==MBTN_LEFT)notice_remove(notice);return;}}
     mbuttons = e->buttons;
+    /* A modal dialog owns the keyboard, not the whole desktop.  A press
+     * anywhere else is the Cancel answer and the dialog goes away; the press
+     * itself is consumed so it cannot also activate what was underneath. */
+    if (e->down && modal_w &&
+        !in_rect(mx, my, modal_w->x, modal_w->y, modal_w->w, modal_w->h)) {
+        wm_modal_dismiss();
+        wm_full();
+        return;
+    }
     if (e->down && e->button == MBTN_RIGHT && !ov_active &&
         wm_desktop_pref(WMP_OVERVIEW) && my >= screen_h - TASKBAR_H &&
         in_rect(mx, my, 48, screen_h - TASKBAR_H + 6, 110, TASKBAR_H - 12)) {
@@ -2565,45 +2720,73 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
     if (w) {
         wm_focus(w);
         int rx = mx - w->x, ry = my - w->y;
-        /* title buttons */
+        int dlg = win_is_dialog(w);
+        /* Right-click the titlebar: the window menu (scoswm-arch parity). */
+        if (ry < WIN_TITLEBAR && e->button == MBTN_RIGHT && !dlg) {
+            title_menu(w);
+            return;
+        }
+        /* Any edge or corner resizes.  The drawn grip in the corner is the
+         * same target people already reach for. */
+        if (e->button == MBTN_LEFT && !dlg && w->state != WIN_STATE_MAX) {
+            int edge = 0;
+            if (rx <= 3) edge |= 4;
+            if (rx >= w->w - 4) edge |= 8;
+            if (ry >= w->h - 4) edge |= 2;
+            if (ry <= 2) edge |= 1;
+            if (edge) {
+                resize_win = w;
+                resize_edge = edge;
+                resize_ox = w->w - rx; resize_oy = w->h - ry;
+                resize_ax = w->x + w->w; resize_ay = w->y + w->h;
+                rs_nx = w->x; rs_ny = w->y;
+                wm_full();
+                return;
+            }
+        }
+        /* title buttons: a dialog carries only Close */
         if (ry < WIN_TITLEBAR && e->button==MBTN_LEFT) {
-            for (int b = 0; b < 3; b++) {
-                int bx = w->w - 22 - (2 - b) * 22;
+            int nbtn = dlg ? 1 : 3;
+            for (int b = 0; b < nbtn; b++) {
+                int kind = dlg ? 2 : b;
+                int bx = w->w - 22 - (2 - kind) * 22;
                 if (in_rect(rx, ry, bx, 3, BTN_SZ, BTN_SZ)) {
-                    if (b == 0) { wm_minimize_window(w); }
-                    else if (b == 1) {
-                        if (w->state == WIN_STATE_MAX) {
-                            win_free_buf(w);
-                            w->x = w->px; w->y = w->py; w->w = w->pw; w->h = w->ph;
-                            w->state = WIN_STATE_NORMAL;
-                            win_alloc_buf(w);
-                            w->dirty = 1;
-                        } else {
-                            w->px = w->x; w->py = w->y; w->pw = w->w; w->ph = w->h;
-                            win_free_buf(w);
-                            w->x = 0; w->y = 0;
-                            w->w = screen_w; w->h = screen_h - TASKBAR_H;
-                            w->state = WIN_STATE_MAX; wm_full();
-                            w->dirty = 1;
-                            win_alloc_buf(w);
-                        }
-                    } else {
-                        wm_close_window(w);
-                    }
+                    if (kind == 0) wm_minimize_window(w);
+                    else if (kind == 1) wm_toggle_maximize(w);
+                    else wm_close_window(w);
                     wm_full();
                     return;
                 }
             }
-            if(w->state==WIN_STATE_MAX)return;
+            /* Double-click the titlebar toggles maximise, as in scoswm. */
+            static u64 tb_last_tick;
+            static int tb_last_x, tb_last_y;
+            static struct window *tb_last_w;
+            int pair = tb_last_w == w &&
+                       (u64)tick_count - tb_last_tick <= (u64)prefs_get()->dbl_ms / 10 &&
+                       rx - tb_last_x <= 6 && rx - tb_last_x >= -6 &&
+                       ry - tb_last_y <= 6 && ry - tb_last_y >= -6;
+            tb_last_tick = tick_count; tb_last_x = rx; tb_last_y = ry; tb_last_w = w;
+            if (pair && !dlg) {
+                tb_last_w = NULL;
+                wm_toggle_maximize(w);
+                wm_full();
+                return;
+            }
+            if (w->state == WIN_STATE_MAX && !dlg) {
+                /* Dragging a maximised titlebar restores the window under the
+                 * pointer and keeps dragging, instead of refusing the drag. */
+                int fx = w->w > 0 ? rx * 1000 / w->w : 500;
+                win_free_buf(w);
+                w->x = w->px; w->y = w->py; w->w = w->pw; w->h = w->ph;
+                w->state = WIN_STATE_NORMAL; w->snapped = 0;
+                win_alloc_buf(w); w->dirty = 1;
+                rx = w->w * fx / 1000; ry = 12;
+                if (rx < 8) rx = 8;
+                if (rx > w->w - 8) rx = w->w - 8;
+            }
             drag_win = w;
             drag_ox = rx; drag_oy = ry;
-            wm_full();
-            return;
-        }
-        /* resize handle */
-        if (e->button==MBTN_LEFT && in_rect(rx, ry, w->w - 16, w->h - 16, 16, 16) && w->state != WIN_STATE_MAX) {
-            resize_win = w;
-            resize_ox = w->w - rx; resize_oy = w->h - ry;
             wm_full();
             return;
         }
@@ -2755,6 +2938,7 @@ static void wm_cycle_focus(int dir)
 static void wm_toggle_maximize(struct window *w)
 {
     if (!w || !w->app) return;
+    if (win_is_dialog(w)) return;
     if (w->state == WIN_STATE_MAX) {
         win_free_buf(w);
         w->x = w->px; w->y = w->py; w->w = w->pw; w->h = w->ph;
@@ -2894,6 +3078,7 @@ static __attribute__((noinline)) void handle_key(struct key_event *e)
         dirty = 1;
         return;
     }
+    if (modal_w && modal_w->state == WIN_STATE_MIN) modal_w = NULL;
     struct window *w = modal_w ? modal_w : focused_w;
     if (w && w->app && w->app->key) { APP_T0(w); w->app->key(w, e); APP_T1(w); }
     dirty = 1;
@@ -3085,6 +3270,8 @@ struct dialog_data {
     int  safe_default;          /* 1: Enter cancels, only explicit y/OK acts */
     dialog_cb cb;
     void *ud;
+    int  hover;                 /* 0 action, 1 Cancel, -1 none (appended field:
+                                 * earlier offsets are part of the test contract) */
 };
 
 #define DLG_OK_X 40
@@ -3114,17 +3301,24 @@ static void dlg_paint(struct window *w)
         if((tick_count/50)%2==0)s_fill(s,18+(d->pos-start)*8,y+4,2,16,t->main);
     }
     y = s->h - 40;
-    s_fill(s, DLG_OK_X, y, 70, 26, blend(t->win_bg, t->main, 25));
+    /* Hover is the same high-contrast selection the menus use: the button
+     * under the pointer is filled with the accent and its text inverted. */
+    int ok_hot = d->hover == 0, cancel_hot = d->hover == 1;
+    s_fill(s, DLG_OK_X, y, 70, 26,
+           ok_hot ? t->main : blend(t->win_bg, t->main, 25));
     s_frame_rect(s, DLG_OK_X, y, 70, 26, t->main);
     s_clip_text(s, DLG_OK_X + 6, y + 5, d->label[0] ? d->label : "OK",
-                58, t->text);
+                58, ok_hot ? t->title_text : t->text);
     /* On a safe-default confirmation Cancel is outlined twice: the keyboard
      * default must be visible on screen as well as in dlg_key(). */
     s_fill(s, DLG_CANCEL_X, y, 80, 26,
+           cancel_hot ? t->main :
            d->safe_default ? blend(t->win_bg, t->main, 40) : blend(t->win_bg, t->main, 12));
     s_frame_rect(s, DLG_CANCEL_X, y, 80, 26, t->main);
-    if (d->safe_default) s_frame_rect(s, DLG_CANCEL_X + 2, y + 2, 76, 22, t->title_text);
-    s_text(s, DLG_CANCEL_X + 16, y + 5, "Cancel", t->text);
+    if (d->safe_default) s_frame_rect(s, DLG_CANCEL_X + 2, y + 2, 76, 22,
+                                      cancel_hot ? t->title_text : t->title_text);
+    s_text(s, DLG_CANCEL_X + 16, y + 5, "Cancel",
+           cancel_hot ? t->title_text : t->text);
 }
 
 static void dlg_resolve(struct window *w, int ok)
@@ -3141,8 +3335,17 @@ static void dlg_resolve(struct window *w, int ok)
 
 static void dlg_mouse(struct window *w, struct mouse_event *e, int x, int y)
 {
-    if (e->type != MEV_BUTTON || !e->down || e->button != MBTN_LEFT) return;
+    struct dialog_data *d = w->data;
     int by = w->surf.h - 40;
+    if (e->type == MEV_MOVE) {
+        int old = d->hover;
+        d->hover = -1;
+        if (in_rect(x, y, DLG_OK_X, by, 70, 26)) d->hover = 0;
+        else if (in_rect(x, y, DLG_CANCEL_X, by, 80, 26)) d->hover = 1;
+        if (d->hover != old) wm_redraw(w);
+        return;
+    }
+    if (e->type != MEV_BUTTON || !e->down || e->button != MBTN_LEFT) return;
     if (in_rect(x, y, DLG_OK_X, by, 70, 26)) dlg_resolve(w, 1);
     else if (in_rect(x, y, DLG_CANCEL_X, by, 80, 26)) dlg_resolve(w, 0);
 }
@@ -3205,6 +3408,16 @@ static void dialog_open(const char *title, const char *message, const char *inpu
     int lines=dialog_text(NULL,d->message,390,4096,0);
     wm_resize_window(w,420,lines*18+90+(d->has_input?36:0));
     wm_set_title(w, title);
+    /* A confirmation appears where the eye already is: centred in the work
+     * area, above the taskbar.  Cascading it could put it off-screen, which
+     * is how an input owner used to become invisible. */
+    w->x = (screen_w - w->w) / 2;
+    w->y = (screen_h - TASKBAR_H - w->h) / 2;
+    if (w->x < 8) w->x = 8;
+    if (w->y < 8) w->y = 8;
+    if (w->x + w->w > screen_w) w->x = screen_w - w->w;
+    if (w->y + w->h > screen_h - TASKBAR_H) w->y = screen_h - TASKBAR_H - w->h;
+    if (w->y < 0) w->y = 0;
     modal_w = w;
     wm_full();
     wm_focus(w);

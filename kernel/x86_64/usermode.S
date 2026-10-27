@@ -38,6 +38,12 @@ sc_syscall_entry:
     movq %r11, sc_user_urflags(%rip)
     movq %rax, sc_user_snr(%rip)
     movq sc_user_krsp(%rip), %rsp
+    /* user_enter saves RSP at ITS entry, which is 8 mod 16, so the value the
+     * stub adopts is 8 mod 16 as well.  The SysV ABI wants 16-byte alignment
+     * BEFORE the call (the callee then sees 8 mod 16); getting this wrong
+     * made GCC's aligned SSE spills (movaps) #GP and panic the kernel on a
+     * perfectly ordinary scos.write().  Align once, here, for every syscall. */
+    andq $-16, %rsp
     /* SysV args: rdi, rsi, rdx, rcx, r8, r9.  SYSCALL puts arg4 in r10. */
     movq %r10, %rcx
     call user_syscall_dispatch
@@ -55,6 +61,7 @@ sc_syscall_entry:
  * user_enter pushed are on top of it. */
 .globl sc_user_exit_return
 sc_user_exit_return:
+    movq sc_user_krsp(%rip), %rsp   /* rsp was aligned for the call above */
     movl $0, sc_user_active(%rip)
     pushq sc_user_kflags(%rip)
     popfq

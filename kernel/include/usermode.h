@@ -123,6 +123,14 @@ struct user_shared {
     char     app_id[32];
     char     source[65536];      /* CAT Lua source */
     char     scratch[65536];     /* syscall string/bulk data exchange */
+    /* Event detail the CPL3 app server needs to hand a script the same
+     * arguments the kernel-side host does.  Appended: the offsets above are
+     * the ABI shared with the CPL3 app server sources. */
+    uint32_t mouse_event;        /* MEV_MOVE / MEV_BUTTON / MEV_WHEEL */
+    uint32_t mouse_button;
+    uint32_t mouse_down;
+    uint32_t mouse_wheel;
+    uint32_t window_x, window_y, window_state;
 };
 #define USER_SHARED_MAGIC UINT32_C(0x53435553)
 
@@ -134,6 +142,8 @@ uint64_t user_syscall_dispatch(uint64_t a1, uint64_t a2, uint64_t a3,
                                uint64_t a4, uint64_t a5, uint64_t a6);
 void     user_fault(struct interrupt_frame *f);
 int      user_in_usermode(void);
+void     user_tick_budget(void);       /* timer-interrupt CPU budget for a busy app */
+int      user_last_was_timeout(void);
 uint64_t user_fault_count(void);
 uint64_t user_syscall_count(void);
 uint64_t user_denied_count(void);
@@ -149,7 +159,9 @@ int      user_run_event(int pid, int event, const char *source, uint32_t len,
 int      user_sandbox_probe(int pid, int probe, uint32_t *result);
 uint32_t user_last_result(void);
 void     user_set_input(int event, int keycode, int pressed, int shift, int ctrl, int alt,
-                        int mx, int my, int buttons);
+                        int mx, int my, int buttons, int mouse_type, int mouse_button,
+                        int mouse_down, int mouse_wheel);
+int      user_pid_interval(int pid);      /* ms requested by scos.interval(), 0 = default */
 int      user_pid_mapped(int pid, uintptr_t va);
 uint64_t user_image_entry(void);
 uint32_t user_image_span(void);

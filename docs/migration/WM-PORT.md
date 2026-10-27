@@ -28,6 +28,27 @@ added on top of it.
 | Live Settings panel: `bar_height`, `desktop_icon_size`, `desktop_grid`, custom palette fields | `kernel/desktop/wm_prefs.c` persists six owner switches in `home/desktop.cfg` (inside the vault): taskbar height 28–96 px, icon size 24/32/48 px, wallpaper grid, global hotkeys, visual overview and edge snapping. Settings gained a **Window manager** section with live −/+ controls. `TASKBAR_H` became `wm_taskbar_height()` (default 40 = the original geometry) and `wm_reflow_windows()` clamps windows after a work-area change. Hand-edited values are clamped, never trusted. |
 | Power menu: Lock immediate; Restart WM / Exit WM / Suspend / Reboot / Power Off each with a Cancel-default confirmation | Power menu is now **Lock / Restart / Power Off**. Lock calls `security_ui_lock()` (SCos's own lock, not an external locker). Restart and Power Off go through the new `wm_confirm()`: Cancel is outlined twice on screen **and** is what Enter selects; only an explicit `y` or an OK click acts. `test_wm_port.py` proves pressing Enter does not reboot the machine. |
 
+| Pointer feedback: every pressable surface highlights under the pointer | `kernel/desktop/wm.c`: titlebar buttons (`hover_btn_win` / `hover_btn`, one record for all three), taskbar pins, the Windows picker, the launcher and power button through a single `bar_hover_at()` used by both painting and hit testing, dialog buttons (`d->hover`), menu rows and desktop icons. The highlight is an inverse box on the titlebar and an accent fill elsewhere, because the first attempt used the focused titlebar colour as its fill and was therefore invisible on the focused window. |
+| Double-click a titlebar to maximise or restore; drag a maximised window to restore it | `handle_mouse()` titlebar double-click detection and the `drag_win` restore path: a maximised window keeps its restore geometry, so dragging its titlebar back down returns it to the last normal size instead of leaving it stuck at full screen. |
+| Wheel over the taskbar cycles windows; titlebar context menu | `handle_mouse()` (`MEV_WHEEL`) cycles the MRU list, and a right-click on a titlebar opens **Minimise / Maximise / Close**. A dialog has no such menu and exactly one titlebar button. |
+
+## Confirmations own the answer, not the desktop
+
+The old confirmation was an ordinary window. Its own Minimise button could hide
+it while it still owned the keyboard and the next click, so the desktop looked
+idle but accepted nothing until Esc. A confirmation is now a real dialog type:
+
+* it is centred in the work area when it opens, and window management refuses
+  to move, resize, snap, minimise or maximise it (`win_is_dialog()`);
+* it draws **one** titlebar button - the close cross - and no resize grip;
+* an outside click, the cross, Cancel and Escape all answer "no", run the
+  owner's callback with `ok == 0`, and destroy the window in the same event, so
+  no input owner is left behind. The dismissing click does not reach whatever
+  was underneath;
+* `test_wm_dialogs.py` drives this with real mouse and key events and asserts
+  the serial log never gains a second `wm: entering main loop` (no reboot) and
+  the window count returns to where it was.
+
 ## What did not come back, and why
 
 * **X11/Xlib, EWMH/ICCCM, RandR, SHAPE, Xcursor, freedesktop `.desktop` and
@@ -77,7 +98,16 @@ matching the Linux WM.
 * `power_menu_cb(1, ...)` opens a confirmation and pressing Enter **does
   not** reboot.
 
-All 18 suites pass, including the existing compositor, management, CAT,
-security, isolation and user-mode suites. As always, QEMU success is not
+`python3 tools/tests/test_wm_dialogs.py` is the companion suite: it clicks the
+power button and the real menu entries, requires exactly one centred dialog
+whose only titlebar control is the close cross, and checks that outside clicks,
+the Cancel button and Escape all dismiss it without a reboot or a leftover
+window. It also asserts titlebar hover for min/max/close and that the gaps
+between them clear it, that the buttons hit-test where they are drawn, that a
+double-click maximises to the work area, and that `bar_hover_at()` reports the
+power button, the picker and the launcher at their drawn positions.
+
+All 21 suites pass, including the existing compositor, management, CAT,
+security, isolation, escape and user-mode suites. As always, QEMU success is not
 physical-PC acceptance: keyboard firmware may emit different Super scancodes,
 and the overview's full repaint path has not been timed on real GPUs.

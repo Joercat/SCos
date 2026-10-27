@@ -196,6 +196,8 @@ filesystem is needed.
 make                           # build/BOOTX64.EFI, kernel.elf and scos.img
 python3 tools/check_milestone.py
 python3 tools/tests/test_security.py     # crypto KATs + choices/vault/isolation guest tests
+python3 tools/tests/test_escape.py       # the Lua sandbox escape app: breakout=0 + API parity
+python3 tools/tests/test_wm_dialogs.py   # confirmations, titlebar hover and taskbar hit testing
 sha256sum -c dist/scos.img.sha256
 python3 tools/setup_qemu.py     # optional pinned host QEMU environment
 python3 tools/run_qemu.py --xhci # x64 EDK2/q35, native USB HID, disposable disk state

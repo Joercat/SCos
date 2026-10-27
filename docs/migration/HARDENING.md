@@ -113,6 +113,74 @@ hardening suite asserts this in the source.
 * Input events are mixed into the audited entropy pool (throttled to 1 in 16
   events), so interaction timing contributes to volume-key/salt/IV entropy.
 
+## 12. CPL3: the kernel stack was misaligned for every syscall
+
+`SYSCALL` does not switch stacks, so `sc_syscall_entry` adopts the RSP saved by
+`user_enter` and calls `user_syscall_dispatch` on it. `user_enter` saves its own
+entry RSP, which is 8 mod 16, and the call therefore ran with the stack the
+SysV ABI forbids. GCC was entitled to use an aligned `movaps` spill - and did,
+inside the `SC_NR_DATE` record copy - so a perfectly ordinary `scos.write()`
+raised `#GP` and, because it happened in ring 0, panicked the kernel. The stub
+now aligns once (`andq $-16, %rsp`) for every syscall, and both return paths
+restore the saved kernel RSP first. Found by the escape app on its 30th probe.
+
+## 13. The write quota counted lifetime writes, not live files
+
+`FILE_WRITE` kept `ns_files` in kernel RAM and only ever incremented it, so
+deleting a file left the slot charged. After sixteen writes in an app's life -
+its own report file, notes, saved settings - every later `scos.write()`
+returned false, for that app, forever, across relaunches of the window. The
+quota is now measured from the app's private directory at the moment of the
+write (`files` and `bytes` are summed from the VFS, with the replaced file's
+size subtracted), which is what the kernel-side host has always done.
+
+## 14. `scos.files()` could never succeed for an isolated app
+
+`SC_NR_FILE_LIST` takes a *scratch offset*, not a file name, but it ran through
+the same `ns_path()` validator as the other file calls. Every listing failed as
+"invalid data filename", which the CPL3 host then reported as a capability
+denial - so a package could not enumerate its own directory in the isolated
+host while the kernel host listed it fine. LIST now has its own branch before
+the name check, with the same subtraction-only bounds it always had.
+
+## 15. A spinning package could hold the machine forever
+
+The CPU budget was only tested inside the syscall dispatcher, so
+`while true do end` never reached it: a real 1-second spin was observed holding
+the desktop, and a debugger stop could not even reach the idle boundary. The
+timer interrupt now charges the episode too, but only when it interrupted CPL3
+code (`CS.RPL == 3`), so it can never abandon a kernel-mode syscall's stack.
+The WM reports "exceeded its CPU budget (contained)" instead of a fault, and
+`test_escape.py` verifies the desktop keeps working afterwards.
+
+## 16. Nested C-call recursion overflowed both stacks
+
+`LUAI_MAXCCALLS` was 48, and 200 before that. Each nested C call (pcall, a
+`string.gsub` callback, a `table.sort` comparator) uses the real C stack, which
+is 64 KiB for the kernel host and for each CPL3 process. At 48, a gsub callback
+that recursed page-faulted the app at CPL3 and would have overrun the stack the
+compositor itself runs on in the kernel host. It is now 16, so the VM raises
+the ordinary "C stack overflow" Lua error before either stack is touched.
+
+## 17. The two CAT hosts had drifted apart
+
+Isolation is the owner's choice, so a package must behave the same either way.
+Comparing the hosts found: `scos.themes()` returned *indices* at CPL3 and IDs in
+the kernel; `scos.time()` divided milliseconds by 100 instead of 1000; the icon
+range was 0..23 in one host and 0..9 in the other; `set_icon` was accepted and
+silently ignored at CPL3; `move()` returned nothing there; an unfocused window
+still reported mouse buttons; `file_size`/`read`/`write`/`remove`/`rename`/
+`files` mapped "absent" and "denied" onto each other; `log` had a 1024-byte cap
+in one and 512 in the other; `theme_apply` skipped ID validation; and drawing
+over budget was a silent no-op at CPL3 instead of an error. Each is now the same
+call with the same arguments, the same range, and the same error text, and
+`test_escape.py` runs one script in both hosts and compares its API signature.
+
+Note the deliberate difference that remains: capabilities. An isolated process
+holds `VFS_READ|VFS_WRITE|SYSINFO` only, so `theme_apply`, `notify`, `message`
+and `set_icon` raise "disabled by the owner" - which is exactly what the kernel
+host raises for a process without the capability.
+
 ## Verification
 
 `python3 tools/tests/test_hardening.py` boots QEMU and verifies:
@@ -130,5 +198,11 @@ hardening suite asserts this in the source.
   and no panic;
 * `home/users` enumeration and `home/users/root/../other/x` are denied.
 
-All 19 suites pass (including the new `test_hardening.py`, `test_wm_port.py`
-and `test_usermode.py`). Emulator success is not physical-PC acceptance.
+* the escape app (52 probes) reports `breakout=0`; one script run isolated and
+  run normally produces an identical `scos` API signature; a package that spins
+  without syscalls is stopped by the timer and the desktop keeps working;
+* the power confirmations are single centred dialogs that vanish on the close
+  button, an outside click, Cancel and Escape, leaving no window and no reboot.
+
+All 21 suites pass (including the new `test_escape.py` and
+`test_wm_dialogs.py`). Emulator success is not physical-PC acceptance.

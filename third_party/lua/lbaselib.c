@@ -531,9 +531,10 @@ static const luaL_Reg base_funcs[] = {
 #endif
   {"next", luaB_next},
   {"pairs", luaB_pairs},
-#if !defined(SCOS_LUA)
+  /* Protected calls are pure VM state (no file, clock or OS access), so the
+   * SCos host keeps them: a package must be able to recover from its own
+   * errors, and the CPL3 escape suite relies on the same behaviour. */
   {"pcall", luaB_pcall},
-#endif
 #if !defined(SCOS_LUA)
   {"print", luaB_print},
 #endif
@@ -549,9 +550,7 @@ static const luaL_Reg base_funcs[] = {
   {"tonumber", luaB_tonumber},
   {"tostring", luaB_tostring},
   {"type", luaB_type},
-#if !defined(SCOS_LUA)
   {"xpcall", luaB_xpcall},
-#endif
   /* placeholders */
   {LUA_GNAME, NULL},
   {"_VERSION", NULL},

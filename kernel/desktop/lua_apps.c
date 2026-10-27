@@ -98,7 +98,9 @@ static int cat_usermode(struct window *w, int event)
     pid = proc_current();
     r = user_run_event(pid, event, m.source, m.length, a->id);
     if (r < 0) { d->failed = 1; sc_copy(d->error, sizeof(d->error),
-                                       "CPL3 app faulted (contained)"); }
+                                       user_last_was_timeout()
+                                       ? "CPL3 app exceeded its CPU budget (contained)"
+                                       : "CPL3 app faulted (contained)"); }
     else if (user_last_result()) { d->failed = 1;
         sc_copy(d->error, sizeof(d->error), "CPL3 app reported an error"); }
     return 1;
@@ -273,19 +275,30 @@ static void script_paint(struct window *w){
 }
 static void script_key(struct window *w,struct key_event *e){
     struct lua_window *d=w->data;if(!d)return;
-    if(d->usermode){user_set_input(USER_EVENT_KEY,e->keycode,e->pressed,e->shift,e->ctrl,e->alt,0,0,0);cat_usermode(w,USER_EVENT_KEY);return;}
+    if(d->usermode){user_set_input(USER_EVENT_KEY,e->keycode,e->pressed,e->shift,e->ctrl,e->alt,
+                                   0,0,0,0,0,0,0);cat_usermode(w,USER_EVENT_KEY);return;}
     struct invocation i={.name="key",.key=e};invoke(d,&i);
 }
 static void script_mouse(struct window *w,struct mouse_event *e,int x,int y){
     struct lua_window *d=w->data;if(!d)return;
     d->mouse_x=x;d->mouse_y=y;d->mouse_buttons=e->buttons;
-    if(d->usermode){user_set_input(USER_EVENT_MOUSE,0,0,0,0,0,x,y,e->buttons);cat_usermode(w,USER_EVENT_MOUSE);return;}
+    /* The CPL3 host passes the SAME seven arguments the kernel-side host does
+     * (type, x, y, button, down, wheel, buttons); it used to receive zeros,
+     * so an isolated app could never see a click. */
+    if(d->usermode){user_set_input(USER_EVENT_MOUSE,0,0,0,0,0,x,y,e->buttons,
+                                   e->type,e->button,e->down,e->wheel);
+                    cat_usermode(w,USER_EVENT_MOUSE);return;}
     struct invocation i={.name="mouse",.mouse=e,.x=x,.y=y};invoke(d,&i);
 }
 static void script_tick(struct window *w){
     struct lua_window *d=w->data;if(!d)return;
     if((i32)((u32)tick_count-d->next_tick)<0)return;
-    d->next_tick=(u32)tick_count+(u32)d->interval;
+    {
+        /* An isolated package's scos.interval() arrives through the syscall
+         * gate, so the kernel-side scheduler must ask for that value. */
+        int ms = d->usermode ? user_pid_interval(proc_current()) : 0;
+        d->next_tick = (u32)tick_count + (u32)(ms > 0 ? (ms + 9) / 10 : d->interval);
+    }
     if(d->usermode){cat_usermode(w,USER_EVENT_TICK);return;}
     struct invocation i={.name="tick"};invoke(d,&i);
 }
