@@ -181,6 +181,22 @@ holds `VFS_READ|VFS_WRITE|SYSINFO` only, so `theme_apply`, `notify`, `message`
 and `set_icon` raise "disabled by the owner" - which is exactly what the kernel
 host raises for a process without the capability.
 
+## 18. The build stamp could lag the commit it names
+
+Provenance is a security property here: an image that misreports its own commit
+lets a reviewer judge code that is not the code on the stick. Two Makefile
+faults allowed exactly that. The stamp header was an *order-only* prerequisite
+of every object that `#include`s it, and make never compares the timestamp of an
+order-only prerequisite, so a commit changed nothing and the kernel kept the
+previous id, after which `tools/makedisk.py` refused to pack it (correctly) and
+the only workaround was to run `make` twice. And `desktop-buildinfo.o` - the one
+file that exists to read the stamp - had `FORCE` with no dependency on the
+header, so it could be compiled against the header make was about to replace.
+The header is now a normal prerequisite everywhere it is read, `buildinfo.o`
+depends on it ahead of `FORCE`, and `test_buildinfo.py` fails if any rule ever
+moves it back behind a `|` or if the packed kernel does not contain the stamp
+the tree describes.
+
 ## Verification
 
 `python3 tools/tests/test_hardening.py` boots QEMU and verifies:
