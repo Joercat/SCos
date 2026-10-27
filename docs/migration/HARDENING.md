@@ -197,6 +197,52 @@ depends on it ahead of `FORCE`, and `test_buildinfo.py` fails if any rule ever
 moves it back behind a `|` or if the packed kernel does not contain the stamp
 the tree describes.
 
+## 19. App storage was private by convention, and uninstall kept it
+
+Two faults with one root: the private directory was a convention, not a rule.
+The Lua wrapper validated the filename, so the API was safe, but nothing else
+was: a native app could `vfs_write("home/appdata/<other>/x")`, and the filename
+validator accepted a leading dot even though the directory lister and the
+quota walk did not agree on what a data file was. Separately, uninstalling a
+package left `home/appdata/<id>/` in place, so reinstalling the same id read the
+previous installation's saves - the user's own report.
+
+`kernel/desktop/app_storage.c` is now the single source of truth: id validator,
+filename validator (flat, no leading dot, no separators), path construction,
+usage, quota and wipe. `vfs_read`, `vfs_write`, `vfs_mkdir`, `vfs_delete` and
+`vfs_rename` call `app_storage_allowed()` while an app process is current and
+refuse any other app's `home/appdata/<id>/` - so even a native app that
+bypasses the Lua API is confined. `app_uninstall()` captures the id before it
+clears the registration, wipes the directory and says so; a reinstall starts
+empty. Storage separation is deliberately independent of the per-app isolation
+choice, which remains the owner's to decline.
+
+The CPL3 host had its own copy of that quota and answered a refusal with a
+plain zero, which the package read as *a successful write that never happened*.
+The refusal now has a number of its own (`SC_FILE_QUOTA_REFUSED`) and both hosts
+raise the same sentence, `app data quota exceeded (16 files / 64 KiB)`; the
+cgroup limits are the same constants, and `app_storage_check()` has the final
+word so raising a limit cannot widen the namespace.
+
+Privileged commands (`save`, power actions, `sysrq`, `appuninstall`, `make`,
+`rm -s/-f/-i`, `kill --system`, `theme <id>`, `isolate`, `choices`, `policy`,
+`audit clear`, `user*`) now pass through `security_privileged_command()` and are
+refused unless `security_elevated()`. `tlpdo <command>` asks for the password in
+the terminal's own masked field (the text console masks it too) and only on
+success runs the inner command - so the password is asked for *before* any y/n
+question, in both shells, and a question left on screen cannot be answered into
+an expired grant because the gate is checked again when the answer arrives.
+Elevation is bound to the account and to **inactivity**: two quiet minutes end
+it, activity keeps it, a user switch, lock or `security_elevate_drop()` ends it
+immediately. `sudo.password` is a user
+choice, default on, like every other protection here.
+
+Interactive questions moved out of the command line. A y/n confirmation and the
+first-launch isolation choice (`appstrt <installed-app>`) are now answered in a
+dedicated field: keys select, **Enter accepts**, Enter with nothing chosen is
+the safe default, Esc/Ctrl+C cancels and runs nothing. `test_prompts.py` proves
+a bare `y` does not answer and that a bare key does not launch.
+
 ## Verification
 
 `python3 tools/tests/test_hardening.py` boots QEMU and verifies:
@@ -220,5 +266,21 @@ the tree describes.
 * the power confirmations are single centred dialogs that vanish on the close
   button, an outside click, Cancel and Escape, leaving no window and no reboot.
 
-All 21 suites pass (including the new `test_escape.py` and
-`test_wm_dialogs.py`). Emulator success is not physical-PC acceptance.
+`python3 tools/tests/test_tlpdo.py` verifies the privileged table, refusal
+without elevation, grant/drop, inactivity expiry (activity keeps it), the masked
+terminal password with a wrong-password refusal, three failed attempts running
+nothing, a password never reaching the transcript, nesting refused, and a
+confirmation answered *after* the grant expired still refusing to run (the gate
+is re-checked when the answer arrives, in both shells). `test_prompts.py`
+verifies key-then-Enter on both the y/n and the app launch field,
+Enter-with-no-answer cancelling, Esc cancelling, Backspace clearing an answer, a
+terminal shortcut not firing from inside the question, and stored isolation
+choices. `test_tty.py` verifies the text console end to end: it re-authenticates
+before it gives a shell, refuses a privileged command without `tlpdo` before it
+asks anything, asks for the password before the y/n question, never echoes it,
+only accepts y/n, refuses a nested `tlpdo`, and Ctrl+Alt+F7 returns to a working
+desktop. `test_storage.py` verifies every traversal shape against a real app
+(nine attempts, all denied), the flat namespace, the 16-file/64 KiB quota,
+uninstall erasing the directory, and a reinstall seeing no old data.
+
+All 25 suites pass. Emulator success is not physical-PC acceptance.

@@ -146,13 +146,16 @@ static int api_title(lua_State *L){
 }
 static int api_log(lua_State *L){size_t n;const char *s=luaL_checklstring(L,1,&n);if(n>512)return luaL_error(L,"log exceeds 512 bytes");app_log(context(L)->w,s);return 0;}
 static int api_clock(lua_State *L){lua_pushnumber(L,(lua_Number)tick_count/100.0);return 1;}
+/* Every data path comes from app_storage.c: one validator for the id, one for
+ * the basename and one for the private directory.  A package never names a
+ * path - it names a file, and the id comes from the kernel-held registration,
+ * never from the script. */
 static void data_path(lua_State *L,char *out) {
     size_t n;const char *name=luaL_checklstring(L,1,&n);
+    const char *id=context(L)->w->app->id;
     if(strlen(name)!=n)luaL_error(L,"invalid data filename");
-    if(!n||n>=VFS_NAME||!strcmp(name,".")||!strcmp(name,".."))luaL_error(L,"invalid data filename");
-    for(size_t i=0;i<n;i++)if(!((name[i]>='a'&&name[i]<='z')||(name[i]>='A'&&name[i]<='Z')||(name[i]>='0'&&name[i]<='9')||name[i]=='.'||name[i]=='_'||name[i]=='-'))luaL_error(L,"invalid data filename");
-    strcpy(out,"home/appdata/");strcat(out,context(L)->w->app->id);
-    vfs_mkdir("home/appdata");vfs_mkdir(out);strcat(out,"/");strcat(out,name);
+    if(!app_storage_ensure(id)||!app_storage_path(id,name,out,128))
+        luaL_error(L,"invalid data filename");
 }
 static int api_read(lua_State *L){char path[128];data_path(L,path);u32 n;char *s=vfs_read(path,&n);if(!s)lua_pushnil(L);else if(n>SCRIPT_MAX)return luaL_error(L,"data file too large");else lua_pushlstring(L,s,n);return 1;}
 /* Per-app isolation is the OWNER'S choice.  The check is against the
@@ -170,13 +173,12 @@ static void cat_isolation_guard(lua_State *L)
 void cat_global_guard(lua_State *L, u32 cap) { cat_capability_guard(L, cap); }
 static int api_write(lua_State *L){
     cat_isolation_guard(L);
-    char path[128];data_path(L,path);size_t n;const char *s=luaL_checklstring(L,2,&n);
+    char path[128];const char *name=luaL_checklstring(L,1,NULL);
+    size_t n;const char *s=luaL_checklstring(L,2,&n);
+    data_path(L,path);
     if(n>SCRIPT_MAX)return luaL_error(L,"data file too large");
-    struct vfs_node *old=vfs_lookup(path);
-    char dirpath[128];strcpy(dirpath,"home/appdata/");strcat(dirpath,context(L)->w->app->id);
-    struct vfs_node *dir=vfs_lookup(dirpath);u64 bytes=0;int files=0;
-    if(dir)for(struct vfs_node *f=dir->child;f;f=f->sibling){bytes+=f->size;files++;}
-    if((!old&&files>=16)||bytes-(old?old->size:0)+n>SCRIPT_MAX)
+    /* One quota gate for every caller: the Lua wrapper and the VFS agree. */
+    if(!app_storage_check(context(L)->w->app->id,name,n))
         return luaL_error(L,"app data quota exceeded (16 files / 64 KiB)");
     lua_pushboolean(L,vfs_write(path,s,(u32)n));return 1;
 }
@@ -357,12 +359,24 @@ int app_uninstall(const char *id,char *message,size_t capacity)
     const char *result="Application is not installed, or is a protected built-in.";int ok=0;
     for(int i=0;id&&i<script_count;i++)if(scripts[i].id[0]&&!strcmp(id,scripts[i].id)){
         struct lua_app *a=&scripts[i];
+        char app_id[SC_APP_ID_MAX];int data_files=0;u32 data_bytes=0;int wiped;
+        sc_copy(app_id,sizeof(app_id),a->id);
         /* Never delete a demo, project or explicitly launched external source. */
         struct vfs_node *installed=vfs_lookup(a->path);
         if(!strncmp(a->path,"home/apps/",10)&&installed&&(installed->is_dir||!vfs_delete(a->path))){result="Cannot remove installed package; application unchanged.";break;}
         for(int j=wm_win_count()-1;j>=0;j--){struct window *w=wm_win_at(j);if(w->app==&a->app)wm_close_window(w);}
-        wm_desktop_remove_app(a->id);app_unregister(&a->app);memset(a,0,sizeof(*a));ok=1;
-        result=fs_image_available()?(fs_image_save()?"Uninstalled and saved. Project source and app data kept.":"Uninstalled in RAM, but disk save FAILED. Run save before reboot."):"Uninstalled for this session. No disk written; projects/data kept.";
+        wm_desktop_remove_app(a->id);app_unregister(&a->app);memset(a,0,sizeof(*a));
+        /* Uninstall means the data goes too.  A reinstall must start clean;
+         * leaving a save behind was the previous behaviour and it leaked one
+         * installation's private files into the next. */
+        wiped=app_storage_wipe(app_id,&data_files,&data_bytes);
+        ok=1;
+        if(!wiped){
+            result="Uninstalled, but WARNING: its private app data could not be erased. Run save and check the filesystem.";
+        }else if(fs_image_available()){
+            result=fs_image_save()?(data_files?"Uninstalled and saved. Private app data erased.":"Uninstalled and saved. App data erased.")
+                                   :"Uninstalled in RAM, but disk save FAILED. Run save before reboot.";
+        }else result="Uninstalled for this session. No disk written; app data erased.";
         break;
     }
     if(capacity){strncpy(message,result,capacity-1);message[capacity-1]=0;}wm_request_full();return ok;

@@ -107,7 +107,8 @@ between them clear it, that the buttons hit-test where they are drawn, that a
 double-click maximises to the work area, and that `bar_hover_at()` reports the
 power button, the picker and the launcher at their drawn positions.
 
-All 21 suites pass, including the existing compositor, management, CAT,
-security, isolation, escape and user-mode suites. As always, QEMU success is not
+All 25 suites pass, including the existing compositor, management, CAT,
+security, isolation, escape and user-mode suites, plus the later storage,
+`tlpdo`, prompt and text-console suites. As always, QEMU success is not
 physical-PC acceptance: keyboard firmware may emit different Super scancodes,
 and the overview's full repaint path has not been timed on real GPUs.

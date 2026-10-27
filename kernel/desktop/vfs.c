@@ -67,12 +67,14 @@ static int vfs_denied(const char *path)
     if (security_protected_path(path) && !security_bypass_active()) return 1;
     if (security_write_denied()) return 1;
     if (!proc_path_allowed(path, 1)) return 1;
+    if (!app_storage_allowed(path)) return 1;
     return vfs_user_private(path);
 }
 static int vfs_read_denied(const char *path)
 {
     if (security_protected_path(path) && !security_bypass_active()) return 1;
     if (!proc_path_allowed(path, 0)) return 1;
+    if (!app_storage_allowed(path)) return 1;
     return vfs_user_private(path);
 }
 
@@ -323,6 +325,7 @@ int vfs_rename(const char *oldp, const char *newp)
 {
     struct vfs_node *n;
     if (!oldp || !newp || strlen(newp)>=256) return 0;
+    if (!app_storage_allowed(newp)) return 0;   /* vfs_denied covers oldp */
     if (vfs_denied(oldp) || vfs_denied(newp)) return 0;
     n = vfs_lookup(oldp);
     if (!n || !n->parent) return 0;

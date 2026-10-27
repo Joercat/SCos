@@ -353,13 +353,37 @@ around **every** app callback (`APP_T0` / `APP_T1` in `wm.c`):
    `home/appdata/<its-id>/**` and its own `.cat` package under `home/apps/` or
    `home/demos/`. Documents, downloads, `system/` and every other app's data
    are absent at lookup and denied at read/write. This applies to native C apps
-   too — the check is in `vfs.c`, not in an app-facing helper.
+   too — the check is in `vfs.c`, not in an app-facing helper. Independently of
+   this choice, `app_storage_allowed()` keeps every app out of every other
+   app's `home/appdata/<id>/`, isolated or not.
 
 Built-in native C apps are compiled-in ring-0 OS components; they keep the
 page-table domains, mount namespace, capabilities and resource limits above but
 not the CPL3 boundary (§2). GPU modules are part of the kernel and are never
 isolated. An app the owner chose **never** to isolate gets `PROC_CAP_ALL`, no
 domain and the original unrestricted behaviour — nothing is forced.
+
+**Storage separation is not part of that choice.** Whatever the owner decides
+about isolation, every app's data lives in `home/appdata/<id>/` and nowhere
+else. `kernel/desktop/app_storage.c` owns the id and filename validators, path
+construction, the 16-file/64 KiB quota and the wipe; the Lua API, the VFS and
+the uninstaller all call it. The VFS checks `app_storage_allowed()` on read,
+write, mkdir, delete and rename while an app process is current, so a native
+app calling `vfs_write("home/appdata/<other>/x")` is refused just like a CAT
+package. Uninstalling wipes the directory: reinstalling the same id cannot read
+the previous installation's saves.
+
+**Privileged commands and `tlpdo`.** `security_privileged_command()` is the one
+table: `save`, `shutdown`/`poweroff`/`reboot`/`panic`/`sysrq`, `appuninstall`,
+`make`, `useradd`/`userdel`/`usermod`, `rm` with `-s`/`-f`/`-i`, `kill --system`,
+`theme <id>`, `isolate`, `choices`, `policy` and `audit clear`. None of them run
+without `security_elevated()`, which only `tlpdo <command>` grants after
+verifying the signed-in account's password (in the terminal's own masked field;
+the text console masks it too). Elevation is bound to the account and ends after
+two minutes **without interaction** — working keeps it, idling does not — and
+immediately on a user switch, lock or `security_elevate_drop()`. Guests remain
+on the read-only allow-list and cannot invoke `tlpdo`. `sudo.password` (user
+choice, default on) can turn the prompt off, like every other protection here.
 
 Owner-facing commands: `isolation` lists pid, app, owner, isolated state,
 domain and capability mask; `security` reports the number of isolated domains.

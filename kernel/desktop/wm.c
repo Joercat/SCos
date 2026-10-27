@@ -525,6 +525,69 @@ void wm_set_pending_console(void *term)
     pending_console = term;
 }
 
+/* --------------------------------------------------- deferred app launch --- */
+/* A shell launches an app from inside that app's own key callback.  For a
+ * native app that is harmless, but an ISOLATED app's private page tables must
+ * not be built while the caller's private domain is the current one: the new
+ * PML4's pages would be allocated in the caller's arena and the CPL3 host then
+ * reports an error.  The launch is queued here and executed by wm_run(), in
+ * kernel context, after the caller's callback has fully unwound. */
+static int deferred_active;
+static char deferred_id[SC_APP_ID_MAX];
+static char deferred_arg[192];
+static int deferred_iso = -1;
+static void *deferred_console;
+
+void wm_launch_deferred(const char *app_id, const char *arg, int isolated, void *console)
+{
+    if (!app_id || !*app_id) return;
+    if (!app_find(app_id)) {
+        if (console) term_console_line(console, "app failed to launch: unknown app");
+        return;
+    }
+    sc_copy(deferred_id, sizeof(deferred_id), app_id);
+    sc_copy(deferred_arg, sizeof(deferred_arg), arg ? arg : "");
+    deferred_iso = isolated;
+    deferred_console = console;
+    deferred_active = 1;
+    wm_request_full();
+}
+
+static struct window *window_for_app(const char *id)
+{
+    for (int i = win_count - 1; i >= 0; i--)
+        if (wins[i] && wins[i]->app && !strcmp(wins[i]->app->id, id)) return wins[i];
+    return NULL;
+}
+
+void wm_service_launch(void)
+{
+    char msg[176];
+    struct window *nw;
+    int already;
+    if (!deferred_active) return;
+    deferred_active = 0;
+    already = wm_app_running(deferred_id);
+    pending_console = deferred_console;
+    wm_launch_app_override(deferred_id, deferred_arg[0] ? deferred_arg : NULL, deferred_iso);
+    pending_console = NULL;            /* consumed (or discarded on failure) */
+    nw = window_for_app(deferred_id);
+    strcpy(msg, "app ");
+    sc_cat(msg, sizeof(msg), deferred_id);
+    if (!nw) sc_cat(msg, sizeof(msg), " failed to launch");
+    else {
+        const char *failure = nw->app && nw->app->failure ? nw->app->failure(nw) : NULL;
+        if (failure) {
+            sc_cat(msg, sizeof(msg), " stopped: ");
+            sc_cat(msg, sizeof(msg), failure);
+        } else sc_cat(msg, sizeof(msg), already ? " already running - focused"
+                                                 : " started successfully");
+    }
+    if (deferred_console) term_console_line(deferred_console, msg);
+    deferred_console = NULL;
+    wm_full();
+}
+
 void wm_clear_console(void *term)
 {
     for (int i = 0; i < win_count; i++)
@@ -3257,6 +3320,7 @@ void wm_run(void)
          * cannot free a window that is still executing its own key handler. */
         security_wm_tick();
         if (wm_stop_requested) goto stopped;
+        wm_service_launch();      /* queued `appstrt` / launch-prompt result */
 
         static u64 last_tick;
         if (tick_count != last_tick) {

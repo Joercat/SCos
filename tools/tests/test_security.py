@@ -63,6 +63,12 @@ def test_the_gate_and_protection_are_wired():
     term = (ROOT / 'kernel/desktop/app_terminal.c').read_text()
     assert 'security_current_user()' in term, 'the terminal prompt claims a fake user again'
     assert 'security_command_allowed(' in term, 'terminal commands bypass authorization'
+    assert 'security_privileged_command(' in term and 'TERM_PROMPT_PASSWORD' in term, \
+        'the terminal does not gate privileged commands through tlpdo'
+    assert 'app_storage_allowed(' in (ROOT / 'kernel/desktop/vfs.c').read_text(), \
+        'per-app storage is not enforced at the VFS boundary'
+    assert 'app_storage_wipe(' in (ROOT / 'kernel/desktop/lua_apps.c').read_text(), \
+        'uninstalling an app does not erase its private data'
     tty = (ROOT / 'kernel/desktop/tty.c').read_text()
     assert 'security_reauthenticate(' in tty, 'the maintenance console has no re-auth gate'
     assert 'Rescue console' in tty and 'if (return_to_wm && !security_reauthenticate' not in tty, \
@@ -221,7 +227,27 @@ def test_a_booted_guest_enforces_accounts():
             'the base account is not top power when roles are enforced'
         d.write(s, b'roles.enabled\0')
         assert g.call('security_choice_set', s, 0) == 1
-        assert allowed('save')[0] == 1, 'equal permissions do not apply to all commands'
+        assert allowed('ls')[0] == 1 and allowed('help')[0] == 1
+        # Privileged commands are no longer free just because every account is
+        # an administrator: they need the tlpdo password gate.
+        ok, msg = allowed('save')
+        assert ok == 0 and 'tlpdo' in msg, (ok, msg)
+        ok, msg = allowed('rm -f home/documents/welcome.txt')
+        assert ok == 0 and 'tlpdo' in msg, (ok, msg)
+        assert allowed('rm home/documents/welcome.txt')[0] == 1, 'plain rm asks for no password'
+        assert g.call('security_elevated') == 0
+        g.call('security_elevate_grant')
+        assert g.call('security_elevated') == 1
+        assert allowed('save')[0] == 1, 'a granted elevation does not permit the command'
+        g.call('security_elevate_drop')
+        assert allowed('save')[0] == 0
+        # The gate itself is a user choice: off means no password prompt.
+        d.write(s, b'sudo.password\0')
+        assert g.call('security_choice_set', s, 0) == 1
+        assert allowed('save')[0] == 1
+        d.write(s, b'sudo.password\0')
+        assert g.call('security_choice_set', s, 1) == 1
+        assert allowed('save')[0] == 0
 
         assert 'panic' not in g.serial().lower(), g.serial()[-2000:]
     print('PASS: booted guest authenticates, protects its database, changes passwords, '
@@ -322,7 +348,8 @@ def test_security_are_user_choices_and_isolation_is_per_app():
         assert choice_set('isolation.prompt', 1) == 1
         for key in ('login.required', 'lock.enabled', 'lock.idle', 'password.policy',
                     'password.age', 'guest.restrict', 'audit.enabled',
-                    'vault.encryption', 'isolation.prompt', 'confirm.destructive'):
+                    'vault.encryption', 'isolation.prompt', 'confirm.destructive',
+                    'sudo.password'):
             assert choice(key) == 1, '%s is not enabled by default' % key
         assert choice('isolation.default') == 0, 'isolation is forced by default'
         assert choice('roles.enabled') == 0, 'all accounts are not equal by default'

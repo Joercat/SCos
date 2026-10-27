@@ -54,8 +54,11 @@ void usermode_init(void)
 {
     for (int i = 1; i <= SC_NR_MAX; i++) allow[i] = 1;
     limits[USER_RLIMIT_MEMORY]      = USER_HEAP_SIZE;
-    limits[USER_RLIMIT_FILES]       = 16;
-    limits[USER_RLIMIT_FILEBYTES]   = 65536;
+    /* One source for the app-storage caps: the cgroup view and the kernel-side
+     * host must not drift, or the same package would be allowed to write more
+     * data isolated than unisolated. */
+    limits[USER_RLIMIT_FILES]       = APP_STORAGE_MAX_FILES;
+    limits[USER_RLIMIT_FILEBYTES]   = APP_STORAGE_MAX_BYTES;
     limits[USER_RLIMIT_SYSCALLS]    = 100000;
     limits[USER_RLIMIT_CPU_MS]      = 1000;
 }
@@ -520,8 +523,16 @@ static u64 do_file(u64 nr, u64 a, u64 b, u64 c)
                     files++;
                 }
         }
-        if (!old && files >= limits[USER_RLIMIT_FILES]) return 0;
-        if (bytes - old_bytes + n > limits[USER_RLIMIT_FILEBYTES]) return 0;
+        /* A refusal says which refusal: -3 is the quota.  Returning plain 0
+         * made the CPL3 host report a *successful* write that never happened,
+         * while the kernel-side host raised for the same call. */
+        if (!old && files >= limits[USER_RLIMIT_FILES]) return (u64)-3;
+        if (bytes - old_bytes + n > limits[USER_RLIMIT_FILEBYTES]) return (u64)-3;
+        /* The per-app quota is app_storage_check()'s answer, not this loop's:
+         * the resource limit above is a cgroup knob the machine may raise, so
+         * asking the same validator the kernel-side host asks keeps both hosts
+         * at 16 files / 64 KiB whatever the limit says. */
+        if (!app_storage_check(proc_pid_app_id(active_pid), name, n)) return (u64)-3;
         if (!vfs_write(path, (const char *)sh->scratch + off, n)) return 0;
         return n;
     }

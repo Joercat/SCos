@@ -87,12 +87,28 @@ def test():
       # GUI uninstall cancellation cannot remove files or stop windows.
       callstr(g,'app_request_uninstall','manage-test');assert g.call('wm_dialog_active')
       g.debug.send('c');g.press('esc');g.pause();g.run();assert g.read('home/apps/manage-test.cat')
-      term=g.launch('terminal');g.type('appuninstall manage-test\n');g.run(.3)
-      tab=g.ptr(g.ptr(term+80));assert g.string(tab,256)=='appuninstall manage-test'
-      g.type('n\n');g.run(.3);assert g.read('home/apps/manage-test.cat')
-      g.type('appuninstall manage-test\n');g.type('y\n');g.run(.4)
+      term=g.launch('terminal')
+      # appuninstall is privileged: typing it without the tlpdo wrapper is
+      # refused, and the package is untouched.
+      g.type('appuninstall manage-test\n');g.run(.3)
+      assert g.read('home/apps/manage-test.cat')
+      assert g.call('security_elevated')==0
+      # tlpdo asks for the password in the terminal's own masked field.
+      g.type('tlpdo appuninstall manage-test\n');g.run(.3)
+      g.type('wrong\n');g.run(.3)
+      assert g.call('security_elevated')==0,'a wrong password granted privilege'
+      assert g.read('home/apps/manage-test.cat')
+      g.type('scos\n');g.run(.4)
+      assert g.call('security_elevated')==1
+      # The y/n question is answered by a key, and Enter accepts.  Typing the
+      # key alone must NOT answer it.
+      g.type('y');g.run(.3);assert g.read('home/apps/manage-test.cat'),'a bare y answered the question'
+      g.type('n\n');g.run(.4);assert g.read('home/apps/manage-test.cat')
+      g.type('tlpdo appuninstall manage-test\n');g.run(.3)
+      g.type('y\n');g.run(.5)
       assert g.read('home/apps/manage-test.cat') is None
-      assert g.read('home/appdata/manage-test/kept.txt')==b'kept'
+      # Uninstalling erases the private data; only a reinstall starts clean.
+      assert g.read('home/appdata/manage-test/kept.txt') is None,'uninstall kept the app data'
       assert not callstr(g,'app_find','manage-test') and not callstr(g,'wm_taskbar_pinned','manage-test')
       assert g.call('wm_win_count')==1;g.close(term)
       # Reuse the same slot more than the registration cap, without rebooting.
@@ -207,6 +223,7 @@ def test():
       assert g.call('wm_dialog_active'),'the icon menu did not raise the confirmation'
       g.snapshot('uninstall-from-icon');g.type('\n');g.run()
       assert g.read('home/apps/ui-test.cat') is None,'the confirmed uninstall left the package on disk'
+      assert g.read('home/appdata/ui-test/kept.txt') is None,'the icon uninstall kept the app data'
       assert g.call('wm_win_count')==before-1,'the uninstalled app kept its window open'
       after=[g.debug.read(ibase+i*DITEM,DITEM) for i in range(g.value('nitems'))]
       left=[i for i,r in enumerate(after) if struct.unpack_from('<i',r,0)[0]==0 and r[4:36].split(b'\0')[0]==b'ui-test']
@@ -218,7 +235,7 @@ def test():
         # app_uninstall itself persists removals; no extra save is called.
         before=g.read('system/desktop.json');g.reboot();assert g.read('system/desktop.json')==before
         assert g.read('home/apps/manage-test.cat') is None
-        assert g.read('home/appdata/manage-test/kept.txt')==b'kept'
+        assert g.read('home/appdata/manage-test/kept.txt') is None
         assert b'manage-test' not in (g.read('home/taskbar.txt') or b'')
       print('PASS session/durable removal, terminal y/n, GUI cancel, slot reuse, protected builtins, Files app links, adaptive pins, notifications and GPU fallback: '+('IDE' if ide else 'USB'),flush=True)
 if __name__=='__main__':test()

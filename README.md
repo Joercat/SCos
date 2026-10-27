@@ -20,7 +20,8 @@ implementations have now been adapted and integration-tested; see
 
 **Still unavailable:** AHCI/NVMe/USB mass-storage persistence, networking/real
 browser engine and accelerated GPU drivers. Files remain RAM-only unless a
-unique supported ATA SCos-data partition is verified; `save` requires confirmation.
+unique supported ATA SCos-data partition is verified; `save` requires the
+`tlpdo` password and a confirmation.
 ACPI has a manual-power fallback for unsupported firmware. Emulator success is
 **not physical acceptance on the user's USB-input PC**. No new release number.
 
@@ -100,6 +101,27 @@ behaviour. Built-in native C apps are compiled into the kernel image (like
 Linux kernel modules): they get the domains, namespaces, capabilities and
 limits, but their C code still runs at CPL0. Each account also gets a private
 `home/users/<name>/` tree enforced at the VFS boundary.
+
+**App data is its own namespace.** An app's files live in
+`home/appdata/<id>/` and nowhere else: the id comes from the kernel-held
+registration, a package names a *file* rather than a path, the namespace is
+flat (16 files / 64 KiB) and it is private whether or not the owner chose to
+run the app isolated. `vfs_read/write/mkdir/delete/rename` enforce the same
+rule, so a native app calling the VFS directly is confined too. Uninstalling an
+app **erases that directory**, so reinstalling the same id starts with no data
+at all.
+
+**Privileged commands need a password, like `sudo`.** `tlpdo <command>` asks
+for the account password in the terminal's own masked field and runs the inner
+command only on success; without it, `save`, the power actions, `sysrq`,
+`appuninstall`, `make`, `rm -s/-f/-i`, `kill --system`, `theme <id>`,
+`isolate`, `choices`, `policy`, `audit clear` and the account commands are
+refused. Elevation is per account and lasts while the owner keeps interacting -
+two quiet minutes end it, a user switch, lock or logout ends it at once.
+`sudo.password` is a user choice (default on), as with every protection here.
+The y/n confirmation and the first-launch isolation question are answered in a
+dedicated field: keys select, **Enter accepts**, Enter with nothing chosen is
+the safe default, and Esc/Ctrl+C cancels without running anything.
 
 An anti-rollback anchor in a GPT-reserved sector outside the saved image lets
 boot reject an older (still authenticated) vault image after a replay.

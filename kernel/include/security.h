@@ -296,6 +296,16 @@ int  security_is_admin(void);
 int  security_command_allowed(const char *line, char *out, size_t cap);
 int  security_shell(const char *line, char *out, size_t cap);
 int  security_reauthenticate(const char *reason);
+
+/* `tlpdo`: the password gate for privileged commands.  Elevation is bound to
+ * the signed-in account and ends after a period with no interaction at all -
+ * it never expires while the owner is working, and never survives a user
+ * switch or lock.  `sudo.password` (a user choice) can turn the prompt off. */
+int  security_privileged_command(const char *line, char *what, size_t cap);
+int  security_elevated(void);
+void security_elevate_grant(void);
+void security_elevate_drop(void);
+int  security_elevation_seconds(void);
 void security_mix_event(uint8_t code);
 
 /* Production entry points used by the full-screen UI and by the QEMU test

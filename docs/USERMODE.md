@@ -132,7 +132,7 @@ what the package's own code does. Both hosts are therefore the same API v2:
 | theme / date | live `theme()` + `date()` table | same values through the shared page |
 | `interval(ms)` | 100 … 60000 ms scheduling | stored per process, honoured by the scheduler |
 | drawing | 4,000,000-pixel budget per callback, `drawing budget exceeded` | same budget per episode, same error |
-| data files | `home/appdata/<id>/`, 16 files / 64 KiB | same namespace via syscalls |
+| data files | `home/appdata/<id>/`, flat, 16 files / 64 KiB, always private to that app (independent of the isolation choice) and erased on uninstall | same namespace via syscalls, the same `app_storage_check()` quota, and the same `app data quota exceeded (16 files / 64 KiB)` error (`SC_FILE_QUOTA_REFUSED`) rather than a silent success |
 | `scos.api_info().isolated` | true only when the window really is sandboxed | always true here |
 
 Capabilities are the only difference, and they are the owner's choice: an

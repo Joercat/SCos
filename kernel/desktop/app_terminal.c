@@ -15,6 +15,10 @@
 #define TERM_LINE 256
 #define HIST 16
 #define TERM_MAX_TABS 6
+#define TERM_PROMPT_NONE 0
+#define TERM_PROMPT_CONFIRM 1
+#define TERM_PROMPT_PASSWORD 2
+#define TERM_PROMPT_LAUNCH 3
 #define TERM_TAB_H 22
 #define TAB_BTN_W 74
 
@@ -43,6 +47,20 @@ struct term {
     char aliases[8][2][64];
     int nalias;
     int shutting_down;
+    /* Interactive prompt widget.  A y/n question, a password and the
+     * first-launch app choice are answered by pressing keys in the terminal's
+     * own field and Enter to accept - not by typing a whole line at the shell
+     * prompt, which is what a shell is for and not what a question is for.
+     * Esc or Ctrl+C cancels every kind. */
+    int prompt_kind;
+    char prompt_hint[96];
+    char prompt_ans[SC_PASS_MAX + 1];
+    int prompt_pos;
+    char prompt_cmd[TERM_LINE];
+    char prompt_app[SC_APP_ID_MAX];
+    char prompt_arg[192];
+    int prompt_tries;
+    int prompt_choice;
     /* nano-style full screen editor */
     int edit_mode;
     char ed_path[192];
@@ -188,7 +206,7 @@ static const char *help_text =
     "edit <f>  - Full-screen editor (nano-like: ^O save, ^X exit)\n"
     "appstrt   - Launch an app; its logs stream into this tab\n"
     "apps      - List installed apps and running instances\n"
-    "appuninstall <id> - Remove a user app (confirmed; keeps data)\n"
+    "appuninstall <id> - Remove a user app and ERASE its data (tlpdo)\n"
     "graphics  - Detected GPUs and actual renderer status\n"
     "procs     - Process table with real per-task memory\n"
     "kill <pid>- Terminate an app task (see 'procs')\n"
@@ -223,7 +241,8 @@ static const char *help_text =
     "scinfo    - Display system information\n"
     "alias     - Create command aliases\n"
     "history   - Show command history\n"
-    "save      - Write the filesystem image to disk\n"
+    "tlpdo <c> - Run a privileged command after your password (sudo)\n"
+    "save      - Write the filesystem image to disk (tlpdo)\n"
     "kill --system <pid> - confirmed stop (scwm only)\n"
     "shutdown [--confirm] - Power the machine off\n"
     "reboot    - Restart the machine\n"
@@ -258,25 +277,34 @@ static void resolve_path(struct term *t, const char *arg, char *out)
 }
 
 
-static void run_command(struct term *t, const char *command)
+static void term_prompt_clear(struct term *t)
 {
-    char cmdbuf[TERM_LINE];
-    strncpy(cmdbuf, command, sizeof(cmdbuf) - 1);
-    cmdbuf[sizeof(cmdbuf) - 1] = 0;
+    t->prompt_kind = TERM_PROMPT_NONE;
+    t->prompt_hint[0] = 0;
+    /* Never leave a typed password in a buffer after the question is gone:
+     * the tab is long-lived and the buffer is otherwise only cleared up to
+     * its first NUL. */
+    sc_burn(t->prompt_ans, sizeof(t->prompt_ans));
+    t->prompt_pos = 0;
+    t->prompt_cmd[0] = 0;
+    t->prompt_app[0] = 0;
+    t->prompt_arg[0] = 0;
+    t->prompt_tries = 0;
+    t->prompt_choice = 0;
+}
 
-    int confirmed = t->confirmation.command[0] != 0;
-    char confirmation_message[192];
-    if (confirmed && confirm_command(&t->confirmation, cmdbuf, sizeof(cmdbuf), confirmation_message)) {
-        term_print(t, confirmation_message);
-        return;
-    }
+static void run_line(struct term *t, const char *command, int skip_confirm);
 
+/* Shell-style echo: the transcript shows the command exactly once, when it is
+ * actually about to run.  History is recorded there too, so a question that
+ * was cancelled never becomes a command in the history. */
+static void term_echo_command(struct term *t, const char *cmdbuf)
+{
     char prompt[160];
     prompt_str(t, prompt);
     char echo[TERM_LINE + 160];
     strcpy(echo, prompt); strcat(echo, cmdbuf);
     term_print(t, echo);
-
     if (cmdbuf[0]) {
         if (t->hcount < HIST) strcpy(t->hist[t->hcount++], cmdbuf);
         else {
@@ -285,6 +313,75 @@ static void run_command(struct term *t, const char *command)
         }
         t->hindex = t->hcount;
     }
+}
+
+static void run_command(struct term *t, const char *command)
+{
+    run_line(t, command, 0);
+}
+
+static void run_line(struct term *t, const char *command, int skip_confirm)
+{
+    char cmdbuf[TERM_LINE];
+    strncpy(cmdbuf, command, sizeof(cmdbuf) - 1);
+    cmdbuf[sizeof(cmdbuf) - 1] = 0;
+
+    /* ---- tlpdo: the password gate, before anything else ---------------- */
+    {
+        const char *q = cmdbuf;
+        while (*q == ' ') q++;
+        if (!strncmp(q, "tlpdo", 5) && (!q[5] || q[5] == ' ')) {
+            const char *inner = q + 5;
+            char what[96];
+            while (*inner == ' ') inner++;
+            term_echo_command(t, cmdbuf);
+            if (!*inner) {
+                term_print(t, "usage: tlpdo <command>  (asks for your password, then runs the command)");
+                term_print(t, "Privileged: save, shutdown, reboot, poweroff, sysrq, appuninstall, rm -s/-f,");
+                term_print(t, "kill --system, theme, isolate, choices, policy, useradd/userdel/usermod.");
+                return;
+            }
+            if (!strncmp(inner, "tlpdo", 5) && (!inner[5] || inner[5] == ' ')) {
+                term_print(t, "tlpdo: do not nest tlpdo.");
+                return;
+            }
+            if (!security_privileged_command(inner, what, sizeof(what))) {
+                term_print(t, "tlpdo: that command does not need a password; running it.");
+                run_line(t, inner, skip_confirm);
+                return;
+            }
+            if (security_elevated()) {
+                term_print(t, "tlpdo: already authorised for this session; press on.");
+                run_line(t, inner, skip_confirm);
+                return;
+            }
+            if (!security_choice("sudo.password")) {
+                term_print(t, "tlpdo: the password gate is switched off (choices set sudo.password on).");
+                run_line(t, inner, skip_confirm);
+                return;
+            }
+            /* Ask for the password in the terminal's masked field. */
+            term_prompt_clear(t);
+            t->prompt_kind = TERM_PROMPT_PASSWORD;
+            sc_copy(t->prompt_cmd, sizeof(t->prompt_cmd), inner);
+            sc_copy(t->prompt_hint, sizeof(t->prompt_hint), "Password for ");
+            sc_cat(t->prompt_hint, sizeof(t->prompt_hint), security_current_user());
+            sc_cat(t->prompt_hint, sizeof(t->prompt_hint), ": ");
+            t->prompt_tries = 3;
+            t->scroll = 1000000; t->follow = 1;
+            return;
+        }
+    }
+
+    int confirmed = skip_confirm;
+    char confirmation_message[256];
+    if (!confirmed && t->confirmation.command[0] &&
+        confirm_command(&t->confirmation, cmdbuf, sizeof(cmdbuf), confirmation_message)) {
+        term_print(t, confirmation_message);
+        return;
+    }
+
+    term_echo_command(t, cmdbuf);
 
     /* alias expansion */
     char effective[TERM_LINE];
@@ -304,8 +401,46 @@ static void run_command(struct term *t, const char *command)
             break;
         }
 
+    /* A privileged command without an active elevation is refused here, before
+     * the confirmation question, so the answer is about the password rather
+     * than about the deletion.  This is checked even for an already-confirmed
+     * command: elevation is measured in inactivity, and a confirmation field
+     * can sit on screen for longer than the elevation lasts.  Re-running the
+     * gate on the way in means an expired window can never be walked through
+     * by having answered the question before it expired. */
+    {
+        char what[96];
+        if (security_privileged_command(effective, what, sizeof(what)) &&
+            !security_elevated()) {
+            char msg[TERM_LINE];
+            strcpy(msg, "Permission denied: ");
+            strcat(msg, what);
+            strcat(msg, " needs a password. Run 'tlpdo ");
+            strcat(msg, effective);
+            strcat(msg, "' and enter it.");
+            term_print(t, msg);
+            return;
+        }
+    }
+
     if (!confirmed && confirm_command(&t->confirmation,effective,sizeof(effective),confirmation_message)) {
-        term_print(t,confirmation_message); return;
+        /* confirm_command() has recorded the pending command: move it into the
+         * prompt widget and clear the shared state, so the answer is a key in
+         * the field rather than a line typed at the shell. */
+        char *q = str_str(confirmation_message, "\nContinue? [y/N]");
+        if (q && t->confirmation.command[0]) {
+            *q = 0;
+            term_print(t, confirmation_message);
+            term_prompt_clear(t);
+            t->prompt_kind = TERM_PROMPT_CONFIRM;
+            sc_copy(t->prompt_cmd, sizeof(t->prompt_cmd), t->confirmation.command);
+            sc_copy(t->prompt_hint, sizeof(t->prompt_hint), "Continue? [y/N] ");
+            t->confirmation.command[0] = 0;
+            t->scroll = 1000000; t->follow = 1;
+            return;
+        }
+        term_print(t, confirmation_message);
+        return;
     }
     /* The legacy tokenizer overwrites the spaces in `effective` with NULs.
      * Keep a pristine copy for the account subsystem, which needs the whole
@@ -727,7 +862,7 @@ static void run_command(struct term *t, const char *command)
         }
     }
     else if(!strcmp(cmd,"appuninstall")){
-        if(nargs!=2||!strcmp(args[1],"--help"))strcpy(response,"Usage: appuninstall <app-id> (confirmed; projects/data kept)");
+        if(nargs!=2||!strcmp(args[1],"--help"))strcpy(response,"Usage: tlpdo appuninstall <app-id> (password; erases its data)");
         else app_uninstall(args[1],response,sizeof(response));
     }
     else if(!strcmp(cmd,"graphics")){if(nargs!=1)strcpy(response,"Usage: graphics");else graphics_report(response,sizeof(response));}
@@ -753,24 +888,35 @@ static void run_command(struct term *t, const char *command)
             if (!a || a->id[0] == '_') {
                 strcpy(response, "app "); strcat(response, args[1]);
                 strcat(response, " failed to launch: unknown app");
-            } else {
-                int already = wm_app_running(a->id);
-                wm_set_pending_console(t);     /* open()-time logs land here */
-                char path_arg[256];void *arg=NULL;
-                if(nargs>2){resolve_path(t,args[2],path_arg);arg=path_arg;}
-                struct window *nw = wm_open_app(a->id,arg);
-                if (!nw) {
-                    strcpy(response, "app "); strcat(response, args[1]);
-                    strcat(response, " failed to launch");
-                } else {
-                    strcpy(response, "app "); strcat(response, args[1]);
-                    const char *failure=nw->app->failure ? nw->app->failure(nw) : NULL;
-                    if (failure) {
-                        strcat(response," stopped: ");
-                        strncat(response,failure,256);
-                    } else strcat(response, already ? " already running - focused"
-                                                    : " started successfully");
+            } else if (security_initialized() && security_choice("isolation.prompt") &&
+                       !wm_app_is_system(a->id) && security_app_isolation_pending(a->id)) {
+                /* First launch of an installed app: the owner chooses isolation
+                 * in the terminal's own field - press a key, Enter to accept.
+                 * Esc cancels without launching or storing anything. */
+                char argbuf[192];
+                argbuf[0] = 0;
+                if (nargs > 2) {
+                    char path_arg[256];
+                    resolve_path(t, args[2], path_arg);
+                    sc_copy(argbuf, sizeof(argbuf), path_arg);
                 }
+                term_print(t, "First launch: choose isolation for this app below. Esc cancels.");
+                term_prompt_clear(t);
+                t->prompt_kind = TERM_PROMPT_LAUNCH;
+                sc_copy(t->prompt_app, sizeof(t->prompt_app), a->id);
+                sc_copy(t->prompt_arg, sizeof(t->prompt_arg), argbuf);
+                sc_copy(t->prompt_hint, sizeof(t->prompt_hint),
+                        "[a]lways  [n]ever  [i]solated once  [u]nisolated once: ");
+                t->scroll = 1000000; t->follow = 1;
+                return;
+            } else {
+                /* Queued, not opened here: see wm_launch_deferred().  The WM
+                 * loop runs in kernel context and reports into this tab. */
+                char path_arg[192];
+                path_arg[0] = 0;
+                if (nargs > 2) resolve_path(t, args[2], path_arg);
+                wm_launch_deferred(a->id, path_arg[0] ? path_arg : NULL, -1, t);
+                return;
             }
         }
     }
@@ -1262,6 +1408,108 @@ static void run_command(struct term *t, const char *command)
     }
 }
 
+/* ------------------------------------------------------- prompt widget --- */
+/* The field owns the keyboard while it is up: no line editing, no history, no
+ * tab shortcuts.  That is the point - the question is answered here, not by
+ * typing a command at a shell prompt and hoping the shell recognises it. */
+static void term_launch_choice(struct term *t, int choice)
+{
+    char id[SC_APP_ID_MAX], arg[192];
+    int isolated;
+    struct app *a;
+    sc_copy(id, sizeof(id), t->prompt_app);
+    sc_copy(arg, sizeof(arg), t->prompt_arg);
+    term_prompt_clear(t);
+    a = app_find(id);
+    if (!a) { term_print(t, "app failed to launch: unknown app"); return; }
+    if (choice == 'a') {
+        security_app_isolation_set(id, SC_ISO_ALWAYS);
+        isolated = 1;
+    } else if (choice == 'n') {
+        security_app_isolation_set(id, SC_ISO_NEVER);
+        isolated = 0;
+    } else isolated = choice == 'i';
+    /* Never open a window from inside this app's callback: the WM performs
+     * the launch once the callback has unwound, and reports the result into
+     * this tab (the app's own open-time log lines land here too). */
+    wm_launch_deferred(id, arg[0] ? arg : NULL, isolated, t);
+    term_print(t, "launching; its console is this tab.");
+}
+
+static void term_prompt_key(struct window *w, struct term *t, struct key_event *e)
+{
+    if (e->keycode == 3 || e->keycode == 27) {          /* Ctrl+C / Esc */
+        term_prompt_clear(t);
+        term_print(t, "Cancelled.");
+        wm_redraw(w);
+        return;
+    }
+    if (t->prompt_kind == TERM_PROMPT_CONFIRM) {
+        if (e->keycode == '\n') {
+            int yes = t->prompt_ans[0] == 'y' || t->prompt_ans[0] == 'Y';
+            char cmd[TERM_LINE];
+            sc_copy(cmd, sizeof(cmd), t->prompt_cmd);
+            term_prompt_clear(t);
+            if (!yes) term_print(t, "Cancelled.");
+            else run_line(t, cmd, 1);       /* already confirmed */
+            wm_redraw(w);
+            return;
+        }
+        if (e->keycode == 'y' || e->keycode == 'Y') strcpy(t->prompt_ans, "y");
+        else if (e->keycode == 'n' || e->keycode == 'N') strcpy(t->prompt_ans, "n");
+        else if (e->keycode == '\b' || e->keycode == 127) t->prompt_ans[0] = 0;
+        t->prompt_pos = (int)strlen(t->prompt_ans);
+        wm_redraw(w);
+        return;
+    }
+    if (t->prompt_kind == TERM_PROMPT_PASSWORD) {
+        if (e->keycode == '\n') {
+            char pw[SC_PASS_MAX + 1], msg[SC_MSG_MAX], inner[TERM_LINE];
+            int ok;
+            sc_copy(pw, sizeof(pw), t->prompt_ans);
+            sc_copy(inner, sizeof(inner), t->prompt_cmd);
+            sc_burn(t->prompt_ans, sizeof(t->prompt_ans));
+            t->prompt_pos = 0;
+            ok = security_api_verify(security_api_session(), pw, msg, sizeof(msg));
+            sc_burn(pw, sizeof(pw));
+            if (ok) {
+                term_prompt_clear(t);
+                security_elevate_grant();
+                term_print(t, "Identity confirmed. Privileged until two minutes pass without activity.");
+                run_line(t, inner, 0);      /* password first, confirmation after */
+            } else {
+                term_print(t, msg);
+                if (--t->prompt_tries <= 0) {
+                    term_prompt_clear(t);
+                    term_print(t, "tlpdo: too many attempts; nothing was run.");
+                } else {
+                    t->prompt_ans[0] = 0;
+                    t->prompt_pos = 0;
+                }
+            }
+            wm_redraw(w);
+            return;
+        }
+        edit_line(t->prompt_ans, &t->prompt_pos, sizeof(t->prompt_ans), e);
+        wm_redraw(w);
+        return;
+    }
+    if (t->prompt_kind == TERM_PROMPT_LAUNCH) {
+        if (e->keycode == '\n') {
+            term_launch_choice(t, t->prompt_choice ? t->prompt_choice : 'u');
+            wm_redraw(w);
+            return;
+        }
+        if (e->keycode == 'a' || e->keycode == 'A') t->prompt_choice = 'a';
+        else if (e->keycode == 'n' || e->keycode == 'N') t->prompt_choice = 'n';
+        else if (e->keycode == 'i' || e->keycode == 'I') t->prompt_choice = 'i';
+        else if (e->keycode == 'u' || e->keycode == 'U') t->prompt_choice = 'u';
+        else if (e->keycode == '\b' || e->keycode == 127) t->prompt_choice = 0;
+        wm_redraw(w);
+        return;
+    }
+}
+
 /* ------------------------------------------------------------- app glue -- */
 static void term_init_shell(struct term *t, struct window *w, const char *banner)
 {
@@ -1299,6 +1547,7 @@ static void term_close(struct window *w)
         for (int i = 0; i < tw->ntabs; i++) {
             /* apps launched from this tab must not log into freed memory */
             wm_clear_console(tw->tabs[i]);
+            term_prompt_clear(tw->tabs[i]);      /* burn any typed secret */
             pfree(tw->tabs[i], sizeof(struct term));
         }
         pfree(tw, sizeof(*tw));
@@ -1338,6 +1587,7 @@ static void term_close_tab(struct window *w, int i)
     if (i < 0 || i >= tw->ntabs || tw->ntabs <= 1) return;
     struct term *t = tw->tabs[i];
     wm_clear_console(t);
+    term_prompt_clear(t);                        /* burn any typed secret */
     wm_track_mem(w, -(int)sizeof(struct term));
     pfree(t, sizeof(struct term));
     for (int k = i; k < tw->ntabs - 1; k++) tw->tabs[k] = tw->tabs[k + 1];
@@ -1618,6 +1868,38 @@ static void term_paint(struct window *w)
             }
         } else if (t->pending_active && r < t->total_rows + plines) {
             term_paint_row(s, pbuf, cols, r - t->total_rows, th->main, 6, y);
+        } else if (t->prompt_kind != TERM_PROMPT_NONE) {
+            /* The question is a field of its own: a highlighted bar, the
+             * prompt text, then what has been keyed so far (masked for a
+             * password).  Enter accepts, Esc cancels. */
+            char shown[224];
+            sc_copy(shown, sizeof(shown), t->prompt_hint);
+            if (t->prompt_kind == TERM_PROMPT_PASSWORD) {
+                int n = (int)strlen(t->prompt_ans);
+                if (n > 40) n = 40;
+                for (int k = 0; k < n; k++) sc_cat(shown, sizeof(shown), "*");
+            } else if (t->prompt_kind == TERM_PROMPT_CONFIRM) {
+                if (t->prompt_ans[0]) {
+                    sc_cat(shown, sizeof(shown), t->prompt_ans[0] == 'y' ? "yes" : "no");
+                    sc_cat(shown, sizeof(shown), "  (Enter to accept, Esc cancels)");
+                } else sc_cat(shown, sizeof(shown), "(Enter or Esc cancels)");
+            } else {
+                if (t->prompt_choice) {
+                    const char *label = t->prompt_choice == 'a' ? "always isolated" :
+                                        t->prompt_choice == 'n' ? "never isolated" :
+                                        t->prompt_choice == 'i' ? "isolated once" :
+                                                                  "unisolated once";
+                    sc_cat(shown, sizeof(shown), label);
+                    sc_cat(shown, sizeof(shown), "  (Enter to accept)");
+                } else sc_cat(shown, sizeof(shown), "Enter = unisolated once");
+            }
+            s_fill(s, 4, y - 2, s->w - 8, FONT_H + 4, th->main);
+            s_clip_text(s, 8, y, shown, th->win_bg, s->w - 16);
+            {
+                int caret = 8 + s_text_width(shown);
+                if (caret + FONT_W < s->w - 8)
+                    s_fill(s, caret, y + FONT_H - 2, FONT_W, 2, th->win_bg);
+            }
         } else {
             char prompt[160];
             prompt_str(t, prompt);
@@ -1640,6 +1922,7 @@ static void term_key(struct window *w, struct key_event *e)
     if (WT(w)->edit_mode) { ed_key(w, e); return; }
     struct term *t = WT(w);
     if (!e->pressed) return;
+    if (t->prompt_kind != TERM_PROMPT_NONE) { term_prompt_key(w, t, e); return; }
     if (t->confirmation.command[0] && (e->keycode == 3 || e->keycode == 27)) {
         t->confirmation.command[0]=0; t->input[0]=0; t->ipos=0;
         term_print(t,"Cancelled."); wm_redraw(w); return;

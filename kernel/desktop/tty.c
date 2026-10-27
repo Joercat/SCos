@@ -19,6 +19,11 @@ struct tty_session {
     char cwd[128];
     struct shell_confirm confirmation;
     int initialized;
+    /* tlpdo password entry: masked on screen, never echoed, burned after
+     * verification.  `auth_cmd` is the privileged command waiting for it. */
+    int secret;
+    char auth_cmd[TTY_COLS + 1];
+    int auth_tries;
 };
 static struct tty_session consoles[6];
 static int active_console;
@@ -28,6 +33,9 @@ static int active_console;
 #define tty_ipos (consoles[active_console].ipos)
 #define tty_cwd (consoles[active_console].cwd)
 #define tty_confirmation (consoles[active_console].confirmation)
+#define tty_secret (consoles[active_console].secret)
+#define tty_auth_cmd (consoles[active_console].auth_cmd)
+#define tty_auth_tries (consoles[active_console].auth_tries)
 static int tty_rows, tty_wm_alive, tty_exit;
 
 void tty_select(int number)
@@ -97,7 +105,21 @@ static void tty_draw(void)
     for (int i = first; i < tty_nlines; i++, y += FONT_H + 2)
         s_text(&screen, 6, y, tty_lines[i], TTY_FG);
     char pl[TTY_COLS + 4];
+    char shown[TTY_COLS + 4];
     tty_prompt(pl, TTY_COLS - 2);
+    if (tty_secret) {
+        /* A password entry shows its state, never its content. */
+        int n = (int)strlen(tty_input);
+        if (n > TTY_COLS - 16) n = TTY_COLS - 16;
+        shown[0] = 0;
+        for (int k = 0; k < n; k++) { shown[k] = '*'; shown[k + 1] = 0; }
+        strncat(pl, shown, TTY_COLS - (int)strlen(pl));
+        s_text(&screen, 6, y, pl, TTY_PROMPT_FG);
+        s_fill(&screen, 6 + ((int)strlen(pl) - n + tty_ipos) * FONT_W,
+               y + FONT_H - 2, FONT_W, 2, TTY_FG);
+        fb_flip();
+        return;
+    }
     strncat(pl, tty_input, TTY_COLS - (int)strlen(pl));
     s_text(&screen, 6, y, pl, TTY_PROMPT_FG);
     /* block cursor after the input position */
@@ -183,6 +205,54 @@ static void tty_no_wm(const char *cmd)
 static void tty_exec(char *cmd)
 {
     char message[192];
+    /* `tlpdo <command>`: same password gate as the graphical terminal, and in
+     * the same order - password first, confirmation second.  The line has
+     * already been echoed by the input loop. */
+    {
+        char *q = cmd;
+        while (*q == ' ') q++;
+        if (!strncmp(q, "tlpdo", 5) && (!q[5] || q[5] == ' ')) {
+            char *inner = q + 5;
+            char what[96];
+            while (*inner == ' ') inner++;
+            if (!*inner) { tty_print("usage: tlpdo <command>"); return; }
+            if (!strncmp(inner, "tlpdo", 5) && (!inner[5] || inner[5] == ' ')) {
+                tty_print("tlpdo: do not nest tlpdo.");
+                return;
+            }
+            if (!security_privileged_command(inner, what, sizeof(what))) {
+                tty_print("tlpdo: that command does not need a password; running it.");
+                tty_exec(inner);
+                return;
+            }
+            if (security_elevated() || !security_choice("sudo.password")) {
+                tty_exec(inner);
+                return;
+            }
+            sc_copy(tty_auth_cmd, sizeof(tty_auth_cmd), inner);
+            tty_secret = 1;
+            tty_auth_tries = 3;
+            tty_input[0] = 0;
+            tty_ipos = 0;
+            tty_print("Password (not echoed):");
+            return;
+        }
+    }
+    /* A privileged command without an active elevation is refused, not run,
+     * and it is refused BEFORE the y/n question so the answer is about the
+     * password.  This is checked after a confirmed answer too: elevation is
+     * measured in inactivity and can expire while a question waits. */
+    {
+        char what[96];
+        if (security_privileged_command(cmd, what, sizeof(what)) && !security_elevated()) {
+            char out[256];
+            strcpy(out, "Permission denied: ");
+            strcat(out, what);
+            strcat(out, " needs a password. Run 'tlpdo <command>'.");
+            tty_print(out);
+            return;
+        }
+    }
     if (confirm_command(&tty_confirmation, cmd, TTY_COLS + 1, message)) { tty_print(message); return; }
     /* Run before tokenization: the tokenizer replaces the spaces in `cmd`
      * with NULs, and the account policy needs the whole command line. */
@@ -233,7 +303,7 @@ static void tty_exec(char *cmd)
             "  procs           system tasks + app windows with pids\n"
             "  kill <pid>      terminate an app process (pid >= 10, needs wm)\n"
             "  appstrt <app>   launch a GUI app (needs wm; binds you back to it)\n"
-            "  appuninstall <id>  confirmed removal of a user app (keeps data)\n"
+            "  appuninstall <id>  removal of a user app; ERASES its data (tlpdo)\n"
             "  graphics        detected GPUs and renderer status\n"
             "  wm              return to the desktop / start the WM\n"
             "  dmesg           kernel log ring (USB, input, fb, mm...)\n"
@@ -253,7 +323,8 @@ static void tty_exec(char *cmd)
             "  clear           clear this console\n"
             "  reboot          reboot the machine now\n"
             "  kill --system <pid> - confirmed stop (scwm only)\n"
-            "  save - Save to verified SCos disk\n  shutdown [--confirm] - ACPI power-off");
+            "  tlpdo <command>  ask for your password, then run a privileged command\n"
+            "  save - Save to verified SCos disk (tlpdo)\n  shutdown [--confirm] - ACPI power-off (tlpdo)");
     }
     else if (!strcmp(args[0], "ls")) {
         char path[160];
@@ -791,6 +862,45 @@ static void tty_console_loop(void)
         while (kbd_poll(&ke)) {
             got = 1;
             if (!ke.pressed) continue;
+            if (tty_secret) {
+                if (ke.keycode == 3 || ke.keycode == 27) {
+                    tty_secret = 0;
+                    sc_burn(tty_input, sizeof(tty_input));
+                    tty_input[0] = 0; tty_ipos = 0;
+                    tty_print("Cancelled.");
+                    tty_draw();
+                    continue;
+                }
+                if (ke.keycode == '\n') {
+                    char pw[SC_PASS_MAX + 1], msg[SC_MSG_MAX], inner[TTY_COLS + 1];
+                    int ok;
+                    sc_copy(pw, sizeof(pw), tty_input);
+                    sc_copy(inner, sizeof(inner), tty_auth_cmd);
+                    tty_input[0] = 0; tty_ipos = 0;
+                    tty_secret = 0;
+                    ok = security_api_verify(security_api_session(), pw, msg, sizeof(msg));
+                    sc_burn(pw, sizeof(pw));
+                    if (ok) {
+                        security_elevate_grant();
+                        tty_print("Identity confirmed. Privileged until two minutes without activity.");
+                        tty_draw();
+                        tty_exec(inner);
+                    } else {
+                        tty_print(msg);
+                        if (--tty_auth_tries > 0) {
+                            tty_secret = 1;
+                            tty_draw();
+                            continue;
+                        }
+                        tty_print("tlpdo: too many attempts; nothing was run.");
+                    }
+                    tty_draw();
+                    continue;
+                }
+                edit_line(tty_input, &tty_ipos, (int)sizeof(tty_input), &ke);
+                tty_draw();
+                continue;
+            }
             if (tty_confirmation.command[0] && (ke.keycode==3 || ke.keycode==27)) {
                 tty_confirmation.command[0]=0; tty_input[0]=0; tty_ipos=0;
                 tty_print("Cancelled."); tty_draw(); continue;

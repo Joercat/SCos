@@ -1466,6 +1466,136 @@ static int in_list(const char *s, const char *const *list)
     return 0;
 }
 
+/* ------------------------------------------------------- privileged commands --- */
+/* One table answers "does this need a password?", and both shells plus
+ * security_command_allowed() ask it.  A command that changes the machine or
+ * erases data is in here; reading things is not.  `tlpdo` itself is the
+ * wrapper, so it is never privileged. */
+static int token_at(const char *line, int index, char *out, size_t cap)
+{
+    char buf[256];
+    char *p = buf;
+    int n = 0;
+    if (out && cap) out[0] = 0;
+    if (!line) return 0;
+    sc_copy(buf, sizeof(buf), line);
+    while (*p) {
+        char *s;
+        size_t len;
+        while (*p == ' ') p++;
+        if (!*p) break;
+        s = p;
+        while (*p && *p != ' ') p++;
+        len = (size_t)(p - s);
+        if (n == index) {
+            if (len >= cap) len = cap - 1;
+            memcpy(out, s, len); out[len] = 0;
+            return 1;
+        }
+        n++;
+    }
+    return 0;
+}
+
+int security_privileged_command(const char *line, char *what, size_t cap)
+{
+    static const char *const always[] = {
+        "save", "shutdown", "poweroff", "reboot", "panic", "sysrq",
+        "appuninstall", "make", "useradd", "userdel", "usermod", 0
+    };
+    char a[64], b[64], t[64];
+    int n;
+    if (what && cap) what[0] = 0;
+    if (!line) return 0;
+    n = first_tokens(line, a, sizeof(a), b, sizeof(b));
+    if (!n || sc_eq(a, "tlpdo")) return 0;
+    if (in_list(a, always)) {
+        if (what) {
+            sc_copy(what, cap, sc_eq(a, "save") ? "writing the filesystem image to disk" :
+                             sc_eq(a, "appuninstall") ? "uninstalling an app and erasing its data" :
+                             sc_eq(a, "sysrq") ? "issuing a system request" :
+                             sc_eq(a, "make") ? "building the system image" : a);
+        }
+        return 1;
+    }
+    if (sc_eq(a, "kill") && sc_eq(b, "--system")) {
+        if (what) sc_copy(what, cap, "stopping the desktop");
+        return 1;
+    }
+    if (sc_eq(a, "rm")) {
+        for (int i = 1; token_at(line, i, t, sizeof(t)); i++)
+            if (sc_eq(t, "-s") || sc_eq(t, "-f") || sc_eq(t, "-i")) {
+                if (what) sc_copy(what, cap, "deleting files without confirmation");
+                return 1;
+            }
+        return 0;
+    }
+    if (n > 1) {
+        if (sc_eq(a, "theme") && !sc_eq(b, "list") && b[0] != '-') {
+            if (what) sc_copy(what, cap, "changing the system theme");
+            return 1;
+        }
+        if (sc_eq(a, "isolate")) {
+            if (what) sc_copy(what, cap, "changing another app's isolation choice");
+            return 1;
+        }
+        if (sc_eq(a, "choices") && !sc_eq(b, "list") && !sc_eq(b, "show")) {
+            if (what) sc_copy(what, cap, "changing a security switch");
+            return 1;
+        }
+        if (sc_eq(a, "policy") && !sc_eq(b, "show")) {
+            if (what) sc_copy(what, cap, "changing the password policy");
+            return 1;
+        }
+        if (sc_eq(a, "audit") && sc_eq(b, "clear")) {
+            if (what) sc_copy(what, cap, "erasing the security audit log");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Elevation is per account, and it is measured in *inactivity*: while the
+ * owner keeps interacting (typing, clicking, reading with the keyboard) it
+ * does not expire, and it is gone after two quiet minutes, on a user switch,
+ * on lock, and on logout.  `sudo.password` off means "never ask". */
+static int elevate_account = -1;
+
+int security_elevated(void)
+{
+    if (!S.ready) return 1;
+    if (!security_choice("sudo.password")) return 1;
+    if (S.session < 0 || S.locked) return 0;
+    if (elevate_account != S.session) return 0;
+    if (security_idle_ticks() > 2u * TICKS_PER_MINUTE) {
+        elevate_account = -1;
+        return 0;
+    }
+    return 1;
+}
+
+void security_elevate_grant(void)
+{
+    if (S.session < 0) return;
+    elevate_account = S.session;
+    security_note_activity();
+    audit("tlpdo-grant", security_api_session_name());
+}
+
+void security_elevate_drop(void)
+{
+    if (elevate_account >= 0) audit("tlpdo-drop", security_api_session_name());
+    elevate_account = -1;
+}
+
+int security_elevation_seconds(void)
+{
+    u32 idle;
+    if (!security_elevated()) return 0;
+    idle = security_idle_ticks();
+    return (int)((2u * TICKS_PER_MINUTE - idle) / 100u);
+}
+
 int security_command_allowed(const char *line, char *out, size_t cap)
 {
     static const char *const admin_cmds[] = {
@@ -1513,6 +1643,19 @@ int security_command_allowed(const char *line, char *out, size_t cap)
             (sc_eq(cmd, "rm") && (sc_eq(arg, "-s") || sc_eq(arg, "-f"))) ||
             (sc_eq(cmd, "theme") && n > 1)) {
             sc_copy(out, cap, "Permission denied: administrator rights required.");
+            return 0;
+        }
+    }
+    /* Password gate for privileged commands.  The shells prompt through
+     * `tlpdo` before they dispatch; this is the backstop that refuses a
+     * privileged command reaching the dispatcher by any other route. */
+    {
+        char what[96];
+        if (security_privileged_command(line, what, sizeof(what)) && !security_elevated()) {
+            sc_copy(out, cap, "Permission denied: ");
+            sc_cat(out, cap, what);
+            sc_cat(out, cap, " needs a password. Run 'tlpdo <command>' and enter it.");
+            audit("tlpdo-needed", cmd);
             return 0;
         }
     }
@@ -1572,6 +1715,9 @@ static void shell_status(struct outbuf *b)
     ob(b, " failures, "); ob_num(b, S.policy.lock_base); ob(b, "s to ");
     ob_num(b, S.policy.lock_max); ob(b, "s\n");
     ob(b, "  recovery code  : "); ob(b, S.rec_valid ? "active (one use)" : "not active"); ob(b, "\n");
+    ob(b, "  privilege      : ");
+    if (security_elevated()) { ob(b, "elevated (tlpdo); expires after 2 min without activity\n"); }
+    else ob(b, "password required for privileged commands (tlpdo)\n");
     ob(b, "  user choices   : "); ob_num(b, (uint64_t)security_choice_count());
     ob(b, " switches (see 'choices'); isolation is a per-app user choice\n");
     ob(b, "  processes      : "); ob_num(b, (uint64_t)proc_count());

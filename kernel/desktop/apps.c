@@ -25,8 +25,13 @@ static char uninstall_id[32];
 static void uninstall_answer(int ok,const char *text,void *ud){(void)text;(void)ud;if(!ok)return;char message[256];int done=app_uninstall(uninstall_id,message,sizeof(message));wm_notify(done?"Application removed":"Uninstall failed",message,!done);}
 void app_request_uninstall(const char *id){
     if(!id||strlen(id)>30||wm_dialog_active())return;
+    /* When the owner has opted into roles, removal is an administrator act.
+     * (The terminal command additionally needs the tlpdo password.) */
+    if(security_initialized()&&!security_is_admin()){
+        wm_notify("Cannot uninstall","Administrator rights are required to remove an application.",1);return;
+    }
     struct app *a=app_find(id);if(!a||!a->external){wm_notify("Cannot uninstall","Built-in system applications cannot be uninstalled.",1);return;}
-    strcpy(uninstall_id,id);char prompt[256];strcpy(prompt,"Uninstall ");strcat(prompt,id);strcat(prompt,"?\nCloses its windows; removes package/shortcuts.\nProject source and app data are kept.");
+    strcpy(uninstall_id,id);char prompt[256];strcpy(prompt,"Uninstall ");strcat(prompt,id);strcat(prompt,"?\nCloses its windows; removes package and shortcuts\nand ERASES its private app data. Project sources stay.");
     if(fs_image_available()){strcat(prompt,"\nSaves current filesystem to:\n");strncat(prompt,fs_image_target(),40);}else strcat(prompt,"\nSession RAM only; no disk will be written.");
     wm_dialog("Uninstall application",prompt,NULL,uninstall_answer,NULL);
 }

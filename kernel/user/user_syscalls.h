@@ -37,6 +37,10 @@
 #define SC_NR_SET_ICON    33
 #define SC_NR_FAULT       34
 #define SC_NR_MAX         34
+/* File-syscall refusals that are not "no such file" and not a capability
+ * denial.  The kernel-side host raises the same sentence for each, so a
+ * package gets one answer whichever host runs it. */
+#define SC_FILE_QUOTA_REFUSED (-3)   /* 16 files / 64 KiB per app id */
 #define SC_DRAW_CLEAR     1
 #define SC_DRAW_RECT      2
 #define SC_DRAW_TEXT      3

@@ -393,6 +393,10 @@ static int a_write(lua_State *L)
   if (m > 65535 - 256) return luaL_error(L,"data file too large");
   put(0,s,(long)n); put(256,d,(long)m);
   { long r=C3(SC_NR_FILE_WRITE,0,256,(long)m);
+    /* -3 is the kernel's quota refusal.  The kernel-side host raises the same
+     * sentence, so an isolated package sees one answer, not two. */
+    if (r == SC_FILE_QUOTA_REFUSED)
+        return luaL_error(L,"app data quota exceeded (16 files / 64 KiB)");
     if (r < 0) return luaL_error(L,DISABLED);
     lua_pushboolean(L, r > 0 || m == 0); }
   return 1; }
