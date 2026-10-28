@@ -299,14 +299,16 @@ The `ati` module must still load and the decoy must never be mentioned: it is no
 validated, and its bytes are counted only in "never read". Delete it again before shipping.
 
 On physical hardware the same lines are the whole check, plus two more: the `graphics` report should say
-`used for solid output rectangles`, and `module rejected: ...` in a boot log is a bug report rather
+`used for flat output regions`, and `module rejected: ...` in a boot log is a bug report rather
 than a failure - it is the loader saying which predicate the file on the disk failed.
 
 ## 10. What is not here
 
 No 3D, no GSP/RM or vendor-firmware stacks, no mode setting, no page-flipping, no vsync (the measured
 per-family capability table is in `GPU-BASIC-2D-DISPLAY-FEATURES.json`; this chip's family has no vsync
-path upstream either). A VRAM back buffer is offered by the module and deliberately not enabled: the
+path upstream either).  What the compositor does with a bound engine, how much of a real desktop frame
+that is, and why a machine with a working driver still reported 0 engine pixels until this was fixed:
+see [GPU-ACCELERATION.md](GPU-ACCELERATION.md). A VRAM back buffer is offered by the module and deliberately not enabled: the
 compositor's back buffer stays in RAM until the write-combining policy for a driver-owned aperture is
 settled, which is logged rather than hidden. One ported family exists; adding another means porting its
 engine under the same ABI, and nothing about the loader, the disk layout, or the boot stub changes per

@@ -75,6 +75,27 @@ static void family_file_name(const char *family,char16 *out){
  for(unsigned k=0;k<n;k++)out[i++]=(char16)stem[k];
  out[i++]=u'.';out[i++]=u'M';out[i++]=u'O';out[i++]=u'D';out[i]=0;
 }
+/* Whether the driver index on this volume lists a module for a family.  The index is the stub's only way to
+ * learn what the disk offers without opening files, and it decides which family gets its module read: a
+ * machine with two display functions must not have the one whose family has no file chosen over the one
+ * that does.  The format is the packer's (tools/makedisk.py): u32 count, u32 total bytes, then per entry
+ * 8 bytes of 8.3 stem, u32 size, u32 crc32 - all little-endian, which is what this machine is. */
+static int index_lists_family(const void *index,size_t bytes,const char *family){
+ if(!index||bytes<8||!family||!family[0])return 0;
+ const uint8_t *base=(const uint8_t*)index;
+ uint32_t count=0;__builtin_memcpy(&count,base,4);
+ if(!count||count>512u||bytes<8u+(size_t)count*16u)return 0;
+ char stem[9];unsigned n=0;
+ while(n<8u&&family[n]){stem[n]=(char)((family[n]>='a'&&family[n]<='z')?family[n]-32:family[n]);n++;}
+ stem[n]=0;
+ for(uint32_t i=0;i<count;i++){
+  const uint8_t *entry=base+8u+(size_t)i*16u;
+  unsigned k=0;
+  while(k<n&&k<8u&&entry[k]==(uint8_t)stem[k])k++;
+  if(k==n&&(n==8u||entry[n]==0))return 1;
+ }
+ return 0;
+}
 static uint64_t ticks(void){uint32_t a,d;__asm__ volatile("lfence; rdtsc":"=a"(a),"=d"(d)::"memory");return ((uint64_t)d<<32)|a;}
 static uint32_t crc32(const uint8_t *p,size_t n){uint32_t c=~0u;while(n--){c^=*p++;for(unsigned i=0;i<8;i++)c=(c>>1)^(0xedb88320u&-(c&1));}return ~c;}
 /* Read from the loaded image's own filesystem only; never search other disks. */
@@ -219,6 +240,14 @@ status EFIAPI efi_main(handle image,struct system_table *table){
   * pool for now and move into the executable boot-arena region once that region exists. */
  void *module_data=0;size_t module_size=0;void *index_data=0;size_t index_size=0;
  uint32_t store_count=0,select_state=0;char selected_family[16];selected_family[0]=0;
+  /* The index is a small fixed table, not a directory walk: it tells the kernel how many modules exist on
+   * the disk without the firmware having opened any of them, and - read here, before the module choice - it
+   * is how the stub knows which families this volume can actually serve. */
+  {void *index=0;size_t bytes=0;status found=read_file(root,(const char16*)u"\\SCOS\\DRVLIST.IDX",&index,&bytes);
+   if(!FAILED(found)&&index&&bytes>=8){
+    if(bytes>BOOT_INDEX_MAX)bytes=BOOT_INDEX_MAX;
+    index_data=index;index_size=bytes;store_count=*(uint32_t*)index;
+   }else if(index)bs->free_pool(index);}
  /* The coprocessor's firmware set, as this volume offers it.  Read here because this is the only moment a
   * filesystem exists, and examined rather than copied: the kernel image plus its CRC is what the arena is
   * sized for, and parking a multi-megabyte firmware blob in it would take that much away from the memory the
@@ -237,9 +266,32 @@ status EFIAPI efi_main(handle image,struct system_table *table){
   pci_functions_seen=scan.functions_inspected;pci_buses_scanned=scan.buses_scanned;
   pci_display_seen=scan.display_functions;
   const char *family=match?gpu_family_name(match):"";
-  if(match&&!gpu_match_named_only(scan.vendor,scan.device,scan.subclass)){
-   /* A chip the naming table knows but no driver table binds gets no module read at all: firmware
-    * must not hand the kernel bytes for a chip generation nothing can drive. */
+  /* Which family's module to read is chosen here, with two facts the walk cannot see: whether the family is
+   * one a driver's table binds at all (`drivable'), and whether this volume actually lists a module for it.
+   * The rule was once "the first match the walk met", and it fails on the shape a hybrid machine has: a
+   * display function the naming table knows but no driver binds comes first, so the module for the card
+   * behind it - present on the same disk - is never opened, and the machine reports no driver rather than
+   * one whose driver was never read. */
+  int chosen=0;
+  if(index_data&&index_size){
+   for(unsigned i=0;i<scan.matches&&!chosen;i++){
+    const struct pci_display_match *c=&scan.candidates[i];
+    if(!c->drivable)continue;
+    if(!index_lists_family(index_data,index_size,gpu_family_name(c->match)))continue;
+    family=gpu_family_name(c->match);match=c->match;chosen=1;
+   }
+  }
+  if(!chosen)
+   /* Nothing on the disk for any family the tables bind, or no index at all: fall back to a function a
+    * driver table binds, so the report can name the chip whose module is missing rather than saying that
+    * nothing was recognised.  The read below then fails with EFI_NOT_FOUND, which is the honest answer. */
+   for(unsigned i=0;i<scan.matches;i++)
+    if(scan.candidates[i].drivable){family=gpu_family_name(scan.candidates[i].match);
+                                    match=scan.candidates[i].match;chosen=1;break;}
+  if(chosen){
+   /* One file, named from the chosen family, read while the volume handle is still open.  A chip the
+    * naming table knows but no driver table binds never reaches here: it is not a candidate, so firmware
+    * cannot hand the kernel bytes for a generation nothing can drive. */
    unsigned n=0;while(n<15&&family[n]){selected_family[n]=family[n];n++;}selected_family[n]=0;
    char16 path[32];family_file_name(family,path);
    phase="read gpu driver module";s=read_file(root,path,&module_data,&module_size);
@@ -256,14 +308,9 @@ status EFIAPI efi_main(handle image,struct system_table *table){
     select_state=1;
     log("GPU driver module read for this chip\r\n");
    }
-  }else log("No GPU family matched by the generated tables; no module read\r\n");
-  /* The index is a small fixed table, not a directory walk: it lets the kernel report how many
-   * modules exist on the disk without the firmware having opened any of them. */
-  {void *index=0;size_t bytes=0;status found=read_file(root,(const char16*)u"\\SCOS\\DRVLIST.IDX",&index,&bytes);
-   if(!FAILED(found)&&index&&bytes>=8){
-    if(bytes>BOOT_INDEX_MAX)bytes=BOOT_INDEX_MAX;
-    index_data=index;index_size=bytes;store_count=*(uint32_t*)index;
-   }else if(index)bs->free_pool(index);}
+  }else if(scan.matches)
+   log("The display adapter is named but no driver table in this tree binds it; no module read\r\n");
+  else log("No GPU family matched by the generated tables; no module read\r\n");
   /* The five images, one role at a time.  A role that is not on the disk leaves zeros behind and is
    * reported as absent; one the firmware could not open is reported as unreadable, because "too big for
    * the stub to read" and "not there" are different things a person can act on differently. */

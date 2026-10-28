@@ -14,27 +14,189 @@ void fb_init(void){
  if(!screen.px)panic("desktop framebuffer allocation failed");
 }
 static u32 component(u32 c,u32 mask){unsigned shift=0;while(!(mask&1)){mask>>=1;shift++;}return ((c*mask/255)<<shift);}
-/* A solid rectangle is the common case for the wallpaper, the boot screens, window chrome and any
- * cleared region.  Copying one to the console costs a full pass over uncached device memory, while
- * the engine needs a handful of register writes, so the flip offers the rectangle to the GPU first.
- * The scan that proves the rectangle really is uniform reads the compositor's own RAM and stops at
- * the first differing pixel, so a textured rectangle costs a few rows and then gets copied as before.
- * screen.px stays authoritative either way: this only skips the output copy, never the truth buffer. */
-static int engine_output_fill(int x,int y,int w,int h){
- if(w<64||h<8||!gpu_engine_drives_output())return 0;
- const u32 *src=screen.px+(size_t)y*screen_w+x;
- u32 color=*src;
- for(int r=0;r<h;r++){
-  const u32 *row=src+(size_t)r*screen_w;
-  for(int c=0;c<w;c++)if(row[c]!=color)return 0;
+/* --------------------------------------------------- accelerated output path ----
+ *
+ * The compositor draws every frame into `screen.px` in RAM and then copies the damaged rectangles to
+ * the console.  That copy is the one stage a 2D engine can take over, and until now it was offered to
+ * the engine only as a **single flat colour**: the previous `engine_output_fill()` scanned the whole
+ * rectangle and gave up at the first pixel that differed.  A desktop is almost never one colour - a
+ * window is a flat chrome border around a flat background around text, the wallpaper is flat around
+ * icons - so on a machine whose driver was bound, self-tested and reported as "engine drives the
+ * console", a measured boot with an emulated CL-GD5446 put **0 pixels through the engine and 17,300,000
+ * through the CPU**.  The driver was not the problem; the offer was.
+ *
+ * So a damage rectangle is now decomposed into maximal flat rectangles in one pass over its rows, and
+ * those go to the engine; only the pixels no flat rectangle covers are copied by the CPU.  Both halves
+ * are counted by `gpu_engine_note_work()`, which is what makes "the GPU is accelerating this" a
+ * measurement in the boot report and the test suite rather than an inference from a bound driver.
+ *
+ * Four rules keep this honest:
+ *  - `screen.px` stays the truth buffer.  This decides *how* bytes reach the card, never what they are;
+ *    a rectangle the engine will not take is copied by the same loop that always did it.
+ *  - A flat run narrower than ENGINE_MIN_RUN, or a rectangle under ENGINE_MIN_AREA pixels, stays on the
+ *    CPU: a bitBLT costs a register round trip and a busy-wait, and for a cursor-sized rect that is more
+ *    than the copy it replaces.
+ *  - A rectangle whose flat area is a small part of it (text, icons, a photo) is copied whole instead:
+ *    paying transfers for a few bands and then copying the rest is slower than not asking.
+ *  - A transfer that fails is abandoned for the *whole* damage rectangle, which the CPU then copies from
+ *    the shadow.  Re-writing pixels the engine did land is harmless - identical bytes - while leaving a
+ *    region unpainted is the one outcome this path must never produce.
+ */
+#define ENGINE_MIN_RUN   12      /* a flat run narrower than this is not worth a transfer */
+#define ENGINE_MIN_H     2      /* nor is a rectangle one row tall */
+#define ENGINE_MIN_AREA  2048u   /* pixels; below this the register round trip costs more than the copy */
+#define ENGINE_MIN_SHARE 8u     /* flat area must be at least 1/8 of the rectangle, else the CPU copies */
+#define ENGINE_MAX_RECTS 128    /* flat rectangles one damage rect may decompose into */
+#define ENGINE_MAX_CALLS 16     /* transfers issued per damage rect; the smallest rects are dropped first */
+
+struct engine_rect { int x0,x1,y0,y1; u32 color; };
+struct engine_open { int x0,x1,y0; u32 color; };
+
+static void copy_row_span(int x,int row,int n)
+{
+ if(n<=0)return;
+ const u32 *src=screen.px+(size_t)row*screen_w+x;
+ /* Cast before the arithmetic, not after: `stride' is in pixels, so a void* that had the pixel offset
+  * added to it would write row*stride *bytes* into the aperture - which lands in the first few rows of
+  * the screen and leaves the row it was meant for untouched. */
+ volatile u32 *dst=(volatile u32*)(uintptr_t)output.base+(size_t)row*output.stride+x;
+ size_t count=(size_t)n;
+ __asm__ volatile("rep movsl":"+S"(src),"+D"(dst),"+c"(count)::"memory");
+}
+
+/* End of the run of one colour that starts at `at`, comparing four pixels per iteration while it can.
+ * A flat band is the common case and the scan has to stay cheaper than the copy it replaces; a textured
+ * row falls out of the wide loop on its first check and finishes in the byte loop below. */
+static int run_end(const u32 *row,int at,int w)
+{
+ u32 v=row[at];
+ u64 pair=((u64)v<<32)|(u64)v;
+ int cx=at+1;
+ while(cx+4<=w){
+  u64 a,b;
+  __builtin_memcpy(&a,row+cx,8);
+  __builtin_memcpy(&b,row+cx+2,8);
+  if(a!=pair||b!=pair)break;
+  cx+=4;
  }
- if(gpu_engine_fill_rectangle(x,y,w,h,color)!=0)return 0;
+ while(cx<w&&row[cx]==v)cx++;
+ return cx;
+}
+
+/* Close one run that has stopped growing into a rectangle, if it is worth a transfer.
+ *
+ * A full table is not a failure: it means this region is more fragmented than the bound allows, and the
+ * rectangles that did not fit are simply left to the CPU copy that follows.  The alternative - abandoning
+ * the whole damage rectangle because the *last* run did not fit - is what made a full-screen flip of a
+ * real desktop go entirely to the CPU while the small rectangles inside it went to the engine. */
+static void engine_emit(struct engine_rect *out,int *rects,const struct engine_open *o,int xbase,int y1)
+{
+ int w=o->x1-o->x0,h=y1-o->y0;
+ if(h<ENGINE_MIN_H)return;
+ if((u32)w*(u32)h<ENGINE_MIN_AREA)return;
+ if(*rects>=ENGINE_MAX_RECTS)return;
+ /* The run coordinates are relative to the damage rectangle (the scan starts at column 0 of `row');
+  * everything the caller sees is in scanout space.  Mixing the two is a rectangle painted at the
+  * wrong x - the kind of mistake a readback of the same screen cannot catch, because the shadow is
+  * still correct. */
+ out[(*rects)++]=(struct engine_rect){xbase+o->x0,xbase+o->x1,o->y0,y1,o->color};
+}
+
+/* One pass over the rows of the damage rectangle.  Runs of one colour are carried from row to row; a run
+ * that is still the same at the next row extends its rectangle, and one that is not is closed.  The open
+ * list and the runs of the current row are both ordered by x, so the merge is a walk, not a search.
+ * Saturating the open or output bound only costs coverage, never correctness. */
+static int engine_decompose(int x,int y,int w,int h,struct engine_rect *out)
+{
+ static struct engine_open cur[ENGINE_MAX_RECTS],nxt[ENGINE_MAX_RECTS];
+ int rects=0,opens=0;
+ for(int r=0;r<h;r++){
+  const u32 *row=screen.px+(size_t)(y+r)*screen_w+x;
+  int oi=0,nopen=0,rx=0;
+  while(rx<w){
+   int cx=run_end(row,rx,w);
+   /* Anything still open that begins before this run cannot be extended by it. */
+   while(oi<opens&&cur[oi].x0<rx){
+    engine_emit(out,&rects,&cur[oi],x,y+r);
+    oi++;
+   }
+   int extended=0;
+   if(oi<opens&&cur[oi].x0==rx){
+    if(cur[oi].x1==cx&&cur[oi].color==row[rx]){
+     if(nopen<ENGINE_MAX_RECTS)nxt[nopen++]=cur[oi];
+     extended=1;
+    }else engine_emit(out,&rects,&cur[oi],x,y+r);
+    oi++;
+   }
+   if(!extended&&cx-rx>=ENGINE_MIN_RUN&&nopen<ENGINE_MAX_RECTS)
+    nxt[nopen++]=(struct engine_open){rx,cx,y+r,row[rx]};
+   rx=cx;
+  }
+  while(oi<opens){
+   engine_emit(out,&rects,&cur[oi],x,y+r);
+   oi++;
+  }
+  for(int i=0;i<nopen;i++)cur[i]=nxt[i];
+  opens=nopen;
+ }
+ while(opens>0){
+  opens--;
+  engine_emit(out,&rects,&cur[opens],x,y+h);
+ }
+ return rects;
+}
+
+/* The transfers this rectangle gets are the largest of its flat rectangles, biggest first: a fixed budget
+ * of round trips should go to the bands that save the most pixels, not to whichever closed first. */
+static void sort_by_area(struct engine_rect *r,int count)
+{
+ for(int i=1;i<count;i++){
+  struct engine_rect key=r[i];
+  u32 key_area=(u32)(key.x1-key.x0)*(u32)(key.y1-key.y0);
+  int j=i-1;
+  while(j>=0&&(u32)(r[j].x1-r[j].x0)*(u32)(r[j].y1-r[j].y0)<key_area){
+   r[j+1]=r[j];
+   j--;
+  }
+  r[j+1]=key;
+ }
+}
+
+/* Paint as much of the damage rectangle as the engine will take and copy the remainder, returning the
+ * number of pixels the engine painted (0 means it painted nothing and the caller must copy the whole
+ * rectangle itself). */
+static u32 engine_paint_region(int x,int y,int w,int h){
+ static struct engine_rect rects[ENGINE_MAX_RECTS];
+ int count=engine_decompose(x,y,w,h,rects);
+ if(count<=0)return 0;
+ sort_by_area(rects,count);
+ if(count>ENGINE_MAX_CALLS)count=ENGINE_MAX_CALLS;
+ u32 engine_pixels=0;
+ for(int i=0;i<count;i++)
+  engine_pixels+=(u32)(rects[i].x1-rects[i].x0)*(u32)(rects[i].y1-rects[i].y0);
+ if((u64)engine_pixels*ENGINE_MIN_SHARE<(u64)w*(u64)h)return 0;
+ u32 painted=0;
+ for(int i=0;i<count;i++){
+  const struct engine_rect *r=&rects[i];
+  if(gpu_engine_fill_rectangle(r->x0,r->y0,r->x1-r->x0,r->y1-r->y0,r->color)!=0)return 0;
+  painted+=(u32)(r->x1-r->x0)*(u32)(r->y1-r->y0);
+ }
  if(gpu_engine_wait_idle()!=0)return 0;
- /* Counted per rectangle, not per pixel, from the caller's point of view: the same number is
-  * reported next to the CPU total so "the GPU did the drawing" stays checkable rather than a
-  * claim.  A fill the engine accepted and then failed to retire is not counted as work done. */
- gpu_engine_note_work((u32)w*(u32)h,0);
- return 1;
+ /* What the decomposition left out, one row at a time, so a textured interior costs only the pixels no
+  * rectangle covers instead of the whole band.  `at` never moves backwards, so a rectangle already
+  * inside a copied gap is skipped rather than copied twice. */
+ for(int row=y;row<y+h;row++){
+  int at=x,end=x+w;
+  for(int i=0;i<count;i++){
+   const struct engine_rect *r=&rects[i];
+   if(row<r->y0||row>=r->y1)continue;
+   if(r->x0>at)copy_row_span(at,row,r->x0-at);
+   if(r->x1>at)at=r->x1;
+  }
+  if(at<end)copy_row_span(at,row,end-at);
+ }
+ __asm__ volatile("sfence":::"memory");
+ return painted;
 }
 
 /* One text line of the console is 16 rows by columns*8 pixels of uncached device memory.  On a card
@@ -79,7 +241,16 @@ void fb_flip_rect(int x,int y,int w,int h){
  if(h>screen_h-y)h=screen_h-y;
  volatile u32 *fb=(void*)(uintptr_t)output.base;
  int native=output.red==0xff0000&&output.green==0xff00&&output.blue==0xff;
- if(native&&engine_output_fill(x,y,w,h))return;
+ /* The engine gets first refusal on every damaged rectangle, not just the flat ones: see the note above
+  * engine_paint_region().  When it paints part of a rectangle, the pixels it did not take have already
+  * been copied by that function, so the CPU total stays a measurement of what the CPU actually did. */
+ if(native&&gpu_engine_drives_output()){
+  u32 painted=engine_paint_region(x,y,w,h);
+  if(painted){
+   gpu_engine_note_work(painted,(u32)w*(u32)h-painted);
+   return;
+  }
+ }
  if(native)gpu_engine_note_work(0,(u32)w*(u32)h);
  for(int r=0;r<h;r++){
   const u32 *src=screen.px+(size_t)(y+r)*screen_w+x;

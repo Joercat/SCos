@@ -305,9 +305,18 @@ void gpu_init(const struct boot_framebuffer *fb)
     /* A family being *named* is not a driver.  The one module the firmware read for this machine's
      * chip is validated and exercised here; every other family's file stays on the disk. */
     if (!bound && handoff && handoff->module_state) {
+        /* Two passes, and the order is the whole point: a machine can have two functions of one family
+         * (two cards, or one card whose render function and display function both match), and the engine
+         * only accelerates the console when it is bound to the function that *feeds* the console.  Binding
+         * whichever function the PCI walk happened to list first is how a working, verified engine ends up
+         * on the other card, drawing into memory nobody can see, while the panel says "engine bound".  The
+         * scanout owner gets first refusal; every other function keeps the old order. */
+        for (int pass = 0; pass < 2 && !module_bound; pass++) {
         for (int i = 0; i < device_count; i++) {
             struct gpu_device *g = &devices[i];
             if (!gpu_module_eligible(g)) continue;
+            if (pass == 0 && !g->is_scanout) continue;
+            if (pass == 1 && g->is_scanout) continue;
             if (strncmp(handoff->module_name, g->match->family,
                         strlen(g->match->family)) != 0) continue;
             if (gpu_module_bind(g, handoff) == 0) {
@@ -326,6 +335,7 @@ void gpu_init(const struct boot_framebuffer *fb)
                 break;
             }
         }
+        }
     }
     if (!bound && !module_bound)
         klog("gpu: no engine bound, rendering stays on the CPU compositor");
@@ -336,7 +346,7 @@ void gpu_init(const struct boot_framebuffer *fb)
         klog("gpu: engine drives its own aperture only: another function feeds the console, so output "
              "stays on the CPU");
     else
-        klog("gpu: engine drives the console; solid output rectangles go through the GPU");
+        klog("gpu: engine drives the console; flat output regions are painted by the GPU");
 }
 
 int gpu_device_count(void) { return device_count; }
@@ -413,7 +423,7 @@ int gpu_engine_available(void)
      * the chip and implements nothing made this return 1, and the notice that followed told the user a 2D
      * engine had been verified.  A fill pointer is the difference, and it is the one every drawing path
      * already tests before calling. */
-    if (bound && bound->ops) return 1;
+    if (bound && bound->ops) return bound->ops->fill_rectangle != 0;
     const struct scos_gpu_engine_ops *m = gpu_module_ops();
     return m && m->fill ? 1 : 0;
 }

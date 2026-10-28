@@ -68,9 +68,10 @@ static void gpu_boot_notice(void)
     }
     if (gpu_engine_drives_output()) {
         wm_notify("GPU 2D engine bound",
-                  ms && ms->bound ? "Driver module loaded from disk and verified by readback; solid "
-                  "output rectangles are drawn by the GPU."
-                  : "Built-in port active; output rectangles are drawn by the GPU.", 0);
+                  ms && ms->bound ? "Driver module loaded from disk and verified by readback; the "
+                  "flat regions of every damaged rectangle are painted by the GPU, and only the textured "
+                  "parts of the screen are copied by the CPU."
+                  : "Built-in port active; flat output regions are painted by the GPU.", 0);
         return;
     }
     if (gpu_engine_available()) {

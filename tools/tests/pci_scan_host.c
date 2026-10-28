@@ -179,13 +179,48 @@ int main(void)
     check(scan(&s) == 0 && s.display_functions == 0,
           "a function outside base class 3 is not claimed, whatever its id says");
 
-    /* ---- 10. two GPUs: the first match wins, because the stub stages exactly one module. ---- */
+    /* ---- 10. two GPUs: both are reported, and the first one seen is the preferred one. ---- */
     reset();
     put(0, 1, 0, CIRRUS_5446, CLASS(3, 0), 0, 0);
     put(1, 0, 0, NVIDIA_5050, CLASS(3, 0), 0, 0);
     put(0, 31, 0, VNDEV(0x8086, 0x01a1), CLASS(6, 4), HEADER_BRIDGE, BRIDGE_BUSES(1, 1));
     check(scan(&s) == 1 && s.device == 0x00b8 && s.display_functions == 2,
           "with two display functions the lowest address wins and both are counted, so the report can say so");
+    check(s.matches == 2 && s.candidates[0].device == 0x00b8 && s.candidates[1].device == 0x2d83,
+          "both matches are handed over in the order the walk met them, so the disk decides which family is read");
+    check(s.candidates[0].drivable && s.candidates[1].drivable,
+          "both are ids a binding table claims, so either could be staged");
+
+    /* ---- 11. the shape that broke on real hardware: a display function nothing can drive comes first. ---- */
+    reset();
+    /* 8086:56a1 is an Arc A750: the naming registry knows it, no driver table in this tree binds it. */
+    put(0, 2, 0, VNDEV(0x8086, 0x56a1), CLASS(3, 0), 0, 0);
+    put(0, 1, 0, VNDEV(0x8086, 0x01a1), CLASS(6, 4), HEADER_BRIDGE, BRIDGE_BUSES(1, 1));
+    put(1, 0, 0, NVIDIA_5050, CLASS(3, 0), 0, 0);
+    check(scan(&s) == 1,
+          "a machine whose first display function nothing can drive still reports a match");
+    {
+        /* The walk meets the root port before slot 2, so the card behind it can come first; the point of
+         * this case is the *marks*, not the order, and a test that pinned the order would be asserting the
+         * topology of this fixture rather than the rule. */
+        unsigned named = 0, drivable = 0;
+        for (unsigned i = 0; i < s.matches; i++) {
+            if (s.candidates[i].device == 0x56a1 && !s.candidates[i].drivable) named++;
+            if (s.candidates[i].device == 0x2d83 && s.candidates[i].drivable) drivable++;
+        }
+        check(s.matches == 2 && named == 1 && drivable == 1,
+              "the name-only row is kept as a candidate, marked, and the drivable one is kept beside it");
+    }
+    check(s.device == 0x2d83 && s.winner_drivable,
+          "the preferred match is the one a driver table binds, not merely the one met first");
+    check(!gpu_match_named_only(s.vendor, s.device, s.subclass),
+          "so the stub is free to stage the module for the card that is really there");
+
+    /* ---- 12. name-only only: the walk reports it, and says nothing may be staged for it. ---- */
+    reset();
+    put(0, 2, 0, VNDEV(0x8086, 0x56a1), CLASS(3, 0), 0, 0);
+    check(scan(&s) == 1 && s.matches == 1 && !s.candidates[0].drivable && !s.winner_drivable,
+          "a machine with only a named-but-undrivable display function is reported as exactly that");
 
     check(reads_outside_the_header == 0, "no scenario ever made the walk read past the configuration header");
     printf("%s: boot-stub PCI display scan, %u check(s), %u failure(s)\n", failures ? "FAIL" : "PASS",

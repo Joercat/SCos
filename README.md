@@ -19,7 +19,8 @@ implementations have now been adapted and integration-tested; see
 [driver verification and limitations](docs/migration/DRIVER64.md).
 
 **Still unavailable:** AHCI/NVMe/USB mass-storage persistence, networking/real
-browser engine and accelerated GPU drivers. Files remain RAM-only unless a
+browser engine, and GPU acceleration on Turing-or-later cards that needs vendor firmware.
+Files remain RAM-only unless a
 unique supported ATA SCos-data partition is verified; `save` requires confirmation.
 ACPI has a manual-power fallback for unsupported firmware. Emulator success is
 **not physical acceptance on the user's USB-input PC**. No new release number.
@@ -137,7 +138,14 @@ Only existing supported ATA persistence is available; no new storage drivers.
 Top-right notifications overlay windows, menus and modals. Click to dismiss;
 normal notices expire after ten seconds. Lua apps can use `scos.notify(text)`.
 
-`graphics` reports read-only PCI display-device discovery and the CPU renderer.
-**GPU acceleration and working hardware-driver selection remain unimplemented.**
-The boot warning explicitly reports CPU fallback. GOP/PAT/write combining are
-not GPU rendering. Browser integration remains deferred.
+`graphics` reports read-only PCI display-device discovery, the renderer and the
+measured split of pixels between the GPU engine and the CPU. Three families have
+driver code (Cirrus CL-GD5446 and ATI Rage128 offer a 2D engine; NVIDIA's module
+for Turing and later identifies the chip and reports its registers but offers no
+engine), and every damaged rectangle is now decomposed into flat regions and
+painted by the engine when one is bound - measured at 74% of a desktop frame on an
+emulated CL-GD5446, against 0% before. **On a Turing-or-later NVIDIA card the GPU
+still renders nothing**: submission there needs GSP firmware and a resource
+manager, which this tree does not have. See
+[why the GPU was not accelerating, and what was fixed](docs/migration/GPU-ACCELERATION.md).
+GOP/PAT/write combining are not GPU rendering. Browser integration remains deferred.

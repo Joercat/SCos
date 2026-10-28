@@ -1066,7 +1066,7 @@ void graphics_report(char *out, size_t capacity)
     put(&w, "Renderer: ");
     if (engine) put(&w, "CPU software compositor, engine available for selected ops\n");
     else if (ms && ms->bound && gpu_engine_drives_output())
-        put(&w, "CPU software compositor, GPU engine painting solid output rectangles\n");
+        put(&w, "CPU software compositor, GPU engine painting flat output regions\n");
     else if (ms && ms->bound && ms->identification_only)
         put(&w, "CPU software compositor - the GPU is NOT rendering: the module that knows this chip "
                 "implements no engine\n");
@@ -1098,7 +1098,7 @@ void graphics_report(char *out, size_t capacity)
             put(&w, " pixels; ");
         }
         put(&w, gpu_engine_drives_output()
-            ? "used for solid output rectangles"
+            ? "used for flat output regions"
             : (ms->identification_only ? "the CPU compositor still paints every pixel of this screen"
                                        : "not used for output: another PCI function feeds this display"));
         put(&w, "\n  opened \\SCOS\\");
