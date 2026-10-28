@@ -415,7 +415,6 @@ def main(directory, sectors=None, firmware_dir=None, out=None):
     record_text, record_json = build_record(v, elf,
                                             [(stem + '.MOD', blob) for stem, blob in modules], firmware)
     (d / 'BUILD.TXT').write_text(record_text)
-    (d / 'build.json').write_text(json.dumps(record_json, sort_keys=True, indent=1) + '\n')
     # Every byte that has to land on the volume is known here, so this is where the volume is asked whether it
     # is big enough - before the first cluster of the big files is handed out, and with the size that would fit
     # in the answer.  A refusal that names a number is the difference between "this firmware cannot be carried"
@@ -429,6 +428,12 @@ def main(directory, sectors=None, firmware_dir=None, out=None):
                          'firmware file(s)'
                          % (human(total_sectors * SECTOR), clusters, wanted, human(min_image_bytes(content_bytes)),
                             content_bytes, len(modules), len(firmware)))
+    # The size the volume was packed at belongs in the record, because the delivery is allowed to be bigger than
+    # the 64 MiB this artifact has always been - a GSP-RM image is 63 MB by itself - and a checker holding a
+    # constant cannot tell a grown delivery from a truncated one.  It is written here, where the geometry is
+    # final, and not guessed afterwards by whoever reads the file: `--min-size' above is the same arithmetic.
+    record_json['image_bytes'] = total_sectors * SECTOR
+    (d / 'build.json').write_text(json.dumps(record_json, sort_keys=True, indent=1) + '\n')
     bc = allocate(record_text.encode())
     scos = (dot(0, dirs[3]) + entry('KERNEL.ELF', kc, len(elf)) + entry('KERNEL.CRC', cc, 4)
             + entry('BUILD.TXT', bc, len(record_text.encode())) + entry('DRVLIST.IDX', ic, len(index)))

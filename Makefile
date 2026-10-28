@@ -55,8 +55,16 @@ ventoy: gpu-modules gsp-firmware all
 	@echo "copy $(BUILD)/scos-ventoy.img onto the Ventoy partition and pick it in the menu"
 	@echo "or run tools/flash.sh --ventoy /run/media/\$$USER/Ventoy, which packs, copies and reads it back"
 
+# A GSP-RM image, when one is staged, is packed into the delivery like every other firmware file - and the
+# delivery grows to carry it, because 63 MB does not fit in 64 MiB beside a kernel.  The size asked for is the
+# packer's own answer (`--min-size'), not this file's guess, and with nothing staged the rule packs the 64 MiB
+# image it has always packed.  This is the only place the size is decided for a delivery, so a stick and a
+# repository cannot disagree about how big the artifact is.
+GSP_RM = $(firstword $(wildcard $(BUILD)/gsp/gsp-*.bin))
 dist: gpu-modules gsp-firmware all
+	$(if $(GSP_RM),python3 tools/makedisk.py build --firmware $(BUILD)/gsp --size $(shell python3 tools/makedisk.py build --firmware $(BUILD)/gsp --min-size | cut -f1) --out $(BUILD)/scos.img,)
 	cp $(BUILD)/scos.img dist/scos.img
+	@echo "dist/scos.img is $$(wc -c < dist/scos.img) bytes; GSP-RM $(if $(GSP_RM),packed from $(GSP_RM),not staged - the boot stub can only be handed what this tree holds, so the panel reads fw 1/5)"
 	cp $(BUILD)/build.json dist/scos.img.build.json
 	sha256sum dist/scos.img > dist/scos.img.sha256
 # `dist' depends on the modules and the coprocessor firmware, not merely on `all': both are packed into the

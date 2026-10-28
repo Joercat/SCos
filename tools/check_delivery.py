@@ -9,7 +9,8 @@ delivery that has drifted fails the build that made it.
 
 What it checks, in the order the failure modes matter:
 
-  1. the three files exist, the image is 67108864 bytes, and its sha256 is what dist/scos.img.sha256 says;
+  1. the three files exist, the image is at least 67108864 bytes and exactly the size its own record says it
+     was packed at, and its sha256 is what dist/scos.img.sha256 says;
   2. the record's tree state is `clean` - an experiment is not a delivery;
   3. the record names a commit that is reachable from HEAD, so it describes this branch;
   4. the bytes *inside* the image match the record: KERNEL.ELF and every .MOD are read back out of the
@@ -33,7 +34,8 @@ ROOT = Path(__file__).resolve().parents[1]
 IMAGE = 'dist/scos.img'
 RECORD = 'dist/scos.img.build.json'
 CHECKSUM = 'dist/scos.img.sha256'
-IMAGE_BYTES = 67108864
+IMAGE_BYTES = 67108864           # the floor: the FMC-only delivery, and the size a grown one must exceed
+IMAGE_MAX = 512 * 1024 * 1024    # above this, somebody passed --size to a delivery by mistake
 # Everything that ends up packed into the image.  A change here between the record's commit and HEAD means
 # the artifact on the branch is not the artifact this source would produce.
 IMAGE_INPUTS = ('kernel/', 'boot/', 'drivers/', 'tools/makedisk.py', 'tools/research/gen_gpu_tables.py',
@@ -65,8 +67,15 @@ def check(root=ROOT, repo=None):
         return problems
 
     blob = image.read_bytes()
-    if len(blob) != IMAGE_BYTES:
-        problems.append('%s is %d bytes, not %d' % (IMAGE, len(blob), IMAGE_BYTES))
+    if len(blob) < IMAGE_BYTES:
+        problems.append('%s is %d bytes, below the %d this artifact has never been smaller than: the ESP, the '
+                        'kernel and the firmware do not fit in what is here' % (IMAGE, len(blob), IMAGE_BYTES))
+    elif len(blob) % 512:
+        problems.append('%s is %d bytes, which is not a whole number of sectors: a GPT image ends on a sector'
+                        % (IMAGE, len(blob)))
+    elif len(blob) > IMAGE_MAX:
+        problems.append('%s is %d bytes, past the %d a delivery is allowed to be: this looks like a scratch '
+                        'image, not an artifact' % (IMAGE, len(blob), IMAGE_MAX))
     digest = hashlib.sha256(blob).hexdigest()
     wanted = (checksum.read_text().strip().split() or [''])[0]
     if digest != wanted:
@@ -76,6 +85,17 @@ def check(root=ROOT, repo=None):
         meta = json.loads(record.read_text())
     except ValueError as exc:
         return problems + ['%s is not readable JSON: %s' % (RECORD, exc)]
+    # The size rule the record can answer for itself: whatever the packer decided the volume had to be, that is
+    # the number the bytes have to agree with.  A record without the field predates grown deliveries, so the
+    # only size that is right for it is the one it has always had.
+    packed = meta.get('image_bytes')
+    if packed is not None:
+        if int(packed) != len(blob):
+            problems.append('%s holds %d bytes and its record says it was packed at %d: one of the two is from '
+                            'a different build' % (IMAGE, len(blob), int(packed)))
+    elif len(blob) != IMAGE_BYTES:
+        problems.append('%s is %d bytes and its record predates the size field, so the only size it can be '
+                        'checked against is %d' % (IMAGE, len(blob), IMAGE_BYTES))
     if meta.get('tree') != 'clean':
         problems.append('the record says tree %r: an image built from an uncommitted tree is an experiment, '
                         'not a delivery' % meta.get('tree'))
