@@ -388,7 +388,7 @@ thing the bug was about - QEMU models no NVIDIA function - so the evidence for t
 `tools/tests/gpu_fsp_host.c` models the window as hardware does, wrapping at 64 dwords, and asserts that a
 full 868-byte handover arrives byte for byte in **four** bursts, that the read-back ran before the doorbell,
 and that a window which never walks is caught by the read-back (mismatch reported, no veto, doorbell rung).
-The count is pinned at 137 checks.
+The count is pinned at 140 checks.
 
 **What the next boot should show, and what each answer means.**
 
@@ -409,6 +409,22 @@ and `RMARGS` at 4 KiB, every one contiguous system memory, and each log buffer c
 per 4 KiB page from its second word onwards (`r535_gsp_libos_init`, `LibosMemoryRegionInitArgument`).  That
 record is now built and pointed at, and the panel prints its address beside the three sizes, so a boot that
 still fails says whether the arguments were staged before it says anything about the card.
+
+**What the first boot of that fix showed, and what it cost.**  The GB207 answered `GSP handover: ... boot args
+point at the FMC image: no LibOS record staged`, which is a sentence about the *kernel's* state, not the card's:
+the record was built inside the descriptor walk, behind a check for the resource-manager image, and the volume in
+the machine carried only the FMC.  It is now built by the handover itself, before and independently of that
+walk, and the panel prints its address, its three log buffers and its argument block whether or not any
+descriptors were staged.  The same paste also caught the panel claiming `reply queue: ... (store refused: no
+door into the queue)` on a card whose queue registers read perfectly well: the probe that writes those words
+only runs when they do not read, so the sentence described a test nobody had run.  It now says which of the two
+happened, and `queue_probed` is the flag that keeps them apart.
+
+**Two new numbers on the query line, because "no reply" has two causes.**  The host writes the packet into EMEM
+and moves `QUEUE_TAIL`; the FSP lifts `QUEUE_HEAD` as it consumes, and only then writes an answer.  The panel now
+prints that head and tail after every send with one of two readings - *the FSP took the packet* or *the FSP never
+read it* - because a reply-wait cannot tell a coprocessor that ignored a message from a channel nothing is
+reading, and those two have opposite next steps (message contents vs. queue and EMEM mapping).
 
 **And the completion test, which was the second half of the same mistake.**  The FMC does not answer a
 successful handover on the channel: it boots the resource manager, which is what `gh100_gsp_lockdown_released`

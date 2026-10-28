@@ -723,7 +723,10 @@ static void test_the_gates(void)
     check("and the refusals are counted where they happened, register by register",
           fsp_state.reads == model.reads && fsp_state.refusal_reads == model.refusals && model.refusals > 0);
     check("a refusing card is written to exactly once, by the probe that asks whether the queue takes stores",
-          model.writes == 2 && fsp_state.writes == 2 && !fsp_state.queue_writable);
+          model.writes == 2 && fsp_state.writes == 2 && !fsp_state.queue_writable && fsp_state.queue_probed);
+    check("and the probe is recorded as having run, because the panel used to describe its result on cards where "
+          "it never did: the queue registers read fine there, so nothing was written to them",
+          fsp_state.queue_probed == 1);
     check("and this scratch says 0xFF, so the wait for it ends at the first look rather than at a bound",
           fsp_state.boot_polls == 1);
     check("the coprocessor's own block is reported as still locked, which is the fact the panel leads with",
@@ -995,6 +998,10 @@ static void test_the_handover_payload(void)
           FSP_NOT_CONTENT(fsp_state.hwcfg2) && fsp_state.hwcfg2_after == 0x123u && fsp_state.gsp_released);
     check("the queue fell idle again after the exchange, which is what the next message would need",
           fsp_state.queues_idle_after);
+    check("and the FSP moved its queue head off zero, so the packet was taken out of the channel rather than left "
+          "in it: the difference between a card that ignored a message and one that never read it",
+          fsp_state.submit_valid && fsp_state.submit_consumed &&
+          fsp_state.submit_head == fsp_state.submit_tail && fsp_state.submit_tail != 0);
     ask_with(0, 32, 97, 96, -1, 0);
     check("an FMC whose hash section is not 48 bytes is refused a payload, and told which section it was",
           fsp_state.fmc_seen && !fsp_state.staged && fsp_state.cot_defect == 1);
@@ -1262,6 +1269,9 @@ static void test_the_handover_answers(void)
           "would have followed is declined with its reason kept: blocked(1), not silence",
           fsp_state.handover_attempted == 1 && fsp_state.handover_sent && fsp_state.handover.bytes == 0 &&
           !fsp_state.queried && fsp_state.send_blocked == 1);
+    check("and a packet nobody read is reported as unanswered rather than unread: the head is still at the zero "
+          "the host wrote, which is the one thing a reply-wait cannot tell apart from silence",
+          fsp_state.submit_valid && !fsp_state.submit_consumed && fsp_state.submit_head == 0);
 }
 
 /* The two things a submission needs, measured where this generation publishes them.  The legacy user-mode page

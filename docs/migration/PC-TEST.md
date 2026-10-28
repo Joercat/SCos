@@ -389,9 +389,13 @@ does not render.  The falcon's lockdown bit and mailbox pair are what the panel 
 outcome.  What changes is what the next measurement can be - the falcon's own error word and the FSP's answer to
 a real container, instead of a refusal to accept a stub.
 
-`GSPFMC.BIN` is the one this build assembles a handover from; `GSP.BIN` and `GSPBL.BIN` are the booter pair the
-other path would need, and the resource manager's arguments are built here rather than read from them - so
-staging all three changes what the panel can *say* before it changes what the card does.  Say so rather than let `fw 3/5` imply more -
+`GSPFMC.BIN` is the one this build assembles a handover from, and it needs `GSP.BIN` beside it to have anything
+to boot into: an image carrying the FMC alone reports `fw 1/5` and builds a handover that points at no resource
+manager.  `make ventoy` now stages the matched 570.144 set from linux-firmware (component `make
+gsp-firmware-set`) and refuses to leave `GSP.BIN` out when the set has it - the last two images were the same
+size as each other and one of them did not carry it, which is a difference nobody can see from a file listing.
+Take the FMC and the resource-manager image from the *same* driver release: the FMC is what verifies the RM
+image, so a pair from two versions is a pair whose signature will not check.  Say so rather than let `fw 3/5` imply more -
 and equally, do not read `fw 3/5` as a missing file: on a chip with an FSP, three of five is the whole set
 (`complete for this machine`), and the two absent names are the booter pair that belongs to the other path.
 

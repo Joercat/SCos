@@ -626,13 +626,23 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
     put_hex(w, (uint32_t)f->image_crc32);
     put(w, ")");
     if (!f->libos_staged) {
-        put(w, ", boot args point at the FMC image: no LibOS record staged.\n");
+        put(w, ", no LibOS record: no pages for one.\n");
+        return;
+    }
+    put(w, ", LibOS record 0x");
+    put_hex(w, (uint32_t)f->libos_phys);
+    put(w, " (LOGINIT/LOGINTR/LOGRM 64 KiB each at 0x");
+    put_hex(w, (uint32_t)f->libos_log_phys);
+    put(w, ", RMARGS 4 KiB at 0x");
+    put_hex(w, (uint32_t)f->libos_rmargs_phys);
+    put(w, ")");
+    if (!f->params_staged) {
+        put(w, "; no boot parameters staged, so the FMC was told nothing: the resource manager image this\n"
+               "  volume does not carry is what they describe.\n");
         return;
     }
     put(w, ", boot args 0x");
     put_hex(w, (uint32_t)f->boot_params_phys);
-    put(w, ": LOGINIT/LOGINTR/LOGRM 64 KiB each, RMARGS 4 KiB at 0x");
-    put_hex(w, (uint32_t)f->libos_phys);
     put(w, ".\n  boot: ");
     /* The outcome, then the registers it was read from - because the FMC reports success by going quiet and
      * releasing the lockdown, not by answering, and a log that only says "no reply" reads like a failure. */

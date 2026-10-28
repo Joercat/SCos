@@ -911,7 +911,6 @@ static void stage_gsp_boot_descriptors(const struct gpu_firmware_state *fws)
      * array behind it (r535_gsp_libos_init).  This tree stages that record (stage_libos_args above), because
      * until it did, this field named the FMC image: a valid address, but not a record of four regions, so the
      * RM it was supposed to describe had nothing to log to and nothing to read. */
-    stage_libos_args();
     /* The record when it is staged; otherwise the address this field has carried since the handover was first
      * built - a region the coprocessor may read, but not a set of four regions - and the panel says so. */
     params->gsp_rm.boot_args_offset = fsp_state.libos_staged ? fsp_state.libos_phys
@@ -1008,6 +1007,12 @@ static void stage_fmc(void)
      * there is nothing to point at, and (uint64_t)-1 is what the driver that has no arguments writes; with one,
      * the address goes in and the FSP is being asked to boot an operating system's worth of firmware rather
      * than to decline a stub. */
+    /* The LibOS argument record is staged here rather than inside the descriptor walk, because it does not
+     * describe the resource-manager image: it describes the memory the resource manager is given.  It was
+     * built there, behind a check for that image, so a volume carrying only the FMC - which is the state of
+     * the last two deliveries - left the record unbuilt and the panel said so on a card that had nothing
+     * else wrong with it. */
+    stage_libos_args();
     stage_gsp_boot_descriptors(fws);
     /* The FRTS is declared, not reserved: `msg.cot.frtsVidmemOffset = ALIGN(rsvd_size, 0x200000);
      * msg.cot.frtsVidmemSize = 0x100000' is what nvkm/subdev/fsp/gh100.c writes on every cold boot, where
@@ -1148,6 +1153,24 @@ static int gsp_fmc_settled(void)
     return fsp_state.lockdown_after == 0;
 }
 
+/* Did the coprocessor take the packet?  QUEUE_TAIL is the last dword the host wrote and QUEUE_HEAD is how far
+ * the FSP has read; the reference driver sets HEAD to 0 itself and the FSP lifts it as it consumes.  Read after
+ * every send, and reported beside the reply, because "no reply" over a packet still sitting in EMEM and "no
+ * reply" over a packet the FSP read and then ignored are opposite diagnoses. */
+static void note_submit(void)
+{
+    if (!w_fsp.page) return;
+    fsp_state.submit_head = read32(&w_fsp, NV_PFSP_QUEUE_HEAD);
+    fsp_state.submit_tail = read32(&w_fsp, NV_PFSP_QUEUE_TAIL);
+    fsp_state.submit_valid = !FSP_NOT_CONTENT(fsp_state.submit_head) &&
+                             !FSP_NOT_CONTENT(fsp_state.submit_tail) &&
+                             fsp_state.submit_tail != 0xffffffffu;
+    if (!fsp_state.submit_valid) return;
+    /* Consumed means the head has moved off the zero the host wrote, or has caught the tail: either is the FSP
+     * having walked the packet at least once. */
+    fsp_state.submit_consumed = fsp_state.submit_head != 0 || fsp_state.submit_head >= fsp_state.submit_tail;
+}
+
 static void hand_over_fmc(void)
 {
     uint8_t reply[128];
@@ -1163,6 +1186,7 @@ static void hand_over_fmc(void)
     /* Four seconds, the reference's budget for this boot, and the same clock the readiness wait used. */
     fsp_state.settled = wait_for_timed(gsp_fmc_settled, &fsp_state.handover_polls, FSP_WAIT_BOOT_MS,
                                        &fsp_state.handover_ms_used);
+    note_submit();
     /* A reply is still read if the FMC did send one - its error path does - but it is no longer the thing this
      * wait is for, so its absence is not a failure and its presence does not override the register test. */
     if (reply_waiting()) (void)read_reply(reply, sizeof reply, &fsp_state.handover);
@@ -1212,6 +1236,7 @@ static void probe_queue_write_access(void)
      * nobody asked for, and these two words are the ones the reference driver clears when it receives. */
     write32(&w_fsp, NV_PFSP_MSGQ_TAIL, 0);
     write32(&w_fsp, NV_PFSP_MSGQ_HEAD, 0);
+    fsp_state.queue_probed = 1;
     fsp_state.reset_head = read32(&w_fsp, NV_PFSP_MSGQ_HEAD);
     fsp_state.reset_tail = read32(&w_fsp, NV_PFSP_MSGQ_TAIL);
     fsp_state.queue_writable = !FSP_NOT_CONTENT(fsp_state.reset_tail) && fsp_state.reset_tail == 0;
@@ -1290,7 +1315,8 @@ static void probe_mailbox(void)
         if (!send_packet(&query, 1, NVDM_TYPE_CAPS_QUERY)) return;
         fsp_state.queried = 1;
         fsp_state.query.request_bytes = fsp_state.packet_bytes;
-        if (!wait_for(reply_waiting, &fsp_state.reply_polls)) return;
+        if (!wait_for(reply_waiting, &fsp_state.reply_polls)) { note_submit(); return; }
+        note_submit();
         read = read_reply(reply, sizeof reply, &fsp_state.query);
         fsp_state.responded = read == 1;
     }

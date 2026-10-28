@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-FSP_CHECKS = 137                    # the modelled mailbox, pinned: a dropped case is a silent loosening
+FSP_CHECKS = 140                    # the modelled mailbox, pinned: a dropped case is a silent loosening
 FSP_SIZES = (48, 97, 96)            # what a GB2xx FSP asks the container for, from the reference driver
 
 # The published register description, transcribed rather than read out of the file under test:

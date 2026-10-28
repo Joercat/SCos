@@ -325,6 +325,13 @@ struct gpu_fsp_state {
     int hwcfg2_after_valid, mailbox_after_valid, scratch_after_valid, queue_after_valid;
     int mbox_error;                           /* a non-zero mailbox pair that is not the boot-args address */
     uint32_t queue_tail_after, queue_head_after;   /* the reply queue after the doorbell: proves the store */
+    /* Whether the coprocessor *took* the packet, which is a different question from whether it answered: on
+     * this generation the host writes into EMEM at offset 0 and moves QUEUE_TAIL; the FSP moves QUEUE_HEAD up
+     * as it consumes, and only then writes a reply.  A head that never moves says the packet is still sitting
+     * in a channel nobody is reading, which is the one failure a reply-wait cannot distinguish from silence. */
+    int queue_probed;                         /* the write-and-read-back probe actually ran */
+    int submit_valid, submit_consumed;
+    uint32_t submit_head, submit_tail;
     /* The LibOS argument record the resource manager is told to read: four descriptors, three 64 KiB log
      * buffers with an address array inside each, and the RM's own argument block.  `libos_declined' is why
      * there is none, and it is the difference between a handover that can boot an RM and one that cannot. */

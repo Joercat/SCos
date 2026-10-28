@@ -54,8 +54,15 @@ VENTOY_FIRMWARE ?= $(firstword $(wildcard $(GSP_SET)) $(wildcard /lib/firmware/n
 VENTOY_SIZE = $(shell python3 tools/makedisk.py build --min-size \
 	$(if $(VENTOY_FIRMWARE),--firmware $(VENTOY_FIRMWARE)) | cut -f1)
 ventoy: gpu-modules gsp-firmware all
+	@echo "firmware staged from $(if $(VENTOY_FIRMWARE),$(VENTOY_FIRMWARE),$(BUILD)/gsp (no gsp-set: only the FMC will be packed))"
 	python3 tools/makedisk.py build $(if $(VENTOY_FIRMWARE),--firmware $(VENTOY_FIRMWARE) ,)--size $(VENTOY_SIZE) \
 		--out $(BUILD)/scos-ventoy.img
+	@if [ -f "$(VENTOY_FIRMWARE)/GSP.BIN" ]; then \
+		python3 tools/verify-stick.py $(BUILD)/scos-ventoy.img | grep -q 'GSP.BIN (' || { \
+			echo "REFUSED: $(VENTOY_FIRMWARE)/GSP.BIN is staged but the image does not carry it."; \
+			echo "  A stick without the resource-manager image cannot start the coprocessor past the FMC,"; \
+			echo "  and the panel would say fw 1/5 on a card that has nothing wrong with it."; exit 1; }; \
+	fi
 	sha256sum $(BUILD)/scos-ventoy.img > $(BUILD)/scos-ventoy.img.sha256
 	@echo "copy $(BUILD)/scos-ventoy.img onto the Ventoy partition and pick it in the menu"
 	@echo "or run tools/flash.sh --ventoy /run/media/\$$USER/Ventoy, which packs, copies and reads it back"
