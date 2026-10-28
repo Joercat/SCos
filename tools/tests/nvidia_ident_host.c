@@ -57,6 +57,10 @@ static int maps;
  * "unreachable" or "answers nothing" and never as a state of the block. */
 static u32 fsp_regs[4];
 static u32 ce_block[2];
+/* The video-memory scratch word at 0x1183a4, which is *inside* the 16 MiB register mapping and so is
+ * served before the array lookup rather than through `far_slot'.  Its default is what an aperture with
+ * nothing at that address returns, which is the case the driver has to call "not a size". */
+static u32 vram_word;
 static int ce_block_reads;                /* so a scenario can prove the driver did not go looking */
 static u32 *far_slot(u32 offset)
 {
@@ -173,6 +177,7 @@ static u32 fake_read32(u64 handle, u32 offset)
     if (handle == WINDOW_HANDLE) offset += 0x00810000u;   /* relative to the window's own mapping */
     else if (handle == FAR_HANDLE) offset += 0x008f0000u; /* the FSP page, mapped on its own */
     else if (handle != REG_HANDLE) { printf("  note: read through an unknown handle\n"); return 0xffffffffu; }
+    if (offset == 0x001183a4u) return vram_word;
     if (offset == 0x00810000u) return umode_class;
     if (offset == 0x00810084u) return 0;                    /* TIME_1: the high half stays zero */
     if (offset == 0x00810080u) {                            /* TIME_0: the nanosecond counter */
@@ -210,6 +215,9 @@ static u64 fake_alloc(u64 bytes) { (void)bytes; return 0; }
 struct fixture {
     struct scos_gpu_exports exports;
     struct scos_gpu_device_info device;
+    /* The one thing a module may say *back*: what the chip's own scratch word said its frame buffer is.
+     * Zeroed per scenario, so "the driver reported nothing" is distinguishable from "it reported zero". */
+    struct scos_gpu_device_report report;
 };
 
 static void fixture_reset(struct fixture *f, u32 vendor, u32 device_id, u64 framebuffer_base)
@@ -241,7 +249,9 @@ static void fixture_reset(struct fixture *f, u32 vendor, u32 device_id, u64 fram
         .spin = fake_spin,
         .wait_bit = fake_wait_bit,
         .alloc = fake_alloc,
+        .report = &f->report,
     };
+    f->report = (struct scos_gpu_device_report){ .size = sizeof(f->report) };
     stores = 0;
     maps = 0;
     far_maps = 0;
@@ -263,6 +273,7 @@ static void fixture_reset(struct fixture *f, u32 vendor, u32 device_id, u64 fram
     for (unsigned i = 0; i < 5u; i++) gsp_regs[i] = 0xffffffffu;   /* unseeded: the block does not answer */
     for (unsigned i = 0; i < 4u; i++) fsp_regs[i] = 0xffffffffu;
     ce_block[0] = ce_block[1] = 0xffffffffu;
+    vram_word = 0;
 }
 
 extern int scos_module_init(const struct scos_gpu_exports *exports,
@@ -325,10 +336,10 @@ int main(void)
           "for the reader to decode");
     check(has(text, "impl 0x8"), "IMPLEMENTATION is taken from 23:20, where NVIDIA documents it");
     check(has(text, "rev A.1"), "MAJOR_REVISION 7:4 and MINOR_REVISION 3:0 are read as separate fields");
-    check(has(text, "reads 18, writes 0"),
+    check(has(text, "reads 19, writes 0"),
           "the boot register twice, the class register once, the two inventory blocks' CFG words, four rows of "
           "each candidate table before the walk reached its end, and five reads of the GSP block");
-    check(reads_served == 18, "the count it reports is the count it issued");
+    check(reads_served == 19, "the count it reports is the count it issued");
     check(has(text, "window silent"), "and it says the submission window was silent");
     check(has(text, "feeds the console"),
           "the function whose BAR holds the firmware's surface says it feeds the console");
@@ -351,7 +362,7 @@ int main(void)
     check(verdict == 0 && has(text, "window class 0xc461=published"),
           "a class register answering with the published number is reported as matching it");
     check(has(text, "clock +2097us"), "and the clock in that page is measured, not assumed");
-    check(reads_served == 24 && has(text, "reads 24, writes 0"),
+    check(reads_served == 25 && has(text, "reads 25, writes 0"),
           "two boot-register reads, one class read, six reads of the time pair, fifteen for the inventory and "
           "the GSP block, "
           "and no more");
@@ -406,7 +417,7 @@ int main(void)
     check(maps == 2 && window_physical == 0xe0100000ull + 0x810000ull && window_mapping_bytes == 0x20000ull,
           "two mappings: the register BAR as far as the kernel maps it, and the 128 KiB window page");
     snprintf(needle, sizeof needle, "reads %d, writes 0", reads_served);
-    check(reads_served == 24 && has(text, needle),
+    check(reads_served == 25 && has(text, needle),
           "and the reads it reports are the reads the device served, whichever handle they went through");
     check(stores == 0, "neither mapping was written to");
 
@@ -513,10 +524,10 @@ int main(void)
     check(!has(text, "window silent"),
           "the two words are not interchangeable, so the text must not blur them: the engine table may "
           "still be silent, which is a different fact about a different block");
-    check(reads_served == 17 && has(text, "reads 17, writes 0"),
+    check(reads_served == 18 && has(text, "reads 18, writes 0"),
           "and the failed mapping costs no read beyond the boot register and the inventory: the page it "
           "could not reach is never asked about");
-    check(maps == 2 && log_count == 2,
+    check(maps == 2 && log_count == 3,
           "the attempt is recorded, and no doorbell line is written about a page that was never read - the "
           "GSP line is there because that block answers through the register mapping, not the window");
 
@@ -524,7 +535,7 @@ int main(void)
     fixture_reset(&f, 0x10de, 0x2d83, 0);
     registers[0] = boot0;
     verdict = scos_module_init(&f.exports, &ops);
-    check(reads_served == 18, "a second run asks the chip again rather than reusing the last answer");
+    check(reads_served == 19, "a second run asks the chip again rather than reusing the last answer");
     check(verdict == 0 && has(ops->describe(ops->context), "not the console owner"),
           "with no firmware surface in its BARs it says another function feeds the console");
     check(stores == 0, "the second run still wrote nothing");
@@ -579,7 +590,7 @@ int main(void)
     text = ops->describe(ops->context);
     check(verdict == 0 && has(text, "not the console owner") && !has(text, "feeds the console"),
           "a rebind recomputes the inventory instead of repeating the previous one");
-    check(has(text, "reads 18, writes 0"), "and the read counter restarted, as a measurement must");
+    check(has(text, "reads 19, writes 0"), "and the read counter restarted, as a measurement must");
 
     /* ---- 1j. the format Blackwell's own header publishes: CFG is the block's self-report - version 2, how
      * many devices, how many rows each occupies, how many rows exist - and a device spans three dwords with
@@ -617,7 +628,7 @@ int main(void)
     check(has(text, " of 2 devices"), "and only the two devices the table named are counted");
     snprintf(needle, sizeof needle, "reads %d, writes 0", reads_served);
     check(has(text, needle), "the CFG word and every row are in the read count the module reports");
-    check(reads_served == 32,
+    check(reads_served == 33,
           "two boot-register reads, the class, six clock reads, one CFG word per block, the twelve rows the "
           "chip said exist and four scratch words: nothing is read past the end of the table it decoded");
     check(has(text, "FSP scratch at 0x8f0320 answers 0x00000000/0x00000000/0x00000000/0x00000000"),
@@ -836,7 +847,7 @@ int main(void)
           "FSP's page - and each is a separate mapping because the cap is per mapping, not per BAR");
     check(ce_block_reads == 2, "the engine block was read, and only after the cross-check agreed on the unit");
     snprintf(needle, sizeof needle, "reads %d, writes 0", reads_served);
-    check(reads_served == 28 && has(text, needle),
+    check(reads_served == 29 && has(text, needle),
           "two boot reads, the class, six clock reads, the two CFG words and the six rows they said exist, "
           "five for the coprocessor, two for the engine block and four for the FSP - eleven of the "
           "twenty-eight answered with a refusal, and all twenty-eight are in the number the panel prints");
@@ -955,6 +966,72 @@ int main(void)
     text = ops && ops->describe ? ops->describe(ops->context) : 0;
     check(verdict == 0 && has(text, "arch 0x1d (arch not in the published table)"),
           "an architecture outside the published table is printed as a number and labelled as unnamed");
+
+    /* ---- 1t. the frame buffer's size, which is the one number a firmware reservation is placed back
+     * from.  It is read from the scratch word the boot firmware leaves it in, reported to the kernel
+     * through the report pointer (and not only printed), and refused by name when the word is not a
+     * size.  On the machine this was written for this is the register that decides whether a WPR2 can be
+     * placed at all, so each of the four shapes gets its own case. ---- */
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    vram_word = 8192u;                           /* 8 GiB, as the MiB count the firmware stores */
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && f.report.vram_bytes == (8192u << 20),
+          "the frame buffer's size is handed to the kernel, in bytes");
+    check(f.report.vram_register == 0x001183a4u && f.report.vram_units == 1024u * 1024u,
+          "and the report names the register and the unit it was read in, so the number can be checked");
+    check(has(text, "video memory 8192 MiB"), "the panel states it with the register that answered");
+    check(has(text, "the top of video memory a firmware reservation is placed back from"),
+          "and says what it is for, rather than leaving a number for the reader to guess about");
+    check(stores == 0, "the scratch word was read, never written");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    vram_word = 0xffffffffu;                     /* an aperture with nothing at that address */
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && f.report.vram_bytes == 0,
+          "all ones reports no size, so the kernel's zero keeps meaning \"the chip did not say\"");
+    check(has(text, "unknown: the scratch word at 0x1183a4 answers all ones"),
+          "and the panel says why, instead of printing a size of 4096 GiB");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    vram_word = 0xbadf4100u;                     /* the same refusal the coprocessor answers with */
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && f.report.vram_bytes == 0, "a refusal to this reader is not a size either");
+    check(has(text, "a refusal to this reader and not a size"),
+          "and is named for what it is, which is the difference between a locked block and a zero");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    vram_word = 0;
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && f.report.vram_bytes == 0 && has(text, "is zero"),
+          "a zero word is reported as a zero, not as a card with no memory");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
+
+    fixture_reset(&f, 0x10de, 0x2d83, 0x10000000ull);
+    registers[0] = boot0;
+    vram_word = 8192u;
+    low_mapping_bytes = 0x100000ull;             /* a kernel cap below the scratch word */
+    verdict = scos_module_init(&f.exports, &ops);
+    text = ops->describe(ops->context);
+    check(verdict == 0 && f.report.vram_bytes == 0 &&
+          has(text, "the register window does not reach 0x1183a4"),
+          "a window that stops short of the register says so, and reports no size rather than a stale one");
+    if (ops && ops->teardown) ops->teardown(ops->context);
+    scos_module_teardown(ops);
 
     /* Counted rather than written down: the number of scenarios has grown every time a new answer from a
      * chip was added to the driver, and a stale figure in a passing line is worse than no figure. */

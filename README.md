@@ -146,6 +146,11 @@ engine), and every damaged rectangle is now decomposed into flat regions and
 painted by the engine when one is bound - measured at 74% of a desktop frame on an
 emulated CL-GD5446, against 0% before. **On a Turing-or-later NVIDIA card the GPU
 still renders nothing**: submission there needs GSP firmware and a resource
-manager, which this tree does not have. See
+manager, which this tree does not have. What that path needs from the card is
+now measured rather than assumed - the module reads the frame buffer's size from
+the chip's own scratch word and the kernel computes the firmware's reservation
+from it, refusing with a reason when the card will not say - but no reservation is
+sent until a resource-manager image can be staged, which this repository cannot
+supply. See
 [why the GPU was not accelerating, and what was fixed](docs/migration/GPU-ACCELERATION.md).
 GOP/PAT/write combining are not GPU rendering. Browser integration remains deferred.

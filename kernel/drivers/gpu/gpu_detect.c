@@ -285,22 +285,6 @@ void gpu_init(const struct boot_framebuffer *fb)
      * hardware - and the FSP's answer is exactly the fact such a boot most needs. */
     if (handoff) {
         gpu_firmware_note(handoff);
-        /* The card this machine displays on, or the first one this OS has a name for.  Not `gpu_module_eligible':
-         * a chip the naming table knows but no driver claims is exactly the case where asking the security
-         * processor is worth doing, and it is also the case where no module will ever be bound. */
-        {
-            int pick = -1;
-            for (int i = 0; i < device_count; i++)
-                if (devices[i].is_scanout) { pick = i; break; }
-            if (pick < 0 && device_count > 0) pick = 0;      /* nothing owns the screen: ask the first anyway,
-                                                                  * because on a card it is the answer about the
-                                                                  * card that matters, not which of its functions
-                                                                  * happened to be wired to the console */
-            if (pick >= 0) gpu_fsp_note(&devices[pick], handoff);   /* once, and of one function: two asks of
-                                                                        * two functions of one chip would be two
-                                                                        * reports of the same mailbox, and a
-                                                                        * panel cannot say which one to believe */
-        }
     }
     /* A family being *named* is not a driver.  The one module the firmware read for this machine's
      * chip is validated and exercised here; every other family's file stays on the disk. */
@@ -335,6 +319,31 @@ void gpu_init(const struct boot_framebuffer *fb)
                 break;
             }
         }
+        }
+    }
+    /* Asked after the module, and that order is the reason this call moved.  The handover describes a
+     * reservation in video memory, and every address in it is an offset back from the top of that memory -
+     * a number only the driver module can read, because the register that holds it is inside the window the
+     * module maps.  Asking the FSP before a module had been bound meant the handover was built without it,
+     * which is why the reservation was declined for three revisions.  Nothing else about the probe changed:
+     * it still asks one function, still reads before it writes, and on any card that is not NVIDIA's it has
+     * already returned by the line above. */
+    if (handoff) {
+        /* The card this machine displays on, or the first one this OS has a name for.  Not `gpu_module_eligible':
+         * a chip the naming table knows but no driver claims is exactly the case where asking the security
+         * processor is worth doing, and it is also the case where no module will ever be bound. */
+        {
+            int pick = -1;
+            for (int i = 0; i < device_count; i++)
+                if (devices[i].is_scanout) { pick = i; break; }
+            if (pick < 0 && device_count > 0) pick = 0;      /* nothing owns the screen: ask the first anyway,
+                                                                  * because on a card it is the answer about the
+                                                                  * card that matters, not which of its functions
+                                                                  * happened to be wired to the console */
+            if (pick >= 0) gpu_fsp_note(&devices[pick], handoff);   /* once, and of one function: two asks of
+                                                                        * two functions of one chip would be two
+                                                                        * reports of the same mailbox, and a
+                                                                        * panel cannot say which one to believe */
         }
     }
     if (!bound && !module_bound)

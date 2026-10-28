@@ -247,3 +247,67 @@ panel says so in those words.
 | `kernel/desktop/graphics.c`, `platform.c` | user-facing wording matches what is now true ("flat output regions") |
 | `tools/tests/pci_scan_host.c` | hybrid-GPU cases and candidate assertions |
 | `tools/tests/test_gpu_render.py` | device-versus-shadow equality for structured rectangles; desktop frame mostly painted by the engine; textured rectangle entirely on the CPU |
+
+## 7. The Blackwell path: the first increment, and what it does not reach
+
+Section 4 ended with a plan in five steps.  Step 1 - *reserve video memory for the firmware* - is the
+one that had no code behind it at all, and it is now in the tree, in the shape the reference drivers
+describe and with the arithmetic under test.
+
+Three things were missing, and each of them was a different kind of missing:
+
+1. **A number.**  Every address in the reservation is an offset *back from the top of video memory*,
+   so a driver that does not know that top cannot place anything.  The register that holds it is
+   `NV_PGC6_AON_SECURE_SCRATCH_GROUP_42`, `0x001183a4`, RW-4R, published (MIT) in NVIDIA's
+   `src/common/inc/swref/published/ampere/ga102/dev_gc6_island.h`, and the boot firmware leaves the
+   frame buffer's size in it as a count of MiB (`ga102_fb_vidmem_size()` in nvkm reads it the same
+   way).  `drivers/gpu/nvidia/module.c` now reads it - the kernel cannot, the register block is the
+   module's window - and refuses four shapes of answer by name: all ones (a block that is not
+   decoding), a `0xbadf...` refusal (a block that will not answer *this* reader), zero or a value
+   larger than any card (not a size), and a register window that stops short of it (this driver's
+   own bound, not the chip's answer).  What survives those checks crosses to the kernel in a
+   `struct scos_gpu_device_report` - the first thing a module may say *back* through the ABI - and
+   nothing else does, so the kernel's zero still means "the chip did not say".
+2. **A placement.**  `kernel/drivers/gpu/gsp_layout.c` computes the whole reservation from five
+   inputs: FRTS down from the 128 KiB-rounded top, the bootloader 4 KiB aligned under it, the ELF
+   image 64 KiB aligned under that, the heap 1 MiB aligned under the image, the WPR2's start one
+   MiB-aligned `sizeof(GspFwWprMeta)` under the heap, and a 1 MiB host heap below that.  The order,
+   the alignments and the sizes are nouveau's `tu102_gsp_oneinit()` and `gh100_gsp_wpr_meta_init()`
+   (nvkm, MIT); the code is this tree's own - a freestanding function with no allocation and no device
+   access that refuses rather than shifting a region when the card is too small.
+3. **An order of operations.**  `gpu_fsp_note()` used to run *before* any module was bound, so the
+   handover was built before the only code that can read the video-memory size had run.  It runs
+   after now, with the reason written where the call moved.
+
+What is measured, and how:
+
+* `tools/tests/gsp_layout_host.c` pins the placement against a case worked out by hand from the rules
+  (a 1 GiB card: FRTS at 1072693248, bootloader at 1072627712, image at 1071579136, heap at
+  1069547520 and 2031616 bytes long, WPR2 `[1068498944, 1073741824)`, host heap at 1067450368), then
+  checks ordering, per-region alignment, no overlap and the memory bound over **495** accepted
+  combinations of eleven card sizes and five image sizes, then the refusals - and that a refusal leaves
+  no offset a caller could hand to firmware.
+* `tools/tests/nvidia_ident_host.c` drives the new register through the module's fake register file in
+  five shapes and asserts the number reaches the kernel and appears on the panel, with the register
+  and its unit named, and that not one store was issued.
+* `tools/tests/test_gpu_fsp.py` re-proves that the shipped payload is **unchanged** on a card that
+  cannot be measured: the harness is pinned at `frtsVidmemOffset = 0`, `frtsVidmemSize = 1 MiB` and
+  `gspBootArgsSysmemOffset = -1`, which is what it asserted before this work.  One real defect was
+  caught by exactly that check while writing this: `GSP_LAYOUT_OK` is zero, so a plan that was never
+  computed read as a successful one and put a **zero-byte FRTS** into the handover.  The gate is
+  `plan_ready` now, not the reason code, and the test says why.
+
+What is still missing, stated plainly because the panel is easy to read as more than it is:
+
+* **The resource-manager image.**  `GSP.BIN` - `nvidia/gb202/gsp/gsp-<ver>.bin`, roughly 30 MB - is
+  not in NVIDIA's open kernel modules (they carry the FMC, the booter and their own RM-side bindata,
+  which is what `tools/gsp-firmware.py` rebuilds).  The mirrors reachable from this build environment
+  carry only `bootloader-<ver>.bin` and `fmc-<ver>.bin` for `gb202`; the RM image is distributed with
+  the proprietary driver and with `linux-firmware`.  Without it a booted FMC has no operating system
+  to start, which is why the plan is computed and reported but the *send* is unchanged.
+* **Steps 3-5 of §4.**  Once an RM image is on the volume, the reservation above is what the handover
+  will describe; after that the GSP's own message queue, a channel and a class submission are the
+  remaining work, and none of it can be verified here - QEMU models no NVIDIA function, and there is
+  no Blackwell card in this environment.  A successful plan on a real machine would be visible as a
+  `graphics` panel line naming the MiB it read and the offsets it derived; it is *not* rendering, and
+  nothing in this tree claims it is.

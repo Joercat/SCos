@@ -69,7 +69,9 @@ def source(name):
 def test_the_modelled_mailbox_sends_exactly_the_published_framing():
     with tempfile.TemporaryDirectory() as tmp:
         binary = Path(tmp) / 'gpu_fsp_host'
-        run(GCC + ['tools/tests/gpu_fsp_host.c', '-o', str(binary)])
+        # The handover now places a reservation, so the planner is part of this harness's link:
+        # the same object the kernel links, compiled with the same flags.
+        run(GCC + ['tools/tests/gpu_fsp_host.c', 'kernel/drivers/gpu/gsp_layout.c', '-o', str(binary)])
         result = subprocess.run([str(binary)], cwd=ROOT, capture_output=True, text=True)
         assert not result.stderr.strip(), 'the sanitizers said something: ' + result.stderr
         m = re.match(r'^(\d+) check\(s\), (\d+) failure\(s\)$', result.stdout.strip())

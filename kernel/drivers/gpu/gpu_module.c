@@ -591,11 +591,15 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
              device->is_scanout ? "console LFB at" : "aperture of this function at",
              (unsigned)(u32)physical, (unsigned)need, info.width, info.height, record.test_stride);
     }
+    /* Zeroed before the call and read after it: a module that writes nothing there has reported
+     * nothing, and a struct whose size does not match this kernel's is ignored rather than
+     * half-read.  Anything it does report is logged, because it becomes an input to a reservation. */
+    struct scos_gpu_device_report report = { .size = (u32)sizeof(report) };
     exports = (struct scos_gpu_exports){
         .size = sizeof(exports), .abi = SCOS_GPU_ABI_VERSION, .device = &info,
         .log = module_log, .map = module_map, .read32 = module_read32,
         .write32 = module_write32, .ticks = module_ticks, .spin = module_spin,
-        .wait_bit = module_wait_bit, .alloc = module_alloc,
+        .wait_bit = module_wait_bit, .alloc = module_alloc, .report = &report,
     };
     scos_gpu_module_init entry = (scos_gpu_module_init)(uintptr_t)(record.region +
                                                                     header->entry_init);
@@ -604,6 +608,12 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
         record.refusal = 15;
         klog(MODULE_LOG_PREFIX "did not take the device: %s", reject_reason(15));
         return -1;
+    }
+    if (report.size >= sizeof(report) && report.vram_bytes) {
+        device->vram_bytes = report.vram_bytes;
+        klog(MODULE_LOG_PREFIX "the module read %u MiB of video memory from 0x%x (unit %u B); that is "
+             "the number a firmware carve-out has to be placed against", report.vram_bytes >> 20,
+             report.vram_register, report.vram_units);
     }
     if (ops->abi != SCOS_GPU_ABI_VERSION || ops->size > sizeof(*ops) ||
         ops->size < 7u * sizeof(void *)) {   /* must at least reach wait_idle */

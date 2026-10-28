@@ -30,6 +30,13 @@
 #include "gpu_abi.h"
 #include "blackwell_regs.h"
 
+/* The one register this file reads outside blackwell_regs.h, because it is not a boot or engine
+ * register at all: NV_PGC6_AON_SECURE_SCRATCH_GROUP_42, 0x001183a4, RW-4R, in the always-on scratch
+ * group, published (MIT) in NVIDIA's src/common/inc/swref/published/ampere/ga102/dev_gc6_island.h.
+ * The boot firmware leaves the frame buffer's size in it as a count of MiB; nouveau's
+ * ga102_fb_vidmem_size() reads it the same way.  See probe_vram() for what makes a value usable. */
+#define NV_PGC6_AON_SECURE_SCRATCH_GROUP_42   0x001183a4u
+
 /* A module may not import anything, so it supplies the one memory helper it needs. */
 void *memset(void *pointer, int value, unsigned long bytes)
 {
@@ -90,6 +97,16 @@ struct inventory {
     int ce_locked, ce_dead, ce_replies;   /* what the first copy engine's own block answered: the lock,
                                            * nothing at all, or a reply that is content */
     u32 fsp_scratch[4];
+    /* The video-memory size the chip keeps in a scratch word.  Provenance: the register is
+     * NV_PGC6_AON_SECURE_SCRATCH_GROUP_42, 0x001183a4, published (MIT) in NVIDIA's own
+     * src/common/inc/swref/published/ampere/ga102/dev_gc6_island.h, RW-4R; the meaning - a count of
+     * mebibytes - is the one nouveau's ga102_fb_vidmem_size() gives it (`nvkm_rd32(device, 0x1183a4)
+     * << 20`), and that is stated rather than implied because this file otherwise cites only the
+     * register documentation.  It is read, never written: a boot firmware put it there. */
+    u32 vram_word;                      /* the word as read, whatever it said */
+    u32 vram_mib;                       /* its value when it was usable as a size */
+    int vram_state;                     /* 0 not asked, 1 answered, 2 all ones, 3 a refusal, 4 zero/absurd,
+                                         * 5 the register window stops short of the word */
     int fsp_attempted, fsp_error_reads, fsp_locked, fsp_replies;
     int fsp_direct, fsp_unreachable;      /* reached through the register mapping, or not reached at all */
     u64 fsp_handle;                       /* its own page, when 0x8f0000 is past the mapping's cap */
@@ -571,6 +588,32 @@ static void probe_targets(void)
  * advancing, the window the Volta and Turing documentation describes is present on this silicon, and the
  * copy-engine work after this is addressable rather than speculative.  If it answers nothing, that is the
  * ceiling, measured.  Both answers are reported; neither is written to. */
+/* The frame buffer's size, from the scratch word the boot firmware leaves it in.  This is the one
+ * input a GSP reservation cannot do without: every region of that reservation is an offset back from
+ * the top of video memory, so a driver that does not know the top has nowhere to place anything - and
+ * the kernel cannot read this word itself, because the register block is the module's window.
+ *
+ * The checks are the same shape as everywhere else in this file: all ones is a block that is not
+ * answering, a PRIV refusal is a block that will not answer *this* reader, and a value of zero or one
+ * larger than any card is not a size.  In each of those cases nothing is reported, because the kernel
+ * treats a reported zero as "not known" and a wrong number as a place to boot firmware into. */
+static void probe_vram(void)
+{
+    u32 value;
+
+    inv.vram_word = inv.vram_mib = 0;
+    /* 5 is this driver's own bound and 4 is the chip's answer: a window that stops short of the
+     * register is not a card that said something wrong, and the two must not read alike. */
+    if (inv.mapping_bytes <= NV_PGC6_AON_SECURE_SCRATCH_GROUP_42) { inv.vram_state = 5; return; }
+    value = reg_read(NV_PGC6_AON_SECURE_SCRATCH_GROUP_42);
+    inv.vram_word = value;
+    if (value == 0xffffffffu) { inv.vram_state = 2; return; }
+    if (NV_PRI_IS_REFUSAL(value)) { inv.vram_state = 3; return; }
+    if (!value || value > (512u << 10)) { inv.vram_state = 4; return; }   /* 512 GiB is not a card */
+    inv.vram_mib = value;
+    inv.vram_state = 1;
+}
+
 static void probe_usermode(void)
 {
     /* The documented page sits at the top of a 16 MiB register BAR, which is past the kernel's per-mapping
@@ -881,6 +924,29 @@ static void build_text(void)
     } else if (inv.fsp_unreachable) {
         put_text(&b, "; the FSP page at 0x8f0000 could not be mapped, so nothing is claimed about it");
     }
+    /* The frame buffer's size, in the description and not only in the log: it is the number a GSP
+     * reservation is placed back from, so a reader deciding whether this card can be booted needs it in
+     * the report the panel prints.  A word that is not a size is quoted as what it was. */
+    if (inv.vram_state == 1) {
+        put_text(&b, "; video memory ");
+        put_dec(&b, inv.vram_mib);
+        put_text(&b, " MiB from the scratch word at 0x1183a4, the top of video memory a firmware "
+                     "reservation is placed back from");
+    } else if (inv.vram_state == 2) {
+        put_text(&b, "; video memory unknown: the scratch word at 0x1183a4 answers all ones, so the "
+                     "block is not decoding and no size is claimed");
+    } else if (inv.vram_state == 3) {
+        put_text(&b, "; video memory unknown: the scratch word at 0x1183a4 answered 0x");
+        put_hex(&b, inv.vram_word, 8);
+        put_text(&b, ", a refusal to this reader and not a size");
+    } else if (inv.vram_state == 4) {
+        put_text(&b, "; video memory unknown: the scratch word at 0x1183a4 ");
+        if (inv.vram_word) { put_text(&b, "holds 0x"); put_hex(&b, inv.vram_word, 8); }
+        else put_text(&b, "is zero");
+        put_text(&b, ", which is not a frame-buffer size");
+    } else if (inv.vram_state == 5) {
+        put_text(&b, "; video memory unknown: the register window does not reach 0x1183a4");
+    }
     if (inv.top_lce && !inv.window_live) {
         put_text(&b, "; engines are register blocks, not channels: no submission window answered, so "
                      "nothing was submitted");
@@ -976,6 +1042,8 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     inv.ce_locked = inv.ce_dead = inv.ce_replies = 0;
     inv.gsp_error_reads = inv.gsp_locked = 0;
     inv.fsp_scratch[0] = inv.fsp_scratch[1] = inv.fsp_scratch[2] = inv.fsp_scratch[3] = 0;
+    inv.vram_word = inv.vram_mib = 0;
+    inv.vram_state = 0;
     inv.fsp_attempted = inv.fsp_error_reads = inv.fsp_locked = inv.fsp_replies = 0;
     inv.fsp_direct = inv.fsp_unreachable = 0;
     inv.fsp_handle = 0;
@@ -1037,6 +1105,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
         }
     }
 
+    probe_vram();
     probe_usermode();
     probe_engines();
     probe_gsp();
@@ -1140,6 +1209,46 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
         }
         *w.at = 0;
         note(fourth);
+    }
+
+    /* The frame buffer's size, handed to the kernel rather than only printed: it is the one input a GSP
+     * reservation cannot be computed without, and this is the only driver with a window into the register
+     * that holds it.  A value that failed the checks in probe_vram() is not reported at all, so the kernel's
+     * zero keeps meaning "the chip did not say". */
+    if (X->report && X->report->size >= sizeof(*X->report) && inv.vram_state == 1) {
+        X->report->vram_bytes = inv.vram_mib << 20;
+        X->report->vram_register = NV_PGC6_AON_SECURE_SCRATCH_GROUP_42;
+        X->report->vram_units = 1024u * 1024u;
+    }
+    {
+        static char fifth[512];
+        struct buf v = { fifth, fifth + sizeof(fifth) - 1, 0 };
+        put_text(&v, "nvidia: video memory ");
+        if (inv.vram_state == 1) {
+            put_dec(&v, inv.vram_mib);
+            put_text(&v, " MiB, read from the scratch word at 0x1183a4 (NV_PGC6_AON_SECURE_SCRATCH_"
+                         "GROUP_42, published): the top of video memory a firmware reservation is "
+                         "placed back from");
+        } else if (inv.vram_state == 2) {
+            put_text(&v, "unknown: the scratch word at 0x1183a4 answers all ones, so the block is not "
+                         "decoding and no size is claimed");
+        } else if (inv.vram_state == 3) {
+            put_text(&v, "unknown: the scratch word at 0x1183a4 answered 0x");
+            put_hex(&v, inv.vram_word, 8);
+            put_text(&v, ", a refusal to this reader and not a size");
+        } else if (inv.vram_state == 4) {
+            put_text(&v, "unknown: the scratch word at 0x1183a4 ");
+            if (inv.vram_word) { put_text(&v, "holds 0x"); put_hex(&v, inv.vram_word, 8); }
+            else put_text(&v, "is zero");
+            put_text(&v, ", which is not a frame-buffer size");
+        } else if (inv.vram_state == 5) {
+            put_text(&v, "unknown: the register window does not reach 0x1183a4, which is this driver's "
+                         "mapping and not an answer from the chip");
+        } else {
+            put_text(&v, "unknown: the scratch word at 0x1183a4 was not read");
+        }
+        *v.at = 0;
+        note(fifth);
     }
 
     *out_ops = &ops;

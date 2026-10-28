@@ -21,6 +21,7 @@
 #ifndef SCOS_GPU_H
 #define SCOS_GPU_H
 
+#include "gsp_layout.h"   /* the frame-buffer reservation the FSP handover places */
 #include "kernel.h"
 #include "gpu_match.h"
 #include "gpu_abi.h"
@@ -74,6 +75,10 @@ struct gpu_device {
     uint32_t reg_first, reg_second;
     uint8_t reg_state;
     uint8_t reg_kernel_fallback;     /* the kernel read them only because no module was staged */
+    /* Total video memory, as a module read it from the chip; 0 when no module could.  It is the one
+     * number a firmware reservation has to have - a carve-out placed from offset 0 is not a
+     * reservation - so "unknown" is recorded as unknown and never defaulted. */
+    uint64_t vram_bytes;
 };
 
 #define GPU_MAX_DEVICES 8
@@ -262,6 +267,16 @@ struct gpu_fsp_state {
     uint32_t wpr_meta_size, radix3_bytes, radix3_tree_bytes, signature_bytes, bootloader_bytes;
     unsigned params_staged;                  /* both descriptors are in memory and pointed at */
     unsigned params_declined;      /* 1 no pages, 2 no FMC image, 3 no RM image on the volume, 4 no tree pages */
+    /* The reservation the handover describes, and the one number it cannot be computed without: the
+     * video memory a module read off the chip.  A plan that was refused leaves every offset zero and
+     * names the reason, which is what makes "no carve-out" a recorded fact and not a silent default. */
+    uint64_t vram_bytes;
+    struct gsp_fb_plan plan;
+    /* Two fields, because GSP_LAYOUT_OK is zero and a struct that has never been asked would otherwise
+     * read as a plan that succeeded - which is how a zero-byte FRTS came to be one edit away from being
+     * sent.  `plan_ready' is the only thing any caller may test. */
+    int plan_ready;
+    int plan_state;                          /* enum gsp_layout_refusal: why not, when not ready */
     struct gpu_fsp_store stores[GPU_FSP_STORE_LOG];  /* the last writes, oldest first, wrapped */
     uint32_t store_count;                            /* writes issued, not writes kept: the log is shorter */
     uint32_t send_walk;                    /* dwords the EMEM offset advanced by, recorded and not obeyed */

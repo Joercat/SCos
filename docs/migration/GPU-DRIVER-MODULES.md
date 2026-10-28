@@ -1120,8 +1120,11 @@ for the checker and for deliberate experiments only.
 
 The big resource-manager image is *not* among these arrays, so `GSP.BIN` still has to come off a machine with
 the driver installed - `build/gsp/` or the ESP, either way.  What is here is enough to make the handover real,
-and nothing more: the vidmem WPR2 and FRTS reservation, the radix-3 page table and `GSP_FMC_BOOT_PARAMS` are the
-next work, and until they exist the coprocessor has no memory to boot into, however genuine its image is.
+and nothing more.  The update after this paragraph was written: the vidmem WPR2 and FRTS reservation is now
+computed (`kernel/drivers/gpu/gsp_layout.c`, host-tested by `tools/tests/gsp_layout_host.c`), the frame buffer's
+size it needs is read from the chip's own scratch word by `drivers/gpu/nvidia/module.c`, and the radix-3 page
+table and `GSP_FMC_BOOT_PARAMS` were already staged here.  It is still not sent, because the one input no code in
+this tree can supply is the resource-manager image: see the last section of `GPU-ACCELERATION.md`.
 
 ## What a report is allowed to say about itself
 

@@ -722,12 +722,42 @@ static void stage_gsp_boot_descriptors(const struct gpu_firmware_state *fws)
         meta->sysmem_addr_of_bootloader = fws->address + bl->offset;
         meta->size_of_bootloader = bl->bytes;
     }
-    /* The three fields the reference drivers can fill and this OS cannot: the WPR itself (no frame-buffer
-     * carve-out has been made, because no vidmem has been reserved), the FRTS's place inside it, and the size of
-     * the frame buffer, which cannot be read from a block the security processor still holds.  They are left
-     * zero and named in the panel - the same reason the COT's frtsVidmem fields are zero - rather than filled
-     * with a number that would look like a reservation. */
-    meta->frts_size = GSP_FRTS_SIZE;
+    /* The fields the reference drivers fill and this OS could not: the WPR itself, the FRTS's place inside it,
+     * and the size of the frame buffer.  The last one was the blocker and is no longer: it is read by the
+     * driver module from the chip's own scratch word (see drivers/gpu/nvidia/module.c), which is the only party
+     * that has a window into that register block.  When it is known, the plan below fills all three; when it is
+     * not, they stay at the declined encoding and the panel says so. */
+    /* The reservation, if the one number it needs is known.  `vram_bytes' is what a module read off the
+     * chip; with it, every address below is placed from the top of video memory down, in the order the
+     * firmware walks them, and every field the reference driver fills is filled here too.  Without it the
+     * plan is refused with a reason, the fields stay at the declined encoding they have carried since the
+     * handover was first built, and nothing about this boot changes - which is what has to happen on a
+     * card that will not say how much memory it has. */
+    fsp_state.plan_state = gsp_fb_plan(&fsp_state.plan, fsp_state.vram_bytes, fsp_state.vram_bytes,
+                                       rm->payload_bytes, bl->resident ? bl->bytes : 0,
+                                       GSP_LAYOUT_HEAP_ALIGN);
+    fsp_state.plan_ready = fsp_state.plan_state == GSP_LAYOUT_OK;
+    if (fsp_state.plan_ready) {
+        const struct gsp_fb_plan *plan = &fsp_state.plan;
+        meta->gsp_fw_offset = plan->elf_offset;
+        meta->boot_bin_offset = plan->bootloader_offset;
+        meta->frts_offset = plan->frts_offset;
+        meta->frts_size = plan->frts_bytes;
+        meta->gsp_fw_heap_offset = plan->heap_offset;
+        meta->gsp_fw_heap_size = plan->heap_bytes;
+        meta->gsp_fw_wpr_start = plan->wpr2_start;
+        meta->gsp_fw_wpr_end = plan->wpr2_end;
+        meta->non_wpr_heap_offset = plan->non_wpr_heap_offset;
+        meta->non_wpr_heap_size = plan->non_wpr_heap_bytes;
+        meta->gsp_fw_rsvd_start = plan->rsvd_start;
+        meta->fb_size = plan->vram_bytes;
+        meta->vga_workspace_offset = plan->vram_bytes - GSP_VGA_WORKSPACE_SIZE;
+        meta->boot_count = 0;                        /* a cold boot, as the reference writes it */
+    }
+
+    /* A refused plan leaves the FRTS at the size this tree has always declared and the offset it has
+     * always declined; that is the shipped behaviour on a card whose memory size nothing can read. */
+    if (!fsp_state.plan_ready) meta->frts_size = GSP_FRTS_SIZE;
     meta->vga_workspace_size = GSP_VGA_WORKSPACE_SIZE;
     meta->heap_vf_partition_count = 1;         /* one partition, this OS: the reference encodes the count, not a flag */
 
@@ -836,8 +866,13 @@ static void stage_fmc(void)
      * frame buffer.  This OS has taken none, so the alignment of zero is zero and the region lands at the very
      * end of the frame buffer - which is the FSP's to carve, and the reason a size of 0 here would be worse than
      * a number: the FMC would be asked to verify an FRTS whose extent it was never told. */
-    store64(fsp_state.payload + COT_OFF_FRTS_VIDMEM, 0);
-    store32(fsp_state.payload + COT_OFF_FRTS_VIDMEM_SIZE, GSP_FRTS_SIZE);
+    /* With a plan, the FRTS is a place inside the reservation and the payload says where; without one
+     * it is the declined encoding (offset 0, size 1 MiB) this tree has always sent, which asks the FSP
+     * to carve the region itself at the end of the frame buffer. */
+    store64(fsp_state.payload + COT_OFF_FRTS_VIDMEM,
+            fsp_state.plan_ready ? fsp_state.plan.frts_offset : 0);
+    store32(fsp_state.payload + COT_OFF_FRTS_VIDMEM_SIZE,
+            fsp_state.plan_ready ? (uint32_t)fsp_state.plan.frts_bytes : GSP_FRTS_SIZE);
     store64(fsp_state.payload + COT_OFF_BOOT_ARGS,
             fsp_state.params_staged ? fsp_state.boot_params_phys : (uint64_t)-1);
     /* Two fields the driver that boots this chip fills and this one cannot yet.  The FRTS is a 1 MiB region
@@ -1074,6 +1109,9 @@ void gpu_fsp_note(const struct gpu_device *device, const struct boot_handoff *ha
     fsp_state.present = 1;
     fsp_state.vendor = device ? device->vendor : 0;
     fsp_state.bar0 = bar0;
+    /* Read by a module, never guessed here: the frame buffer's size decides where a carve-out ends,
+     * and a reservation placed without it is the one mistake this file cannot make and still boot. */
+    fsp_state.vram_bytes = device ? device->vram_bytes : 0;
     if (!device || device->vendor != 0x10deu) return;
     fsp_state.nvidia = 1;
     if (!bar0 || bar0 >> 46) { fsp_state.skipped = bar0 ? 2 : 1; return; }
