@@ -140,11 +140,14 @@ def test_the_probe_is_gated_and_the_doorbell_is_counted():
     for call in re.finditer(r'device_map\([^;]*?\)', text, re.S):
         assert ', 0, &mapped)' in call.group(0), \
             'a mailbox window asked for write combining: %s' % call.group(0).replace('\n', ' ')
-    assert len(re.findall(r'write32\(&w_', text)) == 8, \
-        "this file writes the card with %d call sites, and the eight it should have are the window control " \
-        'write, one data write inside the burst loop, two queue pointers out, two reply pointers back, and the ' \
-        'pair that clears the reply queue when a refusal has left us no way to tell whether a store would land ' \
-        'at all' % len(re.findall(r'write32\(&w_', text))
+    # Ten: the eight the protocol needs - the window control write, one data write inside the burst loop, two
+    # queue pointers out, two reply pointers back, and the pair that clears the reply queue when a refusal has
+    # left us no way to tell whether a store would land - plus the two that re-ring the handover doorbell once,
+    # which only ever happens while the head is still at the zero this side wrote.
+    writes = re.findall(r'write32\(&w_', text)
+    assert len(writes) == 10, (
+        'this file writes the card with %d call sites, and the ten it should have are the eight the protocol '
+        'needs and the two that re-ring the handover doorbell once' % len(writes))
     # The data writes have to be inside a loop that re-arms the window, not a run of call sites: the window is
     # 0x100 bytes wide and wraps, which is what made an 868-byte handover arrive as its own tail.
     assert re.search(r'static void emem_write\(uint32_t at.*?emem_arm\(at \+ done, 1\);', text, re.S), \

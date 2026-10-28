@@ -349,6 +349,14 @@ struct gpu_fsp_state {
     uint32_t queue_write_ptr, queue_read_ptr;
     int rpc_seen;
     uint32_t rpc_function;
+    /* What the channel itself did when it was handed a packet: the control word the arm wrote and what it reads
+     * back as, and the first dwords the data window returns against the ones written.  "differs at dword 0" is
+     * not a diagnosis; the pair of values is. */
+    uint32_t ememc_after, emem_got0, emem_want0;
+    /* The submit queue as it stood when the handover's wait ended.  Kept apart from the query's, which is a
+     * different wait over a different packet, because the handover is the one that matters. */
+    uint32_t handover_head, handover_tail, handover_doorbell;
+    int handover_submit_valid, handover_consumed, handover_retried;
     /* What the reference driver's own per-chip FSP table decides, read from the chip's architecture field
      * rather than assumed: nouveau's `nvkm_fsp_func.cot' in nvkm/subdev/fsp/{gh100,gb100,gb202}.c, the driver
      * that boots this family today.  The sizes are not interchangeable - Hopper's public key and signature are

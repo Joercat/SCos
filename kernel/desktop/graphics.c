@@ -699,11 +699,28 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
     put(w, "/0x");
     put_hex(w, (uint32_t)f->gsp_mailbox1_after);
     if (f->mbox_error) put(w, " (FMC error)");
+    if (f->handover_submit_valid) {
+        put(w, ", submit 0x");
+        put_hex(w, f->handover_head);
+        put(w, "/0x");
+        put_hex(w, f->handover_tail);
+        put(w, f->handover_consumed ? " (read)" : " (never read)");
+        put(w, f->handover_tail == f->handover_doorbell ? ", tail holds 0x" : ", tail does NOT hold 0x");
+        put_hex(w, f->handover_doorbell);
+        if (f->handover_retried) put(w, ", rung twice");
+    }
     put(w, ", scratch 0x");
     put_hex(w, f->boot_scratch_after);
     put(w, ", queue ");
     put(w, f->queues_idle_after ? "idle" : "busy");
     put(w, ".\n");
+    put(w, "  channel: arm 0x");
+    put_hex(w, f->ememc_after);
+    put(w, ", window returns 0x");
+    put_hex(w, f->emem_got0);
+    put(w, " where 0x");
+    put_hex(w, f->emem_want0);
+    put(w, " was written.\n");
     /* What RM itself said, which is the only reading here that comes from the resource manager rather than
      * from the falcon that was supposed to start it. */
     if (!f->queue_staged) {

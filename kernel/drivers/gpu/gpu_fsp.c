@@ -489,11 +489,18 @@ static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type
         uint8_t back[FSP_EMEM_BURST_BYTES];
         uint32_t burst = total - at > FSP_EMEM_BURST_BYTES ? FSP_EMEM_BURST_BYTES : total - at;
         emem_read(at, back, burst);
+        if (at == 0) fsp_state.emem_got0 = load32(back);      /* what the window hands back for the first dword */
         for (uint32_t i = 0; i + 4 <= burst; i += 4)
             if (fsp_state.send_mismatch == ~0u && memcmp(back + i, packet + at + i, 4) != 0)
                 fsp_state.send_mismatch = (at + i) / 4u;
     }
     fsp_state.send_readback = fsp_state.send_mismatch == ~0u;   /* 1 only when every dword came back */
+    /* The two numbers that make a mismatch readable: what the window hands back where the transport dword was
+     * written, and the control word the arm leaves behind.  A window that answers 0xbadf.... is refusing the
+     * read, not holding different bytes; one that answers 0 for a packet written over zeros is telling us the
+     * write did not land at all. */
+    fsp_state.emem_want0 = load32(packet);
+    fsp_state.ememc_after = read32(&w_fsp, NV_PFSP_EMEMC);
     /* Reported, not obeyed - the same rule the counter it replaced was given, and for a reason this time
      * that was measured: on the GB207 the channel's data window answers reads with something that is not
      * what was written to it *at every offset including the first*, while the packet still arrives and the
@@ -1326,6 +1333,30 @@ static void hand_over_fmc(void)
     fsp_state.settled = wait_for_timed(gsp_fmc_settled, &fsp_state.handover_polls, FSP_WAIT_BOOT_MS,
                                        &fsp_state.handover_ms_used);
     note_submit();
+    fsp_state.handover_doorbell = fsp_state.doorbell;
+    fsp_state.handover_head = fsp_state.submit_head;
+    fsp_state.handover_tail = fsp_state.submit_tail;
+    fsp_state.handover_submit_valid = fsp_state.submit_valid;
+    fsp_state.handover_consumed = fsp_state.submit_consumed;
+    /* A tail nobody picked up: ring it once more.  The whole protocol is an edge - the host writes the last
+     * dword and then says how far it got - and a coprocessor that was mid-initialisation when the edge arrived
+     * never sees a level it can poll.  One retry, a shorter wait, and the log says both were tried; a second
+     * ring of a queue that is already moving would be a second packet, so it only happens while the head is
+     * still at the zero this side wrote. */
+    if (!fsp_state.settled && fsp_state.handover_submit_valid && fsp_state.handover_head == 0 &&
+        fsp_state.handover_tail != 0) {
+        uint64_t retry_ms = 0;
+        write32(&w_fsp, NV_PFSP_QUEUE_TAIL, fsp_state.handover_tail);
+        write32(&w_fsp, NV_PFSP_QUEUE_HEAD, 0);
+        fsp_state.handover_retried = 1;
+        fsp_state.settled = wait_for_timed(gsp_fmc_settled, &fsp_state.handover_polls,
+                                           FSP_WAIT_REPLY_MS, &retry_ms);
+        fsp_state.handover_ms_used += retry_ms;
+        note_submit();
+        fsp_state.handover_head = fsp_state.submit_head;
+        fsp_state.handover_tail = fsp_state.submit_tail;
+        fsp_state.handover_consumed = fsp_state.submit_consumed;
+    }
     read_status_queue();
     /* A reply is still read if the FMC did send one - its error path does - but it is no longer the thing this
      * wait is for, so its absence is not a failure and its presence does not override the register test. */
