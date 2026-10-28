@@ -164,17 +164,26 @@ def test_a_grown_delivery_passes_the_same_gate():
                                '--min-size'], cwd=ROOT, capture_output=True, text=True)
         assert want.returncode == 0, want.stdout + want.stderr
         size = want.stdout.split('\t')[0]
-        packed = subprocess.run([sys.executable, 'tools/makedisk.py', 'build', '--firmware', str(staged),
-                                 '--size', size, '--out', str(tmp / 'scos.img')], cwd=ROOT,
-                                capture_output=True, text=True)
-        assert packed.returncode == 0, packed.stdout + packed.stderr
-        image = (tmp / 'scos.img').read_bytes()
+        # `build.json' is written where the packer was pointed (`build/'), not beside --out: a delivery is the
+        # three files together, so the sidecar is picked up from there and put with the image, which is the same
+        # thing `make dist' does.  The scratch copy of the real build directory is restored at the end so a run
+        # of this suite cannot leave a record describing firmware nobody staged.
+        keep = (ROOT / 'build/build.json').read_bytes()
+        try:
+            packed = subprocess.run([sys.executable, 'tools/makedisk.py', 'build', '--firmware', str(staged),
+                                     '--size', size, '--out', str(tmp / 'scos.img')], cwd=ROOT,
+                                    capture_output=True, text=True)
+            assert packed.returncode == 0, packed.stdout + packed.stderr
+            image = (tmp / 'scos.img').read_bytes()
+            record = (ROOT / 'build/build.json').read_bytes()
+        finally:
+            (ROOT / 'build/build.json').write_bytes(keep)
         grown = len(image) > int((ROOT / 'dist/scos.img').stat().st_size)
         assert grown, 'packing a 63 MB firmware file produced an image of %d bytes, which is not grown' % len(image)
         dist = DIST
         dist.mkdir(parents=True, exist_ok=True)
         (dist / 'scos.img').write_bytes(image)
-        shutil.copyfile(tmp / 'build.json', dist / 'scos.img.build.json')
+        (dist / 'scos.img.build.json').write_bytes(record)
         digest = hashlib.sha256(image).hexdigest()
         (dist / 'scos.img.sha256').write_text('%s  dist/scos.img\n' % digest)
         record = json.loads((dist / 'scos.img.build.json').read_text())
