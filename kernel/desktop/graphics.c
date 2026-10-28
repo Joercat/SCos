@@ -888,8 +888,8 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
             put(w, "The card answered it, and the answer is in the numbers below.");
         else if (f->handover_attempted)
             put(w, "The card did not answer the handover (it was written, and the reply queue's two pointers "
-                    "never separated); the payload also names no FRTS region and no boot arguments, which is "
-                    "what this OS can honestly offer today ");
+                    "never separated); the payload names no FRTS region, because this OS reserves none, "
+                    "which is what this OS can honestly offer today ");
         else
             /* The one case left after the gate came out: a queue that says it is busy.  The reference driver
              * waits on that same pair of pointers before it touches QUEUE_TAIL, so this is the condition the
@@ -923,6 +923,63 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
                     "packet's length is a card that was asked, whatever it said, and a list that ends at a "
                     "payload dword is a driver that stopped before asking.  Which of the two happened is no "
                     "longer something this report has to be argued about.\n");
+        }
+        /* The two blocks the FMC reads back out of memory before it loads anything, and what the payload says
+         * about them.  This paragraph exists because a handover's address fields are the whole difference between
+         * "load this operating system" and "there is nothing to load", and both look like a sent packet. */
+        if (f->params_staged) {
+            put(w, "  Both descriptors the FMC dereferences are in memory: a GspFwWprMeta of ");
+            put_number(w, f->wpr_meta_size);
+            put(w, " bytes at 0x");
+            if (f->wpr_meta_phys >> 32) { put_hex(w, (uint32_t)(f->wpr_meta_phys >> 32)); }
+            put_hex(w, (uint32_t)f->wpr_meta_phys);
+            put(w, ", named as the resource-manager description in a boot-params block at 0x");
+            if (f->boot_params_phys >> 32) { put_hex(w, (uint32_t)(f->boot_params_phys >> 32)); }
+            put_hex(w, (uint32_t)f->boot_params_phys);
+            put(w, " whose target is the coherent one and whose isGspRmBoot flag is set, and the handover payload's "
+                   "boot-arguments field carries that second address instead of the -1 that means nothing to boot. "
+                   "The metadata names the resource-manager image the boot volume offered - ");
+            put_number(w, f->radix3_bytes);
+            put(w, " bytes of it at 0x");
+            if (f->radix3_phys >> 32) { put_hex(w, (uint32_t)(f->radix3_phys >> 32)); }
+            put_hex(w, (uint32_t)f->radix3_phys);
+            put(w, ", and its signature section, ");
+            put_number(w, f->signature_bytes);
+            put(w, " bytes at 0x");
+            if (f->signature_phys >> 32) { put_hex(w, (uint32_t)(f->signature_phys >> 32)); }
+            put_hex(w, (uint32_t)f->signature_phys);
+            put(w, " - as addresses inside the region the boot stub left those files in, which is the same one copy "
+                   "the panel above describes: this driver never copies a ");
+            put_number(w, f->radix3_bytes);
+            put(w, "-byte image anywhere, it tells the chip where the bytes already are - and one indirection "
+                   "above them, because the address above is a radix-3 page table built here out of ");
+            put_number(w, f->radix3_tree_bytes / 1024u);
+            put(w, " KiB of entries at 0x");
+            if (f->radix3_phys >> 32) { put_hex(w, (uint32_t)(f->radix3_phys >> 32)); }
+            put_hex(w, (uint32_t)f->radix3_phys);
+            put(w, ", three levels of 4 KiB pages that the chip walks down to reach the payload, which is what "
+                   "LibOS asks of a host and not an optimisation: a driver that handed over the image's own "
+                   "address instead of the root would have its boot rejected inside the FSP.  The FRTS is "
+                   "declared at 1 MiB and placed at an offset of 0 back from the end of the frame buffer, which "
+                   "is precisely what the reference driver writes when it has reserved no frame-buffer heap of "
+                   "its own, and the security processor is the one that carves it.  nonWprHeapSize, gspFwHeapSize "
+                   "and pmuReservedSize in the metadata are zero: those three come from a per-generation table in "
+                   "the resource-manager layer of the vendor's driver that this OS has no copy of, and a number "
+                   "invented there would be a heap the firmware is told it may overwrite.  ");
+        } else {
+            put(w, "  The descriptors the FMC would dereference were not staged: ");
+            switch (f->params_declined) {
+                case 1: put(w, "the kernel had no two free pages under the limit this FSP can reach, and a "
+                               "metadata block the chip cannot read is worse than none because the boot then fails "
+                               "somewhere inside the chip instead of here"); break;
+                case 2: put(w, "there is no FMC image to point the second block back at, and the boot-args offset "
+                               "of a FMC that does not exist is an address the FSP would read as garbage"); break;
+                default: put(w, "there is no resource-manager image on the boot volume: the metadata's only real "
+                                "job is to name the .fwimage payload and its signature, and with neither present the "
+                                "honest payload is the one that says there is nothing to boot rather than a block of "
+                                "zeros that looks like a request"); break;
+            }
+            put(w, ".  ");
         }
     } else if (f->fmc_seen) {
         put(w, "the FMC image on the boot volume was read, but it cannot be described in this payload: ");

@@ -58,7 +58,7 @@ def fmc_blob(hash_bytes=48, pkey_bytes=97, sig_bytes=96, image_bytes=0x2000, nam
     rows += struct.pack('<10I', 0, 3, 0x20, 0, shoff + shentsize * count, len(strings), 0, 0, 1, 0)
     for index, name in enumerate(names):
         off, size = offsets[name]
-        crc = (zlib.crc32(bytes(blob[off:off + size])) ^ 0xffffffff) & 0xffffffff
+        crc = zlib.crc32(bytes(blob[off:off + size])) & 0xffffffff   # nouveau's formula, unmodified
         if break_crc:
             crc ^= 0xa5a5a5a5
         rows += struct.pack('<10I', 1 + sum(len(n) + 1 for n in names[:index]), 1, gspcheck.FMC_SHF_FLAGS, 0, off, size,
@@ -200,11 +200,16 @@ def test_a_file_of_the_right_shape_passes_and_says_what_the_panel_will_say():
         entry = rep['files']['fmc']
         assert entry['ok'] and entry['bytes'] == len(fmc_blob())
         assert entry['sections']['publickey']['bytes'] == 97 and entry['sections']['signature']['bytes'] == 96
-        assert entry['crc32'] == '0x%08x' % ((zlib.crc32(fmc_blob()) ^ 0xffffffff) & 0xffffffff), \
-            'the file-level checksum the report shows is not the file\'s'
+        assert entry['crc32'] == '0x%08x' % (zlib.crc32(fmc_blob()) & 0xffffffff), \
+            'the file-level checksum the report shows is not the one the build record and the panel quote'
         assert rep['panel'] == {'fw_staged': 1, 'fw_total': 5, 'handover_buildable': True}, rep['panel']
         assert rep['missing'] == ['GSP.BIN', 'GSPBL.BIN', 'GSPBTL.BIN', 'GSPBTU.BIN'], rep['missing']
         assert any('no boot arguments to boot into' in n for n in rep['notes']), rep['notes']
+        # ...and that a file whose sections *do* carry the reference driver's checksum is accepted without being
+        # complained about: the fixture above writes sh_info as crc32_le(~0, bytes) ^ ~0, which is nouveau's
+        # formula, and the rule this tool used to apply was that value inverted - a bug that reported four correct
+        # CRCs as absent ones and made this tool and the kernel disagree about one file.
+        assert not [n for n in rep['notes'] if 'not a checksum' in n], rep['notes']
 
 
 def test_the_wrong_generation_is_a_different_sentence_from_a_broken_file():
@@ -247,7 +252,7 @@ def test_each_way_a_file_can_be_wrong_gets_its_own_words():
             rep, status = tool_report(one)
             if needle is None:
                 assert status == 0, (name, rep['problems'])
-                assert any('nouveau would refuse the file and this build does not' in n for n in rep['notes']), \
+                assert any('so the field is not a checksum in this file' in n for n in rep['notes']), \
                     (name, rep['notes'])
                 assert rep['panel']['handover_buildable'] is True, \
                     'a file whose sections still carry a signature was vetoed by a bookkeeping field'
@@ -430,7 +435,7 @@ def test_a_file_shaped_like_the_vendor_is_accepted_with_the_difference_spoken():
         assert {n: s['bytes'] for n, s in entry['sections'].items()} == {'hash': 48, 'image': 199240,
                                                                         'publickey': 97,
                                                                         'signature': 96}, entry['sections']
-        said = [n for n in rep['notes'] if 'nouveau would refuse the file and this build does not' in n]
+        said = [n for n in rep['notes'] if 'so the field is not a checksum in this file' in n]
         assert len(said) == 4, 'all four sections trip the CRC rule in a real file, so all four are said: %r' % rep['notes']
         assert rep['panel']['handover_buildable'] is True, rep['panel']
         assert (rep['panel']['fw_staged'], rep['panel']['fw_total']) == (1, 5), rep['panel']

@@ -556,6 +556,195 @@ static const char *flcn_name(uint32_t code)
  * `arch' here is read from the aperture rather than from a PCI id, because the sizes belong to the silicon.
  * A chip that will not say (0, all ones, or a PRI error) leaves every size at zero and the handover
  * unsendable: an unknown expectation is not a licence to assume one, and the panel prints the difference. */
+/* The two sysmem descriptors the FMC reads before it will load anything, laid out exactly as the vendor's own
+ * header says - taken from NVIDIA's r570.144 bindings in the mainline Nova driver
+ * (drivers/gpu/nova-core/gsp/fw/r570_144/bindings.rs), which is generated from the same header the closed
+ * driver compiles against, for the same firmware version this machine's driver names.  Field order and type
+ * width are the whole contract here: the FSP is handed `gspRmDescSize' and reads the rest positionally, so a
+ * field added, dropped or re-ordered silently becomes a wrong address, which is why the sizes below are
+ * asserted against the published totals rather than trusted. */
+#define GSP_FW_WPR_META_MAGIC               0xdc3aae21371a60b3ull   /* the i64 value -2577556379034558285 */
+#define GSP_FW_WPR_META_REVISION            1u
+#define GSP_DMA_TARGET_LOCAL_FB             0u
+#define GSP_DMA_TARGET_COHERENT_SYSTEM      1u
+#define GSP_DMA_TARGET_NONCOHERENT_SYSTEM   2u
+#define GSP_FRTS_SIZE                       0x100000u      /* 1 MiB, the size both reference drivers publish */
+#define GSP_VGA_WORKSPACE_SIZE              (128u * 1024u)
+
+/* The five roles, in the order boot/uefi/gsp_fw.h lays them out in the staged region and tools/makedisk.py
+ * names them on the volume: an index is only ever taken from here, never counted off a list. */
+#define ROLE_GSP_RM                         0u
+#define ROLE_FMC                            1u
+#define ROLE_BOOTLOADER                     2u
+
+struct gsp_fw_wpr_meta {
+    uint64_t magic, revision;
+    uint64_t sysmem_addr_of_radix3_elf, size_of_radix3_elf;
+    uint64_t sysmem_addr_of_bootloader, size_of_bootloader;
+    uint64_t bootloader_code_offset, bootloader_data_offset, bootloader_manifest_offset;
+    union {
+        struct { uint64_t sysmem_addr_of_signature, size_of_signature; } sig;
+        struct { uint32_t heap_free_list_wpr_offset, unused0; uint64_t unused1; } heap;
+    } u1;
+    uint64_t gsp_fw_rsvd_start;
+    uint64_t non_wpr_heap_offset, non_wpr_heap_size;
+    uint64_t gsp_fw_wpr_start, gsp_fw_heap_offset, gsp_fw_heap_size;
+    uint64_t gsp_fw_offset, boot_bin_offset, frts_offset, frts_size, gsp_fw_wpr_end;
+    uint64_t fb_size, vga_workspace_offset, vga_workspace_size, boot_count;
+    union {
+        struct {
+            uint64_t partition_rpc_addr;
+            uint16_t partition_rpc_request_offset, partition_rpc_reply_offset;
+            uint32_t elf_code_offset, elf_data_offset, elf_code_size, elf_data_size, ls_ucode_version;
+        } rpc;
+        struct {
+            uint32_t padding[4];
+            uint64_t sysmem_addr_of_crash_report_queue;
+            uint32_t size_of_crash_report_queue;
+            uint32_t ls_ucode_version_padding;
+        } cr;
+    } u2;
+    uint8_t heap_vf_partition_count, flags, padding[2];
+    uint32_t pmu_reserved_size;
+    uint64_t verified;
+};
+
+struct gsp_fmc_boot_params {
+    uint32_t regkeys;                                  /* GSP_FMC_INIT_PARAMS */
+    uint32_t pad0;
+    struct {
+        uint32_t target, desc_size;
+        uint64_t desc_offset;
+        uint64_t wpr_carveout_offset;
+        uint32_t wpr_carveout_size;
+        uint8_t is_gsp_rm_boot, pad1[3];
+    } boot_gsp_rm;
+    struct { uint32_t target, pad2; uint64_t boot_args_offset; } gsp_rm;
+    struct { uint32_t target, pad3; uint64_t payload_offset; uint32_t payload_size, pad4; } spdm;
+};
+
+_Static_assert(sizeof(struct gsp_fw_wpr_meta) == 256,
+                "GspFwWprMeta is 9 words, a 16-byte union, 15 words, a 32-byte union, 8 bytes and a word - "
+                "256 bytes on the published field list, and a different total means a field was moved");
+_Static_assert(__builtin_offsetof(struct gsp_fw_wpr_meta, sysmem_addr_of_radix3_elf) == 16, "radix3 address");
+_Static_assert(__builtin_offsetof(struct gsp_fw_wpr_meta, u1) == 72, "the signature union follows the three bootloader offsets");
+_Static_assert(__builtin_offsetof(struct gsp_fw_wpr_meta, frts_size) == 160, "frtsSize");
+_Static_assert(__builtin_offsetof(struct gsp_fw_wpr_meta, verified) == 248, "verified is the last field");
+_Static_assert(sizeof(struct gsp_fmc_boot_params) == 80, "GSP_FMC_BOOT_PARAMS: 4 + 4 + 32 + 16 + 24 bytes, and 80 is a multiple of the struct's alignment so nothing is padded away");
+_Static_assert(__builtin_offsetof(struct gsp_fmc_boot_params, boot_gsp_rm) == 8, "bootGspRmParams follows initParams");
+_Static_assert(__builtin_offsetof(struct gsp_fmc_boot_params, gsp_rm) == 40, "gspRmParams follows bootGspRmParams");
+_Static_assert(__builtin_offsetof(struct gsp_fmc_boot_params, spdm) == 56, "gspSpdmParams follows gspRmParams");
+
+/* The tree the FMC's own loader walks to reach the resource-manager image: three levels of 4 KiB pages, every
+ * entry a little-endian physical address, published twice over and identically - nouveau's
+ * nvkm_gsp_radix3_ctor() and Nova's drivers/gpu/nova-core/firmware/radix3.rs, whose comment says the format
+ * belongs to LibOS, the GSP's own operating system.  One entry per page of the level below, each level rounded
+ * up to whole pages and left zero past its last entry because the booter reads a level a page at a time, and a
+ * single root page whose first entry is the address of the first level-1 page.  The FSP is never handed the
+ * image itself: `sysmemAddrOfRadix3Elf' names this root, and the image is reached by walking down it, which is
+ * why the driver that forgets the tree boots nothing and says so only inside the chip. */
+#define GSP_PAGE_SIZE                4096u
+#define GSP_PAGE_ENTRIES             (GSP_PAGE_SIZE / 8u)
+
+/* How many bytes of entries it takes to index `bytes' of data: one little-endian address per page of it. */
+static uint64_t radix3_level_bytes(uint64_t bytes)
+{
+    return ((bytes + GSP_PAGE_SIZE - 1) / GSP_PAGE_SIZE) * 8u;
+}
+
+/* Builds the tree over `data_phys' and returns the root's physical address, or 0 if the pages are not there. */
+static uint64_t build_radix3(uint64_t data_phys, uint64_t bytes, uint32_t *tree_bytes_out)
+{
+    uint64_t entries = (bytes + GSP_PAGE_SIZE - 1) / GSP_PAGE_SIZE;
+    uint64_t l2_pages = (radix3_level_bytes(bytes) + GSP_PAGE_SIZE - 1) / GSP_PAGE_SIZE;
+    uint64_t l1_pages = (radix3_level_bytes(l2_pages * GSP_PAGE_SIZE) + GSP_PAGE_SIZE - 1) / GSP_PAGE_SIZE;
+    uint64_t total = 1 + l1_pages + l2_pages;
+    uint64_t base = pages_allocate_limit((size_t)total, PHYSICAL_LIMIT);
+    uint64_t *l0, *l1, *l2;
+
+    if (!base) return 0;
+    memset((void *)(uintptr_t)base, 0, (size_t)(total * GSP_PAGE_SIZE));
+    *tree_bytes_out = (uint32_t)(total * GSP_PAGE_SIZE);
+    l1 = (uint64_t *)(uintptr_t)(base + GSP_PAGE_SIZE);
+    l2 = (uint64_t *)(uintptr_t)(base + GSP_PAGE_SIZE * (1 + l1_pages));
+    for (uint64_t i = 0; i < entries; i++) l2[i] = data_phys + i * GSP_PAGE_SIZE;
+    for (uint64_t i = 0; i < l2_pages; i++) l1[i] = base + GSP_PAGE_SIZE * (1 + l1_pages) + i * GSP_PAGE_SIZE;
+    l0 = (uint64_t *)(uintptr_t)base;
+    l0[0] = base + GSP_PAGE_SIZE;
+    /* One root entry means one level-1 *run*, and the pages allocated here are contiguous, so the reachable
+     * data is the entries in every level-1 page times the entries in a level-2 page.  Past that the tree would
+     * index bytes the FMC could never walk to, which is a silent truncation of a boot rather than a large one. */
+    if (!entries || entries > l1_pages * GSP_PAGE_ENTRIES * GSP_PAGE_ENTRIES) return 0;
+    return base;
+}
+
+/* Stage both descriptors.  Nothing is copied for the RM image: the boot stub already holds the file in a
+ * read-only region of its own, below 4 GiB and page aligned, and the section offsets the ELF walk produced are
+ * offsets inside that region - so the addresses handed to the FMC are that region plus the offset, which is
+ * the same "one copy, two users" arrangement the module loader uses for a driver it has already mapped. */
+static void stage_gsp_boot_descriptors(const struct gpu_firmware_state *fws)
+{
+    const struct gpu_firmware_image *rm = &fws->image[ROLE_GSP_RM];
+    const struct gpu_firmware_image *bl = &fws->image[ROLE_BOOTLOADER];
+    uint64_t pages, tree;
+    uint32_t tree_bytes = 0;
+    struct gsp_fw_wpr_meta *meta;
+    struct gsp_fmc_boot_params *params;
+
+    if (!fsp_state.image_physical) { fsp_state.params_declined = 2; return; }
+    if (!rm->resident || !rm->payload_bytes) { fsp_state.params_declined = 3; return; }
+
+    /* The tree first, because a metadata block that points at the image directly is the mistake it exists to
+     * prevent: the address below is what the FMC reads, and it has to be a root page of entries. */
+    tree = build_radix3(fws->address + rm->offset + rm->payload_offset, rm->payload_bytes, &tree_bytes);
+    if (!tree) { fsp_state.params_declined = 4; return; }
+
+    pages = pages_allocate_limit(2, PHYSICAL_LIMIT);
+    if (!pages) { fsp_state.params_declined = 1; return; }
+    memset((void *)pages, 0, 8192);
+    fsp_state.wpr_meta_phys = pages;
+    fsp_state.boot_params_phys = pages + 4096;
+    meta = (struct gsp_fw_wpr_meta *)(uintptr_t)pages;
+    params = (struct gsp_fmc_boot_params *)(uintptr_t)(pages + 4096);
+
+    meta->magic = GSP_FW_WPR_META_MAGIC;
+    meta->revision = GSP_FW_WPR_META_REVISION;
+    meta->sysmem_addr_of_radix3_elf = tree;
+    meta->size_of_radix3_elf = rm->payload_bytes;   /* the length of what the tree indexes, as both drivers write it */
+    meta->u1.sig.sysmem_addr_of_signature = fws->address + rm->offset + rm->signature_offset;
+    meta->u1.sig.size_of_signature = rm->signature_bytes;
+    if (bl->resident && bl->bytes) {
+        meta->sysmem_addr_of_bootloader = fws->address + bl->offset;
+        meta->size_of_bootloader = bl->bytes;
+    }
+    /* The three fields the reference drivers can fill and this OS cannot: the WPR itself (no frame-buffer
+     * carve-out has been made, because no vidmem has been reserved), the FRTS's place inside it, and the size of
+     * the frame buffer, which cannot be read from a block the security processor still holds.  They are left
+     * zero and named in the panel - the same reason the COT's frtsVidmem fields are zero - rather than filled
+     * with a number that would look like a reservation. */
+    meta->frts_size = GSP_FRTS_SIZE;
+    meta->vga_workspace_size = GSP_VGA_WORKSPACE_SIZE;
+    meta->heap_vf_partition_count = 1;         /* one partition, this OS: the reference encodes the count, not a flag */
+
+    params->boot_gsp_rm.target = GSP_DMA_TARGET_COHERENT_SYSTEM;
+    params->boot_gsp_rm.desc_offset = fsp_state.wpr_meta_phys;
+    params->boot_gsp_rm.desc_size = (uint32_t)sizeof *meta;
+    params->boot_gsp_rm.is_gsp_rm_boot = 1;    /* the resource manager image is on the volume: this is a RM boot */
+    params->gsp_rm.target = GSP_DMA_TARGET_NONCOHERENT_SYSTEM;
+    params->gsp_rm.boot_args_offset = fsp_state.image_physical;   /* the FMC image, where the FMC reads its own args back */
+
+    fsp_state.wpr_meta_size = (uint32_t)sizeof *meta;
+    fsp_state.radix3_phys = tree;
+    fsp_state.radix3_data_phys = fws->address + rm->offset + rm->payload_offset;
+    fsp_state.radix3_bytes = (uint32_t)meta->size_of_radix3_elf;
+    fsp_state.radix3_tree_bytes = tree_bytes;
+    fsp_state.signature_phys = meta->u1.sig.sysmem_addr_of_signature;
+    fsp_state.signature_bytes = (uint32_t)meta->u1.sig.size_of_signature;
+    fsp_state.bootloader_phys = meta->sysmem_addr_of_bootloader;
+    fsp_state.bootloader_bytes = (uint32_t)meta->size_of_bootloader;
+    fsp_state.params_staged = 1;
+}
+
 static void cot_parameters(void)
 {
     uint32_t boot0 = read32(&w_vf, FSP_PMC_BOOT_0);
@@ -628,7 +817,24 @@ static void stage_fmc(void)
     store16(fsp_state.payload + COT_OFF_VERSION, fsp_state.cot_version);
     store16(fsp_state.payload + COT_OFF_SIZE, COT_SIZE);
     store64(fsp_state.payload + COT_OFF_FMC_ADDRESS, fsp_state.image_physical);
-    store64(fsp_state.payload + COT_OFF_BOOT_ARGS, (uint64_t)-1);
+    /* The boot arguments are the one field of this payload that used to be a placeholder.  Both reference
+     * drivers put a real physical address here - Nova: `msg.cot.gsp_boot_args_sysmem_offset =
+     * args.fmc_boot_params.dma_address()' - because the FMC's first act is to read that block and follow
+     * `gspRmDescOffset' to the WPR metadata that names the resource-manager image.  With no descriptor staged
+     * there is nothing to point at, and (uint64_t)-1 is what the driver that has no arguments writes; with one,
+     * the address goes in and the FSP is being asked to boot an operating system's worth of firmware rather
+     * than to decline a stub. */
+    stage_gsp_boot_descriptors(fws);
+    /* The FRTS is declared, not reserved: `msg.cot.frtsVidmemOffset = ALIGN(rsvd_size, 0x200000);
+     * msg.cot.frtsVidmemSize = 0x100000' is what nvkm/subdev/fsp/gh100.c writes on every cold boot, where
+     * rsvd_size is however much frame-buffer heap the driver has already taken for itself at the top of the
+     * frame buffer.  This OS has taken none, so the alignment of zero is zero and the region lands at the very
+     * end of the frame buffer - which is the FSP's to carve, and the reason a size of 0 here would be worse than
+     * a number: the FMC would be asked to verify an FRTS whose extent it was never told. */
+    store64(fsp_state.payload + COT_OFF_FRTS_VIDMEM, 0);
+    store32(fsp_state.payload + COT_OFF_FRTS_VIDMEM_SIZE, GSP_FRTS_SIZE);
+    store64(fsp_state.payload + COT_OFF_BOOT_ARGS,
+            fsp_state.params_staged ? fsp_state.boot_params_phys : (uint64_t)-1);
     /* Two fields the driver that boots this chip fills and this one cannot yet.  The FRTS is a 1 MiB region
      * placed by an offset back from the *end* of the frame buffer (aligned to the 128 KiB WPR granularity),
      * and the boot arguments are a GSP_FMC_BOOT_PARAMS block in sysmem whose address the FMC reads back into

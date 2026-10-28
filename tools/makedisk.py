@@ -8,6 +8,7 @@ and its accidental-corruption CRC from the same EFI system partition.
 from pathlib import Path
 import hashlib
 import json
+import os
 import struct
 import sys
 import tempfile
@@ -19,6 +20,11 @@ SECTOR = 512
 SECTORS = 131072  # 64 MiB, enough clusters for an actual FAT32 filesystem
 DATA_FIRST, DATA_SECTORS = 129024, 256
 FIRST, LAST = 2048, DATA_FIRST - 1
+# The image tracked in the repository has to stay small enough for a git host to accept it, so a build that
+# needs to carry a file the 64 MiB volume cannot hold - the resource-manager image is 63571696 bytes by itself -
+# is packed to a whole USB stick instead: the same writer, the same layout, the ESP grown to the device.
+# `tools/flash.sh' passes the size; nothing here depends on it being 64 MiB.
+GPT_BACKUP_SECTORS = 33
 
 
 def validate(efi, elf, build=Path('build')):
@@ -129,12 +135,28 @@ FIRMWARE_ROLES = (("gsp", "GSP.BIN", "gsp"), ("fmc", "GSPFMC.BIN", "fmc"),
 FIRMWARE_MAX = 72 * 1024 * 1024
 
 
-def firmware_blobs(directory):
+_ESP_READER = None
+
+
+def esp_reader():
+    '''The ESP reader lives in tools/verify-stick.py, which is also what dates a stick after it has been
+    written; the hyphen in that file's name is why it comes in by path instead of by import.'''
+    global _ESP_READER
+    if _ESP_READER is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('scos_verify_stick',
+                                                     Path(__file__).resolve().parent / 'verify-stick.py')
+        _ESP_READER = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_ESP_READER)
+    return _ESP_READER
+
+
+def firmware_blobs(directory, sub='gsp'):
     """The staged firmware, as (ESP name, bytes) pairs in role order.  build/gsp is searched recursively, so
     copying a whole linux-firmware nvidia/ tree under it works without renaming anything; a role matched by
     more than one file is refused rather than guessed at, because quietly choosing one chip image out of
     several is exactly the mistake this directory exists to make impossible."""
-    root = Path(directory, "gsp")
+    root = Path(directory) if sub is None else Path(directory, sub)
     blobs = []
     if not root.is_dir():
         return blobs
@@ -229,17 +251,35 @@ def build_record(v, elf, modules, firmware=()):
                                           for n, b in firmware]}
 
 
-def main(directory):
+def main(directory, sectors=None, firmware_dir=None, out=None):
+    """Pack `directory' into a GPT/ESP image.
+
+    `sectors' sizes the whole disk and grows the ESP into everything between the GPT and the data partition,
+    `firmware_dir' names a directory of firmware to stage instead of build/gsp, and `out' says where the bytes
+    go.  All three default to what the Makefile has always asked for, so `makedisk.py build' still reproduces
+    the tracked 64 MiB image byte for byte; they exist because the 64 MiB volume physically cannot hold the
+    resource-manager image this generation boots from, and the answer to that is a bigger disk, not a smaller
+    firmware."""
     d = Path(directory)
+    total_sectors = SECTORS if sectors is None else int(sectors) // SECTOR
+    if total_sectors < SECTORS:
+        raise ValueError('a %d-byte image cannot hold this build; the ESP has to be at least %d bytes and the '
+                         'boot loader, kernel, modules and firmware all land inside it'
+                         % (total_sectors * SECTOR, SECTORS * SECTOR))
+    data_sectors = DATA_SECTORS
+    DATA_FIRST = total_sectors - GPT_BACKUP_SECTORS - 1 - data_sectors
+    FIRST, LAST = 2048, DATA_FIRST - 1
+    target = d / 'scos.img' if out is None else Path(out)
+    Path(target).parent.mkdir(parents=True, exist_ok=True)
     efi = (d/'BOOTX64.EFI').read_bytes()
     elf = (d/'kernel.elf').read_bytes()
     validate(efi, elf)
-    image = bytearray(SECTORS*SECTOR)
+    image = bytearray(total_sectors*SECTOR)
     # Protective MBR is metadata, not an executable BIOS loader.
-    image[446:462] = struct.pack('<B3sB3sII', 0, b'\0\2\0', 0xee, b'\xff'*3, 1, SECTORS-1)
+    image[446:462] = struct.pack('<B3sB3sII', 0, b'\0\2\0', 0xee, b'\xff'*3, 1, total_sectors-1)
     image[510:512] = b'\x55\xaa'
     image[400:412] = b'SCOSDATA64v1'
-    struct.pack_into('<III', image, 412, DATA_FIRST, DATA_SECTORS, SECTORS)
+    struct.pack_into('<III', image, 412, DATA_FIRST, data_sectors, total_sectors)
     partition_id = uuid.UUID('b2a52b42-b792-4e85-9ce6-5e9bdcd425a7').bytes_le
     disk_id = uuid.UUID('1cb5b534-9ee8-4a50-b9d5-600ce619b86c').bytes_le
     entries = bytearray(128*128)
@@ -247,14 +287,19 @@ def main(directory):
                                partition_id, FIRST, LAST, 0, 'SCos EFI system'.encode('utf-16le'))
     entries[128:256] = struct.pack('<16s16sQQQ72s', uuid.UUID('1ffcb787-a904-4fce-8fbd-c728ac57e333').bytes_le,
                                    uuid.UUID('1f5b84d1-9560-4345-9f49-74bc872143e4').bytes_le,
-                                   DATA_FIRST, DATA_FIRST+DATA_SECTORS-1, 0, 'SCos data'.encode('utf-16le'))
-    for current, backup, table in ((1, SECTORS-1, 2), (SECTORS-1, 1, SECTORS-33)):
+                                   DATA_FIRST, DATA_FIRST+data_sectors-1, 0, 'SCos data'.encode('utf-16le'))
+    for current, backup, table in ((1, total_sectors-1, 2), (total_sectors-1, 1, total_sectors-33)):
         header = bytearray(struct.pack('<8sIIIIQQQQ16sQIII', b'EFI PART', 0x10000, 92, 0, 0,
-                                      current, backup, 34, SECTORS-34, disk_id, table, 128, 128, zlib.crc32(entries)))
+                                      current, backup, 34, total_sectors-34, disk_id, table, 128, 128, zlib.crc32(entries)))
         struct.pack_into('<I', header, 16, zlib.crc32(header))
         image[current*512:current*512+92] = header
         image[table*512:table*512+len(entries)] = entries
     total = LAST-FIRST+1
+    if total > 0x0ffffff5 + 2 * 130 + 32:
+        raise ValueError('an ESP of %d sectors is wider than FAT32 addresses at one sector per cluster; a '
+                         'stick up to 128 GiB works and a larger one wants a bigger cluster size, which this '
+                         'packer does not implement rather than silently writing a volume the firmware '
+                         'cannot read' % total)
     fat_sectors = (total-32+2+129)//130  # one sector/cluster, two FAT copies
     data_sector = FIRST+32+2*fat_sectors
     clusters = total-32-2*fat_sectors
@@ -318,7 +363,7 @@ def main(directory):
     ic = allocate(index)
     # Appended after the modules, and deliberately kept out of the driver index: that table counts things the
     # kernel could load as a driver, and a firmware image is not one of them.
-    firmware = firmware_blobs(directory)
+    firmware = firmware_blobs(firmware_dir, sub=None) if firmware_dir else firmware_blobs(directory)
     v = provenance(directory, elf)
     # The record names the modules as the ESP holds them (FAT is upper-case), which is what a reader
     # checking the stick with another OS will see, so the two must not use different spellings.
@@ -333,6 +378,10 @@ def main(directory):
         scos += entry(stem + '.MOD', allocate(blob), len(blob))
     for esp, blob in firmware:
         scos += entry(esp, allocate(blob), len(blob))
+    # Every name this packer wrote, with the bytes it was written from.  The comparison below is the only thing
+    # standing between a build and a stick that boots, and it compares the packed bytes with the staged ones
+    # rather than the staged ones with themselves: a directory entry lying about its length, an ESP that ran out
+    # of clusters, or a chain the FAT cut short all fail here instead of on a panel in front of somebody else.
     directory_data = [entry('EFI', dirs[1], directory=True)+entry('SCOS', dirs[3], directory=True),
                       dot(0, dirs[1])+entry('BOOT', dirs[2], directory=True),
                       dot(dirs[1], dirs[2])+entry('BOOTX64.EFI', ec, len(efi)),
@@ -341,16 +390,60 @@ def main(directory):
         offset = (data_sector+c-2)*512;image[offset:offset+len(data)] = data
     for i in range(2):
         offset = (FIRST+32+i*fat_sectors)*512;image[offset:offset+len(fat)] = fat
+    readback = [('KERNEL', 'ELF', elf, ('SCOS',)), ('KERNEL', 'CRC', struct.pack('<I', zlib.crc32(elf)), ('SCOS',)),
+                ('BUILD', 'TXT', record_text.encode(), ('SCOS',)), ('DRVLIST', 'IDX', index, ('SCOS',)),
+                ('BOOTX64', 'EFI', efi, ('EFI', 'BOOT'))] \
+               + [(stem, 'MOD', blob, ('SCOS',)) for stem, blob in modules] \
+               + [(esp.rsplit('.', 1)[0], esp.rsplit('.', 1)[1], blob, ('SCOS',)) for esp, blob in firmware]
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(dir=d, prefix='.uefi-', delete=False) as f:
-            temporary = Path(f.name);f.write(image)
-        temporary.replace(d/'scos.img')
+        with tempfile.NamedTemporaryFile(dir=str(target.parent), prefix='.uefi-', delete=False) as f:
+            temporary = Path(f.name)
+            f.write(image)
+            f.flush()
+            os.fsync(f.fileno())
+            reader = esp_reader()
+            for stem, ext, blob, chain in readback:
+                got = reader.read_named_file(temporary, stem, ext, chain=chain)
+                if got is None:
+                    raise ValueError('%s.%s was written but cannot be read back out of the packed ESP'
+                                     % (stem, ext))
+                if got != blob:
+                    raise ValueError('%s.%s reads back as %d bytes (sha256 %s), not the %d staged: the directory '
+                                     'entry and the cluster chain disagree, so the file on the disk is not the '
+                                     'file this build has'
+                                     % (stem, ext, len(got), hashlib.sha256(got).hexdigest()[:12], len(blob)))
+        temporary.replace(target)
     finally:
         if temporary is not None:temporary.unlink(missing_ok=True)
     print(f'x64 UEFI GPT/ESP: {len(image)} bytes; loader {len(efi)}; ELF {len(elf)}; '
-          f'coprocessor firmware {len(firmware)} file(s)')
+          f'coprocessor firmware {len(firmware)} file(s), every one read back out of the packed ESP')
+
+
+def cli():
+    '''`makedisk.py [directory] [--size BYTES] [--firmware DIR] [--out FILE]'.
+
+    With no flags this packs build/ into dist/scos.img exactly as it always did, which is what the Makefile
+    runs.  The other three exist for one job: writing a USB stick that has to carry a firmware image bigger
+    than the 64 MiB volume the repository tracks, packed straight out of the driver directory already installed
+    on the machine being flashed, with no build, no compiler and no filesystem surgery on the way.'''
+    import argparse
+    ap = argparse.ArgumentParser(prog='tools/makedisk.py')
+    ap.add_argument('directory', nargs='?', default='build',
+                    help='the staged build directory to pack (default: build)')
+    ap.add_argument('--size', type=int, default=None, metavar='BYTES',
+                    help='size the whole disk to BYTES, growing the ESP into the rest of it; a whole number of '
+                         '512-byte sectors, at least the 64 MiB the tracked image uses')
+    ap.add_argument('--firmware', default=None, metavar='DIR',
+                    help='read the firmware roles from DIR instead of build/gsp - for example '
+                         '/lib/firmware/nvidia/gb207/gsp, whose gsp-*.bin is the file no public archive ships')
+    ap.add_argument('--out', default=None, metavar='FILE',
+                    help='write the image to FILE instead of build/scos.img, which is the path the Makefile\'s dist target copies from')
+    a = ap.parse_args()
+    if a.size is not None and a.size % SECTOR:
+        ap.error('--size has to be a multiple of %d bytes, because that is what a sector is' % SECTOR)
+    main(a.directory, sectors=a.size, firmware_dir=a.firmware, out=a.out)
 
 
 if __name__ == '__main__':
-    main(sys.argv[1] if len(sys.argv)>1 else 'build')
+    cli()

@@ -254,6 +254,14 @@ struct gpu_fsp_state {
      * words on receive and never tests whether it is allowed to read them first; we gated every write on a
      * readable pair, which is how a card can finish a whole boot with writes 0 because nobody ever tried. */
     uint32_t reset_head, reset_tail;
+    /* What the GSP boot needs besides the image: the two descriptors the FMC reads back out of sysmem before
+     * it will run, staged in pages of their own and pointed at by the handover payload.  An address of zero
+     * with `params_declined' naming the reason is the honest state; a made-up one is not. */
+    uint64_t wpr_meta_phys, boot_params_phys;
+    uint64_t radix3_phys, radix3_data_phys, signature_phys, bootloader_phys;
+    uint32_t wpr_meta_size, radix3_bytes, radix3_tree_bytes, signature_bytes, bootloader_bytes;
+    unsigned params_staged;                  /* both descriptors are in memory and pointed at */
+    unsigned params_declined;      /* 1 no pages, 2 no FMC image, 3 no RM image on the volume, 4 no tree pages */
     struct gpu_fsp_store stores[GPU_FSP_STORE_LOG];  /* the last writes, oldest first, wrapped */
     uint32_t store_count;                            /* writes issued, not writes kept: the log is shorter */
     uint32_t send_walk;                    /* dwords the EMEM offset advanced by, recorded and not obeyed */

@@ -21,6 +21,7 @@ from pathlib import Path
 
 SECTOR = 512
 SCAN_LIMIT = 72 * 1024 * 1024          # the ESP can start well into the image; a 64 MiB image fits in this
+FAT_FILE_MAX = 72 * 1024 * 1024 + 4096  # BOOT_FIRMWARE_FILE_MAX in kernel/include/boot.h, plus a page of slack
 
 
 def find_fat32_boot_sector(read):
@@ -63,9 +64,11 @@ def cluster_offset(read, base, bpb, cluster):
     return first_data + (cluster - 2) * sectors_per_cluster * bpb['bytes_per_sector']
 
 
-def read_cluster_chain(read, base, bpb, cluster, limit=64 * 1024 * 1024):
+def read_cluster_chain(read, base, bpb, cluster, limit=FAT_FILE_MAX):
     """Follow the FAT until it says stop.  A cycle is an error, not a loop: an old stick that confuses this
-    tool must fail loudly rather than spin."""
+    tool must fail loudly rather than spin.  `limit' is the boot stub's own read cap rather than a round number,
+    because a reader that stops short of the biggest file the firmware accepts would call a legal stick
+    unreadable - and the resource-manager image, at 63571696 bytes, sits just under it."""
     fat_start = base + bpb['reserved'] * bpb['bytes_per_sector']
     out = bytearray()
     seen = set()
@@ -99,12 +102,15 @@ def directory(blob):
     return entries
 
 
-def read_named_file(path, wanted_stem, wanted_ext):
-    """Bytes of one file from \\SCOS, so a caller can hash what the disk actually holds.
+def read_named_file(path, wanted_stem, wanted_ext, chain=('SCOS',)):
+    """Bytes of one file in `chain' of directories, so a caller can hash what the disk actually holds.
 
     The record beside an image says what was packed; reading the packed bytes back out of the FAT is the
     only way to find out whether the two still agree.  Returns None when the name is absent, which is a
-    fact a caller should have to handle rather than an exception that hides it.
+    fact a caller should have to handle rather than an exception that hides it.  The default chain is
+    \\SCOS, which is where this OS keeps everything it reads after the loader starts; the loader itself is
+    at \\EFI\\BOOT because the firmware looks there, and that path is worth reading back too - it is the one
+    file whose absence means the stick simply does not boot.
     """
     handle = open(path, 'rb')
     try:
@@ -117,11 +123,14 @@ def read_named_file(path, wanted_stem, wanted_ext):
             raise ValueError('no FAT32 boot sector in the first %d MiB' % (SCAN_LIMIT // (1024 * 1024)))
         base, sector = found
         bpb = parse_bpb(sector)
-        scos = next((e for e in directory(read_cluster_chain(read, base, bpb, bpb['root_cluster']))
-                     if e['stem'] == 'SCOS' and e['directory']), None)
-        if not scos:
-            raise ValueError('the ESP holds no \\SCOS directory')
-        blob = read_cluster_chain(read, base, bpb, scos['cluster'])
+        cluster, entries = bpb['root_cluster'], None
+        for wanted in chain:
+            entries = next((e for e in directory(read_cluster_chain(read, base, bpb, cluster))
+                            if e['stem'] == wanted and e['directory']), None)
+            if entries is None:
+                raise ValueError('the ESP holds no %s directory' % ''.join('\\' + d for d in chain))
+            cluster = entries['cluster']
+        blob = read_cluster_chain(read, base, bpb, cluster)
         entry = next((e for e in directory(blob) if e['stem'] == wanted_stem and e['ext'] == wanted_ext), None)
         if not entry:
             return None

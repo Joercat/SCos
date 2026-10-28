@@ -162,17 +162,22 @@ def check_fmc(blob, arch):
             problems.append('section %r claims %u bytes at offset %u, which runs past the %d-byte file'
                             % (name, size, off, len(blob)))
             continue
-        if info and (zlib.crc32(blob[off:off + size]) ^ 0xffffffff) & 0xffffffff != info:
-            # The reference driver treats this as fatal. The genuine file is not consistent with it: measured on
-            # fmc-570.144.bin from a 615.71.10 install, all four sections carry a non-zero sh_info that is not
-            # the CRC32 of their bytes, while the public key inside it is byte-identical to the one in the
-            # driver's own arrays. So the field is packaging bookkeeping, and what authenticates the image is the
-            # signature over the hash - the coprocessor's check, not ours. This build says the difference instead
-            # of obeying it, which is the choice kernel/drivers/gpu/gpu_firmware.c makes for the same reason.
-            notes.append('section %r carries CRC32 0x%08x in sh_info and its bytes give 0x%08x: nouveau would '
-                         'refuse the file and this build does not, because the coprocessor authenticates the '
-                         'signature rather than this field'
-                         % (name, info, (zlib.crc32(blob[off:off + size]) ^ 0xffffffff) & 0xffffffff))
+        # Nouveau's rule, verbatim: `crc32_le(~0, elf + sh_offset, sh_size) ^ ~0' is what the section header's
+        # sh_info has to equal, and Linux's crc32_le with a ~0 seed and a ~0 post-xor is exactly the value
+        # zlib.crc32 returns.  The comparison used to be made against that value inverted - which is how four
+        # sections of a genuine NVIDIA file came to be reported as carrying no CRC at all, and how this tool and
+        # the kernel, which uses the plain value, ended up quoting different numbers for one file.  Both
+        # conventions are named below when neither matches, because a file whose sh_info holds 1 instead of a
+        # checksum (measured on fmc-615.71.10.bin, fetched from the vendor's own archive) is packaging
+        # bookkeeping rather than a corruption, and refusing it would refuse the image this machine can boot.
+        plain = zlib.crc32(blob[off:off + size]) & 0xffffffff
+        if info and info != plain and info != (plain ^ 0xffffffff):
+            notes.append('section %r carries 0x%08x in sh_info while its bytes give 0x%08x (nouveau\'s formula) '
+                         'or 0x%08x (that value inverted): neither, so the field is not a checksum in this file, '
+                         'and what authenticates the image is the signature over the hash - the '
+                         'coprocessor\'s check, not ours.  This build says the difference instead of obeying it, '
+                         'which is the choice kernel/drivers/gpu/gpu_firmware.c makes for the same reason'
+                         % (name, info, plain, plain ^ 0xffffffff))
     found = {}
     for name, typ, flags, off, size, info in secs:
         if name in FMC_SECTIONS and name not in found:
@@ -313,7 +318,9 @@ def report(src, arch):
         with open(path, 'rb') as handle:
             blob = handle.read()
         entry = {'esp_name': esp, 'file': os.path.basename(path), 'source': path, 'bytes': len(blob),
-                 'crc32': '0x%08x' % ((zlib.crc32(blob) ^ 0xffffffff) & 0xffffffff), 'sections': {}}
+                 # The same formula the build record beside dist/scos.img uses and the boot stub recomputes, so
+                 # that a number quoted by this tool, by `tools/verify-stick.py' and on the panel is one number.
+                 'crc32': '0x%08x' % (zlib.crc32(blob) & 0xffffffff), 'sections': {}}
         if role == 'fmc':
             problems, notes, found = check_fmc(blob, arch)
             for name, (off, size) in found.items():
@@ -372,7 +379,7 @@ def install(src, dest, arch, force):
                         'round_trip': 'identical' if back == data else 'DIFFERENT after the write (%d bytes '
                                                                       'read back, %d written)'
                                                                       % (len(back), len(data)),
-                        'crc32': '0x%08x' % ((zlib.crc32(back) ^ 0xffffffff) & 0xffffffff)})
+                        'crc32': '0x%08x' % (zlib.crc32(back) & 0xffffffff)})
     if not results and not force:
         report_['problems'].append('nothing was installed: every file present here failed its own check.  Fix '
                                    'the file the message names, or pass --install-anyway to write them anyway and '

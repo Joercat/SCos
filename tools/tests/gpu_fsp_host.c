@@ -94,7 +94,11 @@ static uint8_t model_vf[0x3000];                      /* NV_VIRTUAL_FUNCTION_PRI
 static uint32_t model_arch_boot0 = 0x1b7000a1u;
 static uint8_t model_timer[0x1000];                   /* NV_PTIMER, BAR0+0x9000..0x9fff */
 static uint8_t model_channel[FSP_EMEM_CHANNEL_BYTES];
-static uint8_t model_pages[16 * 1024] __attribute__((aligned(4096)));
+/* Handed out in successive page-aligned chunks, because one boot really does take several allocations - the
+ * FMC copy, the radix-3 tree, the two descriptor blocks - and a model that returned the same base for every
+ * one of them would let the driver pass by writing its metadata on top of the image it was told to point at. */
+static uint8_t model_pages[64 * 1024] __attribute__((aligned(4096)));
+static size_t model_pages_used;
 
 struct model {
     unsigned mode;
@@ -408,10 +412,14 @@ void *device_map(uint64_t physical, uint64_t bytes, int write_combine, uint64_t 
 
 uintptr_t pages_allocate_limit(size_t count, uint64_t limit)
 {
+    uintptr_t at;
+
     if (model.mode & M_NO_PAGES) return 0;
     if (limit < 0x10000ull) return 0;
-    if (count * 0x1000u > sizeof model_pages) return 0;
-    return (uintptr_t)model_pages;
+    if (model_pages_used + count * 0x1000u > sizeof model_pages) return 0;
+    at = (uintptr_t)model_pages + model_pages_used;
+    model_pages_used += count * 0x1000u;
+    return at;
 }
 
 /* ------------------------------------------------------------- plumbing -------------------------------------------------- */
@@ -441,6 +449,7 @@ static void model_reset(unsigned mode)
     memset(&w_timer, 0, sizeof w_timer);
     memset(model_channel, 0, sizeof model_channel);
     memset(model_pages, 0, sizeof model_pages);
+    model_pages_used = 0;
     if (mode & M_VF_LIVE) {
         h_put32(model_vf + 0x1000u, 0x1u);                 /* an interrupt leaf with something pending */
         h_put32(model_vf + 0x1600u, 0x2u);                 /* and the top node that routes it */
@@ -529,6 +538,50 @@ static uint8_t staged_region[1u << 20];
 
 /* Stage an FMC image as the boot stub would and let the kernel's own reader parse it, so what the handover is
  * built from is bytes that passed the real checks rather than a description of them. */
+/* The resource-manager image, as the boot stub leaves it: an ELF64 whose section table names a .fwimage payload
+ * and a .fwsignature_gb20x beside it, which is all r535_gsp_elf_section() asks of the file and all the
+ * metadata block under test needs to be pointed at.  The two sizes are deliberately unequal and the payload is
+ * filled with a ramp, so an address off by one - or payload and signature swapped - fails a byte comparison
+ * rather than a size check that both numbers happen to pass. */
+static uint32_t build_elf64_rm(uint8_t *p, uint32_t capacity, uint32_t payload_size, uint32_t signature_size)
+{
+    static const char names[] = "\0.fwimage\0.fwsignature_gb20x\0.shstrtab\0";
+    const uint32_t names_at = 64u + 4u * 64u, payload_at = 1024u;
+    uint32_t total = payload_at + payload_size + signature_size;
+
+    if (capacity < total) return 0;
+    memset(p, 0, total);
+    p[0] = 0x7f; p[1] = 'E'; p[2] = 'L'; p[3] = 'F'; p[4] = 2; p[5] = 1; p[6] = 1;
+    p[16] = 2; p[17] = 0;                      /* e_type: ET_EXEC */
+    p[18] = 0x3e; p[19] = 0;                    /* e_machine: x86-64, which nothing here reads */
+    p[40] = 64;                                 /* e_shoff, little-endian 64-bit */
+    p[58] = 64; p[59] = 0;                      /* e_shentsize */
+    p[60] = 4; p[61] = 0;                       /* e_shnum */
+    p[62] = 3; p[63] = 0;                       /* e_shstrndx */
+    memcpy(p + names_at, names, sizeof names);
+    /* [1] .fwimage, [2] .fwsignature_gb20x, [3] .shstrtab.  sh_name at 0, sh_offset at 24, sh_size at 32. */
+    for (unsigned i = 0; i < 3; i++) {
+        uint8_t *shdr = p + 64u + (i + 1u) * 64u;
+        uint32_t name = i == 0 ? 1u : (i == 1 ? 10u : 30u);
+        uint32_t off = i == 0 ? payload_at : (i == 1 ? payload_at + payload_size : names_at);
+        uint32_t size = i == 0 ? payload_size : (i == 1 ? signature_size : (uint32_t)sizeof names);
+        shdr[0] = (uint8_t)name; shdr[1] = (uint8_t)(name >> 8);
+        shdr[24] = (uint8_t)off; shdr[25] = (uint8_t)(off >> 8); shdr[26] = (uint8_t)(off >> 16); shdr[27] = (uint8_t)(off >> 24);
+        shdr[32] = (uint8_t)size; shdr[33] = (uint8_t)(size >> 8); shdr[34] = (uint8_t)(size >> 16); shdr[35] = (uint8_t)(size >> 24);
+    }
+    for (uint32_t i = 0; i < payload_size; i++) p[payload_at + i] = (uint8_t)(i * 7u + 3u);
+    for (uint32_t i = 0; i < signature_size; i++) p[payload_at + payload_size + i] = (uint8_t)(0xa0u + i);
+    return total;
+}
+
+/* Set by the one scenario that has an RM image on the volume, so every other case keeps staging exactly the
+ * FMC-only record a GB207 with no gsp-*.bin installed actually produces. */
+static int stage_rm;
+/* Five pages, so that the bottom level of the radix-3 tree has five entries and an off-by-one page cannot
+ * survive the comparison below; 97 bytes of signature because that is the width the FMC's own key section has
+ * and a payload and a signature of equal size would let one be mistaken for the other. */
+static uint32_t rm_payload_size = 5u * 4096u, rm_signature_size = 97u;
+
 static void stage(uint32_t hash, uint32_t key, uint32_t signature, int unnamed, int bad_checksum)
 {
     struct boot_handoff handoff;
@@ -545,6 +598,27 @@ static void stage(uint32_t hash, uint32_t key, uint32_t signature, int unnamed, 
     handoff.firmware.role[1].flags = BOOT_FIRMWARE_ELF32 | BOOT_FIRMWARE_FMC_IMAGE | BOOT_FIRMWARE_FMC_SECTIONS
                                    | BOOT_FIRMWARE_FMC_NAMED | BOOT_FIRMWARE_FMC_CRC;
     handoff.firmware.role[1].crc32 = gpu_firmware_crc32(staged_region, length) ^ (uint32_t)bad_checksum;
+    if (stage_rm) {
+        /* The RM image and the bootloader go in after the FMC, page separated, because the region is the one
+         * the driver is told about and an offset the driver invents has to be caught by the record agreeing
+         * with it.  The bootloader is a header and nothing else: the metadata is meant to name where it is, and
+         * no section of it is read by the code under test. */
+        uint32_t at = (length + 4095u) & ~4095u;
+        uint32_t rm = build_elf64_rm(staged_region + at, sizeof staged_region - at,
+                                     rm_payload_size, rm_signature_size);
+        handoff.firmware.role[0].state = BOOT_FIRMWARE_STATE_STAGED;
+        handoff.firmware.role[0].offset = at;
+        handoff.firmware.role[0].bytes = rm;
+        handoff.firmware.role[0].crc32 = gpu_firmware_crc32(staged_region + at, rm);
+        at += (rm + 4095u) & ~4095u;
+        staged_region[at] = 0x7f; staged_region[at + 1] = 'E';
+        staged_region[at + 2] = 'L'; staged_region[at + 3] = 'F';
+        staged_region[at + 4] = 2; staged_region[at + 5] = 1;
+        handoff.firmware.role[2].state = BOOT_FIRMWARE_STATE_STAGED;
+        handoff.firmware.role[2].offset = at;
+        handoff.firmware.role[2].bytes = 64u;
+        handoff.firmware.role[2].crc32 = gpu_firmware_crc32(staged_region + at, 64u);
+    }
     gpu_firmware_note(&handoff);
 }
 
@@ -813,7 +887,8 @@ static void test_the_handover_payload(void)
     check("the resume store is described as absent, which is how a machine with nothing to resume is encoded",
           m_read(payload + COT_OFF_FRTS_SYSMEM) == 0 && m_read(payload + COT_OFF_FRTS_SYSMEM + 4) == 0 &&
           *(const uint32_t *)(payload + COT_OFF_FRTS_SYSMEM_SIZE) == 0 &&
-          m_read(payload + COT_OFF_FRTS_VIDMEM) == 0 && *(const uint32_t *)(payload + COT_OFF_FRTS_VIDMEM_SIZE) == 0);
+          m_read(payload + COT_OFF_FRTS_VIDMEM) == 0 &&
+          *(const uint32_t *)(payload + COT_OFF_FRTS_VIDMEM_SIZE) == GSP_FRTS_SIZE);
     check("the boot arguments are ~0, which is the cold-boot encoding, and they end where the payload does",
           m_read(payload + COT_OFF_BOOT_ARGS) == ~(uint32_t)0 &&
           m_read(payload + COT_OFF_BOOT_ARGS + 4) == ~(uint32_t)0 &&
@@ -900,6 +975,93 @@ static void test_the_handover_payload(void)
 /* What the panel says when the card takes the image and when it does not, and when it says nothing at all.
  * These three are the whole difference between a port that has been tried and one that has only been built, so
  * each is a separate boot of the model rather than three assertions on one. */
+/* The two sysmem descriptors, and the payload field that points at them.  A GB207 whose volume carries a
+ * gsp-*.bin is the case this whole file has been unable to reach so far: the FMC image was enough to assemble a
+ * handover, and not nearly enough to boot a resource manager out of one. */
+static void test_the_boot_descriptors(void)
+{
+    const struct gpu_firmware_state *fws;
+    const struct gpu_firmware_image *rm, *bl;
+    const struct gsp_fw_wpr_meta *meta;
+    const struct gsp_fmc_boot_params *params;
+    const uint8_t *payload;
+
+    ask_with(0, 48, 97, 96, -1, 0);
+    check("with the FMC alone nothing is staged, and the reason is the missing image rather than a missing page",
+          !fsp_state.params_staged && fsp_state.params_declined == 3 &&
+          fsp_state.boot_params_phys == 0 && fsp_state.wpr_meta_phys == 0);
+    check("and the handover still went out, pointing at nothing, because declining the descriptor is not a reason to stop talking",
+          fsp_state.cot_ready && model.cot_seen == 1 &&
+          m_read(fsp_state.payload + COT_OFF_BOOT_ARGS) == ~(uint32_t)0);
+
+    stage_rm = 1;
+    ask_with(0, 48, 97, 96, -1, 0);
+    stage_rm = 0;
+    fws = gpu_firmware_state();
+    rm = &fws->image[0];
+    bl = &fws->image[2];
+    meta = (const struct gsp_fw_wpr_meta *)(uintptr_t)fsp_state.wpr_meta_phys;
+    params = (const struct gsp_fmc_boot_params *)(uintptr_t)fsp_state.boot_params_phys;
+    payload = fsp_state.payload;
+    check("the resource-manager image was staged as an ELF64 with the two sections the driver asks it to find",
+          rm->resident && rm->elf64 && !rm->elf32 && rm->payload_bytes == rm_payload_size &&
+          rm->signature_bytes == rm_signature_size && bl->resident && bl->bytes == 64u);
+    check("both blocks are page aligned, adjacent, and reported back as what they are",
+          fsp_state.params_staged && !fsp_state.params_declined &&
+          fsp_state.wpr_meta_phys && (fsp_state.wpr_meta_phys & 0xfffu) == 0 &&
+          fsp_state.boot_params_phys == fsp_state.wpr_meta_phys + 4096 &&
+          fsp_state.wpr_meta_size == (uint32_t)sizeof *meta);
+    check("the metadata opens with the magic and revision the header publishes, and nothing else claims those bytes",
+          meta->magic == GSP_FW_WPR_META_MAGIC && meta->revision == GSP_FW_WPR_META_REVISION &&
+          meta->gsp_fw_rsvd_start == 0 && meta->verified == 0);
+    check("the metadata names a radix-3 tree, not the image, and it is indexed at the size of the image",
+          meta->sysmem_addr_of_radix3_elf == fsp_state.radix3_phys &&
+          meta->sysmem_addr_of_radix3_elf != fws->address + rm->offset + rm->payload_offset &&
+          meta->size_of_radix3_elf == rm_payload_size && fsp_state.radix3_data_phys ==
+          fws->address + rm->offset + rm->payload_offset && fsp_state.radix3_tree_bytes == 3u * 4096u);
+    {
+        const uint64_t *root = (const uint64_t *)(uintptr_t)fsp_state.radix3_phys;
+        const uint64_t *lvl1 = (const uint64_t *)(uintptr_t)(fsp_state.radix3_phys + 4096u);
+        const uint64_t *lvl2 = (const uint64_t *)(uintptr_t)(fsp_state.radix3_phys + 8192u);
+        check("three levels of 4 KiB pages, each entry the page below it, and every entry past the last one zero",
+              root[0] == fsp_state.radix3_phys + 4096u && root[1] == 0 && root[511] == 0 &&
+              lvl1[0] == fsp_state.radix3_phys + 8192u && lvl1[1] == 0 &&
+              lvl2[0] == fsp_state.radix3_data_phys && lvl2[4] == lvl2[0] + 4u * 4096u && lvl2[5] == 0);
+        check("and the pages the tree indexes are the fixture's own ramp, read through the address the FMC gets",
+              memcmp((const void *)(uintptr_t)lvl2[0], staged_region + rm->offset + rm->payload_offset,
+                     rm_payload_size) == 0 && *(const uint8_t *)(uintptr_t)lvl2[0] == 3u &&
+              *(const uint8_t *)(uintptr_t)(lvl2[0] + 4095u) == (uint8_t)(4095u * 7u + 3u) &&
+              *(const uint8_t *)(uintptr_t)(lvl2[4] + 3u) == (uint8_t)(3u * 7u + 3u));
+    }
+    check("the signature section the metadata names is the one after it, not a copy of the payload",
+          meta->u1.sig.sysmem_addr_of_signature == fws->address + rm->offset + rm->signature_offset &&
+          meta->u1.sig.size_of_signature == rm_signature_size &&
+          memcmp((const void *)(uintptr_t)meta->u1.sig.sysmem_addr_of_signature,
+                 staged_region + rm->offset + rm->signature_offset, rm_signature_size) == 0);
+    check("the bootloader is named by where it is, and the three offsets into it are left for whoever parses it",
+          meta->sysmem_addr_of_bootloader == fws->address + bl->offset &&
+          meta->size_of_bootloader == 64u && meta->bootloader_code_offset == 0);
+    check("the sizes this OS can declare without reserving anything are declared, and the ones it cannot are zero",
+          meta->frts_size == GSP_FRTS_SIZE && meta->vga_workspace_size == GSP_VGA_WORKSPACE_SIZE &&
+          meta->frts_offset == 0 && meta->gsp_fw_wpr_start == 0 && meta->fb_size == 0);
+    check("bootGspRmParams points at the metadata, with the size the driver's own struct reports and the RM flag set",
+          params->boot_gsp_rm.target == GSP_DMA_TARGET_COHERENT_SYSTEM &&
+          params->boot_gsp_rm.desc_offset == fsp_state.wpr_meta_phys &&
+          params->boot_gsp_rm.desc_size == (uint32_t)sizeof *meta &&
+          params->boot_gsp_rm.is_gsp_rm_boot == 1 && params->boot_gsp_rm.wpr_carveout_offset == 0);
+    check("gspRmParams points back at the FMC copy, non-coherently, and the SPDM block is left absent rather than aimed",
+          params->gsp_rm.target == GSP_DMA_TARGET_NONCOHERENT_SYSTEM &&
+          params->gsp_rm.boot_args_offset == fsp_state.image_physical &&
+          params->spdm.target == 0 && params->spdm.payload_offset == 0);
+    check("so the handover's boot-arguments field is the address of the second block, which is the field that was ~0",
+          m_read(payload + COT_OFF_BOOT_ARGS) == (uint32_t)fsp_state.boot_params_phys &&
+          m_read(payload + COT_OFF_BOOT_ARGS + 4) == (uint32_t)(fsp_state.boot_params_phys >> 32) &&
+          m_read(payload + COT_OFF_FMC_ADDRESS) == (uint32_t)fsp_state.image_physical);
+    check("and the card is handed the payload with the descriptors in it, unchanged, in one packet",
+          model.cot_seen == 1 && model.cot_bytes == FSP_HEADER_BYTES + COT_SIZE &&
+          memcmp((const uint8_t *)model.cot + FSP_HEADER_BYTES, payload, COT_SIZE) == 0);
+}
+
 static void test_the_handover_answers(void)
 {
     ask_with(M_COT_WPR, 48, 97, 96, -1, 0);
@@ -1048,6 +1210,7 @@ int main(void)
     test_the_request_bytes();
     test_a_full_query_and_reply();
     test_the_handover_payload();
+    test_the_boot_descriptors();
     test_the_handover_answers();
     test_the_clock_and_the_doorbell_page();
     test_the_generation_table();
