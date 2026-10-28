@@ -75,9 +75,12 @@ python3 tools/run_qemu.py --xhci # x64 EDK2/q35, native USB HID, disposable disk
 make clean
 ```
 
-The packaged `dist/scos.img` is a 64-MiB GPT disk with a FAT32 EFI system partition:
-`EFI/BOOT/BOOTX64.EFI`, `SCOS/KERNEL.ELF` and `SCOS/KERNEL.CRC`. It is a development
-integration artifact, not a request to flash or physically test the PC now.
+The packaged `dist/scos.img` is a 69,206,016-byte (66 MiB) GPT disk with a FAT32 EFI
+system partition: `EFI/BOOT/BOOTX64.EFI`, `SCOS/KERNEL.ELF`, `SCOS/KERNEL.CRC`, the
+three driver modules, and the coprocessor's own files - `GSPFMC.BIN`, `GSP.BIN`
+(63,571,696 B) and `GSPBL.BIN` - so the image carries everything the card is given
+rather than expecting the machine that boots it to supply any of it. It is a
+development integration artifact, not a request to flash or physically test the PC now.
 It also contains a separate 128-KiB SCos-data partition. Only the verified ATA
 path can save there; the default q35/AHCI guest cannot persist. Neither a USB
 boot medium nor the xHCI HID driver implies USB mass-storage support.
