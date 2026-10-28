@@ -549,7 +549,9 @@ def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
             # The whole paragraph has to arrive in the buffer the panel actually has: on a real card the
             # module adds its own 1152-byte inventory above, so headroom here is measured, not assumed.
             assert 'GSP firmware: 5 of 5 image(s) staged' in panel, panel[-1500:]
-            assert 'set complete for the boot sequence to ask for' in panel, panel[-1500:]
+            assert 'set complete for both paths' in panel, \
+                   'a five-role volume is complete for the FSP and for the booter pair, and the panel does ' \
+                   'not say so: ' + panel[-1500:]
             assert str(len(good)) + ' B' in panel, "the staged container's size never reached the panel"
             assert 'ELF64 4s +.fwimage 1024 +.fwsignature_gb20x 512' in panel, \
                    'the sections the boot sequence reads are not reported as it read them: ' \
@@ -680,6 +682,58 @@ def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
             assert 'interrupted halfway' in panel, panel[-1400:]
             assert 'Not on the disk: bootloader, booter load, booter unload' in panel, panel[-1400:]
             assert 'nothing here claims to have approved one.' in panel, panel[-400:]
+    finally:
+        shutil.rmtree(gsp, ignore_errors=True)
+        restore_staged(held)
+        run(['python3', 'tools/makedisk.py', 'build'])
+
+
+def test_three_of_five_is_the_whole_set_on_an_fsp_part():
+    """The set the fetch command actually produces, which is three files and not five.
+
+    `tools/gsp-firmware.py --fetch-driver 570.144' stages GSP.BIN, GSPFMC.BIN and GSPBL.BIN, and
+    `tools/gspcheck.py' reports the booter pair `absent (booter load sequence)' with the note that "the booter
+    path belongs to a coprocessor that boots without the FSP, which this chip does not".  The panel used to
+    take the same three files and call the set incomplete, which is a report telling somebody to go and find
+    two files their card never opens.  What is asserted here is the correction: the count still says three of
+    five, because that is what is on the volume, and the verdict says complete, because it is.
+    """
+    sys.path.insert(0, str(ROOT / 'tools' / 'tests'))
+    from qemu_support import Guest, restore_staged, stage_aside
+    build = ROOT / 'build'
+    gsp = build / 'gsp'
+    held = stage_aside()
+    nested = gsp / 'nvidia' / 'gb207' / 'gsp'
+    good = build_container()
+    fmc = build_fmc_image()
+    try:
+        nested.mkdir(parents=True)
+        (nested / 'gsp-570.144.bin').write_bytes(good)
+        (nested / 'fmc-570.144.bin').write_bytes(fmc)
+        (nested / 'bootloader-570.144.bin').write_bytes(bytes((i * 5) & 0xff for i in range(4096)))
+        run(['python3', 'tools/makedisk.py', 'build'])
+        with Guest(name='firmware-fsp-three', vga='cirrus') as g:
+            g.run(1.2)
+            serial = g.serial()
+            assert 'wm: entering main loop' in serial, serial[-900:]
+            line = [l for l in serial.splitlines() if 'gsp firmware' in l]
+            assert line, 'the boot log never says what the stub found: ' + serial[-900:]
+            assert '3 of 5 images read by the stub' in line[0], line[0]
+            assert 'complete for the FSP' in line[0], \
+                   'the stub called a complete FSP set incomplete: ' + line[0]
+            cap = REPORT_CAP
+            g.call('graphics_report', g.scratch, cap)
+            panel = g.string(g.scratch, cap)
+            assert len(panel) < cap, 'clipped: ' + panel[-200:]
+            assert 'GSP firmware: 3 of 5 image(s) staged' in panel, panel[-1500:]
+            assert 'complete for this machine' in panel, \
+                   'three roles on an FSP part is the whole set, and the panel disagrees: ' + panel[-1600:]
+            assert 'set incomplete' not in panel, \
+                   'the panel still calls the fetched set incomplete: ' + panel[-1600:]
+            # And the two absent names are still named: "complete" is a verdict about this card's path, not
+            # permission to stop reporting what the volume does not hold.
+            assert 'Not on the disk: booter load, booter unload' in panel, panel[-1600:]
+            print('   measured report length with the three-role set staged: %d bytes' % len(panel))
     finally:
         shutil.rmtree(gsp, ignore_errors=True)
         restore_staged(held)

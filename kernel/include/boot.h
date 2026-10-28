@@ -52,13 +52,34 @@
  * and tools/tests/test_gsp_firmware.py fails if any of the three ever drifts apart. */
 #define BOOT_FIRMWARE_ROLE_NAMES { "gsp", "fmc", "bootloader", "booter load", "booter unload" }
 #define BOOT_FIRMWARE_ROLE_FILES { "GSP.BIN", "GSPFMC.BIN", "GSPBL.BIN", "GSPBTL.BIN", "GSPBTU.BIN" }
+/* Five roles, but **two sequences**, and a machine boots through exactly one of them.  A part with an FSP -
+ * every GB20x, which is what this tree has been developed against - is started by the resource manager, the
+ * FMC and the bootloader, and never opens the booter load/unload pair; a part without one boots through the
+ * booter pair instead.  This was measured rather than assumed: `tools/gspcheck.py build/gsp-set' reports the
+ * three present and the pair `absent (booter load sequence)' with the note that "the booter path belongs to a
+ * coprocessor that boots without the FSP, which this chip does not".
+ *
+ * So a set of three is not three fifths of anything on this hardware, and the report used to call it
+ * "incomplete", which reads as a file somebody still has to find.  `complete' below therefore means complete
+ * *for this machine's path*: the three an FSP part boots through, with the resource manager carrying both
+ * sections the boot sequence reads out of it.  Which of the two sequences is the right one is a fact about the
+ * chip, which the kernel knows and the stub does not, so the stub reports the count and the split rather than
+ * a verdict about the other path. */
+#define BOOT_FIRMWARE_FSP_ROLES    3u   /* gsp, fmc, bootloader */
+#define BOOT_FIRMWARE_BOOTER_ROLES 2u   /* booter load, booter unload */
+#define BOOT_FIRMWARE_ROLE_BOOTER_LOAD   3u
+#define BOOT_FIRMWARE_ROLE_BOOTER_UNLOAD 4u
 struct boot_firmware_role {
     uint32_t state, bytes, crc32, flags;
     uint32_t payload_bytes, signature_bytes, sections;
     uint32_t offset;              /* where this image was copied in the staged region, or ~0u */
 };
 struct boot_firmware {
-    uint32_t staged, total_bytes, complete, flags;   /* flags: what went wrong, OR-ed across roles */
+    uint32_t staged, total_bytes, complete, flags;   /* flags: what went wrong, OR-ed across roles.
+                                                      * complete: the three an FSP part boots through are all
+                                                      * staged and the resource manager holds its payload and
+                                                      * signature - the booter pair is a different path and its
+                                                      * absence does not make this one incomplete. */
     /* The bytes themselves, kept: a region the firmware allocated, copied into, and handed over by
      * physical address, so the kernel can read what will eventually be booted instead of only its size.
      * `resident_bytes' is 0 whenever nothing could be kept - no image, or the total past

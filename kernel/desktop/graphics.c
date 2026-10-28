@@ -325,13 +325,28 @@ static void put_firmware_report(struct writer *w, const struct gpu_firmware_stat
     put(w, " image(s) staged by the boot stub, ");
     put_number(w, fw->total_bytes);
     put(w, " B read in total, set ");
-    if (fw->complete)
-        put(w, "complete for the boot sequence to ask for");
+    /* Five roles, two sequences, and this machine boots through one of them: the resource manager, the FMC
+     * and the bootloader.  Counting all five and calling three of them "incomplete" was the report telling
+     * somebody to go and find two files their card's driver never opens - which is what `tools/gspcheck.py'
+     * says in as many words about the fetched set ("the booter path belongs to a coprocessor that boots
+     * without the FSP, which this chip does not").  The count stays n of five because that is what is on the
+     * volume; the verdict is now about the path. */
+    const unsigned booter = fw->role[BOOT_FIRMWARE_ROLE_BOOTER_LOAD].state == BOOT_FIRMWARE_STATE_STAGED
+                         && fw->role[BOOT_FIRMWARE_ROLE_BOOTER_UNLOAD].state == BOOT_FIRMWARE_STATE_STAGED;
+    if (fw->complete && booter)
+        put(w, "complete for both paths: the three an FSP part boots through, and the booter load/unload "
+               "pair that a part without one takes");
+    else if (fw->complete)
+        put(w, "complete for this machine: the three an FSP part boots through are all here, and the booter "
+               "load/unload pair that is not on the volume belongs to the path a coprocessor without an FSP "
+               "takes, so nothing is missing that this card would open");
     else if (fw->staged == (unsigned)GPU_FIRMWARE_ROLES)
         put(w, "present and not accepted: all five are on the volume, and the reason is stated per image "
                "below");
     else
-        put(w, "incomplete: this volume carries fewer of the five than the boot sequence asks for");
+        put(w, "incomplete: one of the three an FSP part boots through - the resource manager, the FMC and "
+               "the bootloader - is not on this volume or was not accepted, and the paragraph below says "
+               "which and why");
     if (!fw->consistent)
         put(w, " and inconsistent: the summary the stub sent disagrees with its own per-file records, so "
                "the numbers below are the ones this kernel re-added from those records");

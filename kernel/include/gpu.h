@@ -190,7 +190,9 @@ struct gpu_firmware_state {
     struct gpu_firmware_image image[GPU_FIRMWARE_ROLES];
     int present;                     /* any role at all was found on the volume */
     unsigned staged;                 /* roles the stub could open, whatever the outcome */
-    unsigned complete;               /* all five, and the first holds both sections the boot sequence reads */
+    unsigned complete;               /* the three an FSP part boots through are all staged and the first is
+                                      * a 64-bit ELF holding both sections the boot sequence reads - not "all
+                                      * five", because the booter pair is the other path (see boot.h) */
     unsigned consistent;             /* the stub's summary agrees with the records it came with */
     uint32_t total_bytes, flags;
     char signature_name[24];         /* the name the staged image gives its signature section */

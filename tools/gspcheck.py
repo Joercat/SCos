@@ -423,6 +423,12 @@ def print_human(rep):
         tail = ('and refuse to build one: the FMC image is the only file the handover is read from, and it is '
                 'the one that failed')
     print('  the panel will say fw %d/%d %s' % (panel['fw_staged'], panel['fw_total'], tail))
+    # The panel counts five roles and judges one sequence, which read like a contradiction until it was
+    # written down: on a chip with an FSP, three of five *is* the whole set, and the missing pair is the path
+    # a part without one takes.  Say so here, where somebody is looking at the two absent lines above.
+    if panel['fw_staged'] == 3 and rep['files'].get('gsp', {}).get('ok') and rep['files'].get('fmc', {}).get('ok'):
+        print('  which is complete for this chip: gsp, fmc and bootloader are the three an FSP part boots '
+              'through,\n  and the booter load/unload pair belongs to a coprocessor that boots without one')
     if rep.get('installed'):
         for entry in rep['installed']:
             print('  installed %-11s %8d B, read back %s, crc32 %s'

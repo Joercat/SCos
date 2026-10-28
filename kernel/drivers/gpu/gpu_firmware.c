@@ -283,6 +283,9 @@ void gpu_firmware_note(const struct boot_handoff *handoff)
     f->resident_bytes = 0;
     f->parsed = 0;
 
+    /* The verdict is about the sequence this hardware boots through; the count is about the volume.  See
+     * the two-sequences note in boot.h - three of five is a complete set on an FSP part, and was reported as
+     * an incomplete one until the difference was spelled out. */
     for (i = 0; i < GPU_FIRMWARE_ROLES; i++) {
         const struct boot_firmware_role *r = &fw->role[i];
         f->role[i].state = r->state;
@@ -294,7 +297,7 @@ void gpu_firmware_note(const struct boot_handoff *handoff)
         f->role[i].sections = r->sections;
         f->role[i].offset = r->offset;
         if (r->state == BOOT_FIRMWARE_STATE_ABSENT || r->state > BOOT_FIRMWARE_STATE_UNREADABLE) {
-            complete = 0;
+            if (i < BOOT_FIRMWARE_FSP_ROLES) complete = 0;
             continue;
         }
         staged++;
@@ -322,7 +325,10 @@ void gpu_firmware_note(const struct boot_handoff *handoff)
         gpu_firmware_scan(f, (const uint8_t *)(uintptr_t)fw->address, fw->resident_bytes);
     if (staged) {
         klog(FIRMWARE_LOG_PREFIX "gsp firmware: %u of %u images read by the stub, %u B, set %s", staged,
-             (unsigned)GPU_FIRMWARE_ROLES, bytes, complete ? "complete" : "incomplete");
+             (unsigned)GPU_FIRMWARE_ROLES, bytes,
+             complete ? (staged == GPU_FIRMWARE_ROLES ? "complete, both paths"
+                                                     : "complete for the FSP, the booter pair is absent")
+                      : "incomplete");
         if (!f->consistent) klog(FIRMWARE_LOG_PREFIX "gsp firmware: summary disagrees with the per-file records");
         if (f->resident)
             klog(FIRMWARE_LOG_PREFIX "gsp firmware: %u image(s) held at 0x%x (%u B), parsed by this kernel",

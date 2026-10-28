@@ -309,9 +309,20 @@ What is still missing, stated plainly because the panel is easy to read as more 
   the ESP names the boot stub reads.  Measured on the set it produced: `GSP.BIN` 63,571,696 B ELF64 with
   `.fwimage` 63,541,248 B and `.fwsignature_gb20x`; `GSPFMC.BIN` 199,820 B ELF32 with the four sections;
   `GSPBL.BIN` 200,812 B; `tools/gspcheck.py` then reports **fw 3/5** and the handover builds from the FMC.
-  A booted image carrying that set reports `gsp firmware: 3 of 5 images read by the stub, 63972328 B`, and
-  `3 image(s) held ... (63979520 B), parsed by this kernel` - the resource manager included, which is the
-  first time this tree has carried one.
+  A booted image carrying that set reports `gsp firmware: 3 of 5 images read by the stub, 63972328 B, set
+  complete for the FSP, the booter pair is absent`, and `3 image(s) held ... (63979520 B), parsed by this
+  kernel` - the resource manager included, which is the first time this tree has carried one.
+* **Three of five is not an incomplete set on this hardware, and the panel now says so.**  The five roles
+  are two sequences: a part with an FSP is started by the resource manager, the FMC and the bootloader and
+  never opens `booter_load`/`booter_unload`, which belong to the path a part *without* one takes.  `gspcheck`
+  had always said this in a note ("the booter path belongs to a coprocessor that boots without the FSP, which
+  this chip does not") while the panel called the same three files `incomplete: this volume carries fewer of
+  the five than the boot sequence asks for` - a report sending somebody to look for two files their card does
+  not want.  `boot.h` now names the split (`BOOT_FIRMWARE_FSP_ROLES` 3, `BOOT_FIRMWARE_BOOTER_ROLES` 2), the
+  boot stub and the kernel both judge *the FSP sequence*, the count is still n of five because that is what
+  is on the volume, and the panel says `complete for this machine` with the two absent names still listed
+  below it.  The five-role case still reads `complete for both paths`, and a missing FMC or resource manager
+  is still `incomplete`.
 * **The volume has to be bigger than 64 MiB.**  63.5 MB of firmware does not fit in the tracked image, so
   `make ventoy` grows the disk to what the staged set needs (`--min-size` on the same packer); the committed
   `dist/scos.img` stays at 64 MiB and carries the FMC alone.  A 128 MiB guest could not even *keep* the set -

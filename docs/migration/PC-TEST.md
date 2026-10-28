@@ -386,7 +386,9 @@ a real container, instead of a refusal to accept a stub.
 
 `GSPFMC.BIN` is the one this build assembles a handover from; `GSP.BIN` and `GSPBL.BIN` are what the resource
 manager's own boot arguments would need, and those are not implemented here yet, so staging all three changes
-what the panel can *say* before it changes what the card does.  Say so rather than let `fw 3/5` imply more.
+what the panel can *say* before it changes what the card does.  Say so rather than let `fw 3/5` imply more -
+and equally, do not read `fw 3/5` as a missing file: on a chip with an FSP, three of five is the whole set
+(`complete for this machine`), and the two absent names are the booter pair that belongs to the other path.
 
 Once files are there the panel answers in three paragraphs, and each one is a different question.
 `GSP firmware:` is the disk: per image, its size, its CRC32 as read, whether it is an ELF64 image (with

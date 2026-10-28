@@ -391,11 +391,17 @@ status EFIAPI efi_main(handle image,struct system_table *table){
     }else log("GSP firmware read and checked; no memory to keep it\r\n");
    }
   }
-  /* "Complete" is the whole five-file set with the first file carrying both sections the boot sequence
-   * reads out of it.  Anything less is a disk that cannot be booted from, and says so role by role. */
+  /* "Complete" is the three-file sequence an FSP part boots through - resource manager, FMC, bootloader -
+   * with the first of them carrying both sections the boot sequence reads out of it.  It is deliberately not
+   * "all five": the booter load/unload pair belongs to the path a part *without* an FSP takes, and this
+   * generation never opens it (see the two-sequences note in kernel/include/boot.h).  The count is still
+   * reported as n of five, because that is what is on the volume; only the verdict is about this path. */
   {const struct boot_firmware_role *rm=&gsp_fw.role[0];
    uint32_t wanted=BOOT_FIRMWARE_ELF64|BOOT_FIRMWARE_PAYLOAD|BOOT_FIRMWARE_SIGNATURE;
-   if(gsp_fw.staged==BOOT_FIRMWARE_ROLES&&rm->state==BOOT_FIRMWARE_STATE_STAGED&&(rm->flags&wanted)==wanted
+   unsigned i,three=1;
+   for(i=0;i<BOOT_FIRMWARE_FSP_ROLES;i++)
+    if(gsp_fw.role[i].state!=BOOT_FIRMWARE_STATE_STAGED)three=0;
+   if(three&&(rm->flags&wanted)==wanted
       &&!(rm->flags&(BOOT_FIRMWARE_BAD_MAGIC|BOOT_FIRMWARE_TRUNCATED|BOOT_FIRMWARE_NO_STRINGS)))
     gsp_fw.complete=1;}
  }
@@ -428,9 +434,14 @@ status EFIAPI efi_main(handle image,struct system_table *table){
   h->module_name[n]=0;
  }else h->module_state=select_state?select_state:0;
  h->firmware=gsp_fw;
- if(gsp_fw.staged)
-  log(gsp_fw.complete?"GSP firmware: all five images staged, the set the open driver loads\r\n"
-      :"GSP firmware staged, set incomplete; see the kernel report\r\n");
+ if(gsp_fw.staged){
+  if(gsp_fw.complete)
+   log(gsp_fw.staged==BOOT_FIRMWARE_ROLES
+       ?"GSP firmware: all five images staged; the FSP's three and the booter pair\r\n"
+       :"GSP firmware: the three an FSP part boots through are staged (resource manager, FMC, bootloader); "
+        "the booter pair is for a part without one, and this disk does not carry it\r\n");
+  else log("GSP firmware staged, set incomplete for the FSP path; see the kernel report\r\n");
+ }
  if(index_data&&index_size){
   memcpy((void*)(uintptr_t)BOOT_INDEX_ADDRESS(arena),index_data,index_size);
   h->index_address=BOOT_INDEX_ADDRESS(arena);h->module_index_size=(uint32_t)index_size;
