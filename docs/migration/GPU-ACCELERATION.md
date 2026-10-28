@@ -323,9 +323,11 @@ What is still missing, stated plainly because the panel is easy to read as more 
   is on the volume, and the panel says `complete for this machine` with the two absent names still listed
   below it.  The five-role case still reads `complete for both paths`, and a missing FMC or resource manager
   is still `incomplete`.
-* **The volume has to be bigger than 64 MiB.**  63.5 MB of firmware does not fit in the tracked image, so
-  `make ventoy` grows the disk to what the staged set needs (`--min-size` on the same packer); the committed
-  `dist/scos.img` stays at 64 MiB and carries the FMC alone.  A 128 MiB guest could not even *keep* the set -
+* **The volume has to be bigger than 64 MiB.**  63.5 MB of firmware does not fit in the old tracked image, so
+  the packer is told what the staged set needs (`--min-size`, the same code) and the delivered
+  `dist/scos.img` is 69,206,016 bytes and carries GSP.BIN, GSPFMC.BIN and GSPBL.BIN.  It used to stay at
+  64 MiB with the FMC alone, which is the one thing that made every report of `fw 1/5` look like a card
+  problem: an image with the FMC and no resource manager cannot boot the coprocessor past the FMC at all.  A 128 MiB guest could not even *keep* the set -
   the stub read all three files and had no pool for the resource manager, which the panel reported as two
   images held rather than as a missing file - so the machine that boots it wants a few hundred MiB of RAM,
   as any machine with an RTX 5050 has.

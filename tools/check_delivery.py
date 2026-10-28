@@ -9,9 +9,8 @@ delivery that has drifted fails the build that made it.
 
 What it checks, in the order the failure modes matter:
 
-  1. the three files exist, the image is the size its record claims (67108864 bytes for an image whose record
-     predates that field, which is what `dist' has always been), and its sha256 is what dist/scos.img.sha256
-     says;
+  1. the three files exist, the image is the size its record claims (67108864 bytes for a record that predates
+     the field, the size `dist' was for years), and its sha256 is what dist/scos.img.sha256 says;
   2. the record's tree state is `clean` - an experiment is not a delivery;
   3. the record names a commit that is reachable from HEAD, so it describes this branch;
   4. the bytes *inside* the image match the record: KERNEL.ELF and every .MOD are read back out of the
@@ -35,9 +34,9 @@ ROOT = Path(__file__).resolve().parents[1]
 IMAGE = 'dist/scos.img'
 RECORD = 'dist/scos.img.build.json'
 CHECKSUM = 'dist/scos.img.sha256'
-# The tracked image is 64 MiB by rule.  That is a fact about `dist/', not about this checker: a Ventoy image
-# carrying the resource manager is 69 MB and grows with whatever firmware was staged, so the size is read from
-# the record and this constant is only the fallback for a record written before the field existed.
+# The size is read from the record, because it now depends on what firmware was staged: the delivered image
+# carries the resource manager (63,571,696 B) and is 69,206,016 bytes, where the pre-firmware delivery was
+# 67,108,864.  This constant is only the fallback for a record written before the field existed.
 IMAGE_BYTES = 67108864
 # Everything that ends up packed into the image.  A change here between the record's commit and HEAD means
 # the artifact on the branch is not the artifact this source would produce.

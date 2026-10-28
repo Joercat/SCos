@@ -40,15 +40,12 @@ milestone-check:
 # Staged in this order on purpose: `gpu-modules' and `gsp-firmware' fill the directories the packer reads, and
 # `all' writes the image.  Reversed, a clean build/ produced an image with no drivers and no firmware, which is
 # the delivery that arrived on the last flash and reported fw 0/5.
-# A Ventoy-ready image.  Ventoy boots an image *file*, so a stick that already has it needs no raw write:
-# `make ventoy' packs the same bytes, sized to whatever firmware is staged (VENTOY_FIRMWARE is where
-# `make gsp-firmware-set' or an installed driver puts gsp-*.bin), and leaves the result in build/.
-# It is deliberately not committed: a second image in dist/ would double the size of every delivery for a file
-# anyone can rebuild in a second, and the size depends on firmware that only exists on the target machine.
+# A Ventoy-ready image: the same bytes `dist' delivers, also left in build/ under its own name for a stick.
 # Where the coprocessor's images come from, best first: the set `make gsp-firmware-set' fetched and verified
-# from linux-firmware, then an installed driver's own directory.  Both are optional and `make dist' uses
-# neither - the tracked 64 MiB image is sized for the kernel alone, and a 63,571,696-byte resource manager
-# does not fit in it at any price.
+# from linux-firmware, then an installed driver's own directory.  Both are required now: `dist/scos.img' is
+# the image people download, so it has to carry the resource-manager image itself rather than expect the
+# machine that boots it to find one.  A 63,571,696-byte RM image is why the delivered volume is 66 MiB and not
+# the 64 MiB it used to be - and the size is the only visible sign, so `make dist' refuses rather than shrink.
 GSP_SET ?= build/gsp-set
 VENTOY_FIRMWARE ?= $(firstword $(wildcard $(GSP_SET)) $(wildcard /lib/firmware/nvidia/*/gsp))
 VENTOY_SIZE = $(shell python3 tools/makedisk.py build --min-size \
@@ -67,8 +64,21 @@ ventoy: gpu-modules gsp-firmware all
 	@echo "copy $(BUILD)/scos-ventoy.img onto the Ventoy partition and pick it in the menu"
 	@echo "or run tools/flash.sh --ventoy /run/media/\$$USER/Ventoy, which packs, copies and reads it back"
 
+# The delivered image carries the firmware, and that is a change of rule rather than of taste: `dist/scos.img`
+# used to be a 64 MiB volume holding the kernel, the three modules and the FMC alone - which is an image that
+# boots a desktop and cannot start the coprocessor at all, because the FMC it hands over has no resource-manager
+# image to boot into.  The panel said `fw 1/5` on a card that had nothing wrong with it, twice, and both times
+# the file on the branch was 64 MiB while a correct one is 66.  So `make dist' now packs the staged set and
+# refuses to write a delivery without GSP.BIN in it.
 dist: gpu-modules gsp-firmware all
-	cp $(BUILD)/scos.img dist/scos.img
+	@if [ ! -f "$(VENTOY_FIRMWARE)/GSP.BIN" ] || [ ! -f "$(VENTOY_FIRMWARE)/GSPFMC.BIN" ]; then \
+		echo "REFUSED: no complete firmware set at $(if $(VENTOY_FIRMWARE),$(VENTOY_FIRMWARE),build/gsp-set)."; \
+		echo "  This image must carry the resource-manager image: the FMC boots *it*, and an image with the"; \
+		echo "  FMC alone reports fw 1/5 and hands over nothing that can run.  Run:"; \
+		echo "    make gsp-firmware-set    # fetches the matched 570.144 set (needs github.com)"; \
+		exit 1; \
+	fi
+	python3 tools/makedisk.py build --firmware $(VENTOY_FIRMWARE) --size $(VENTOY_SIZE) --out dist/scos.img
 	cp $(BUILD)/build.json dist/scos.img.build.json
 	sha256sum dist/scos.img > dist/scos.img.sha256
 # `dist' depends on the modules and the coprocessor firmware, not merely on `all': both are packed into the

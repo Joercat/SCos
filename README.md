@@ -151,9 +151,10 @@ now measured rather than assumed - the module reads the frame buffer's size from
 the chip's own scratch word and the kernel computes the firmware's reservation
 from it, refusing with a reason when the card will not say. The coprocessor's three
 firmware files are fetched and verified by `make gsp-firmware-set` (partial clone of
-linux-firmware, per-role container checks) and packed by `make ventoy`, which sizes
-the disk for them; the committed image carries the FMC only, because 63 MB of
-resource manager does not fit in 64 MiB. What is still missing is the code that
+linux-firmware, per-role container checks) and packed into the delivered image by
+`make dist`, which sizes the disk for them: `dist/scos.img` is 66 MiB and carries
+`GSP.BIN`, `GSPFMC.BIN` and `GSPBL.BIN`, because a handover built from the FMC alone
+has no resource-manager image to boot into. What is still missing is the code that
 submits work once the coprocessor runs: See
 [why the GPU was not accelerating, and what was fixed](docs/migration/GPU-ACCELERATION.md).
 GOP/PAT/write combining are not GPU rendering. Browser integration remains deferred.
