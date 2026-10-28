@@ -58,13 +58,15 @@ static void gpu_boot_notice(void)
         if (fw && fw->staged)
             wm_notify("GSP firmware read from the boot disk",
                       fw->complete ?
-                          "All five images the open driver loads to start this coprocessor are on the volume, "
-                          "and the one that carries the payload holds the sections that loader reads. No image "
-                          "has been written to the card: SCos has no code yet that hands firmware to the "
-                          "coprocessor, so what changed is what the boot stub could check."
-                        : "Some of the five images are on the volume, which is enough to be read and checked "
-                          "and not enough to be a complete set. Run graphics in Terminal for which roles the "
-                          "disk is missing and what each staged file turned out to be.", 0);
+                          "The three images an FSP part boots through - the resource manager, the FMC and the "
+                          "bootloader - are on the volume, and the one carrying the payload holds the sections "
+                          "that loader reads. No image has been written to the card: nothing here hands "
+                          "firmware to the coprocessor yet, so what changed is what the boot stub could "
+                          "check. The booter pair is the other path, for a part without an FSP."
+                        : "Some of the images are on the volume, which is enough to be read and checked and "
+                          "not enough to be a complete set for the path this card boots through. Run graphics "
+                          "in Terminal for which roles the disk is missing and what each staged file turned "
+                          "out to be.", 0);
     }
     if (gpu_engine_drives_output()) {
         wm_notify("GPU 2D engine bound",
