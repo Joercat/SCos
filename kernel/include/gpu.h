@@ -338,6 +338,17 @@ struct gpu_fsp_state {
     uint64_t libos_phys, libos_log_phys, libos_rmargs_phys;
     unsigned libos_staged, libos_declined;    /* 1 no pages */
     uint32_t libos_log_bytes;
+    /* The shared ring RM is told to talk through: two 0x8000 regions (command and status), a page array, and
+     * the argument block that names them.  `queue_declined' is why there is none. */
+    uint64_t queue_phys, queue_stat_phys;
+    unsigned queue_staged, queue_declined, queue_ptes;
+    uint32_t queue_bytes;
+    /* What RM said over the status queue after the handover, if anything: the first dword of the first entry is
+     * the RPC function number, and a message on that queue is the only proof the resource manager is running
+     * that does not depend on a register this kernel may not be allowed to read. */
+    uint32_t queue_write_ptr, queue_read_ptr;
+    int rpc_seen;
+    uint32_t rpc_function;
     /* What the reference driver's own per-chip FSP table decides, read from the chip's architecture field
      * rather than assumed: nouveau's `nvkm_fsp_func.cot' in nvkm/subdev/fsp/{gh100,gb100,gb202}.c, the driver
      * that boots this family today.  The sizes are not interchangeable - Hopper's public key and signature are

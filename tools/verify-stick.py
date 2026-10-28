@@ -21,7 +21,7 @@ from pathlib import Path
 
 SECTOR = 512
 SCAN_LIMIT = 72 * 1024 * 1024          # the ESP can start well into the image; a 64 MiB image fits in this
-FAT_FILE_MAX = 72 * 1024 * 1024 + 4096  # BOOT_FIRMWARE_FILE_MAX in kernel/include/boot.h, plus a page of slack
+FAT_FILE_MAX = 256 * 1024 * 1024 + 4096  # BOOT_FIRMWARE_FILE_MAX in kernel/include/boot.h, plus a page of slack
 
 
 def find_fat32_boot_sector(read):

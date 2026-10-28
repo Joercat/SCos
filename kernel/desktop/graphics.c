@@ -636,9 +636,19 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
     put(w, ", RMARGS 4 KiB at 0x");
     put_hex(w, (uint32_t)f->libos_rmargs_phys);
     put(w, ")");
+    if (f->queue_staged) {
+        put(w, ", ring 0x");
+        put_hex(w, (uint32_t)f->queue_phys);
+        put(w, " (command and status, ");
+        put_number(w, f->queue_ptes);
+        put(w, " page(s) each way, status at 0x");
+        put_hex(w, (uint32_t)f->queue_stat_phys);
+        put(w, ")");
+    }
     if (!f->params_staged) {
-        put(w, "; no boot parameters staged, so the FMC was told nothing: the resource manager image this\n"
-               "  volume does not carry is what they describe.\n");
+        put(w, "; no boot parameters staged: the resource manager image this volume does not carry is\n"
+               "  what they describe, so the handover carried no descriptor and the FMC was told nothing.\n"
+               "  boot: not attempted.\n");
         return;
     }
     put(w, ", boot args 0x");
@@ -694,6 +704,23 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
     put(w, ", queue ");
     put(w, f->queues_idle_after ? "idle" : "busy");
     put(w, ".\n");
+    /* What RM itself said, which is the only reading here that comes from the resource manager rather than
+     * from the falcon that was supposed to start it. */
+    if (!f->queue_staged) {
+        put(w, "  rm: no ring was staged, so it had nothing to answer through.\n");
+        return;
+    }
+    put(w, "  rm: status queue write 0x");
+    put_hex(w, f->queue_write_ptr);
+    put(w, " read 0x");
+    put_hex(w, f->queue_read_ptr);
+    if (f->rpc_seen) {
+        put(w, " - running, and its first request is RPC 0x");
+        put_hex(w, f->rpc_function);
+        put(w, ".\n");
+    } else {
+        put(w, " - nothing written: the ring this kernel built was never touched.\n");
+    }
 }
 
 

@@ -784,6 +784,101 @@ static void libos_page_array(uint64_t buffer, uint64_t bytes)
     for (uint64_t i = 0; i < bytes / GSP_PAGE_SIZE; i++) entries[i] = buffer + i * GSP_PAGE_SIZE;
 }
 
+#define GSP_QUEUE_ENTRY_BYTES   0x1000u
+#define GSP_QUEUE_ENTRIES       7u
+#define GSP_QUEUE_BYTES         ((GSP_QUEUE_ENTRIES + 1u) * GSP_QUEUE_ENTRY_BYTES)   /* header page + ring */
+#define GSP_QUEUE_REGION_BYTES  (2u * GSP_QUEUE_BYTES)                                 /* cmd and stat */
+#define GSP_QUEUE_PAGES         (GSP_QUEUE_REGION_BYTES / GSP_PAGE_SIZE)
+
+struct msgq_tx_header {
+    uint32_t version, size, msg_size, msg_count, write_ptr, flags, rx_hdr_off, entry_off;
+};
+struct msgq_rx_header { uint32_t read_ptr; };
+_Static_assert(sizeof(struct msgq_tx_header) == 32, "msgqTxHeader is eight words (nvrm/gsp.h)");
+_Static_assert(sizeof(struct msgq_rx_header) == 4, "msgqRxHeader is one word");
+
+/* `MESSAGE_QUEUE_INIT_ARGUMENTS' and `GSP_ARGUMENTS_CACHED', from nvrm/gsp.h.  NvLength and RmPhysAddr are
+ * 64-bit on this generation, which is why the two offsets and the address are eight bytes each. */
+struct message_queue_init_args {
+    uint64_t shared_mem_phys;
+    uint32_t page_table_entries;
+    uint32_t pad0;
+    uint64_t cmd_queue_offset, stat_queue_offset, lockless_cmd_offset, lockless_stat_offset;
+};
+struct gsp_sr_init_args { uint32_t old_level, flags, in_pm_transition; };
+struct gsp_arguments_cached {
+    struct message_queue_init_args queue;
+    struct gsp_sr_init_args sr;
+    uint32_t gpu_instance;
+    uint32_t pad1;
+    struct { uint64_t pa, size; } profiler;
+    uint32_t b_dmem_stack;                /* newer RM asks for its stack in device memory */
+    uint32_t pad2;
+};
+_Static_assert(sizeof(struct message_queue_init_args) == 48, "MESSAGE_QUEUE_INIT_ARGUMENTS: u64 + u32 + pad and four u64");
+_Static_assert(__builtin_offsetof(struct message_queue_init_args, cmd_queue_offset) == 16, "cmdQueueOffset follows the count");
+_Static_assert(sizeof(struct gsp_arguments_cached) == 96, "GSP_ARGUMENTS_CACHED: 48 + 16 + 16 + 16");
+_Static_assert(__builtin_offsetof(struct gsp_arguments_cached, sr) == 48, "srInitArguments follows the queue");
+_Static_assert(__builtin_offsetof(struct gsp_arguments_cached, profiler) == 72, "profilerArgs follows gpuInstance");
+
+/* One ring: header page first, entries after it, every field saying what this code actually built. */
+static void build_one_queue(uint64_t base)
+{
+    struct msgq_tx_header *tx = (struct msgq_tx_header *)(uintptr_t)base;
+    struct msgq_rx_header *rx = (struct msgq_rx_header *)(uintptr_t)(base + GSP_PAGE_SIZE - 16u);
+
+    tx->version = 0u;
+    tx->size = GSP_QUEUE_BYTES;
+    tx->msg_size = GSP_QUEUE_ENTRY_BYTES;
+    tx->msg_count = GSP_QUEUE_ENTRIES;
+    tx->write_ptr = 0u;
+    tx->flags = 0u;
+    tx->rx_hdr_off = (uint32_t)(GSP_PAGE_SIZE - 16u);   /* where this queue's receive pointer lives */
+    tx->entry_off = GSP_QUEUE_ENTRY_BYTES;              /* entries start one page in */
+    rx->read_ptr = 0u;
+}
+
+/* The shared ring and the argument block that describes it.  Kept alive for the life of the boot, like the log
+ * buffers: RM holds these addresses and writes into them long after this function returns. */
+static void build_gsp_queue(void)
+{
+    struct gsp_arguments_cached *args;
+    uint64_t ring;
+    uint64_t *ptes;
+
+    fsp_state.queue_declined = 1;
+    ring = pages_allocate_limit(GSP_QUEUE_PAGES + 1u, PHYSICAL_LIMIT);
+    if (!ring) return;
+    memset((void *)(uintptr_t)ring, 0, (GSP_QUEUE_PAGES + 1u) * GSP_PAGE_SIZE);
+    build_one_queue(ring);
+    build_one_queue(ring + GSP_QUEUE_BYTES);
+
+    /* The page array RM walks to reach the ring: one physical address per 4 KiB page. */
+    ptes = (uint64_t *)(uintptr_t)(ring + GSP_QUEUE_REGION_BYTES);
+    for (unsigned i = 0; i < GSP_QUEUE_PAGES; i++) ptes[i] = ring + (uint64_t)i * GSP_PAGE_SIZE;
+
+    args = (struct gsp_arguments_cached *)(uintptr_t)fsp_state.libos_rmargs_phys;
+    args->queue.shared_mem_phys = ring;
+    args->queue.page_table_entries = GSP_QUEUE_PAGES;
+    args->queue.cmd_queue_offset = 0u;
+    args->queue.stat_queue_offset = GSP_QUEUE_BYTES;
+    args->queue.lockless_cmd_offset = 0u;
+    args->queue.lockless_stat_offset = 0u;
+    args->sr.old_level = 0u;                       /* a power-on resume level: not resuming from a save */
+    args->sr.flags = 0u;
+    args->sr.in_pm_transition = 0u;
+    args->profiler.pa = 0u;
+    args->profiler.size = 0u;
+    args->b_dmem_stack = 1u;
+
+    fsp_state.queue_phys = ring;
+    fsp_state.queue_bytes = GSP_QUEUE_REGION_BYTES;
+    fsp_state.queue_stat_phys = ring + GSP_QUEUE_BYTES;
+    fsp_state.queue_ptes = GSP_QUEUE_PAGES;
+    fsp_state.queue_staged = 1;
+    fsp_state.queue_declined = 0;
+}
+
 static void stage_libos_args(void)
 {
     static const char *const names[3] = { "LOGINIT", "LOGINTR", "LOGRM" };
@@ -796,6 +891,9 @@ static void stage_libos_args(void)
     memset((void *)(uintptr_t)logs, 0, 3u * GSP_LIBOS_LOG_BYTES + 2u * GSP_PAGE_SIZE);
     tables = logs + 3u * GSP_LIBOS_LOG_BYTES;
     regions = (struct libos_region *)(uintptr_t)tables;
+    /* The RM argument block is the page after the descriptor array, and the queue builder fills it, so the
+     * address has to exist before the queue is built rather than after. */
+    fsp_state.libos_rmargs_phys = tables + GSP_PAGE_SIZE;
     for (unsigned i = 0; i < 3u; i++) {
         uint64_t buffer = logs + (uint64_t)i * GSP_LIBOS_LOG_BYTES;
         regions[i].id8 = libos_id8(names[i]);
@@ -805,9 +903,20 @@ static void stage_libos_args(void)
         regions[i].loc = 1u;                  /* LIBOS_MEMORY_REGION_LOC_SYSMEM */
         libos_page_array(buffer, GSP_LIBOS_LOG_BYTES);
     }
-    /* The RM's own argument block.  The reference fills it from the message-queue shared memory it has
-     * already built for RPCs, which this OS does not have yet; zeroed, it is a real region with nothing in it,
-     * and an RM that rejects it says so in the mailbox rather than silently. */
+    /* The RM's own argument block: `GSP_ARGUMENTS_CACHED' from nvrm/gsp.h, which is what the resource manager
+     * reads before it starts.  The field that matters is `messageQueueInitArguments': the physical address of a
+     * shared ring, how many page-table entries describe it, and the two offsets inside it where the command
+     * queue and the status queue begin.  This is the channel every later exchange goes through - RM announces
+     * itself on the status queue, and a host that hands over no queue is a host RM cannot say anything to.
+     *
+     * The ring below follows `msgqTxHeader' / `msgqRxHeader' as nvrm declares them.  One 0x8000 region per
+     * direction, 4 KiB entries: entry 0 is the header page (txHeader at its first 32 bytes, the receive pointer
+     * in its last 16) and the seven entries after it are the ring itself.  `write_ptr' is the producer's cursor
+     * and the other side's `read_ptr' is the consumer's - the host owns the command queue's write pointer and
+     * the status queue's read pointer, RM owns the other two.  A page array of one physical address per 4 KiB
+     * page follows the ring, because the GSP walks page tables rather than a linear address. */
+    build_gsp_queue();
+
     regions[3].id8 = libos_id8("RMARGS");
     regions[3].pa = tables + GSP_PAGE_SIZE;
     regions[3].size = GSP_PAGE_SIZE;
@@ -1171,6 +1280,36 @@ static void note_submit(void)
     fsp_state.submit_consumed = fsp_state.submit_head != 0 || fsp_state.submit_head >= fsp_state.submit_tail;
 }
 
+/* Has the resource manager said anything?  The status queue is the direction RM writes in: its `write_ptr'
+ * moves as it produces, and this side's `read_ptr' is what the host has consumed.  The two differing means RM
+ * is running and talking, and the first dword of the entry it produced is the RPC function number - so this
+ * reads it, records it, and moves the read pointer, which is the acknowledgement RM is waiting for.  A ring
+ * this kernel built and RM never touched is the other answer, and it is the one that says the handover did not
+ * start it. */
+static void read_status_queue(void)
+{
+    struct msgq_tx_header *tx;
+    uintptr_t entry;
+
+    if (!fsp_state.queue_staged) return;
+    tx = (struct msgq_tx_header *)(uintptr_t)fsp_state.queue_stat_phys;
+    fsp_state.queue_write_ptr = tx->write_ptr;
+    fsp_state.queue_read_ptr = tx->msg_count ? 0u : 0u;   /* the consumer's cursor is this side's */
+    if (!fsp_state.queue_write_ptr) return;
+    {
+        struct msgq_rx_header *rx = (struct msgq_rx_header *)(uintptr_t)(fsp_state.queue_stat_phys + tx->rx_hdr_off);
+        fsp_state.queue_read_ptr = rx->read_ptr;
+        if (fsp_state.queue_write_ptr == rx->read_ptr) return;
+        entry = (uintptr_t)(fsp_state.queue_stat_phys + tx->entry_off
+                            + (uint64_t)rx->read_ptr * tx->msg_size);
+        fsp_state.rpc_function = *(const volatile uint32_t *)(uintptr_t)entry;
+        fsp_state.rpc_seen = 1;
+        /* Consumed: one entry, and the cursor moved by one, which is what RM's own producer expects to see. */
+        rx->read_ptr = (rx->read_ptr + 1u) % (tx->msg_count ? tx->msg_count : 1u);
+        fsp_state.queue_read_ptr = rx->read_ptr;
+    }
+}
+
 static void hand_over_fmc(void)
 {
     uint8_t reply[128];
@@ -1187,6 +1326,7 @@ static void hand_over_fmc(void)
     fsp_state.settled = wait_for_timed(gsp_fmc_settled, &fsp_state.handover_polls, FSP_WAIT_BOOT_MS,
                                        &fsp_state.handover_ms_used);
     note_submit();
+    read_status_queue();
     /* A reply is still read if the FMC did send one - its error path does - but it is no longer the thing this
      * wait is for, so its absence is not a failure and its presence does not override the register test. */
     if (reply_waiting()) (void)read_reply(reply, sizeof reply, &fsp_state.handover);

@@ -134,7 +134,7 @@ FIRMWARE_ROLES = (("gsp", "GSP.BIN", "gsp"), ("fmc", "GSPFMC.BIN", "fmc"),
 # so that file could not be carried at any price.  `make gsp-firmware-set' now fetches it (linux-firmware, by
 # partial clone, verified per role), and the size of the *volume* is the remaining constraint: 64 MiB cannot
 # hold it, `make ventoy' grows the disk to what the staged set needs.
-FIRMWARE_MAX = 72 * 1024 * 1024
+FIRMWARE_MAX = 256 * 1024 * 1024
 
 
 _ESP_READER = None

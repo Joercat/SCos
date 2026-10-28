@@ -19,9 +19,11 @@
  * 32 MiB, which is smaller than the resource-manager image the open driver loads on this generation
  * (`gsp-570.144.bin' is 63571696 bytes measured on the installed driver), so the one file that would let the
  * coprocessor actually start could not have been kept however it arrived: a limit that guarantees the failure is
- * not a policy, it is the bug. */
-#define BOOT_FIRMWARE_FILE_MAX (72u * 1024u * 1024u)
-#define BOOT_FIRMWARE_RESIDENT_MAX (72u * 1024u * 1024u)
+ * not a policy, it is the bug.  It is 256 MiB per file now, which is past every RM image NVIDIA has published,
+ * and the resident carve-out is 192 MiB: a machine with an RTX 5050 has the memory, and a limit that decides
+ * which firmware may exist is a limit on the card, not on the OS. */
+#define BOOT_FIRMWARE_FILE_MAX (256u * 1024u * 1024u)
+#define BOOT_FIRMWARE_RESIDENT_MAX (192u * 1024u * 1024u)
 #define BOOT_FIRMWARE_STATE_ABSENT      0u  /* nothing by that name on the boot volume */
 #define BOOT_FIRMWARE_STATE_STAGED      1u  /* read, sized, examined */
 #define BOOT_FIRMWARE_STATE_TOO_BIG     2u  /* reserved: the stub refuses a file past BOOT_FIRMWARE_FILE_MAX

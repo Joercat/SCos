@@ -1160,6 +1160,52 @@ static void test_the_boot_descriptors(void)
               !(fsp_state.libos_log_phys >= fsp_state.radix3_phys &&
                 fsp_state.libos_log_phys < fsp_state.radix3_phys + fsp_state.radix3_tree_bytes));
     }
+    {
+        const struct gsp_arguments_cached *args =
+            (const struct gsp_arguments_cached *)(uintptr_t)fsp_state.libos_rmargs_phys;
+        const struct msgq_tx_header *tx_cmd = (const struct msgq_tx_header *)(uintptr_t)fsp_state.queue_phys;
+        const struct msgq_tx_header *tx_stat =
+            (const struct msgq_tx_header *)(uintptr_t)fsp_state.queue_stat_phys;
+        const uint64_t *ptes = (const uint64_t *)(uintptr_t)(fsp_state.queue_phys + fsp_state.queue_bytes);
+
+        check("the RM's argument block is GSP_ARGUMENTS_CACHED and it names the ring this kernel built: one "
+              "shared region, one page array describing it, command at the start and status after it",
+              fsp_state.queue_staged && !fsp_state.queue_declined &&
+              args->queue.shared_mem_phys == fsp_state.queue_phys &&
+              args->queue.page_table_entries == fsp_state.queue_ptes &&
+              args->queue.cmd_queue_offset == 0u && args->queue.stat_queue_offset == 0x8000u &&
+              args->queue.lockless_cmd_offset == 0u && args->queue.lockless_stat_offset == 0u &&
+              args->b_dmem_stack == 1u && args->sr.old_level == 0u && args->sr.in_pm_transition == 0u);
+        check("both rings carry the header nvrm publishes, with the sizes this code actually allocated",
+              tx_cmd->size == 0x8000u && tx_cmd->msg_size == 0x1000u && tx_cmd->msg_count == 7u &&
+              tx_cmd->entry_off == 0x1000u && tx_cmd->rx_hdr_off == 0xff0u && tx_cmd->write_ptr == 0u &&
+              tx_cmd->flags == 0u && tx_stat->size == 0x8000u && tx_stat->msg_size == 0x1000u &&
+              fsp_state.queue_ptes == 16u && fsp_state.queue_bytes == 0x10000u);
+        check("and the page array behind them is one physical address per 4 KiB page, which is how the GSP "
+              "reaches memory at all",
+              ptes[0] == fsp_state.queue_phys && ptes[1] == fsp_state.queue_phys + 0x1000 &&
+              ptes[fsp_state.queue_ptes - 1] ==
+                  fsp_state.queue_phys + (uint64_t)(fsp_state.queue_ptes - 1) * 0x1000);
+        {
+            /* The status queue is the direction RM writes in.  An entry left there is RM talking, and the
+             * reader must consume exactly one and report the function number it found. */
+            struct msgq_rx_header *rx = (struct msgq_rx_header *)(uintptr_t)(fsp_state.queue_stat_phys +
+                                                                             tx_stat->rx_hdr_off);
+            volatile uint32_t *entry = (volatile uint32_t *)(uintptr_t)(fsp_state.queue_stat_phys +
+                                                                        tx_stat->entry_off);
+            entry[0] = 0x00000097u;                   /* GSP_RM_CONTROL, as a number to read back */
+            ((struct msgq_tx_header *)(uintptr_t)fsp_state.queue_stat_phys)->write_ptr = 1u;
+            read_status_queue();
+            check("an entry RM leaves on the status queue is read once, reported by function number, and "
+                  "acknowledged by moving the consumer's cursor",
+                  fsp_state.rpc_seen && fsp_state.rpc_function == 0x97u && rx->read_ptr == 1u &&
+                  fsp_state.queue_write_ptr == 1u && fsp_state.queue_read_ptr == 1u);
+            ((struct msgq_tx_header *)(uintptr_t)fsp_state.queue_stat_phys)->write_ptr = 0u;
+            rx->read_ptr = 0u;
+            fsp_state.rpc_seen = 0;
+            fsp_state.rpc_function = 0u;
+        }
+    }
     check("so the handover's boot-arguments field is the address of the second block, which is the field that was ~0",
           m_read(payload + COT_OFF_BOOT_ARGS) == (uint32_t)fsp_state.boot_params_phys &&
           m_read(payload + COT_OFF_BOOT_ARGS + 4) == (uint32_t)(fsp_state.boot_params_phys >> 32) &&

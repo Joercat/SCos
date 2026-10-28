@@ -431,7 +431,10 @@ def test_the_intake_refuses_what_it_cannot_carry():
         # Oversized and empty: both refused here, not on a panel 1000 miles from a shell.
         shutil.rmtree(root / 'gsp')
         (root / 'gsp').mkdir()
-        (root / 'gsp' / 'GSP.BIN').write_bytes(b'\0' * (module.FIRMWARE_MAX + 1))
+        # Sparse: the rule is about the size, and writing 256 MiB of zeroes to test it would cost the suite a
+        # quarter of a gigabyte of disk and a second of wall time for nothing.
+        with open(root / 'gsp' / 'GSP.BIN', 'wb') as oversize:
+            oversize.truncate(module.FIRMWARE_MAX + 1)
         try:
             module.firmware_blobs(root)
             raise AssertionError('a file past the stub read cap was accepted')
