@@ -220,12 +220,13 @@ void gpu_io_write32(volatile uint32_t *window, uint64_t within, uint32_t value);
 
 /* One reply, as the message format describes it: the two header dwords' flags and types, and the response
  * payload's task, the request it answers, and its error code.  `framed' says the packet was NVIDIA's at all;
- * `delta_ok' says the channel's offset walked while it was read out; `complete' says there were enough bytes
- * for the task/command/error triple to have been read rather than assumed. */
+ * `readback_ok' says a second pass over the same channel returned the same bytes, which is what makes "these
+ * are distinct offsets of the channel" a measurement rather than a belief about a counter; `complete' says
+ * there were enough bytes for the task/command/error triple to have been read rather than assumed. */
 struct gpu_fsp_reply {
     uint32_t bytes;
     uint32_t request_bytes;               /* how big the message this one answers was, as it left us */
-    int som, eom, framed, delta_ok, complete, oversize;
+    int som, eom, framed, readback_ok, complete, oversize;
     int type, kind;                          /* the NVDM type in the header, and the payload's first byte */
     uint32_t task, command, error;
 };
@@ -281,7 +282,14 @@ struct gpu_fsp_state {
     int plan_state;                          /* enum gsp_layout_refusal: why not, when not ready */
     struct gpu_fsp_store stores[GPU_FSP_STORE_LOG];  /* the last writes, oldest first, wrapped */
     uint32_t store_count;                            /* writes issued, not writes kept: the log is shorter */
-    uint32_t send_walk;                    /* dwords the EMEM offset advanced by, recorded and not obeyed */
+    /* The channel's window is 256 bytes wide and wraps, so a packet is written in bursts and then read back
+     * out of the channel and compared with what was written.  These three are that check: how many bursts the
+     * packet needed, whether it came back byte for byte, and the first dword that did not - which is the number
+     * a reader needs, because "the channel is not holding the packet" and "the packet is wrong" are different
+     * faults and the failing offset tells them apart. */
+    uint32_t send_bursts;
+    int send_readback;
+    uint32_t send_mismatch;
     int queue_writable;                  /* the value we wrote came back, whatever the read said before */
     int queried, responded, send_blocked;     /* a request went into the channel, a reply was read back off
                                                * it, and why a request could not go in */

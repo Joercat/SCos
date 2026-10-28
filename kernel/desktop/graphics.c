@@ -405,11 +405,27 @@ static void put_fsp_mailbox(struct writer *w, const struct gpu_fsp_state *f)
             ? ", so the queue takes stores from this reader and a packet can be put on it"
             : ", which refuses the store as well as the read: this reader has no door into the queue");
     put(w, ".");
-    put(w, " The EMEM offset advanced ");
-    put_number(w, f->send_walk);
-    put(w, " dword(s) while the packet was written, which is reported and not used to veto the send: the "
-           "coprocessor judges a packet by its own length and signature, and an unreadable counter is not "
-           "evidence that the bytes did not arrive.");
+    /* The channel, measured rather than inferred.  An earlier revision of this paragraph reported how far the
+     * EMEM offset counter had "walked" during a write and then said it was not evidence of anything - which is
+     * exactly right, and the reason a card could answer 1 dword after 217 were written while this report looked
+     * calm.  The counter is eight bits wide inside a 256-byte window: a longer transfer wraps and overwrites
+     * what it just wrote.  What replaced it is a read-back of the packet out of the same channel. */
+    put(w, " The request was written into the channel in ");
+    put_number(w, f->send_bursts);
+    put(w, f->send_bursts == 1u ? " window of at most 256 bytes" : " windows of at most 256 bytes each");
+    put(w, ", because the channel's offset counter wraps there, and then read back out of the channel and "
+           "compared with what was written: ");
+    if (f->send_readback)
+        put(w, "every dword of it came back identical, so the bytes the doorbell points at are the bytes this "
+               "kernel meant to send");
+    else {
+        put(w, "the words differ from the packet starting at dword ");
+        put_number(w, f->send_mismatch);
+        put(w, ", so the doorbell was not rung - a card handed a packet the host cannot account for can only "
+               "answer about the wrong thing, and ringing it would have made this boot's silence "
+               "uninterpretable");
+    }
+    put(w, ".");
     put(w, " The FSP's firmware version reads ");
     put_number(w, f->ucode_version & 0x7ffu);
     put(w, " and its own fuse check reads 0x");
@@ -446,9 +462,9 @@ static void put_fsp_mailbox(struct writer *w, const struct gpu_fsp_state *f)
             put_number(w, (unsigned)f->polled);
             put(w, " looks");
         } else if (f->send_blocked == 3) {
-            put(w, "went into the channel and the channel's offset did not advance as those writes say it "
-                   "should have, so the doorbell was never rung: a half-written request is not worth a "
-                   "card's time, and nothing further was sent");
+            put(w, "was written into the channel and did not read back as what was written, so the doorbell "
+                   "was never rung: the failing dword is named above, and a request the channel is not holding "
+                   "is not one the coprocessor can be asked about");
         } else if (f->queried) {
             put(w, "was put in the channel and no reply came back: the reply queue's two pointers never "
                    "separated within ");
@@ -742,7 +758,7 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
     put(w, "The FSP's boot-complete scratch at BAR0+0xad00bc reads 0x");
     put_hex(w, f->boot_scratch);
     put(w, f->booted ? ", which is the value that means it has finished booting, so the mailbox behind it is "
-                      "worth asking"
+                      "worth asking."
                      : ", which is not the 0xFF that means finished: the scratch and the channel behind it "
                        "live in a block the security processor unlocks as its last act of booting, so until this "
                        "reads 0xFF the driver is writing a request into a window its owner has not opened");

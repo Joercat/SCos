@@ -96,6 +96,13 @@ static uint8_t model_vf[0x3000];                      /* NV_VIRTUAL_FUNCTION_PRI
 static uint32_t model_arch_boot0 = 0x1b7000a1u;
 static uint8_t model_timer[0x1000];                   /* NV_PTIMER, BAR0+0x9000..0x9fff */
 static uint8_t model_channel[FSP_EMEM_CHANNEL_BYTES];
+/* The channel's window, as the hardware describes it: a byte offset put in the control register, a direction
+ * bit, and a counter that wraps at 256 bytes.  `emem_walk' is that counter, counted in dwords because every
+ * access moves it by one; it is six bits wide, which is the whole reason a transfer longer than 0x100 bytes
+ * has to be re-armed - and the reason a driver that arms once and writes 217 dwords sends a packet whose
+ * second half has been written over its first.  The reference driver's own port declares `max = 0x100'
+ * (nvkm/falcon/gp102.c) and its transfer loop re-arms per chunk, which is what the file under test now does. */
+#define MODEL_EMEM_WINDOW_DWORDS 64u
 /* Handed out in successive page-aligned chunks, because one boot really does take several allocations - the
  * FMC copy, the radix-3 tree, the two descriptor blocks - and a model that returned the same base for every
  * one of them would let the driver pass by writing its metadata on top of the image it was told to point at. */
@@ -104,7 +111,8 @@ static size_t model_pages_used;
 
 struct model {
     unsigned mode;
-    unsigned emem_dword;                          /* what EMEMC says the next window access lands on */
+    unsigned emem_base;                           /* the byte offset the window was last armed at */
+    unsigned emem_walk;                           /* dwords since it was armed, wrapping at the window */
     int ainc_write, ainc_read;
     uint32_t reads, writes, refusals;             /* what the model was actually asked to do */
     uint32_t tail_writes;                         /* how often the doorbell was rung */
@@ -161,10 +169,18 @@ static void channel_put_dword(unsigned dwords, uint32_t v)
     if (dwords * 4u + 4u <= sizeof model_channel) memcpy(model_channel + dwords * 4u, &v, 4);
 }
 
+/* The offset the next window access lands on, as the chip computes it: the armed base plus the counter, and the
+ * counter is truncated to the window.  This is what a model of the hardware has to do rather than what a model
+ * of the driver would like: the overflow is the bug the file under test used to have. */
+static unsigned emem_current(void)
+{
+    unsigned walking = model.ainc_write || model.ainc_read;
+    return (model.emem_base / 4u) + (walking ? (model.emem_walk % MODEL_EMEM_WINDOW_DWORDS) : 0u);
+}
+
 static uint32_t ememc_value(void)
 {
-    uint32_t v = ((model.emem_dword % FSP_EMEM_DWORDS_PER_BLOCK) << 2) |
-                 ((model.emem_dword / FSP_EMEM_DWORDS_PER_BLOCK) << 8);
+    uint32_t v = model.emem_base | ((model.emem_walk % MODEL_EMEM_WINDOW_DWORDS) << 2);
     if (model.ainc_write) v |= 1u << 24;
     if (model.ainc_read) v |= 1u << 25;
     return v;
@@ -351,8 +367,8 @@ uint32_t gpu_io_read32(const volatile uint32_t *window, uint64_t within)
     if (which == 4 && index == TIMER_TIME_0 && !(model.mode & M_TIMER_FROZEN)) return model.timer_step += 0x400u;
     if (which == 1 && index == R_EMEMC) return ememc_value();
     if (which == 1 && index == R_EMEMD) {
-        value = channel_dword(model.emem_dword);
-        if (model.ainc_read && !(model.mode & M_NO_AINC)) model.emem_dword++;
+        value = channel_dword(emem_current());
+        if (model.ainc_read && !(model.mode & M_NO_AINC)) model.emem_walk++;
         return value;
     }
     return page_of(which)[index];
@@ -368,14 +384,18 @@ void gpu_io_write32(volatile uint32_t *window, uint64_t within, uint32_t value)
     if (index * 4u + 4u > window_bytes(which)) return;
     if (which == 1 && index == R_EMEMC) {
         page_of(which)[index] = value;               /* a register reads back what it was written */
-        model.emem_dword = ((value >> 2) & 0x3fu) + ((value >> 8) & 0xffu) * FSP_EMEM_DWORDS_PER_BLOCK;
-        model.ainc_write = !(model.mode & M_NO_AINC) && (value & (1u << 24));
-        model.ainc_read = !(model.mode & M_NO_AINC) && (value & (1u << 25));
+        /* Arming the window: the byte offset in the low bits, the direction in bit 24 or 25, and the counter
+         * back to zero.  A window that is not walked (M_NO_AINC) still takes the arming write, it just never
+         * moves afterwards, which is the failure this mode models. */
+        model.emem_base = value & 0xffffu & ~3u;
+        model.emem_walk = 0;
+        model.ainc_write = (value & (1u << 24)) != 0;
+        model.ainc_read = (value & (1u << 25)) != 0;
         return;
     }
     if (which == 1 && index == R_EMEMD) {
-        channel_put_dword(model.emem_dword, value);
-        if (model.ainc_write && !(model.mode & M_NO_AINC)) model.emem_dword++;
+        channel_put_dword(emem_current(), value);
+        if (model.ainc_write && !(model.mode & M_NO_AINC)) model.emem_walk++;
         return;
     }
     page_of(which)[index] = value;
@@ -794,9 +814,11 @@ static void test_the_request_bytes(void)
           (packet[2] & 0xffu) == NVDM_TYPE_CLOCK_BOOST && (packet[2] >> 8) == 0);
     check("the packet is twelve bytes, and the doorbell names the last dword written rather than the next",
           fsp_state.packet_bytes == 12 && fsp_state.doorbell == 8 && model.last_tail == 8);
-    check("auto-increment was asked for the writes and not for reads, in the one control write",
-          ((uint32_t *)model_fsp)[R_EMEMC] == (1u << 24));
-    check("the channel offset walked by exactly the three dwords that were written", model.emem_dword == 3);
+    check("the packet is in the channel at three distinct offsets, header first and payload after it",
+          model.emem_base == 0 && model.emem_walk == 3 && model.packet[0] == 0xc0000000u &&
+          (model.packet[2] & 0xffu) == NVDM_TYPE_CLOCK_BOOST);
+    check("and the last arming of the window was a read of it, which is the read-back that proved the write",
+          model.ainc_read && ((uint32_t *)model_fsp)[R_EMEMC] == (1u << 25));
     check("the reply the model produced is pending, and reading it back needs the two pointers to differ",
           ((uint32_t *)model_fsp)[R_MSGQ_HEAD] == 0 && ((uint32_t *)model_fsp)[R_MSGQ_TAIL] == 24);
     check("so the wait sees it, and the read returns the whole packet",
@@ -804,7 +826,7 @@ static void test_the_request_bytes(void)
           read_reply(buffer, sizeof buffer, &fsp_state.query) == 1);
     check("28 bytes, both message flags set, framed as NVIDIA's",
           fsp_state.query.bytes == 28 && fsp_state.query.som == 1 && fsp_state.query.eom == 1 &&
-          fsp_state.query.framed && fsp_state.query.delta_ok);
+          fsp_state.query.framed && fsp_state.query.readback_ok);
     check("the payload's own bytes are where the response format puts them",
           buffer[8] == NVDM_TYPE_FSP_RESPONSE && m_read(buffer + 9) == 7 &&
           m_read(buffer + 13) == NVDM_TYPE_CAPS_QUERY && m_read(buffer + 17) == 0 &&
@@ -825,7 +847,16 @@ static void test_the_request_bytes(void)
               fsp_state.packet_bytes == 868 && fsp_state.doorbell == 864 && model.packet_bytes == 868);
         check("header dwords first, then the payload byte for byte, with no gap and no shift",
               memcmp(model.packet + 2, big, sizeof big) == 0);
-        check("which is 217 dwords written at a walking offset", model.emem_dword == 2u + 860u / 4u);
+        /* The bug this file was carrying, stated as a measurement: 868 bytes is more than three windows of
+         * 256, so a single arming would have wrapped the counter and written the last 100 bytes over the
+         * front of the packet.  Four bursts is what the transfer needs, and the packet is intact - which is
+         * only true together. */
+        check("868 bytes needs four windows, and the driver says so", fsp_state.send_bursts == 4);
+        check("which is why the packet is still there: 217 dwords into a 64-dword window, in four arming writes",
+              model.emem_walk == 217u % MODEL_EMEM_WINDOW_DWORDS &&
+              memcmp(model.packet + 2, big, sizeof big) == 0);
+        check("and the read-back that proves it ran, from the channel, before the doorbell",
+              fsp_state.send_readback && fsp_state.send_mismatch == ~0u);
     }
     model_reset(0);
     map_mailbox_pages(MODEL_BAR0);
@@ -856,10 +887,13 @@ static void test_a_full_query_and_reply(void)
     check("a zero error code is reported as a zero rather than as an absence of answer",
           fsp_state.query.error == 0 && fsp_state.responded);
     check("the reply was acknowledged on both pointers", model.reply_ack_writes == 2);
-    check("the offset walked over the read as well, ending where 28 bytes of it says",
-          fsp_state.query.delta_ok && model.emem_dword == 7);
+    check("the reply was read out and read again, and the two agreed: seven distinct dwords of the channel",
+          fsp_state.query.readback_ok && model.emem_walk == 7);
     check("every read and write the counters claim is one the model served, and vice versa",
-          fsp_state.reads == model.reads && fsp_state.writes == model.writes && model.writes == 9);
+          fsp_state.reads == model.reads && fsp_state.writes == model.writes);
+    check("and the writes are exactly the ones the request needs: the probe's two, the arming and three data "
+          "words, the read-back's arming, the doorbell pair, and the reply's acknowledgement",
+          model.writes == 2u + (1u + 3u + 1u + 2u) + 2u);
     check("and the only registers written are the channel's own: one control, three data, four pointers",
           model.tail_writes == 1);
 
@@ -880,10 +914,13 @@ static void test_a_full_query_and_reply(void)
           model.tail_writes == 1);
 
     ask(M_NO_AINC);
-    check("a channel whose offset does not walk still gets its doorbell, with the walk reported",
-          !fsp_state.send_blocked && fsp_state.queried && fsp_state.send_walk != 2u + 1u && model.tail_writes == 1);
-    check("and the packet is not judged by our counter: the bytes were written, so the request is live",
-          model.emem_dword != 0 || model.writes > 2);
+    /* A channel whose window never walks stores every dword of the packet on top of the first one, so the
+     * packet is not in the channel and the host now *knows* that instead of ringing anyway: the read-back is
+     * what turns "no reply" into "the request was never delivered". */
+    check("a window that does not walk is caught by the read-back rather than by a counter",
+          !fsp_state.send_readback && fsp_state.send_blocked == 3 && fsp_state.send_mismatch != ~0u);
+    check("and the doorbell is not rung on a packet the channel is not holding",
+          !fsp_state.queried && model.tail_writes == 0);
 }
 
 static void test_the_handover_payload(void)

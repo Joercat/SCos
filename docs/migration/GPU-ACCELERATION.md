@@ -337,3 +337,64 @@ What is still missing, stated plainly because the panel is easy to read as more 
   no Blackwell card in this environment.  A successful plan on a real machine would be visible as a
   `graphics` panel line naming the MiB it read and the offsets it derived; it is *not* rendering, and
   nothing in this tree claims it is.
+
+## 8. The handover that was never delivered: a 256-byte window
+
+The first machine to run the handover reported it in one sentence: *"The handover was written into the
+channel and the doorbell rung ... and no answer came back"*, with `reads 97 writes 226` beside it and, in the
+same paragraph, *"The EMEM offset advanced 1 dword(s) while the packet was written"*.  That last number is
+the whole story, and this tree spent a revision explaining it away: 217 dwords of payload had gone into a
+channel whose own counter said it had moved by one, and the report's comment said the counter was
+"reported and not used to veto the send".  It was right not to veto on it, and wrong not to believe it.
+
+**What the counter was saying.**  The FSP's channel is reached through a window: one control register
+(`NV_PFSP_EMEMC`) takes a byte offset and a direction bit, and from then on every access to the data
+register (`NV_PFSP_EMEMD`) lands four bytes further along by itself.  The window is **not** the whole 1 KiB
+channel.  The reference driver declares its EMEM port as `min = 4, max = 0x100` and re-arms the window for
+every chunk it moves (`gp102_flcn_emem_pio` in `nvkm/falcon/gp102.c`; the do/while that calls
+`pio->wr_init(..., mem_base)` per chunk is in `nvkm/falcon/base.c`).  The offset counter inside the window is
+eight bits wide.  So a transfer longer than 256 bytes does not fail: it **wraps**, and writes over the front
+of what it just wrote.
+
+An 868-byte handover - two header dwords and 860 bytes of `NVDM_PAYLOAD_COT` - did exactly that.  Its first
+256 bytes landed, the next 612 were written over them, and the packet the doorbell pointed at had the FMC's
+address in the right place and nothing else.  The FSP was handed a message whose own `size` field described a
+record it did not hold, and it answered with silence - not with an error code, because a request that never
+arrived intact is not a request it can reject.  Every gate this tree had built stopped at "the packet went
+out", which was true, and none of them asked what the channel was holding afterwards.
+
+**What the fix is.**  `emem_write()` and `emem_read()` in `kernel/drivers/gpu/gpu_fsp.c` arm the window for
+each 256-byte burst (`FSP_EMEM_BURST_BYTES`), and every access the file makes to the channel goes through
+them.  Then, before the doorbell, the packet is **read back out of the channel and compared with what was
+written**; a mismatch is not sent, and the panel names the first dword that differed.  The read-back happens
+before the ring on purpose: the FSP writes its reply into the same channel from offset 0, so a check that ran
+afterwards could compare the answer with the request and call the answer damage.  Replies are read the same
+way, and read twice, because "seven dwords came out of one register" is only a measurement if the same seven
+come out again.
+
+**What this machine measured afterwards**, in QEMU with the fetched set staged (the one place in this
+repository that boots at all): the three images read, `63972328 B`, `pw 3/5`, and the paragraph below still
+says what it said.  What it *cannot* measure is the thing the bug was about - QEMU models no NVIDIA function
+- so the evidence for this fix is structural: `tools/tests/gpu_fsp_host.c` now models the window as hardware
+does, wrapping at 64 dwords, and asserts that a full 868-byte handover arrives byte for byte in **four**
+bursts, that the read-back ran before the doorbell, and that a window that never walks is caught by the
+read-back (the send blocked, the doorbell not rung) rather than by a counter that cannot see it.  The count
+is pinned at 132 checks.
+
+**What the next boot should show, and what each answer means.**
+
+| On the panel | What it means |
+| --- | --- |
+| `The request was written into the channel in 4 windows ... every dword of it came back identical` | the packet is in the channel; whatever follows is the card's answer and not this OS dropping it |
+| `the words differ ... starting at dword N` | the channel did not keep what was written; the doorbell was not rung, and N says where the two diverge |
+| `GSP handover: ... error 0x..` with a code | the FSP read the whole record and refused it by name: `0xdf` is the WPR/FRTS one, `0xdb` the boot check, `0xdd` a bad DMA target |
+| `no answer came back` after the above | the FSP took a well-formed record and did not reply, which is a different claim from the one this tree was making an hour ago |
+
+**And the next wall, named rather than discovered later.**  The FMC boots with `GSP_FMC_BOOT_PARAMS`, and the
+field that tells the resource manager where its own arguments live (`gspRmParams.bootArgsOffset`) is written
+with the address of the FMC copy this kernel staged.  The reference driver writes a 4 KiB LibOS argument
+record there instead: four memory-region descriptors - `LOGINIT`, `LOGINTR`, `LOGRM`, `RMARGS` - each with a
+page-table array behind it (`r535_gsp_libos_init`).  This tree stages no such record.  So an accepted
+handover here means *the FSP took the image*, not *the RM started with arguments it understood*, and that
+distinction is now written at the assignment as well as here.  Staging that record is the first task after
+this one, and the panel's handover paragraph is what will say whether it is the one that matters.

@@ -309,6 +309,9 @@ where this OS's intake contract came from:
     sudo cp /lib/firmware/nvidia/gb207/gsp/fmc-570.144.bin        /mnt/esp/SCOS/GSPFMC.BIN
     # or, without a machine that has the driver installed:
     make gsp-firmware-set GSP_CHIP=gb202 && sudo cp build/gsp-set/GSP*.BIN /mnt/esp/SCOS/
+    # Copy the whole set, never a mixture: the resource manager, the FMC and the bootloader are three files of
+    # one driver release, and an FMC from another release will verify against a resource manager that is not
+    # the one it was built with.  `make ventoy' packs exactly the set in build/gsp-set.
     # and with an installed driver, the three files by name:
     sudo cp /lib/firmware/nvidia/gb207/gsp/gsp-570.144.bin         /mnt/esp/SCOS/GSP.BIN
     sudo cp /lib/firmware/nvidia/gb207/gsp/bootloader-570.144.bin  /mnt/esp/SCOS/GSPBL.BIN

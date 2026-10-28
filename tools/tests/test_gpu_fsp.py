@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-FSP_CHECKS = 129                    # the modelled mailbox, pinned: a dropped case is a silent loosening
+FSP_CHECKS = 132                    # the modelled mailbox, pinned: a dropped case is a silent loosening
 FSP_SIZES = (48, 97, 96)            # what a GB2xx FSP asks the container for, from the reference driver
 
 # The published register description, transcribed rather than read out of the file under test:
@@ -94,7 +94,12 @@ def test_the_registers_are_the_ones_the_silicon_publishes():
     # dwords holds 255 dwords of payload plus two header dwords, and the file's refusal of 1017-byte payloads
     # is only right while these two numbers are these.
     assert re.search(r'#define FSP_EMEM_CHANNEL_BYTES\s+1024u', text), 'the RM channel is not 1 KiB here'
-    assert re.search(r'#define FSP_EMEM_DWORDS_PER_BLOCK\s+64u', text), 'the blocks are not 64 dwords here'
+    # And the width of one arming of that channel's window.  This replaces a "dwords per block" constant that
+    # was used to build a byte offset out of a dword index: the offset was right and the transfer was not,
+    # because the reference driver's own EMEM port is declared `min = 4, max = 0x100' and its loop re-arms the
+    # window per chunk (nvkm/falcon/gp102.c and nvkm/falcon/base.c).  A longer burst wraps and overwrites.
+    assert re.search(r'#define FSP_EMEM_BURST_BYTES\s+0x100u', text), \
+        'the 256-byte arming window the reference driver declares (max = 0x100) is not this file\'s limit'
 
 
 def test_the_handover_payload_is_laid_out_as_the_header_lays_it_out():
@@ -135,10 +140,19 @@ def test_the_probe_is_gated_and_the_doorbell_is_counted():
     for call in re.finditer(r'device_map\([^;]*?\)', text, re.S):
         assert ', 0, &mapped)' in call.group(0), \
             'a mailbox window asked for write combining: %s' % call.group(0).replace('\n', ' ')
-    assert len(re.findall(r'write32\(&w_', text)) == 10, \
-        'this file writes the card with %d call sites, and the ten it should have are one control, three data, ' \
-        'two queue pointers out, two reply pointers back, and the pair that clears the reply queue when a ' \
-        'refusal has left us no way to tell whether a store would land at all' % len(re.findall(r'write32\(&w_', text))
+    assert len(re.findall(r'write32\(&w_', text)) == 8, \
+        "this file writes the card with %d call sites, and the eight it should have are the window control " \
+        'write, one data write inside the burst loop, two queue pointers out, two reply pointers back, and the ' \
+        'pair that clears the reply queue when a refusal has left us no way to tell whether a store would land ' \
+        'at all' % len(re.findall(r'write32\(&w_', text))
+    # The data writes have to be inside a loop that re-arms the window, not a run of call sites: the window is
+    # 0x100 bytes wide and wraps, which is what made an 868-byte handover arrive as its own tail.
+    assert re.search(r'static void emem_write\(uint32_t at.*?emem_arm\(at \+ done, 1\);', text, re.S), \
+        'the channel writes no longer re-arm the window per burst'
+    assert 'FSP_EMEM_BURST_BYTES' in text and re.search(r'#define FSP_EMEM_BURST_BYTES\s+0x100u', text), \
+        'the burst limit the reference driver declares (max = 0x100) is gone from the file'
+    assert 'emem_read(0, packet' not in text and 'send_readback' in text, \
+        'the packet is no longer read back out of the channel before the doorbell' 
     # The two queue registers are written, and the only other writes are to the channel.  Pinned as a count of
     # write32 call sites because "how many registers did the OS touch" is the question this whole feature turns
     # on, and it should be answerable from the source before it is answerable from a card.

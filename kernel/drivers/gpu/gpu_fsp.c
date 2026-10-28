@@ -76,7 +76,10 @@
 #define FSP_BOOT_COMPLETE_FAILED     0x00000000u
 #define FSP_PMC_BOOT_0                        0x0u  /* the first dword of the aperture, inside the VF window */
 #define FSP_EMEM_CHANNEL_BYTES            1024u
-#define FSP_EMEM_DWORDS_PER_BLOCK           64u      /* so an offset is a block number and a dword within it */
+/* How much one arming of the channel's window is good for.  0x100 is the reference driver's own figure: its
+ * EMEM port is declared `min = 4, max = 0x100' (gp102_flcn_emem_pio) and its transfer loop re-arms the window
+ * per chunk.  A longer burst does not fail, it wraps, and overwrites the start of what it just wrote. */
+#define FSP_EMEM_BURST_BYTES              0x100u
 #define FSP_REFUSED(v)                   (((v) & 0xffffff00u) == 0xbadf4100u)
 /* Any value in the 0xBADF.... family, of which the line above is the one cause.  The coprocessor's driver
  * masks a read against FLCN_CSB_PRIV_PRI_ERROR_CODE 0xBADF0000 under 0xFFFF0000 before it believes a value
@@ -275,19 +278,58 @@ static void map_mailbox_pages(uint64_t bar0)
      * having it mapped says nothing about the mailbox, so nothing below depends on it. */
 }
 
-static uint32_t emem_offset_dwords(void)
+/* The channel's window: one control register, one data register, and a counter that is *not* a register a
+ * reader can trust.
+ *
+ * The control write carries a byte offset of the channel, the direction of the transfer in bit 24 (write) or
+ * bit 25 (read), and from that point every access to the data register lands at the next four bytes and moves
+ * the window along by itself.  This file used to write that control word once and then push 217 dwords
+ * through the data register, and it read the control register back afterwards to see how far the window had
+ * walked.
+ *
+ * Both halves of that are wrong, and the published driver says by how much: its own EMEM transfer is declared
+ * as `min = 4, max = 0x100' (drivers/gpu/drm/nouveau/nvkm/falcon/gp102.c, `gp102_flcn_emem_pio'), and the
+ * core loop that uses it re-arms the window for every chunk (`pio->wr_init(falcon, port, sec, mem_base)'
+ * inside the do/while in nvkm/falcon/base.c).  The window counter is eight bits wide, so a transfer longer
+ * than 256 bytes wraps back to the start of the window and overwrites bytes it has already written.  An
+ * 868-byte handover therefore put its first 256 bytes in place, then wrote the next 612 over them, and the FSP
+ * was handed a packet whose hash, key and signature were not where its own header said they were - which is
+ * the shape of "written and answered with nothing" that this machine reported, not the shape of a card that
+ * refused an image.
+ *
+ * Reading the control register to prove the transfer walked is wrong in the other direction: on this hardware
+ * that field is a counter inside the window, not a statement about the packet, and it read 1 dword after the
+ * 217 that were written.  What proves a packet arrived is reading it back out and comparing it, which is what
+ * `send_packet' does now - before the doorbell, so the reply that will land in the same channel cannot be
+ * mistaken for the request that is still being checked.
+ */
+static void emem_arm(uint32_t bytes, int write)
 {
-    uint32_t v = read32(&w_fsp, NV_PFSP_EMEMC);
-    return ((v >> 2) & 0x3fu) + ((v >> 8) & 0xffu) * FSP_EMEM_DWORDS_PER_BLOCK;
+    write32(&w_fsp, NV_PFSP_EMEMC, (write ? (1u << 24) : (1u << 25)) | (bytes & ~3u));
 }
 
-static void emem_seek(uint32_t dwords, int auto_write, int auto_read)
+/* Every access the channel gets goes through these two, and both re-arm the window every 256 bytes, which is
+ * the only reason a packet larger than a quarter of a kilobyte can be sent at all. */
+static void emem_write(uint32_t at, const uint8_t *data, uint32_t bytes)
 {
-    uint32_t v = ((dwords % FSP_EMEM_DWORDS_PER_BLOCK) << 2) |
-                 ((dwords / FSP_EMEM_DWORDS_PER_BLOCK) << 8);
-    if (auto_write) v |= 1u << 24;
-    if (auto_read) v |= 1u << 25;
-    write32(&w_fsp, NV_PFSP_EMEMC, v);
+    for (uint32_t done = 0; done < bytes; ) {
+        uint32_t burst = bytes - done;
+        if (burst > FSP_EMEM_BURST_BYTES) burst = FSP_EMEM_BURST_BYTES;
+        emem_arm(at + done, 1);
+        for (uint32_t i = 0; i + 4 <= burst; i += 4) write32(&w_fsp, NV_PFSP_EMEMD, load32(data + done + i));
+        done += burst;
+    }
+}
+
+static void emem_read(uint32_t at, uint8_t *data, uint32_t bytes)
+{
+    for (uint32_t done = 0; done < bytes; ) {
+        uint32_t burst = bytes - done;
+        if (burst > FSP_EMEM_BURST_BYTES) burst = FSP_EMEM_BURST_BYTES;
+        emem_arm(at + done, 0);
+        for (uint32_t i = 0; i + 4 <= burst; i += 4) store32(data + done + i, read32(&w_fsp, NV_PFSP_EMEMD));
+        done += burst;
+    }
 }
 
 /* All four pointers, in one place, because "may I send" is the same question as "is there a reply": the FSP
@@ -414,14 +456,15 @@ static int lockdown_now(void)
  * here is one byte or 860 of them, and both fit. */
 static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type)
 {
-    uint32_t header[2];
-    uint32_t padded = (size + 3u) & ~3u, before, after;
+    uint8_t packet[FSP_EMEM_CHANNEL_BYTES];
+    uint32_t padded = (size + 3u) & ~3u, total = padded + FSP_HEADER_BYTES, at;
     int idle;
 
-    if (padded + FSP_HEADER_BYTES > FSP_EMEM_CHANNEL_BYTES) return 0;
+    if (total > FSP_EMEM_CHANNEL_BYTES) return 0;
 
-    header[0] = MCTP_VERSION | (1u << 30) | (1u << 31);            /* seid 0, seq 0, end and start of message */
-    header[1] = MCTP_TYPE_VENDOR_PCI | (MCTP_VENDOR_ID_NVIDIA << 8) | (nvdm_type << 24);
+    store32(packet, MCTP_VERSION | (1u << 30) | (1u << 31));       /* seid 0, seq 0, end and start of message */
+    store32(packet + 4, MCTP_TYPE_VENDOR_PCI | (MCTP_VENDOR_ID_NVIDIA << 8) | (nvdm_type << 24));
+    for (uint32_t i = 0; i < padded; i++) packet[FSP_HEADER_BYTES + i] = i < size ? payload[i] : 0u;
 
     fsp_state.polled = 0;
     for (unsigned i = 0; i < FSP_POLL_LIMIT; i++) {
@@ -431,31 +474,35 @@ static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type
     }
     if (idle != 1) { fsp_state.send_blocked = 1; return 0; }        /* busy the whole time: nothing written */
 
-    emem_seek(0, 1, 0);
-    /* Where the channel's offset is *after* it has been set to 0, which is what the reference driver measures
-     * too: the seek itself must not move it, and if it did, the count below would be a complaint about the
-     * seek rather than about the writes. */
-    before = emem_offset_dwords();
-    write32(&w_fsp, NV_PFSP_EMEMD, header[0]);
-    write32(&w_fsp, NV_PFSP_EMEMD, header[1]);
-    for (uint32_t i = 0; i < padded; i += 4) {
-        uint32_t word = 0;
-        for (uint32_t b = 0; b < 4 && i + b < size; b++) word |= (uint32_t)payload[i + b] << (b * 8);
-        write32(&w_fsp, NV_PFSP_EMEMD, word);
-    }
-    after = emem_offset_dwords();
-    /* Recorded, not obeyed.  This used to abort the request when the offset had not advanced by exactly one
-     * dword per write, on the belief that the channel would then hold a fraction of a packet; the card said
-     * otherwise.  Measured on the GB207: send blocked(3) with the packet already written and the queue idle,
-     * which means the only thing the veto achieved was that no doorbell was ever rung and no exchange ever
-     * happened - strictly less known than a reply.  What decides whether a packet is well formed is the FSP
-     * itself, which is given the length in the header and authenticates the image by signature, so the walk is
-     * reported here and the doorbell is rung.  If the walk is zero, that is in the panel as a separate fact and
-     * the next question becomes why stores are swallowed, which is a hardware question with an answer. */
-    fsp_state.send_walk = after - before;
+    /* The packet goes in through windows of at most 256 bytes, each one armed to the offset it starts at. */
+    emem_write(0, packet, total);
+    fsp_state.send_bursts = (total + FSP_EMEM_BURST_BYTES - 1u) / FSP_EMEM_BURST_BYTES;
 
-    fsp_state.packet_bytes = padded + FSP_HEADER_BYTES;
-    fsp_state.doorbell = padded + 4u;        /* the tail is the last dword written, not the one after it */
+    /* And then comes back out again, before anything is rung.  This is the check the offset counter was
+     * pretending to be: the channel is read through its own windows and compared with what was just written,
+     * so "the packet is in the channel" is a measurement rather than an inference from a register that turned
+     * out to count something else.  It happens *before* the doorbell because the FSP's reply is written into
+     * this same channel from offset 0, and a read-back racing that write would report the reply as a damaged
+     * request.  A mismatch is not sent: a card handed a packet that is not the one the host thinks it wrote
+     * can only answer about the wrong thing. */
+    fsp_state.send_readback = 1;
+    fsp_state.send_mismatch = ~0u;
+    for (at = 0; at < total; at += FSP_EMEM_BURST_BYTES) {
+        uint8_t back[FSP_EMEM_BURST_BYTES];
+        uint32_t burst = total - at > FSP_EMEM_BURST_BYTES ? FSP_EMEM_BURST_BYTES : total - at;
+        emem_read(at, back, burst);
+        for (uint32_t i = 0; i + 4 <= burst; i += 4)
+            if (fsp_state.send_mismatch == ~0u && memcmp(back + i, packet + at + i, 4) != 0)
+                fsp_state.send_mismatch = (at + i) / 4u;
+    }
+    if (fsp_state.send_mismatch != ~0u) {
+        fsp_state.send_readback = 0;
+        fsp_state.send_blocked = 3;
+        return 0;
+    }
+
+    fsp_state.packet_bytes = total;
+    fsp_state.doorbell = padded + 4u;        /* the tail names the last dword written, not the one after it */
     write32(&w_fsp, NV_PFSP_QUEUE_TAIL, fsp_state.doorbell);
     write32(&w_fsp, NV_PFSP_QUEUE_HEAD, 0);
     return 1;
@@ -473,13 +520,20 @@ static int read_reply(uint8_t *buffer, uint32_t capacity, struct gpu_fsp_reply *
     if (size < 4u) return -1;
     if (size > capacity) { reply->oversize = (int)size; return 0; }
 
-    emem_seek(0, 0, 1);
-    for (uint32_t i = 0; i + 4 <= size; i += 4) store32(buffer + i, read32(&w_fsp, NV_PFSP_EMEMD));
+    /* Read out through the same windows the writes use, and then read a second time and compared: the first
+     * read is what the reply is decoded from, and the second is what says the channel really holds distinct
+     * bytes at distinct offsets rather than one dword served over and over by a window that never moved.  Both
+     * reads happen before the acknowledgement below, because acknowledging is what lets the FSP start writing
+     * its next message into this same channel. */
+    emem_read(0, buffer, size);
     reply->bytes = size;
-    /* The read has to have walked as many dwords as it claims to have returned, for the same reason the
-     * write does: the packet came out of one register, and only the offset proves they were different dwords
-     * of the channel rather than the same one read back five times. */
-    reply->delta_ok = emem_offset_dwords() == size / 4u;
+    reply->readback_ok = 1;
+    for (uint32_t at = 0; at < size; at += FSP_EMEM_BURST_BYTES) {
+        uint8_t again[FSP_EMEM_BURST_BYTES];
+        uint32_t burst = size - at > FSP_EMEM_BURST_BYTES ? FSP_EMEM_BURST_BYTES : size - at;
+        emem_read(at, again, burst);
+        if (memcmp(again, buffer + at, burst) != 0) reply->readback_ok = 0;
+    }
     /* Acknowledge by pulling *both* pointers to zero, which is what the driver that boots this family does
      * (`nvkm_wr32(MSGQ_TAIL, 0); nvkm_wr32(MSGQ_HEAD, 0)' in gh100_fsp_recv) - not up to the head, which is
      * how the other reference implementation leaves them.  The difference is invisible after one message and
@@ -495,7 +549,7 @@ static int read_reply(uint8_t *buffer, uint32_t capacity, struct gpu_fsp_reply *
     reply->eom = (int)((transport >> 30) & 1u);
     reply->framed = size >= FSP_HEADER_BYTES && (message & 0x7fu) == MCTP_TYPE_VENDOR_PCI &&
                     ((message >> 8) & 0xffffu) == MCTP_VENDOR_ID_NVIDIA;
-    if (!reply->framed || !reply->delta_ok) return 0;
+    if (!reply->framed || !reply->readback_ok) return 0;
     reply->type = (int)(message >> 24);
     if (size >= FSP_HEADER_BYTES + 1u + 12u) {
         reply->kind = buffer[FSP_HEADER_BYTES];
@@ -766,7 +820,16 @@ static void stage_gsp_boot_descriptors(const struct gpu_firmware_state *fws)
     params->boot_gsp_rm.desc_size = (uint32_t)sizeof *meta;
     params->boot_gsp_rm.is_gsp_rm_boot = 1;    /* the resource manager image is on the volume: this is a RM boot */
     params->gsp_rm.target = GSP_DMA_TARGET_NONCOHERENT_SYSTEM;
-    params->gsp_rm.boot_args_offset = fsp_state.image_physical;   /* the FMC image, where the FMC reads its own args back */
+    /* What the resource manager is told about its own arguments.  The reference driver puts its LibOS
+     * argument block here (`args->gspRmParams.bootArgsOffset = gsp->libos.addr'), which is a 4 KiB record of
+     * four memory-region descriptors - three log buffers and the RM's argument block - each with a page-table
+     * array behind it (r535_gsp_libos_init).  This tree stages none of that, so what goes here is the FMC image
+     * this kernel copied into its own pages: a region the coprocessor is certainly allowed to read, at an
+     * address that is certainly real, and *not* a LibOS argument record.  That is stated rather than dressed
+     * up because it is the next thing on this path that has to be written, and because a reader of the next
+     * log needs to know that an accepted handover here means "the FMC took the image", not "the RM started
+     * with arguments it understood": its first read of this address will not find a LOGINIT/LoGRM pair in it. */
+    params->gsp_rm.boot_args_offset = fsp_state.image_physical;
 
     fsp_state.wpr_meta_size = (uint32_t)sizeof *meta;
     fsp_state.radix3_phys = tree;
