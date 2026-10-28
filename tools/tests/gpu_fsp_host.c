@@ -39,7 +39,7 @@ void klog(const char *fmt, ...) { (void)fmt; }
 
 /* ------------------------------------------------------------- the model -------------------------------------------------- */
 
-#define MODEL_THERM   0x20000u
+#define MODEL_THERM   0xad0000u
 #define MODEL_FSP     0x8f0000u
 #define MODEL_GSP     0x110000u
 #define MODEL_VF      0x000000u
@@ -82,6 +82,8 @@ void klog(const char *fmt, ...) { (void)fmt; }
 #define M_COT_WPR     8192u  /* the FSP reads the handover and refuses it with the WPR error */
 #define M_COT_SILENT 16384u  /* the FSP takes the handover and never answers */
 #define M_NO_IDENTITY 32768u /* even NV_PMC_BOOT_0 refuses: nobody can say which chip this is */
+#define M_SCRATCH_REFUSES 65536u /* the boot-complete scratch itself answers the locked-target refusal, which is
+                                  * what a real GB207 did: BAR0+0xad00bc unreadable while the FSP was booting */
 
 static uint8_t model_therm[0x1000];
 static uint8_t model_fsp[0x4000];
@@ -459,7 +461,8 @@ static void model_reset(unsigned mode)
     h_put32(model_vf + 0x0u, model_arch_boot0);        /* NV_PMC_BOOT_0, at the first dword of the aperture */
     memset(&model, 0, sizeof model);
     model.mode = mode;
-    *(uint32_t *)(model_therm + T_BOOT_COMPLETE * 4u) = (mode & M_NOT_BOOTED) ? 0x12345600u : 0xffu;
+    *(uint32_t *)(model_therm + T_BOOT_COMPLETE * 4u) = (mode & M_SCRATCH_REFUSES) ? 0xbadf1100u
+        : (mode & M_NOT_BOOTED) ? 0x12345600u : 0xffu;
     ((uint32_t *)model_fsp)[S_UCODE] = 42;
     *(uint32_t *)(model_fsp + (NV_PFSP_FUSE_ERROR_CHECK - MODEL_FSP)) = 0;
     ((uint32_t *)model_gsp)[G_HWCFG2] = (mode & M_RELEASED) ? 0x123u : 0xbadf4100u;
@@ -693,7 +696,7 @@ static void test_the_gates(void)
           fsp_state.reads == model.reads && fsp_state.refusal_reads == model.refusals && model.refusals > 0);
     check("a refusing card is written to exactly once, by the probe that asks whether the queue takes stores",
           model.writes == 2 && fsp_state.writes == 2 && !fsp_state.queue_writable);
-    check("a scratch register that refuses is not polled to the limit: the wait stops at the refusal",
+    check("and this scratch says 0xFF, so the wait for it ends at the first look rather than at a bound",
           fsp_state.boot_polls == 1);
     check("the coprocessor's own block is reported as still locked, which is the fact the panel leads with",
           !fsp_state.gsp_readable && fsp_state.hwcfg2 == 0xbadf4100u);
@@ -737,6 +740,22 @@ static void test_the_gates(void)
      * one reached rather than that a particular number was. */
     check("and the wait for a boot that never happens is the bound the file says it is, not a hang",
           fsp_state.boot_polls == FSP_POLL_LIMIT || fsp_state.boot_ms_used >= FSP_WAIT_BOOT_MS);
+
+    /* The register and the wait that a real card paid for this file to have: on the GB207 the boot scratch
+     * answered 0xbadf1100 and the whole four-second wait collapsed into one read, because a refusal had been
+     * taken as the answer.  Here it must not be - a window that is not decoded yet and a coprocessor that has
+     * not finished booting are one event seen from outside, and the only way to tell them apart is to look
+     * again at the reference driver's cadence for the driver's whole budget, which is what these two checks pin. */
+    model_reset(M_NOT_BOOTED | M_SCRATCH_REFUSES);
+    gpu_fsp_note(&device, &empty);
+    check("a scratch register that refuses is polled out to one of the two stated bounds, not read once as a "
+          "verdict: the wait is a wait, not a look",
+          !fsp_state.booted && fsp_state.boot_scratch == 0xbadf1100u && fsp_state.refusal_reads > 1 &&
+          (fsp_state.boot_polls > 1 || fsp_state.boot_ms_used >= FSP_WAIT_BOOT_MS) &&
+          (fsp_state.boot_polls == FSP_POLL_LIMIT || fsp_state.boot_ms_used >= FSP_WAIT_BOOT_MS));
+    check("and the request still goes out, because waiting for a card that has not unlocked the door is a way "
+          "to learn nothing at all",
+          fsp_state.queried && fsp_state.send_blocked != 1);
 
     model_reset(M_BUSY);
     ((uint32_t *)model_fsp)[R_QUEUE_TAIL] = 4;              /* a packet the FSP has not finished with */

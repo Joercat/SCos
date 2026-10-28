@@ -682,7 +682,8 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
         return;
     }
     if (!f->mapped) {
-        put(w, "the windows this path asks for - BAR0+0x20000 for the boot scratch, +0x8f0000 for the mailbox, "
+        put(w, "the windows this path asks for - BAR0+0xad0000 for the boot scratch, +0x8f0000 for the "
+               "mailbox, "
                "+0x110000 for the coprocessor's falcon, +0x0 for the virtual-function page and +0x9000 for the "
                "timer block - could not be mapped, so the registers were never read and nothing was written.\n");
         return;
@@ -723,12 +724,13 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
                "hard-coded size in this file used to be enough and now is not");
     }
     put(w, ".  ");
-    put(w, "The FSP's boot-complete scratch at BAR0+0x200bc reads 0x");
+    put(w, "The FSP's boot-complete scratch at BAR0+0xad00bc reads 0x");
     put_hex(w, f->boot_scratch);
     put(w, f->booted ? ", which is the value that means it has finished booting, so the mailbox behind it is "
                       "worth asking"
-                     : ", which is not 0xFF: the FSP has not reported itself booted, and until it does "
-                       "nothing is reading the channel");
+                     : ", which is not the 0xFF that means finished: the scratch and the channel behind it "
+                       "live in a block the security processor unlocks as its last act of booting, so until this "
+                       "reads 0xFF the driver is writing a request into a window its owner has not opened");
     if (!f->booted) {
         /* Counted, not described: the only honest way to say "it did not answer in time" is to say how much
          * time that was.  The budget is the reference driver's own four seconds, and it is measured against
@@ -742,12 +744,15 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
             put_number(w, (unsigned)f->boot_ms);
             put(w, " ms the reference driver allows, in ");
             put_number(w, (unsigned)f->boot_polls);
-            put(w, " reads at 0x200bc, and then it stopped rather than holding a boot open.  That is the whole "
-                   "budget, not a fraction of it: a card that has not reported itself booted after four seconds "
-                   "of its own clock is not a card that was still on its way");
+            put(w, " reads at 0xad00bc, at most one per millisecond, which is how the reference driver paces "
+                   "the same wait and how long it is willing to keep it open.  A refusal is polled out to the "
+                   "bound rather than taken for a verdict, because this register is unreadable precisely while "
+                   "the coprocessor has not finished; and when four seconds of the card's own clock have gone by "
+                   "with no 0xFF, that is the measurement - the security processor did not report itself booted "
+                   "inside the time the driver that boots this chip allows it");
         } else {
             put_number(w, (unsigned)f->boot_polls);
-            put(w, " reads at 0x200bc.  The coprocessor's timer block would not answer, so this wait could not "
+            put(w, " reads at 0xad00bc.  The coprocessor's timer block would not answer, so this wait could not "
                    "be promised in milliseconds and was bounded by a count of reads instead - which says how "
                    "much work was done, and not how much time passed, and the difference is printed rather than "
                    "hidden");

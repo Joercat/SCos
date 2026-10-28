@@ -56,7 +56,14 @@
 #define NV_PFSP_QUEUE_TAIL             0x008f2c04u  /* how far the host has written */
 #define NV_PFSP_MSGQ_HEAD              0x008f2c80u  /* the reply queue, the same arrangement the other way */
 #define NV_PFSP_MSGQ_TAIL              0x008f2c84u
-#define NV_THERM_FSP_BOOT_COMPLETE     0x000200bcu  /* 0xFF once the FSP has finished booting itself */
+/* NV_THERM_I2CS_SCRATCH, from the published register description for this chip family
+ * (src/common/inc/swref/published/blackwell/gb202/dev_therm.h), and the field the reference driver polls inside
+ * it (the addendum beside it: NV_THERM_I2CS_SCRATCH_FSP_BOOT_COMPLETE, STATUS 31:0, SUCCESS 0xFF, FAILED 0).
+ * This used to be BAR0+0x200bc, which is not that register: it is inside the security processor's own mailbox
+ * window, and it answers 0xbadf1100 to everything.  Every boot of this driver has therefore concluded that the
+ * FSP had not finished booting, from a register that does not say so, and then gone on to write a handover at
+ * the moment it had chosen rather than the moment the chip had. */
+#define NV_THERM_FSP_BOOT_COMPLETE     0x00ad00bcu  /* the whole dword; 0xFF means it has finished */
 #define NV_PFSP_UCODE_VERSION          0x008f0334u  /* SCRATCH_GROUP_3(1), 11:0 */
 #define NV_PFSP_FUSE_ERROR_CHECK       0x008f033cu  /* SCRATCH_GROUP_3(3), 0 = passed */
 #define NV_PGSP_HWCFG2                 0x001100f4u  /* NV_PGSP base 0x110000 + NV_PFALCON_FALCON_HWCFG2 */
@@ -241,8 +248,8 @@ static void map_mailbox_pages(uint64_t bar0)
     void *page;
 
     mapped = 0;
-    page = device_map(bar0 + 0x20000u, 0x1000u, 0, &mapped);
-    if (page && mapped >= 0x1000u) { w_therm.page = page; w_therm.base = 0x20000u; w_therm.length = mapped; }
+    page = device_map(bar0 + 0xad0000u, 0x1000u, 0, &mapped);
+    if (page && mapped >= 0x1000u) { w_therm.page = page; w_therm.base = 0xad0000u; w_therm.length = mapped; }
     mapped = 0;
     page = device_map(bar0 + 0x8f0000u, 0x4000u, 0, &mapped);
     if (page && mapped >= 0x4000u) { w_fsp.page = page; w_fsp.base = 0x8f0000u; w_fsp.length = mapped; }
@@ -376,18 +383,16 @@ static int wait_for(int (*condition)(void), int *count)
     return wait_for_timed(condition, count, FSP_WAIT_REPLY_MS, &fsp_state.reply_ms_used);
 }
 
-/* The reference driver's own readiness test (gh100_gsp_lockdown_released): a pair of all-ones or a refusal is
- * no answer, the low byte of the therm scratch is compared as a whole dword against SUCCESS, and the
- * coprocessor is reachable once bit 13 of its capability word reads UNLOCK. */
-static int boot_ready(void)
+/* The readiness test for the wait that happens before anything is asked of the mailbox.  It deliberately does
+ * not stop at a refusal: the reference driver (gh100_fsp_wait_secure_boot) polls the whole dword of
+ * NV_THERM_I2CS_SCRATCH once per millisecond for 4000 milliseconds and accepts only 0xFF as the answer, and on
+ * this chip that register lives behind a block the security processor unlocks as its last act of booting - so
+ * "unreadable" and "not yet" are the same event seen from too early, and the only way to tell them apart is to
+ * keep looking for as long as the driver that boots this chip is willing to.  A refusal still counts as a poll
+ * and is still reported, register by register, in fsp_state.refusal_reads. */
+static int boot_complete(void)
 {
     fsp_state.boot_scratch = read32(&w_therm, NV_THERM_FSP_BOOT_COMPLETE);
-    /* Any 0xbadf.... answer is an answer, not a state to wait out.  Measured on a GB207: the FSP scratch
-     * window replies 0xbadf1100 - a different member of the family from the 0xbadf4100 that names a locked
-     * PRIV target - and waiting on it burned the whole 4000 ms budget (the panel read "waited 4056 of 4000 ms")
-     * for an event this reader can never see.  The reference driver stops on a refusal and reports it as an
-     * error, which is the only honest thing to do with a window that says it will not be decoded. */
-    if (FSP_NOT_CONTENT(fsp_state.boot_scratch) || fsp_state.boot_scratch == 0xffffffffu) return 1;
     return fsp_state.boot_scratch == FSP_BOOT_COMPLETE_SUCCESS;
 }
 
@@ -985,13 +990,12 @@ static void probe_mailbox(void)
      * readiness poll has nothing to become ready for and still costs the caller the whole budget.  Measured on
      * a GB207 that was 4056 ms of desktop for a handover that was staged and never sent (reads 94, writes 0),
      * and the desktop's first interactions are the thing that pays it. */
-    /* Wait for the FSP to say it is up, because on a card that is going to answer there is a window in which
-     * it has not yet, and a report written inside that window would be a measurement of the wrong moment.
-     * A refusal ends that wait on its first look (see boot_ready), which is the whole of the fix for the
-     * 4056 ms measured on a GB207 whose FSP window answers 0xbadf1100: the budget is not the thing being spent
-     * when a page says it will not be decoded, the polling is, and polling stops at the answer. */
+    /* Wait for the FSP to say it is up, at the reference driver's cadence and for its whole budget: 4000 looks,
+     * each bounded by the coprocessor's PTIMER rather than by this CPU's idea of a microsecond, ending either at
+     * 0xFF or at the deadline - never at a refusal, which on this register is what "not yet" looks like from
+     * outside a block its owner has not unlocked.  The address is the correction; see the register's comment. */
     fsp_state.boot_ms = FSP_WAIT_BOOT_MS;
-    (void)wait_for_timed(boot_ready, &fsp_state.boot_polls, FSP_WAIT_BOOT_MS, &fsp_state.boot_ms_used);
+    (void)wait_for_timed(boot_complete, &fsp_state.boot_polls, FSP_WAIT_BOOT_MS, &fsp_state.boot_ms_used);
     /* No ++ here: the wait already counted the look that answered, and a count that adds one for the
      * reader's benefit is a count of nothing. */
     fsp_state.booted = fsp_state.boot_scratch == FSP_BOOT_COMPLETE_SUCCESS;
@@ -1076,7 +1080,7 @@ void gpu_fsp_note(const struct gpu_device *device, const struct boot_handoff *ha
     map_mailbox_pages(bar0);
     if (!fsp_state.mapped) {
         klog(FSP_LOG_PREFIX "the mailbox page at 0x%x and the therm scratch at 0x%x could not be mapped, so "
-             "nothing was asked of them", 0x8f0000u, 0x20000u);
+             "nothing was asked of them", 0x8f0000u, 0xad0000u);
         return;
     }
     fsp_state.attempted = 1;

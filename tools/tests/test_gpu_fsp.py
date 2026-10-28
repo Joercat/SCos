@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-FSP_CHECKS = 119                    # the modelled mailbox, pinned: a dropped case is a silent loosening
+FSP_CHECKS = 121                    # the modelled mailbox, pinned: a dropped case is a silent loosening
 FSP_SIZES = (48, 97, 96)            # what a GB2xx FSP asks the container for, from the reference driver
 
 # The published register description, transcribed rather than read out of the file under test:
@@ -35,7 +35,7 @@ PUBLISHED = {
     'NV_PFSP_QUEUE_TAIL': 0x008f2c04,
     'NV_PFSP_MSGQ_HEAD': 0x008f2c80,
     'NV_PFSP_MSGQ_TAIL': 0x008f2c84,
-    'NV_THERM_FSP_BOOT_COMPLETE': 0x000200bc,
+    'NV_THERM_FSP_BOOT_COMPLETE': 0x00ad00bc,
     'NV_PFSP_UCODE_VERSION': 0x008f0334,
     'NV_PFSP_FUSE_ERROR_CHECK': 0x008f033c,
     'NV_PGSP_HWCFG2': 0x001100f4,
@@ -271,7 +271,7 @@ def test_the_generation_table_is_the_reference_driver_and_not_a_convenience():
     for needle in ('The architecture field of NV_PMC_BOOT_0 reads 0x', 'whose FSP wants a hash of ',
                    "Hopper's table says 48/384/384", 'no FSP mailbox for arch 0x', 'bit13=',
                    "NV_PFALCON_FALCON_HWCFG2_RISCV_BR_PRIV_LOCKDOWN", "The falcon's own mailbox pair read 0x",
-                   'ms of the ', 'reads at 0x200bc', 'cot '):
+                   'ms of the ', 'reads at 0xad00bc', 'cot '):
         assert needle in panel, 'the panel never prints %r, so a refusal cannot be told from a guess' % needle
 
 

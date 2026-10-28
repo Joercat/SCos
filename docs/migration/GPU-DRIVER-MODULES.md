@@ -1175,7 +1175,14 @@ read from; `0xdb` means the container's own authentication blobs did not survive
 
 **What is measured around it.**  A reply is a claim, so the two words a boot would change are re-read afterwards
 and printed as a pair: `NV_PGSP_HWCFG2` (BAR0+0x1100f4, the coprocessor's capability word, which is the register
-every reader so far has been refused) and `NV_THERM_FSP_BOOT_COMPLETE` (BAR0+0x200bc).  `gsp_released` is that
+every reader so far has been refused) and `NV_THERM_FSP_BOOT_COMPLETE` (`NV_THERM_I2CS_SCRATCH`,
+BAR0+0xad00bc - a whole dword whose value is compared against `0xFF`, from the published header for this family).
+This address is a correction, not a retune: the file used to read BAR0+0x200bc, which is not the scratch but a
+byte inside the security processor's mailbox window, and so every boot this driver ran answered "the FSP has not
+reported itself booted" from a register that cannot say so - and, worse, stopped waiting at the first refusal,
+because a refusal had been written down as an answer.  A card pastes the difference: 0xbadf1100 there is what a
+not-yet-unlocked block looks like, so the wait now polls that dword once per millisecond for the four seconds the
+reference driver allows and accepts only 0xFF.  `gsp_released` is that
 comparison and nothing else, and `queues_idle_after` says whether the channel fell idle again - which is what a
 second message would need.  The host model is what makes the pair mean something: it moves `HWCFG2` *only* when
 it has accepted a handover whose payload it checked, so a driver that reported a release without one would be
