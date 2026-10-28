@@ -438,7 +438,9 @@ static void put_fsp_mailbox(struct writer *w, const struct gpu_fsp_state *f)
             put(w, "was put in the channel and no reply came back: the reply queue's two pointers never "
                    "separated within ");
             put_number(w, (unsigned)f->reply_polls);
-            put(w, " looks at them.  A refusal to answer is a result - it says the mailbox is there and the "
+            put(w, " looks at them - one per millisecond of the card's clock, for the second that is how "
+                   "long the driver that boots this chip is willing to wait.  A refusal to answer is a "
+                   "result - it says the mailbox is there and the "
                    "thing behind it is not reading, which is what a boot that never reached the FSP looks "
                    "like from outside");
         } else {
@@ -792,7 +794,8 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
         if (!f->handover.bytes) {
             put(w, ", and no answer came back: the reply queue's pointers never separated within ");
             put_number(w, (unsigned)f->handover_polls);
-            put(w, " looks at them.  That is the answer a card gives when it read a request it was not "
+            put(w, " looks at them, a millisecond apart.  That is the answer a card gives when it read a "
+                   "request it was not "
                    "configured to serve, and it is reported instead of retried - a second handover into a "
                    "channel the first one is possibly still being read would tell nothing about the first.");
         } else {

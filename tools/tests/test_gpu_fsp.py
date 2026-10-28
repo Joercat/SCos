@@ -281,7 +281,8 @@ def test_the_time_bounds_are_the_working_driver_s():
     lockdown bit.  Both are pinned to the published numbers here, so they cannot quietly drift back.
     """
     text = source('kernel/drivers/gpu/gpu_fsp.c')
-    for name, value in (('FSP_WAIT_REPLY_MS', 1500), ('FSP_WAIT_BOOT_MS', 4000),
+    for name, value in (('FSP_WAIT_REPLY_MS', 1000), ('FSP_WAIT_BOOT_MS', 4000),
+                        ('FSP_PTIMER_TICKS_PER_MS', 31250),
                         ('FSP_HWCFG2_LOCKDOWN_BIT', 13)):
         m = re.search(r'#define %s\s+(\d+)u' % name, text)
         assert m, '%s is not a named bound in the file any more' % name

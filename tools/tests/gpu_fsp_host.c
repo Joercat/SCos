@@ -739,7 +739,7 @@ static void test_the_gates(void)
      * must never happen is a third way to stop, so the check is that one of the two stated bounds was the
      * one reached rather than that a particular number was. */
     check("and the wait for a boot that never happens is the bound the file says it is, not a hang",
-          fsp_state.boot_polls == FSP_POLL_LIMIT || fsp_state.boot_ms_used >= FSP_WAIT_BOOT_MS);
+          fsp_state.boot_polls >= (int)FSP_WAIT_BOOT_MS || fsp_state.boot_ms_used >= FSP_WAIT_BOOT_MS);
 
     /* The register and the wait that a real card paid for this file to have: on the GB207 the boot scratch
      * answered 0xbadf1100 and the whole four-second wait collapsed into one read, because a refusal had been
@@ -752,7 +752,7 @@ static void test_the_gates(void)
           "verdict: the wait is a wait, not a look",
           !fsp_state.booted && fsp_state.boot_scratch == 0xbadf1100u && fsp_state.refusal_reads > 1 &&
           (fsp_state.boot_polls > 1 || fsp_state.boot_ms_used >= FSP_WAIT_BOOT_MS) &&
-          (fsp_state.boot_polls == FSP_POLL_LIMIT || fsp_state.boot_ms_used >= FSP_WAIT_BOOT_MS));
+          (fsp_state.boot_polls >= (int)FSP_WAIT_BOOT_MS || fsp_state.boot_ms_used >= FSP_WAIT_BOOT_MS));
     check("and the request still goes out, because waiting for a card that has not unlocked the door is a way "
           "to learn nothing at all",
           fsp_state.queried && fsp_state.send_blocked != 1);

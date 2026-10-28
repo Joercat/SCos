@@ -85,15 +85,14 @@
  * this test everywhere a value could otherwise be read as content by accident. */
 #define FSP_NOT_CONTENT(v)               (((v) & 0xffff0000u) == 0xbadf0000u)
 #define FSP_HEADER_BYTES                    8u      /* the MCTP transport dword and the NVDM dword */
-#define FSP_WAIT_REPLY_MS                1500u       /* the reference driver gives a reply `int time = 1000'
-                                                       * iterations of usleep_range(1000, 2000) - about a
-                                                       * second and a half - and four seconds to the FSP's own
-                                                       * boot (`unsigned timeout_ms = 4000' in wait_secure_boot
-                                                       * and in the lockdown wait).  Those are the numbers a
-                                                       * chip that works is timed against; a bound expressed as
-                                                       * a count of uncached reads comes out tens of times too
-                                                       * small, and prints "silent" about a device that was
-                                                       * still on its way. */
+#define FSP_WAIT_REPLY_MS                1000u       /* gh100_fsp_wait counts `int time = 1000' iterations,
+                                                       * each sleeping one to two milliseconds; this file used
+                                                       * to write 1500 for "about a second and a half", which was
+                                                       * a rounding of someone else's sleep and not of a count.
+                                                       * The count is the thing worth copying, because here a
+                                                       * budget is a number of looks at the card's clock: see
+                                                       * FSP_PTIMER_TICKS_PER_MS.  The FSP's own boot gets the
+                                                       * reference driver's other number, 4000. */
 #define FSP_WAIT_BOOT_MS                 4000u
 #define FSP_POLL_LIMIT                 200000u       /* looks at a pair of registers, and on the reply wait a
                                                          * TSC deadline on top of them: an MMIO read dominates
@@ -192,13 +191,6 @@ static void store32(uint8_t *p, uint32_t v)
     for (unsigned i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (i * 8));
 }
 static void store64(uint8_t *p, uint64_t v) { store32(p, (uint32_t)v); store32(p + 4, (uint32_t)(v >> 32)); }
-
-static uint64_t fsp_ticks(void)
-{
-    uint32_t low, high;
-    __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
-    return (uint64_t)high << 32 | low;
-}
 
 static uint32_t read32(const struct fsp_window *w, uint32_t offset)
 {
@@ -323,55 +315,75 @@ static int reply_waiting(void)
  * waits for the order of tens of milliseconds, bounded by the count of reads below and by the cycle counter,
  * whichever expires first.  Both counts are reported, because "it did not answer in time" is only a fact once
  * a reader can see how much time that was. */
+/* Every wait in this file is timed against the card rather than against whichever CPU this kernel happens to
+ * be running on, and that sentence had to be earned twice over.  The step of the clock: NV_PTIMER_TIME_0
+ * publishes its count of nanoseconds in bits 31:5 (NV_PTIMER_TIME_0_NSEC in the register description), which is
+ * the 32 ns step written as a field, so 31250 increments make the millisecond the reference driver sleeps
+ * between looks.  And the bound: a budget divided by a ratio measured once at probe time is only as good as
+ * that ratio, and the ratio here was wrong by a factor of 1000 - this file used to derive `ticks_per_ms' from
+ * the cycle counter timed against the PTIMER and divided by 1000 one time too many, so a wait promised at
+ * "1500 ms" expired after a millisecond and a half and then printed the microseconds it had really waited as
+ * milliseconds.  A card that was answered with 14 looks at a reply it had a hundred milliseconds to write.
+ *
+ * So a wait is now `budget_ms' looks with the card's own clock between them, which is the shape of the
+ * reference driver's loops to the letter: gh100_fsp_wait counts `int time = 1000' iterations of
+ * usleep_range(1000, 2000), and gh100_fsp_wait_secure_boot counts `unsigned timeout_ms = 4000'.  This kernel
+ * has no scheduler to sleep in, so between looks it spins on the PTIMER until a millisecond of the card's time
+ * has gone by, capped at FSP_SLEEP_READ_LIMIT reads: a counter that does not move costs a bounded amount of
+ * work, and the wait is then bounded by the count of looks alone - which the panel is told, rather than being
+ * smoothed over.  Elapsed time is read off the same clock the wait is timed by, which is the only thing that
+ * makes an "ms" on the screen mean anything. */
+#define FSP_PTIMER_TICKS_PER_MS           31250u      /* 1000000 ns / the 32 ns step the register publishes */
+#define FSP_SLEEP_READ_LIMIT                 32u      /* clock reads spent trying to pass one millisecond */
+#define FSP_SLEEP_PAUSES                      8u      /* pause iterations between two of those reads */
+
 static int read_ptimer(uint32_t *nanoseconds);
 
-/* The PTIMER is the only clock in this OS that the device itself is keeping, and NV_PTIMER counts 32 ns
- * steps, so it is what the cycle counter gets timed against once here: without that ratio a wait can be
- * counted in reads but not promised in milliseconds, and a bound nobody can state is a bound nobody can
- * check afterwards.  `wait_clocked' says which of the two happened. */
+/* Whether the card's clock can be trusted to time a wait by, decided once before any waiting starts: the
+ * counter has to move between two samples for a wait to be promised in milliseconds at all.  The step is not
+ * measured, it is read out of the register's description - see above. */
 static void measure_tick_rate(void)
 {
     uint32_t first = 0, last = 0;
-    uint64_t t0 = fsp_ticks(), t1;
-    uint64_t ns;
 
     if (!read_ptimer(&first)) return;
     for (volatile int spin = 0; spin < 8192; spin++) __asm__ volatile("pause");
     if (!read_ptimer(&last)) return;
-    t1 = fsp_ticks();
-    if (last == first || t1 <= t0) return;
-    ns = (uint64_t)(uint32_t)(last - first) * 32ull;
-    if (!ns) return;
-    fsp_state.ticks_per_ms = (uint32_t)(((t1 - t0) * 1000000ull) / ns / 1000ull);
-    fsp_state.wait_clocked = fsp_state.ticks_per_ms != 0;
-}
-
-static uint64_t waited_ms(uint64_t start)
-{
-    if (!fsp_state.ticks_per_ms) return 0;
-    return (fsp_ticks() - start) / fsp_state.ticks_per_ms;
+    if (last == first) return;                          /* readable and frozen: the count of looks is the bound */
+    fsp_state.ticks_per_ms = FSP_PTIMER_TICKS_PER_MS;
+    fsp_state.wait_clocked = 1;
 }
 
 static int wait_for_timed(int (*condition)(void), int *count, uint32_t budget_ms, uint64_t *ms_used)
 {
-    uint64_t start = fsp_ticks();
-    uint64_t deadline = fsp_state.ticks_per_ms
-        ? start + (uint64_t)budget_ms * fsp_state.ticks_per_ms : 0;
+    uint32_t start = 0, now = 0, mark = 0;
+    int clocked = fsp_state.wait_clocked && read_ptimer(&start);
     int hit = 0;
 
-    for (unsigned i = 0; i < FSP_POLL_LIMIT; i++) {
+    if (clocked) mark = start;
+    for (unsigned i = 0; i < budget_ms && i < FSP_POLL_LIMIT; i++) {
         (*count)++;                                     /* every wait says how long it took, because "it did not
                                                            * answer" is only a fact once the reader can see what
                                                            * was waited on and for how long; `polled'
                                                            * above for the send, because they are two different
                                                            * waits and one number would be either vague or wrong */
         if (condition()) { hit = 1; break; }
-        if (deadline && fsp_ticks() > deadline) break;
-        if (!deadline && i >= FSP_POLL_LIMIT / 4u) break;   /* no clock: the read count is the bound, and the
-                                                                * panel says the wait was bounded that way */
-        for (volatile int spin = 0; spin < 32; spin++) __asm__ volatile("pause");
+        if (!clocked) {
+            for (volatile int s = 0; s < 4096; s++) __asm__ volatile("pause");
+            continue;                                   /* no clock to pace by: the look count is the whole bound
+                                                           * and the panel says the wait was bounded that way */
+        }
+        for (unsigned spin = 0; spin < FSP_SLEEP_READ_LIMIT; spin++) {
+            for (volatile unsigned s = 0; s < FSP_SLEEP_PAUSES; s++) __asm__ volatile("pause");
+            if (!read_ptimer(&now)) { clocked = 0; break; }
+            if ((uint32_t)(now - mark) >= FSP_PTIMER_TICKS_PER_MS) break;
+        }
+        mark = now;
     }
-    if (ms_used) *ms_used = waited_ms(start);
+    if (ms_used) *ms_used = clocked && now > start
+        ? (uint64_t)(uint32_t)(now - start) / FSP_PTIMER_TICKS_PER_MS : 0;
+    if (!clocked) fsp_state.wait_clocked = 0;           /* a clock that stopped answering mid-wait is a fact
+                                                           * about the rest of the probe, not just this wait */
     return hit;
 }
 
@@ -408,6 +420,16 @@ static int lockdown_now(void)
     return (int)((hwcfg2 >> FSP_HWCFG2_LOCKDOWN_BIT) & 1u);
 }
 
+/* The send queue drained, which is the condition gh100_fsp_send waits on before it stores anything; a refusal
+ * mid-wait is its own answer and is recorded as one. */
+static int fsp_queue_idle(void)
+{
+    int idle;
+
+    if (!queues(&idle)) { fsp_state.send_blocked = 2; return 0; }
+    return idle == 1;
+}
+
 /* One packet: the two header dwords and the payload, into the channel from offset 0, with the queue tail
  * moved as the last write because that is the moment the FSP is allowed to look.  Multi-packet messages -
  * which is what a reply larger than the channel would be - are not sent and not pretended at: the payload
@@ -416,20 +438,21 @@ static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type
 {
     uint32_t header[2];
     uint32_t padded = (size + 3u) & ~3u, before, after;
-    int idle;
 
     if (padded + FSP_HEADER_BYTES > FSP_EMEM_CHANNEL_BYTES) return 0;
 
     header[0] = MCTP_VERSION | (1u << 30) | (1u << 31);            /* seid 0, seq 0, end and start of message */
     header[1] = MCTP_TYPE_VENDOR_PCI | (MCTP_VENDOR_ID_NVIDIA << 8) | (nvdm_type << 24);
 
+    /* The reference driver drains the send queue the same way - 1000 looks, a millisecond apart - and so does
+     * this, through the same wait helper, so that "the queue was busy" means "busy for a second of the card's
+     * clock" here exactly as it does there rather than "busy for 200000 reads at whatever this bus does". */
     fsp_state.polled = 0;
-    for (unsigned i = 0; i < FSP_POLL_LIMIT; i++) {
-        fsp_state.polled++;
-        if (!queues(&idle)) { fsp_state.send_blocked = 2; return 0; }
-        if (idle == 1) break;
+    if (!wait_for_timed(fsp_queue_idle, &fsp_state.polled, FSP_WAIT_REPLY_MS, 0) &&
+        fsp_state.send_blocked != 2) {
+        fsp_state.send_blocked = 1;                                  /* busy the whole time: nothing written */
+        return 0;
     }
-    if (idle != 1) { fsp_state.send_blocked = 1; return 0; }        /* busy the whole time: nothing written */
 
     emem_seek(0, 1, 0);
     /* Where the channel's offset is *after* it has been set to 0, which is what the reference driver measures
