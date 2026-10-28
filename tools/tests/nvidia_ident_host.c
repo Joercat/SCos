@@ -384,7 +384,7 @@ int main(void)
           "an unpublished class number is reported as a number, and is not refused");
     check(!has(text, "=published"),
           "and it is not labelled as a generation nobody documented for this chip");
-    check(has(text, "Volta/Turing page, not Blackwell"),
+    check(has(text, "not the 0xc461 reset value"),
           "but it does say that the number belongs to a page this generation never documented, which is the "
           "difference between a measurement and an expectation");
 

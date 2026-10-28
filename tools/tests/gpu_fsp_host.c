@@ -106,7 +106,9 @@ static uint8_t model_channel[FSP_EMEM_CHANNEL_BYTES];
 /* Handed out in successive page-aligned chunks, because one boot really does take several allocations - the
  * FMC copy, the radix-3 tree, the two descriptor blocks - and a model that returned the same base for every
  * one of them would let the driver pass by writing its metadata on top of the image it was told to point at. */
-static uint8_t model_pages[64 * 1024] __attribute__((aligned(4096)));
+static uint8_t model_pages[1u << 20] __attribute__((aligned(4096)));   /* the FMC copy, its radix tree,
+                                                                          * the boot parameters and the four
+                                                                          * LibOS regions: 0x30000 of logs alone */
 static size_t model_pages_used;
 
 struct model {
@@ -993,7 +995,6 @@ static void test_the_handover_payload(void)
           FSP_NOT_CONTENT(fsp_state.hwcfg2) && fsp_state.hwcfg2_after == 0x123u && fsp_state.gsp_released);
     check("the queue fell idle again after the exchange, which is what the next message would need",
           fsp_state.queues_idle_after);
-
     ask_with(0, 32, 97, 96, -1, 0);
     check("an FMC whose hash section is not 48 bytes is refused a payload, and told which section it was",
           fsp_state.fmc_seen && !fsp_state.staged && fsp_state.cot_defect == 1);
@@ -1115,10 +1116,43 @@ static void test_the_boot_descriptors(void)
           params->boot_gsp_rm.desc_offset == fsp_state.wpr_meta_phys &&
           params->boot_gsp_rm.desc_size == (uint32_t)sizeof *meta &&
           params->boot_gsp_rm.is_gsp_rm_boot == 1 && params->boot_gsp_rm.wpr_carveout_offset == 0);
-    check("gspRmParams points back at the FMC copy, non-coherently, and the SPDM block is left absent rather than aimed",
+    check("gspRmParams is non-coherent, the SPDM block is left absent rather than aimed, and the boot arguments "
+          "name the LibOS record rather than the FMC copy as they did before that record existed",
           params->gsp_rm.target == GSP_DMA_TARGET_NONCOHERENT_SYSTEM &&
-          params->gsp_rm.boot_args_offset == fsp_state.image_physical &&
+          params->gsp_rm.boot_args_offset == fsp_state.libos_phys &&
+          params->gsp_rm.boot_args_offset != fsp_state.image_physical &&
+          fsp_state.libos_staged && !fsp_state.libos_declined &&
           params->spdm.target == 0 && params->spdm.payload_offset == 0);
+    {
+        const struct libos_region *r = (const struct libos_region *)(uintptr_t)fsp_state.libos_phys;
+
+        check("the record is four 32-byte descriptors in one page - three log buffers and the RM's own argument "
+              "block - with the ids id8() packs big-endian out of the vendor's header",
+              fsp_state.libos_phys % 0x1000u == 0 &&
+              r[0].id8 == libos_id8("LOGINIT") && r[1].id8 == libos_id8("LOGINTR") &&
+              r[2].id8 == libos_id8("LOGRM") && r[3].id8 == libos_id8("RMARGS"));
+        check("64 KiB each for the three logs and 4 KiB for the arguments, all contiguous system memory, each "
+              "region behind the last",
+              r[0].size == 0x10000 && r[1].size == 0x10000 && r[2].size == 0x10000 && r[3].size == 0x1000 &&
+              r[0].kind == 1 && r[1].kind == 1 && r[2].kind == 1 && r[3].kind == 1 &&
+              r[0].loc == 1 && r[1].loc == 1 && r[2].loc == 1 && r[3].loc == 1 &&
+              r[0].pa == fsp_state.libos_log_phys && r[1].pa == r[0].pa + 0x10000 &&
+              r[2].pa == r[1].pa + 0x10000 && r[3].pa == fsp_state.libos_phys + 0x1000 &&
+              r[3].pa == fsp_state.libos_rmargs_phys);
+        check("every log buffer opens with a zero put pointer and then one address per 4 KiB page, which is the "
+              "array the GSP walks to write into it",
+              ((const uint64_t *)(uintptr_t)r[0].pa)[0] == 0 &&
+              ((const uint64_t *)(uintptr_t)r[0].pa)[1] == r[0].pa &&
+              ((const uint64_t *)(uintptr_t)r[0].pa)[0x10] == r[0].pa + 0xf000 &&
+              ((const uint64_t *)(uintptr_t)r[2].pa)[1] == r[2].pa &&
+              ((const uint64_t *)(uintptr_t)r[2].pa)[0x10] == r[2].pa + 0xf000);
+        check("and none of it lands on the pages the FMC copy or the radix tree occupy",
+              fsp_state.libos_log_phys != fsp_state.image_physical &&
+              fsp_state.libos_phys >= (uintptr_t)model_pages &&
+              fsp_state.libos_phys + 0x2000 <= (uintptr_t)model_pages + sizeof model_pages &&
+              !(fsp_state.libos_log_phys >= fsp_state.radix3_phys &&
+                fsp_state.libos_log_phys < fsp_state.radix3_phys + fsp_state.radix3_tree_bytes));
+    }
     check("so the handover's boot-arguments field is the address of the second block, which is the field that was ~0",
           m_read(payload + COT_OFF_BOOT_ARGS) == (uint32_t)fsp_state.boot_params_phys &&
           m_read(payload + COT_OFF_BOOT_ARGS + 4) == (uint32_t)(fsp_state.boot_params_phys >> 32) &&
@@ -1217,9 +1251,10 @@ static void test_the_handover_answers(void)
           FSP_NOT_CONTENT(fsp_state.hwcfg2_after));
 
     ask_with(M_COT_SILENT, 48, 97, 96, -1, 0);
-    check("a card that takes the handover and answers nothing is reported as exactly that: sent, and no reply",
+    check("a card that takes the handover and answers nothing is reported as exactly that: sent, no reply, and "
+          "no lockdown word that could be mistaken for one",
           fsp_state.handover_sent && fsp_state.handover.bytes == 0 && fsp_state.handover.complete == 0 &&
-          fsp_state.hwcfg2_after == 0 && !fsp_state.gsp_released);
+          !fsp_state.settled && !fsp_state.hwcfg2_after_valid && !fsp_state.gsp_released);
 
     ask_with(M_BUSY, 48, 97, 96, -1, 0);
     check("a card that takes a packet and never consumes it still gets the handover, because nothing is waited "

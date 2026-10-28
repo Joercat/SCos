@@ -388,7 +388,7 @@ thing the bug was about - QEMU models no NVIDIA function - so the evidence for t
 `tools/tests/gpu_fsp_host.c` models the window as hardware does, wrapping at 64 dwords, and asserts that a
 full 868-byte handover arrives byte for byte in **four** bursts, that the read-back ran before the doorbell,
 and that a window which never walks is caught by the read-back (mismatch reported, no veto, doorbell rung).
-The count is pinned at 133 checks.
+The count is pinned at 137 checks.
 
 **What the next boot should show, and what each answer means.**
 
@@ -397,16 +397,27 @@ The count is pinned at 133 checks.
 | `The request was written into the channel in 4 windows ... every dword of it came back identical` | the packet is in the channel; whatever follows is the card's answer and not this OS dropping it |
 | `read back: differs from the packet at dword N` | the channel does not return what was written (measured on GB207 at dword 0, on packets it then answers); the doorbell is rung anyway, and N says where the two diverge |
 | `GSP handover: ... error 0x..` with a code | the FSP read the whole record and refused it by name: `0xdf` is the WPR/FRTS one, `0xdb` the boot check, `0xdd` a bad DMA target |
-| `no answer came back` after the above | the FSP took a well-formed record and did not reply, which is a different claim from the one this tree was making an hour ago |
+| `boot: no answer in N of 4000 ms` | the handover went out and neither the lockdown bit nor the falcon mailboxes changed inside the reference driver's own budget |
+| `boot: settled in N ms, lockdown bit 13 clear` | the FMC booted the resource manager; this is a success the reply wait used to report as silence |
 
-**And the next wall, named rather than discovered later.**  The FMC boots with `GSP_FMC_BOOT_PARAMS`, and the
-field that tells the resource manager where its own arguments live (`gspRmParams.bootArgsOffset`) is written
-with the address of the FMC copy this kernel staged.  The reference driver writes a 4 KiB LibOS argument
-record there instead: four memory-region descriptors - `LOGINIT`, `LOGINTR`, `LOGRM`, `RMARGS` - each with a
-page-table array behind it (`r535_gsp_libos_init`).  This tree stages no such record.  So an accepted
-handover here means *the FSP took the image*, not *the RM started with arguments it understood*, and that
-distinction is now written at the assignment as well as here.  Staging that record is the first task after
-this one, and the panel's handover paragraph is what will say whether it is the one that matters.
+**The record the resource manager reads, and why it was the blocker.**  The FMC boots with
+`GSP_FMC_BOOT_PARAMS`, and the field that tells the resource manager where its own arguments live
+(`gspRmParams.bootArgsOffset`) used to be written with the address of the FMC copy this kernel staged - a
+real, readable address, and not a record of anything.  The reference driver writes a 4 KiB LibOS argument
+record there instead: four 32-byte memory-region descriptors, `LOGINIT`, `LOGINTR` and `LOGRM` at 64 KiB each
+and `RMARGS` at 4 KiB, every one contiguous system memory, and each log buffer carrying one physical address
+per 4 KiB page from its second word onwards (`r535_gsp_libos_init`, `LibosMemoryRegionInitArgument`).  That
+record is now built and pointed at, and the panel prints its address beside the three sizes, so a boot that
+still fails says whether the arguments were staged before it says anything about the card.
+
+**And the completion test, which was the second half of the same mistake.**  The FMC does not answer a
+successful handover on the channel: it boots the resource manager, which is what `gh100_gsp_lockdown_released`
+waits for - the falcon's `HWCFG2` bit 13 cleared, or a mailbox pair carrying the boot-arguments address (or an
+error code) - polled for 4000 ms.  This tree now runs that test in that order, and reads a reply only if one
+arrived, because a build that waits for `FSP_RESPONSE` after the COT reports the one outcome that matters as
+silence.  The panel's handover line prints which of the two happened, with the registers it was read from:
+`no answer` and `still locked` for a card that did nothing, `settled` and `lock released` for one that
+booted.
 
 ## 9. The video-memory size that arrived as zero
 

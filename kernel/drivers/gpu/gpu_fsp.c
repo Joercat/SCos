@@ -737,6 +737,91 @@ static uint64_t build_radix3(uint64_t data_phys, uint64_t bytes, uint32_t *tree_
     return base;
 }
 
+/* The LibOS argument record, which is what the resource manager's operating system reads before it runs
+ * anything of RM's.
+ *
+ * Provenance: nouveau's `r535_gsp_libos_init()` (nvkm/subdev/gsp/rm/r535/gsp.c, MIT) builds exactly this -
+ * four `LibosMemoryRegionInitArgument` entries in one 4 KiB page, handed to the FMC as
+ * `gspRmParams.bootArgsOffset`.  The struct is `{ u64 id8; u64 pa; u64 size; u8 kind; u8 loc; }` from
+ * nvrm/gsp.h, 32 bytes with its tail padding, and the ids are the eight ASCII bytes of the name read as a
+ * big-endian word: "LOGINIT", "LOGINTR", "LOGRM", "RMARGS".  `kind` is LIBOS_MEMORY_REGION_CONTIGUOUS (1) and
+ * `loc` is LIBOS_MEMORY_REGION_LOC_SYSMEM (1) for all four.
+ *
+ * Each log buffer is a byte queue whose first 8 bytes are its own "put" pointer, followed by an array of one
+ * physical address per 4 KiB page of the buffer (`create_pte_array`); the GSP only knows 4 KiB pages and walks
+ * that array, so a buffer without it is a buffer it cannot write to.  The buffers must stay alive for as long
+ * as RM does, so they are kernel pages, never released.
+ *
+ * This is the piece that was missing on the previous builds: the boot-args field pointed at the FMC image
+ * itself, which is a place the GSP can read but not a record of four regions, so RM had nothing to log to and
+ * nothing to read.  Without it, an FSP that accepted the handover had still been asked to boot an RM with
+ * arguments it could not parse. */
+#define GSP_LIBOS_LOG_BYTES   0x10000u
+#define GSP_LIBOS_LOG_PAGES   (GSP_LIBOS_LOG_BYTES / GSP_PAGE_SIZE)
+
+struct libos_region {
+    uint64_t id8, pa, size;
+    uint8_t kind, loc;
+    uint8_t pad[6];
+};
+_Static_assert(sizeof(struct libos_region) == 32,
+                "LibosMemoryRegionInitArgument: three 8-byte fields, two bytes, and the padding that makes the "
+                "array stride 32");
+_Static_assert(__builtin_offsetof(struct libos_region, kind) == 24, "kind follows size");
+_Static_assert(__builtin_offsetof(struct libos_region, loc) == 25, "loc follows kind");
+
+static uint64_t libos_id8(const char *name)
+{
+    uint64_t id = 0;
+    for (unsigned i = 0; i < 8u && name[i]; i++) id = (id << 8) | (uint8_t)name[i];
+    return id;
+}
+
+/* One physical address per page, into the buffer's own second word onwards, as the reference does. */
+static void libos_page_array(uint64_t buffer, uint64_t bytes)
+{
+    uint64_t *entries = (uint64_t *)(uintptr_t)(buffer + sizeof(uint64_t));
+    for (uint64_t i = 0; i < bytes / GSP_PAGE_SIZE; i++) entries[i] = buffer + i * GSP_PAGE_SIZE;
+}
+
+static void stage_libos_args(void)
+{
+    static const char *const names[3] = { "LOGINIT", "LOGINTR", "LOGRM" };
+    struct libos_region *regions;
+    uint64_t logs, tables;
+
+    fsp_state.libos_declined = 1;
+    logs = pages_allocate_limit(3u * GSP_LIBOS_LOG_PAGES + 2u, PHYSICAL_LIMIT);
+    if (!logs) return;
+    memset((void *)(uintptr_t)logs, 0, 3u * GSP_LIBOS_LOG_BYTES + 2u * GSP_PAGE_SIZE);
+    tables = logs + 3u * GSP_LIBOS_LOG_BYTES;
+    regions = (struct libos_region *)(uintptr_t)tables;
+    for (unsigned i = 0; i < 3u; i++) {
+        uint64_t buffer = logs + (uint64_t)i * GSP_LIBOS_LOG_BYTES;
+        regions[i].id8 = libos_id8(names[i]);
+        regions[i].pa = buffer;
+        regions[i].size = GSP_LIBOS_LOG_BYTES;
+        regions[i].kind = 1u;                 /* LIBOS_MEMORY_REGION_CONTIGUOUS */
+        regions[i].loc = 1u;                  /* LIBOS_MEMORY_REGION_LOC_SYSMEM */
+        libos_page_array(buffer, GSP_LIBOS_LOG_BYTES);
+    }
+    /* The RM's own argument block.  The reference fills it from the message-queue shared memory it has
+     * already built for RPCs, which this OS does not have yet; zeroed, it is a real region with nothing in it,
+     * and an RM that rejects it says so in the mailbox rather than silently. */
+    regions[3].id8 = libos_id8("RMARGS");
+    regions[3].pa = tables + GSP_PAGE_SIZE;
+    regions[3].size = GSP_PAGE_SIZE;
+    regions[3].kind = 1u;
+    regions[3].loc = 1u;
+
+    fsp_state.libos_phys = tables;
+    fsp_state.libos_log_phys = logs;
+    fsp_state.libos_rmargs_phys = tables + GSP_PAGE_SIZE;
+    fsp_state.libos_log_bytes = GSP_LIBOS_LOG_BYTES;
+    fsp_state.libos_staged = 1;
+    fsp_state.libos_declined = 0;
+}
+
 /* Stage both descriptors.  Nothing is copied for the RM image: the boot stub already holds the file in a
  * read-only region of its own, below 4 GiB and page aligned, and the section offsets the ELF walk produced are
  * offsets inside that region - so the addresses handed to the FMC are that region plus the offset, which is
@@ -821,15 +906,16 @@ static void stage_gsp_boot_descriptors(const struct gpu_firmware_state *fws)
     params->boot_gsp_rm.is_gsp_rm_boot = 1;    /* the resource manager image is on the volume: this is a RM boot */
     params->gsp_rm.target = GSP_DMA_TARGET_NONCOHERENT_SYSTEM;
     /* What the resource manager is told about its own arguments.  The reference driver puts its LibOS
-     * argument block here (`args->gspRmParams.bootArgsOffset = gsp->libos.addr'), which is a 4 KiB record of
-     * four memory-region descriptors - three log buffers and the RM's argument block - each with a page-table
-     * array behind it (r535_gsp_libos_init).  This tree stages none of that, so what goes here is the FMC image
-     * this kernel copied into its own pages: a region the coprocessor is certainly allowed to read, at an
-     * address that is certainly real, and *not* a LibOS argument record.  That is stated rather than dressed
-     * up because it is the next thing on this path that has to be written, and because a reader of the next
-     * log needs to know that an accepted handover here means "the FMC took the image", not "the RM started
-     * with arguments it understood": its first read of this address will not find a LOGINIT/LoGRM pair in it. */
-    params->gsp_rm.boot_args_offset = fsp_state.image_physical;
+     * argument block here (`args->gspRmParams.bootArgsOffset = gsp->libos.addr'), a 4 KiB record of four
+     * memory-region descriptors - three log buffers and the RM's argument block - each with a page-address
+     * array behind it (r535_gsp_libos_init).  This tree stages that record (stage_libos_args above), because
+     * until it did, this field named the FMC image: a valid address, but not a record of four regions, so the
+     * RM it was supposed to describe had nothing to log to and nothing to read. */
+    stage_libos_args();
+    /* The record when it is staged; otherwise the address this field has carried since the handover was first
+     * built - a region the coprocessor may read, but not a set of four regions - and the panel says so. */
+    params->gsp_rm.boot_args_offset = fsp_state.libos_staged ? fsp_state.libos_phys
+                                                            : fsp_state.image_physical;
 
     fsp_state.wpr_meta_size = (uint32_t)sizeof *meta;
     fsp_state.radix3_phys = tree;
@@ -1025,6 +1111,43 @@ const char *gpu_fsp_flcn_name(uint32_t code)
     return flcn_name(code);
 }
 
+/* The completion test that follows the COT, and it is not a reply.
+ *
+ * This is the correction that the previous builds' logs asked for: the FMC does not answer a handover on the
+ * channel when it succeeds - it boots the resource manager - so a driver that waits for an FSP_RESPONSE reports
+ * the only outcome that matters as silence.  The reference driver (nvkm/subdev/gsp/gh100.c,
+ * gh100_gsp_lockdown_released) polls the coprocessor's own words for four seconds instead, and this is that
+ * test: the falcon's capability word readable and its security-lockdown bit (13) clear means the lockdown was
+ * released and RM is running; a non-zero mailbox pair is the FMC speaking - the boot-arguments address it was
+ * handed is success, anything else is an error code.  A refusal is "not yet" and the poll continues, because
+ * that block is locked until the firmware unlocks it. */
+static int gsp_fmc_settled(void)
+{
+    uint32_t hwcfg2, mbox0, mbox1;
+
+    hwcfg2 = read32(&w_gsp, NV_PGSP_HWCFG2);
+    /* A refusal, an all-ones word and a zero are all "this block has not answered yet": zero is the bit-13 test
+     * read as "released" for a register that never said anything, and on this chip that is exactly what a
+     * locked block returns.  Only a word that is not one of those three is evidence. */
+    if (FSP_REFUSED(hwcfg2) || FSP_NOT_CONTENT(hwcfg2) || hwcfg2 == 0xffffffffu || hwcfg2 == 0) return 0;
+    fsp_state.hwcfg2_after = hwcfg2;
+    fsp_state.hwcfg2_after_valid = 1;
+    fsp_state.lockdown_after = (int)((hwcfg2 >> FSP_HWCFG2_LOCKDOWN_BIT) & 1u);
+
+    mbox0 = read32(&w_gsp, NV_PGSP_MAILBOX0);
+    mbox1 = read32(&w_gsp, NV_PGSP_MAILBOX1);
+    if (!FSP_NOT_CONTENT(mbox0) && !FSP_NOT_CONTENT(mbox1) && mbox0 != 0xffffffffu) {
+        fsp_state.gsp_mailbox0_after = mbox0;
+        fsp_state.gsp_mailbox1_after = mbox1;
+        fsp_state.mailbox_after_valid = 1;
+        if (mbox0 || mbox1) {
+            if ((((uint64_t)mbox1 << 32) | mbox0) != fsp_state.boot_params_phys) fsp_state.mbox_error = 1;
+            return 1;
+        }
+    }
+    return fsp_state.lockdown_after == 0;
+}
+
 static void hand_over_fmc(void)
 {
     uint8_t reply[128];
@@ -1037,25 +1160,42 @@ static void hand_over_fmc(void)
     }
     fsp_state.handover_sent = 1;
     fsp_state.handover.request_bytes = fsp_state.packet_bytes;
-    if (!wait_for(reply_waiting, &fsp_state.handover_polls)) return;
-    if (read_reply(reply, sizeof reply, &fsp_state.handover) != 1) return;
+    /* Four seconds, the reference's budget for this boot, and the same clock the readiness wait used. */
+    fsp_state.settled = wait_for_timed(gsp_fmc_settled, &fsp_state.handover_polls, FSP_WAIT_BOOT_MS,
+                                       &fsp_state.handover_ms_used);
+    /* A reply is still read if the FMC did send one - its error path does - but it is no longer the thing this
+     * wait is for, so its absence is not a failure and its presence does not override the register test. */
+    if (reply_waiting()) (void)read_reply(reply, sizeof reply, &fsp_state.handover);
 
+    /* The after-state is read whatever the poll ended at, because a failed boot is a set of numbers too - and
+     * the flags beside them are what stops a zero or a 0xbadf... from being read as an answer. */
     fsp_state.hwcfg2_after = read32(&w_gsp, NV_PGSP_HWCFG2);
-    fsp_state.boot_scratch_after = read32(&w_therm, NV_THERM_FSP_BOOT_COMPLETE);
-    fsp_state.gsp_mailbox0_after = read32(&w_gsp, NV_PGSP_MAILBOX0);
-    fsp_state.gsp_mailbox1_after = read32(&w_gsp, NV_PGSP_MAILBOX1);
-    if (fsp_state.timer_readable) read_ptimer(&fsp_state.timer_after);
-    /* The reference driver's own completion test, in its own order (gh100_gsp_lockdown_released): a refusal is
-     * "not yet", a non-zero mailbox pair is an error unless it is the address the driver handed the FMC as its
-     * boot arguments, and the lock is bit 13.  There is no boot-args block in this OS, so a mailbox that
-     * answers with anything at all is reported as an answer that cannot be matched rather than as success -
-     * and `gsp_released' below is the bit, never "a register read something". */
-    if (!FSP_REFUSED(fsp_state.hwcfg2_after) && !FSP_NOT_CONTENT(fsp_state.hwcfg2_after) &&
-        fsp_state.hwcfg2_after != 0xffffffffu)
-        fsp_state.lockdown_after = (int)((fsp_state.hwcfg2_after >> FSP_HWCFG2_LOCKDOWN_BIT) & 1u);
-    else
+    fsp_state.hwcfg2_after_valid = !FSP_REFUSED(fsp_state.hwcfg2_after) &&
+                                   !FSP_NOT_CONTENT(fsp_state.hwcfg2_after) &&
+                                   fsp_state.hwcfg2_after != 0xffffffffu && fsp_state.hwcfg2_after != 0;
+    if (!fsp_state.hwcfg2_after_valid)
         fsp_state.lockdown_after = -1;
-    fsp_state.gsp_released = fsp_state.lockdown_after == 0;
+    else
+        fsp_state.lockdown_after = (int)((fsp_state.hwcfg2_after >> FSP_HWCFG2_LOCKDOWN_BIT) & 1u);
+    if (!fsp_state.mailbox_after_valid) {
+        fsp_state.gsp_mailbox0_after = read32(&w_gsp, NV_PGSP_MAILBOX0);
+        fsp_state.gsp_mailbox1_after = read32(&w_gsp, NV_PGSP_MAILBOX1);
+        fsp_state.mailbox_after_valid = !FSP_NOT_CONTENT(fsp_state.gsp_mailbox0_after) &&
+                                        !FSP_NOT_CONTENT(fsp_state.gsp_mailbox1_after) &&
+                                        fsp_state.gsp_mailbox0_after != 0xffffffffu;
+    }
+    fsp_state.boot_scratch_after = read32(&w_therm, NV_THERM_FSP_BOOT_COMPLETE);
+    fsp_state.scratch_after_valid = !FSP_NOT_CONTENT(fsp_state.boot_scratch_after) &&
+                                    fsp_state.boot_scratch_after != 0xffffffffu;
+    fsp_state.queue_tail_after = read32(&w_fsp, NV_PFSP_MSGQ_TAIL);
+    fsp_state.queue_head_after = read32(&w_fsp, NV_PFSP_MSGQ_HEAD);
+    fsp_state.queue_after_valid = !FSP_NOT_CONTENT(fsp_state.queue_tail_after) &&
+                                  !FSP_NOT_CONTENT(fsp_state.queue_head_after) &&
+                                  fsp_state.queue_tail_after != 0xffffffffu;
+    if (fsp_state.timer_readable) read_ptimer(&fsp_state.timer_after);
+    /* `gsp_released' is the bit and only the bit: a word this kernel could not read leaves the lockdown at
+     * "unknown", which is a different fact from "still locked" and is printed as one. */
+    fsp_state.gsp_released = fsp_state.hwcfg2_after_valid && fsp_state.lockdown_after == 0;
     queues(&idle);
     fsp_state.queues_idle_after = idle == 1;
 }

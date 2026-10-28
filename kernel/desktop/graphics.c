@@ -625,30 +625,60 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
     put(w, " (CRC32 0x");
     put_hex(w, (uint32_t)f->image_crc32);
     put(w, ")");
-    if (!f->handover.bytes) {
-        put(w, ", no reply after ");
-        put_number(w, (unsigned)f->handover_polls);
-        put(w, " looks");
+    if (!f->libos_staged) {
+        put(w, ", boot args point at the FMC image: no LibOS record staged.\n");
+        return;
+    }
+    put(w, ", boot args 0x");
+    put_hex(w, (uint32_t)f->boot_params_phys);
+    put(w, ": LOGINIT/LOGINTR/LOGRM 64 KiB each, RMARGS 4 KiB at 0x");
+    put_hex(w, (uint32_t)f->libos_phys);
+    put(w, ".\n  boot: ");
+    /* The outcome, then the registers it was read from - because the FMC reports success by going quiet and
+     * releasing the lockdown, not by answering, and a log that only says "no reply" reads like a failure. */
+    if (f->settled) {
+        put(w, "settled in ");
+        put_number(w, (unsigned)f->handover_ms_used);
+        put(w, " ms, ");
+        if (f->mbox_error) {
+            put(w, "FMC mailbox error 0x");
+            put_hex(w, (uint32_t)f->gsp_mailbox0_after);
+            put(w, "/0x");
+            put_hex(w, (uint32_t)f->gsp_mailbox1_after);
+        } else if ((f->gsp_mailbox0_after || f->gsp_mailbox1_after) && f->mailbox_after_valid) {
+            put(w, "mailbox names the boot args, lockdown released");
+        } else {
+            put(w, "lockdown bit 13 clear");
+        }
     } else {
-        put(w, ", answered in ");
+        put(w, "no answer in ");
+        put_number(w, (unsigned)f->handover_ms_used);
+        put(w, " of 4000 ms");
+    }
+    if (f->handover.bytes) {
         fmt_u32(number, f->handover.bytes);
+        put(w, "; reply ");
         put(w, number);
-        put(w, " B, error 0x");
+        put(w, " B error 0x");
         put_hex(w, f->handover.error);
         {
             const char *name = gpu_fsp_flcn_name(f->handover.error);
             if (name) { put(w, " ("); put(w, name); put(w, ")"); }
         }
     }
-    put(w, ". hwcfg2 0x");
+    /* The registers as they read, and the verdict word beside each: a zero and a 0xbadf... are printed rather
+     * than hidden, and neither is called an answer. */
+    put(w, ", hwcfg2 0x");
     put_hex(w, f->hwcfg2);
     put(w, " -> 0x");
     put_hex(w, f->hwcfg2_after);
-    put(w, f->gsp_released ? " (lock released)" : " (still locked)");
+    put(w, !f->hwcfg2_after_valid ? " (no answer)" : f->gsp_released ? " (lock released)"
+                                                                   : " (still locked)");
     put(w, ", mailboxes 0x");
-    put_hex(w, f->gsp_mailbox0_after);
+    put_hex(w, (uint32_t)f->gsp_mailbox0_after);
     put(w, "/0x");
-    put_hex(w, f->gsp_mailbox1_after);
+    put_hex(w, (uint32_t)f->gsp_mailbox1_after);
+    if (f->mbox_error) put(w, " (FMC error)");
     put(w, ", scratch 0x");
     put_hex(w, f->boot_scratch_after);
     put(w, ", queue ");

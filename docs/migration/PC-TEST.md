@@ -382,14 +382,16 @@ a file above about a megabyte with empty content and exit status 0 - so it now a
 object, and passes bytes.  `python3 tools/gsp-firmware.py --notice` prints the provenance
 sentence, and the image bytes are the vendor's, unmodified, with only the container around them built here.
 
-What this does not do is worth stating before a flash: a genuine FMC image makes the handover real, and it does
-not give the coprocessor the vidmem WPR2 and FRTS region or the boot arguments, so the card still does not
-render.  What changes is what the next measurement can be - the falcon's own error word and the FSP's answer to
+What this does not do is worth stating before a flash: a genuine FMC image makes the handover real, and the
+boot arguments are now a real LibOS record (three 64 KiB logs and a 4 KiB RM argument block) instead of the FMC
+image's own address, but the message queue the RM speaks over is still empty, so the card may boot RM and still
+does not render.  The falcon's lockdown bit and mailbox pair are what the panel now reports as the boot's
+outcome.  What changes is what the next measurement can be - the falcon's own error word and the FSP's answer to
 a real container, instead of a refusal to accept a stub.
 
-`GSPFMC.BIN` is the one this build assembles a handover from; `GSP.BIN` and `GSPBL.BIN` are what the resource
-manager's own boot arguments would need, and those are not implemented here yet, so staging all three changes
-what the panel can *say* before it changes what the card does.  Say so rather than let `fw 3/5` imply more -
+`GSPFMC.BIN` is the one this build assembles a handover from; `GSP.BIN` and `GSPBL.BIN` are the booter pair the
+other path would need, and the resource manager's arguments are built here rather than read from them - so
+staging all three changes what the panel can *say* before it changes what the card does.  Say so rather than let `fw 3/5` imply more -
 and equally, do not read `fw 3/5` as a missing file: on a chip with an FSP, three of five is the whole set
 (`complete for this machine`), and the two absent names are the booter pair that belongs to the other path.
 

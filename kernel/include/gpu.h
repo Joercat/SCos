@@ -314,6 +314,23 @@ struct gpu_fsp_state {
     uint32_t hwcfg2_after, boot_scratch_after;                  /* re-read after the attempt: the two words
                                                                    * that change if the FSP took the image */
     int gsp_released, queues_idle_after;
+    /* Whether the FSP booted the resource manager, decided the way the driver that does it decides: the falcon
+     * mailbox pair the FMC writes its boot-arguments address - or an error code - into, and the lockdown bit of
+     * the coprocessor's capability word, polled for four seconds.  It is NOT a reply on the channel: the
+     * reference driver never waits for one, and a build that did could call a boot that worked a silence.  The
+     * pair and the word are therefore recorded with a flag each, because a word this kernel never read is not a
+     * zero and must not be printed as one. */
+    int settled;                              /* 1 = the poll reached an answer, 0 = it timed out */
+    uint64_t handover_ms_used;                /* how long that poll took, in milliseconds */
+    int hwcfg2_after_valid, mailbox_after_valid, scratch_after_valid, queue_after_valid;
+    int mbox_error;                           /* a non-zero mailbox pair that is not the boot-args address */
+    uint32_t queue_tail_after, queue_head_after;   /* the reply queue after the doorbell: proves the store */
+    /* The LibOS argument record the resource manager is told to read: four descriptors, three 64 KiB log
+     * buffers with an address array inside each, and the RM's own argument block.  `libos_declined' is why
+     * there is none, and it is the difference between a handover that can boot an RM and one that cannot. */
+    uint64_t libos_phys, libos_log_phys, libos_rmargs_phys;
+    unsigned libos_staged, libos_declined;    /* 1 no pages */
+    uint32_t libos_log_bytes;
     /* What the reference driver's own per-chip FSP table decides, read from the chip's architecture field
      * rather than assumed: nouveau's `nvkm_fsp_func.cot' in nvkm/subdev/fsp/{gh100,gb100,gb202}.c, the driver
      * that boots this family today.  The sizes are not interchangeable - Hopper's public key and signature are

@@ -149,7 +149,9 @@ def build_fmc_image(hash_bytes=32, publickey_bytes=4, signature_bytes=256, image
     def shdr(name_off=0, type_=0, flags=0, offset=0, size=0, info=0):
         return struct.pack('<IIIIIIIIII', name_off, type_, flags, 0, offset, size, 0, info, 0, 0)
 
-    table = [shdr(), shdr(1, strtab_type, 0x20, strings_at, len(names))]
+    # The string table's own name is the empty string at offset 0: naming it 1 pointed it at 'hash', which
+    # gave the container two sections called hash and made every reader disagree about which one it meant.
+    table = [shdr(), shdr(0, strtab_type, 0x20, strings_at, len(names))]
     for name, offset, size, blob in blobs:
         table.append(shdr(names.index(b'\0' + name.encode()) + 1, 1, section_flags, offset, size,
                           zlib.crc32(blob) if with_crc else 0))

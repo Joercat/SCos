@@ -54,11 +54,14 @@ def test():
       assert 'more byte(s) than this 1024-byte buffer' in small,small[-600:]
       assert 'so it ends here' in small and small.rstrip().endswith('scrollback.'),small[-600:]
       assert g.value('notice_count')>=1
-      g.call('paint_all');initial=crop(image(g,'warning'),g.value('screen_w')-330,10,320,108,g.value('screen_w'))
+      # The band compared is the notification's title row and first line, not a fixed 108 pixels:
+      # a notice is as tall as its text, so a crop that reached past a short one compared the gap
+      # between two notices - wallpaper in one frame, the modal behind it in the other.
+      g.call('paint_all');initial=crop(image(g,'warning'),g.value('screen_w')-330,10,320,48,g.value('screen_w'))
       # A notification must overlay a modal, and dismiss without resolving it.
       g.call('wm_dialog',stringarg(g,'Modal',0),stringarg(g,'Do not resolve',256),0,0,0)
       modal=g.call('wm_win_at',0);g.call('wm_move_window',modal,g.value('screen_w')-330,10);g.call('paint_all')
-      assert crop(image(g,'warning-over-modal'),g.value('screen_w')-330,10,320,108,g.value('screen_w'))==initial
+      assert crop(image(g,'warning-over-modal'),g.value('screen_w')-330,10,320,48,g.value('screen_w'))==initial
       g.call('wm_notify',stringarg(g,'Overlay'),stringarg(g,'Above the modal',256),1);g.call('paint_all')
       before=g.call('wm_win_count');pointer(g,g.value('screen_w')-30,10+(g.value('notice_count')-1)*114+10)
       event(g,2,button=1,down=1,buttons=1);assert g.call('wm_win_count')==before and g.call('wm_dialog_active')

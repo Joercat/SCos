@@ -743,8 +743,11 @@ static void build_text(void)
         put_text(&b, "; window ");
         put_text(&b, "class 0x");
         put_hex(&b, inv.usermode_class, 4);
+        /* Only the one class id the register file publishes is claimed: a card that answers something else is
+         * reported as answering something else, because the alternative - deciding which generation a class
+         * number belongs to from memory - is how 0xc461 came to be printed beside a 0x1100 read. */
         put_text(&b, inv.usermode_class == NV_USERMODE_CLASS_ID_VOLTA_TURING ? "=published"
-                                                                          : " (Volta/Turing page, not Blackwell)");
+                                                                          : " (not the 0xc461 reset value)");
         if (inv.timer_ticking) {
             u64 delta = inv.timer_end - inv.timer_start;
             u32 us = (u32)(delta / 1000u);
