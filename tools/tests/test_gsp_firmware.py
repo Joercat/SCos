@@ -644,7 +644,7 @@ def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
             assert 'FSP: not asked: this display function is vendor 0x00001013' in panel, 'the panel never names whose card this is: ' + panel[-2400:]
             
             assert ('fmc: ELF32 %d B, 6 sections, header exact, sections legal, '
-                    '0 sh_info/CRC32 packaging mismatches' % len(fmc)) in panel, panel[-1800:]
+                    '0 sh_info/CRC32 mismatches (packaging)' % len(fmc)) in panel, panel[-1800:]
             # And the four numbers the verify command is given, in the same clause, because a staged set that
             # could not be described to the FSP has to be distinguishable from one that could.
             assert 'image 512 B at 0x00000268, hash 32, publickey 4, signature 256 B' in panel, panel[-1800:]

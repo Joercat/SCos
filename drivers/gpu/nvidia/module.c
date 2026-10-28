@@ -769,8 +769,7 @@ static void build_text(void)
         put_hex(&b, inv.top_cfg1, 8);
         put_text(&b, " (v0x");
         put_hex(&b, NV_PTOP_CFG_VERSION(inv.top_cfg1), 1);
-        put_text(&b, "); neither block reports the DEVICE_INFO2 format, and the Turing and Ampere arrays "
-                     "at those addresses named no engine either");
+        put_text(&b, ") no DEVICE_INFO2 format");
     } else {
         static const u32 base_of[4] = { NV_PTOP_DEVICE_INFO_AMPERE, NV_PTOP_DEVICE_INFO_ROWS1,
                                         NV_PTOP_DEVICE_INFO_TURING, NV_PTOP_DEVICE_INFO_AMPERE };
@@ -849,7 +848,7 @@ static void build_text(void)
      * been careful about from the first line. */
     put_text(&b, "; GSP ");
     if (!inv.gsp_reachable) {
-        put_text(&b, "block at 0x110000 unreachable (engine reads 0x");
+        put_text(&b, "0x110000 unreachable (reads 0x");
         put_hex(&b, inv.gsp_engine, 8);
         put_text(&b, ")");
     } else if (inv.gsp_locked) {
@@ -859,7 +858,7 @@ static void build_text(void)
         /* Compressed on purpose, and the log line below carries the explanation: the panel has to hold the
          * whole report for a card whose identity line is longer than any the fixture seeds, and a clipped
          * tail would cut the clauses after this one. */
-        put_text(&b, "block 0x110000 locked (0x");
+        put_text(&b, "0x110000 locked (0x");
         put_hex(&b, inv.gsp_engine, 8);
         put_text(&b, ")");
     } else {
@@ -890,12 +889,12 @@ static void build_text(void)
         put_dec(&b, inv.pri_shift);
         put_text(&b, " = 0x110000");
     } else if (inv.top_gsp_found) {
-        put_text(&b, "; no base unit: field 0x");
+        put_text(&b, "; no PRI base from field 0x");
         put_hex(&b, inv.top_gsp_field, 6);
-        put_text(&b, " reaches no 0x110000");
+        put_text(&b, "");
     }
     if (inv.ce_attempted) {
-        put_text(&b, "; the first LCE's block at 0x");
+        put_text(&b, "; LCE 0x");
         put_hex(&b, inv.ce_base, 6);
         if (inv.ce_locked) put_text(&b, " refused the same way");
         else if (inv.ce_dead) put_text(&b, " answers nothing");
@@ -911,14 +910,14 @@ static void build_text(void)
     if (inv.fsp_locked) {
         put_text(&b, "; FSP scratch 0x8f0320 refused too");
     } else if (inv.fsp_replies) {
-        put_text(&b, "; the FSP scratch at 0x8f0320 answers 0x");
+        put_text(&b, "; FSP scratch 0x8f0320 = 0x");
         for (unsigned i = 0u; i < NV_PFSP_SCRATCH_GROUP_2_WORDS; i++) {
             if (i) put_text(&b, "/0x");
             put_hex(&b, inv.fsp_scratch[i], 8);
         }
-        put_text(&b, ": zeros (decoupled access, not debug words)");
+        put_text(&b, " (decoupled read)");
     } else if (inv.fsp_unreachable) {
-        put_text(&b, "; the FSP page at 0x8f0000 could not be mapped, so nothing is claimed about it");
+        put_text(&b, "; FSP page 0x8f0000 unmapped");
     }
     /* The frame buffer's size, in the description and not only in the log: it is the number a GSP
      * reservation is placed back from, so a reader deciding whether this card can be booted needs it in

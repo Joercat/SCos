@@ -581,6 +581,48 @@ static void put_line(struct writer *w, const char *text)
     put(w, "\n");
 }
 
+/* A family record's feature string is "name:what; name:absent; ..." and the panel prints the half that
+ * answers, then a count.  Both halves are in the table; only one of them is news to the reader. */
+static void put_entry_points(struct writer *w, const char *features)
+{
+    unsigned present = 0, absent = 0;
+    const char *at = features;
+
+    if (!features) { put(w, "none recorded"); return; }
+    while (*at) {
+        const char *end = at;
+        while (*end && !(*end == ';' )) end++;
+        {
+            const char *colon = at;
+            while (colon < end && *colon != ':') colon++;
+            int is_absent = (size_t)(end - colon) >= 7 && colon < end &&
+                            colon[1] == 'a' && colon[2] == 'b' && colon[3] == 's' &&
+                            colon[4] == 'e' && colon[5] == 'n' && colon[6] == 't';
+            if (is_absent) absent++;
+            else {
+                if (present++) put(w, "; ");
+                {
+                    char token[96];
+                    size_t n = 0;
+                    for (const char *c = at; c < end && n + 1u < sizeof token; c++) token[n++] = *c;
+                    token[n] = 0;
+                    put(w, token);
+                }
+            }
+        }
+        at = *end ? end + 1 : end;
+        while (*at == ' ') at++;
+    }
+    if (!present) put(w, "none implemented");
+    if (absent) {
+        char number[16];
+        put(w, " (+");
+        fmt_u32(number, absent);
+        put(w, number);
+        put(w, " absent)");
+    }
+}
+
 void gpu_report(char *out, size_t capacity)
 {
     if (!out || capacity == 0) return;
@@ -588,7 +630,7 @@ void gpu_report(char *out, size_t capacity)
     struct writer w = {.start = out, .at = out, .left = room, .dropped = 0};
     char number[24];
 
-    put_line(&w, "GPU detection (exact matching; no BAR sizing, no modeset)");
+    put_line(&w, "GPU detection");
     put(&w, "families ");
     put_number(&w, (unsigned)gpu_match_family_count());
     put(&w, ", id rules ");
@@ -650,12 +692,15 @@ void gpu_report(char *out, size_t capacity)
         put(&w, g->match->source);
         put_line(&w, "");
         if (g->match->note) {
-            put(&w, "  table note: ");
+            put(&w, "  table: ");
             put(&w, g->match->note);
             put_line(&w, "");
         }
+        /* The entry points that exist, then how many do not.  The table's own string names all nine in
+         * both directions, which is provenance, and a person reading a panel is not served by eight
+         * repetitions of "absent": the list of what answers is the fact, the count is the rest. */
         put(&w, "  entry points: ");
-        put(&w, g->match->features);
+        put_entry_points(&w, g->match->features);
         put_line(&w, "");
         put(&w, "  device registers: ");
         switch (g->reg_state) {
@@ -706,7 +751,7 @@ void gpu_report(char *out, size_t capacity)
             put_line(&w, "BAR0 outside the mapping capacity");
             break;
         case 4:
-            put_line(&w, "not read: memory decoding disabled (detection writes no config space)");
+            put_line(&w, "not read: memory decoding disabled");
             break;
         case 5:
             put_line(&w, "not read: BAR0 is the scanout aperture the kernel already maps");
@@ -718,22 +763,22 @@ void gpu_report(char *out, size_t capacity)
             if (g->module_ops)
                 put_line(&w, "not read by the kernel: the bound module reads it (counts above)");
             else
-                put_line(&w, "not read (no module, or no BAR0 reported)");
+                put_line(&w, "not read: no module and no BAR0");
             break;
         }
         const struct gpu_driver *port = gpu_port_for(g->match->family);
-        put(&w, "  SCos port: ");
+        put(&w, "  module: ");
         if (g->module_ops && g->module_ops->fill)
-            put_line(&w, "module loaded, engine verified by device readback");
+            put_line(&w, "engine verified by device readback");
         else if (g->module_ops)
-            put_line(&w, "module bound, description only - no engine operations, so drawing is unchanged");
+            put_line(&w, "bound, describes the chip, offers no engine operations");
         else
-            put_line(&w, port && port->state != GPU_PORT_NONE ? "bound" : "not ported yet");
+            put_line(&w, port && port->state != GPU_PORT_NONE ? "driver in tree, none bound" : "not ported");
         /* The gap text says what was missing before a driver existed.  Once a module is bound for this
          * function it would read as a contradiction, so it is left to the families that really are
          * still waiting. */
         if (port && port->gap && !g->module_ops) {
-            put(&w, "  before GPU work is possible: ");
+            put(&w, "  gap: ");
             put(&w, port->gap);
             put_line(&w, "");
         }

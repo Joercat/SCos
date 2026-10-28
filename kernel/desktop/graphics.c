@@ -158,7 +158,7 @@ static void put_firmware_image(struct writer *w, const struct gpu_firmware_state
     if (!fw) return;
     if (!fw->parsed) {
         if (fw->staged)
-            put(w, "GSP firmware image: nothing kept in memory, so nothing was read out of the files.\n");
+            put(w, "GSP firmware image: nothing held in memory.\n");
         return;
     }
     for (unsigned i = 0; i < GPU_FIRMWARE_ROLES; i++) {
@@ -217,7 +217,7 @@ static void put_firmware_image(struct writer *w, const struct gpu_firmware_state
             fmt_u32(number, image->crc_failures);
             put(w, ", ");
             put(w, number);
-            put(w, " sh_info/CRC32 packaging mismatches");
+            put(w, " sh_info/CRC32 mismatches (packaging)");
             if (image->fmc_named) {
                 put(w, "; image ");
                 fmt_u32(number, image->image_bytes);
@@ -242,7 +242,7 @@ static void put_firmware_image(struct writer *w, const struct gpu_firmware_state
         fmt_u32(number, absent);
         put(w, "; ");
         put(w, number);
-        put(w, " not on the volume");
+        put(w, " absent");
     }
     if (dropped) {
         fmt_u32(number, dropped);
@@ -334,7 +334,7 @@ static void put_fsp_mailbox(struct writer *w, const struct gpu_fsp_state *f)
     else {
         put(w, "differs from the packet at dword ");
         put_number(w, f->send_mismatch);
-        put(w, " (ring-anyway: this window does not read back what it takes)");
+        put(w, " (reported, not obeyed: the doorbell went out anyway)");
     }
     put(w, ". fw version ");
     put_number(w, f->ucode_version & 0x7ffu);
@@ -842,11 +842,9 @@ void graphics_report(char *out, size_t capacity)
                 if (ms && ms->present) {
                     put(&w, " - the driver module ");
                     put(&w, ms->name);
-                    put(&w, " reads this chip itself and quotes what it found above, so the registers were "
-                             "read; they were just not read by the code that draws this panel");
+                    put(&w, " reads this chip itself (counts above)");
                 } else
-                    put(&w, " (a driver module is staged for this function, but it is not resident, so "
-                            "nobody has read it)");
+                    put(&w, " (module staged, not resident: nothing read)");
                 put(&w, "\n");
             } else
                 put(&w, "none (no BAR0 the kernel could read, and the store staged no module)\n");
@@ -871,10 +869,9 @@ void graphics_report(char *out, size_t capacity)
         gpu_report(detail, sizeof detail);
         put(&w, detail);
     }
-    put(&w, "Detection is not driver support: no BAR sizing, GPU reset or modeset was "
-            "performed (config writes during detection: ");
+    put(&w, "config writes during detection: ");
     put_number(&w, (unsigned)gpu_config_writes_during_detect());
-    put(&w, ").\n");
+    put(&w, "; no BAR sizing, no modeset, no GPU reset\n");
     /* Kept in the report for the same reason the loader keeps two tables: one number is "a driver in
      * this tree binds this id", the other is "we know what this chip is called".  Collapsing them into
      * one big rule count would let a name read like support. */

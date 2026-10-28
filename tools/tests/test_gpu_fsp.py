@@ -170,7 +170,7 @@ def test_the_panel_says_what_was_asked_and_what_was_not():
                    ', lock 0x', 'bit13=', 'fw version ', 'hwcfg2 0x1100f4 = 0x',
                    # And the read-back is reported without being obeyed, which is what a real GB207 taught
                    # this path: the mismatch is named at its dword and the doorbell goes out anyway.
-                   'read back: ', 'ring-anyway: this window does not read back what it takes',
+                   'read back: ', 'reported, not obeyed: the doorbell went out anyway',
                    'no door into the queue', 'fw version ', 'clock 0x9400 '):
         assert needle in panel, 'the panel no longer says: %s' % needle
     # The tail is printed whole or not at all, and the reader is told where the rest is.  This is the one

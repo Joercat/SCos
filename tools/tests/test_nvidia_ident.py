@@ -288,7 +288,7 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
                         'a Device access line that says only "none" hides who read the chip: ' + l
             g.call('gpu_report', g.scratch, 4096)
             report = g.string(g.scratch, 4096)
-            assert 'SCos port: module bound, description only' in report, report[-1600:]
+            assert 'module: bound, describes the chip' in report, report[-1600:]
             assert 'render path: CPU compositor' in report, report[-1600:]
             assert 'pixels painted: 0 by the GPU' in report, report[-1600:]
             assert 'link:' in report, 'every device line states the negotiated link, or says there is none'

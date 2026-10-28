@@ -57,23 +57,14 @@ static void gpu_boot_notice(void)
         const struct gpu_firmware_state *fw = gpu_firmware_state();
         if (fw && fw->staged)
             wm_notify("GSP firmware read from the boot disk",
-                      fw->complete ?
-                          "The three images an FSP part boots through - the resource manager, the FMC and the "
-                          "bootloader - are on the volume, and the one carrying the payload holds the sections "
-                          "that loader reads. No image has been written to the card: nothing here hands "
-                          "firmware to the coprocessor yet, so what changed is what the boot stub could "
-                          "check. The booter pair is the other path, for a part without an FSP."
-                        : "Some of the images are on the volume, which is enough to be read and checked and "
-                          "not enough to be a complete set for the path this card boots through. Run graphics "
-                          "in Terminal for which roles the disk is missing and what each staged file turned "
-                          "out to be.", 0);
+                      fw->complete ? "3 of 5 staged, complete for this card. Nothing has been written to "
+                                     "the card yet: run graphics for what was asked of it."
+                                   : "Staged but incomplete. Run graphics for which roles are missing.", 0);
     }
     if (gpu_engine_drives_output()) {
         wm_notify("GPU 2D engine bound",
-                  ms && ms->bound ? "Driver module loaded from disk and verified by readback; the "
-                  "flat regions of every damaged rectangle are painted by the GPU, and only the textured "
-                  "parts of the screen are copied by the CPU."
-                  : "Built-in port active; flat output regions are painted by the GPU.", 0);
+                  ms && ms->bound ? "Module verified by readback; flat regions by the GPU, textured by the CPU."
+                                  : "Built-in port; flat regions by the GPU.", 0);
         return;
     }
     if (gpu_engine_available()) {

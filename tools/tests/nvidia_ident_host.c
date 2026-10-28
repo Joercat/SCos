@@ -504,7 +504,7 @@ int main(void)
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
     check(verdict == 0 && has(text, "engine table not decoded: CFG 0x224fc=0x00000000 (v0x0), "
-                               "0x324fc=0x00000000 (v0x0)"),
+                               "0x324fc=0x00000000 (v0x0) no DEVICE_INFO2 format"),
           "a table that names no known engine is reported as no answer, with the two blocks' self-report "
           "quoted, so \"nothing was found\" can be told apart from \"the chip says there is nothing there\"");
     check(reads_served > 0 && stores == 0, "and the refusal cost no store");
@@ -631,9 +631,9 @@ int main(void)
     check(reads_served == 33,
           "two boot-register reads, the class, six clock reads, one CFG word per block, the twelve rows the "
           "chip said exist and four scratch words: nothing is read past the end of the table it decoded");
-    check(has(text, "FSP scratch at 0x8f0320 answers 0x00000000/0x00000000/0x00000000/0x00000000"),
+    check(has(text, "FSP scratch 0x8f0320 = 0x00000000/0x00000000/0x00000000/0x00000000"),
           "a block that answers with its published initial values is reported as answering, not as free");
-    check(has(text, "zeros (decoupled access, not debug words)"),
+    check(has(text, " (decoupled read)"),
           "and the report says out loud that zeros from that region are the decoupler answering, not content "
           "and not silence");
     check(!has(text, "base unit"), "no engine address is derived when the table names no GSP entry to "
@@ -731,9 +731,9 @@ int main(void)
     check(has(text, "window up but clock still") &&
           !has(text, "would not fit this module's own buffer"),
           "and the widest case carries the clause that clipped a real card, with nothing dropped from it");
-    check(has(text, "the first LCE's block at 0x104000 answers 0x12345678/0x9abcdef0") &&
-          has(text, "FSP scratch at 0x8f0320 answers 0xf00dbabe") &&
-          has(text, "GSP block 0x110000 locked (0x"),
+    check(has(text, "LCE 0x104000 answers 0x12345678/0x9abcdef0") &&
+          has(text, "FSP scratch 0x8f0320 = 0xf00dbabe") &&
+          has(text, "GSP 0x110000 locked (0x"),
           "and every clause that has to be there for the measurement to mean anything is, in its longest form");
     check(has(text, "LCE 3/VIC 1/GFX 2/ENC 2/DEC 1/SEC 1/GSP 2/JPG 1 of 17 devices"),
           "and every device the seeded table named is tallied, including the codec and bus blocks");
@@ -773,7 +773,7 @@ int main(void)
     umode_class = 0xffffffffu;
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(has(text, "GSP block at 0x110000 unreachable (engine reads 0xffffffff)"),
+    check(has(text, "GSP 0x110000 unreachable (reads 0xffffffff)"),
           "a block that answers nothing is reported as unreachable, and an absent register file is not "
           "silently read as a coprocessor sitting in reset at address zero");
     check(any_log("the block does not answer, so there is nothing to hand work to yet"),
@@ -830,14 +830,14 @@ int main(void)
     ce_block[0] = ce_block[1] = 0xbadf4100u;
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(verdict == 0 && has(text, "GSP block 0x110000 locked (0xbadf4100"),
+    check(verdict == 0 && has(text, "GSP 0x110000 locked (0xbadf4100"),
           "a reply the chip means as a refusal is reported as a refusal");
     check(!has(text, "reset status") && !has(text, "out of reset") && !has(text, "in reset"),
           "and no field is decoded out of it - the state the last build invented from this same dword");
     check(has(text, "base unit 0x001100 x 2^8 = 0x110000"),
           "the unit of an undocumented 18-bit field is taken from the one entry whose block is published, "
           "instead of being picked because it looked plausible");
-    check(has(text, "the first LCE's block at 0x104000 refused the same way"),
+    check(has(text, "LCE 0x104000 refused the same way"),
           "and the engine a submission would be built for is measured to be shut as well, not assumed to be");
     check(has(text, "FSP scratch 0x8f0320 refused too"),
           "the microcontroller whose release the lock waits for does not answer either, which is the fact "
@@ -873,7 +873,7 @@ int main(void)
     ce_block[1] = 0x00000001u;
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(verdict == 0 && has(text, "the first LCE's block at 0x104000 answers 0x00000300/0x00000001"),
+    check(verdict == 0 && has(text, "LCE 0x104000 answers 0x00000300/0x00000001"),
           "a block that replies is reported as replying, at the address the chip's own table named");
     check(has(text, ": content"),
           "and the claim stops at \"this is a reply and not an error code\": gb100 publishes no register "
@@ -905,7 +905,7 @@ int main(void)
           "and the block behind it is still reported as refusing, not as answering badly");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
-    check(has(text, "GSP block 0x110000 locked (0xbadf4100"),
+    check(has(text, "GSP 0x110000 locked (0xbadf4100"),
           "and the coprocessor's refusal is still reported next to it, unhedged");
     check(!has(text, "is locked the same way"),
           "the engine block is not swept into the coprocessor's answer by a shared prefix");
@@ -926,7 +926,7 @@ int main(void)
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
     check(verdict == 0 &&
-          has(text, "no base unit: field 0x001040 reaches no 0x110000"),
+          has(text, "no PRI base from field 0x001040"),
           "a table whose entry disagrees with the published base is reported as disagreement");
     check(ce_block_reads == 0,
           "and no read is issued at the address the unconfirmed scaling would have implied: an unproven "
@@ -949,7 +949,7 @@ int main(void)
     for (unsigned i = 0; i < 5u; i++) gsp_regs[i] = 0xbadf4100u;
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(verdict == 0 && has(text, "the FSP page at 0x8f0000 could not be mapped, so nothing is claimed"),
+    check(verdict == 0 && has(text, "FSP page 0x8f0000 unmapped"),
           "an unmappable page is reported as this driver's bound");
     check(!has(text, "FSP scratch at 0x8f0320"),
           "and never as a block that answered nothing, which is a different sentence about a different thing");

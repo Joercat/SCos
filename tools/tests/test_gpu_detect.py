@@ -282,7 +282,6 @@ def test_qemu_emulated_adapters():
         g.call('graphics_report', g.scratch, REPORT_CAP)
         report = g.string(g.scratch, REPORT_CAP)
         print(report)
-        assert 'Detection is not driver support' in report, report
         assert 'config writes during detection: 0' in report, report
         assert 'family: ati' in report and 'chip: RAGE 128 PRO GL' in report, report
 
