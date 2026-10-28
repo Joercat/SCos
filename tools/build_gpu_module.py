@@ -34,7 +34,20 @@ import os
 import struct
 import sys
 
-ABI_VERSION = 1
+def _abi_version():
+    """Read the ABI number from the header the modules are compiled against, rather than restating it:
+    a packer that carried its own constant kept writing modules the kernel refused, and the refusal
+    ("ABI does not match this kernel") looked like a module bug rather than a stale number here."""
+    import re
+    header = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'kernel', 'include', 'gpu_abi.h')
+    with open(header, encoding='utf-8') as handle:
+        found = re.search(r'#define\s+SCOS_GPU_ABI_VERSION\s+(\d+)u', handle.read())
+    if not found:
+        raise SystemExit('build_gpu_module: no SCOS_GPU_ABI_VERSION in kernel/include/gpu_abi.h')
+    return int(found.group(1))
+
+
+ABI_VERSION = _abi_version()
 MAGIC = 0x4D504753  # "SGPM"
 HEADER_SIZE = 192
 FAMILY_NAME = 16

@@ -492,11 +492,23 @@ def min_size_of(directory, firmware_dir=None):
     d = Path(directory)
     bytes_ = len((d / 'BOOTX64.EFI').read_bytes()) + len((d / 'kernel.elf').read_bytes()) + 4
     module_dir = d / 'gpu'
-    for path in sorted(module_dir.glob('*.mod')) if module_dir.is_dir() else []:
+    modules = sorted(module_dir.glob('*.mod')) if module_dir.is_dir() else []
+    for path in modules:
         bytes_ += len(path.read_bytes())
-    for _esp, blob in (firmware_blobs(firmware_dir, sub=None) if firmware_dir else firmware_blobs(d)):
+    # The driver index (8 bytes of counts, 16 per module) and the build record are on the volume too.  They
+    # were missing from this sum, and the result was an answer one cluster short of what the packer then
+    # asked for - hidden for as long as the total rounded up to the same whole MiB, and a refusal the moment
+    # it did not.
+    bytes_ += 8 + 16 * len(modules)
+    record = d / 'BUILD.TXT'
+    if record.exists():
+        bytes_ += len(record.read_bytes())
+    firmware = firmware_blobs(firmware_dir, sub=None) if firmware_dir else firmware_blobs(d)
+    for _esp, blob in firmware:
         bytes_ += len(blob)
-    return min_image_bytes(bytes_)
+    # One cluster of slack per file: allocate() rounds every file up to a whole cluster, and the directory
+    # entries that name them take a few more.
+    return min_image_bytes(bytes_ + 512 * (4 + len(modules) + len(firmware)))
 
 
 def cli():

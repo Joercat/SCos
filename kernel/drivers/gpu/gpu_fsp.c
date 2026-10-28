@@ -477,15 +477,13 @@ static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type
     /* The packet goes in through windows of at most 256 bytes, each one armed to the offset it starts at. */
     emem_write(0, packet, total);
     fsp_state.send_bursts = (total + FSP_EMEM_BURST_BYTES - 1u) / FSP_EMEM_BURST_BYTES;
+    fsp_state.packet_bytes = total;
+    fsp_state.doorbell = padded + 4u;        /* the tail names the last dword written, not the one after it */
 
-    /* And then comes back out again, before anything is rung.  This is the check the offset counter was
-     * pretending to be: the channel is read through its own windows and compared with what was just written,
-     * so "the packet is in the channel" is a measurement rather than an inference from a register that turned
-     * out to count something else.  It happens *before* the doorbell because the FSP's reply is written into
-     * this same channel from offset 0, and a read-back racing that write would report the reply as a damaged
-     * request.  A mismatch is not sent: a card handed a packet that is not the one the host thinks it wrote
-     * can only answer about the wrong thing. */
-    fsp_state.send_readback = 1;
+    /* And then the channel is read back and compared with what was written.  This is the check the offset
+     * counter was pretending to be, and it happens *before* the doorbell because the FSP's reply is written
+     * into this same channel from offset 0: a read-back after the ring could compare the answer with the
+     * request and call the answer damage. */
     fsp_state.send_mismatch = ~0u;
     for (at = 0; at < total; at += FSP_EMEM_BURST_BYTES) {
         uint8_t back[FSP_EMEM_BURST_BYTES];
@@ -495,14 +493,16 @@ static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type
             if (fsp_state.send_mismatch == ~0u && memcmp(back + i, packet + at + i, 4) != 0)
                 fsp_state.send_mismatch = (at + i) / 4u;
     }
-    if (fsp_state.send_mismatch != ~0u) {
-        fsp_state.send_readback = 0;
-        fsp_state.send_blocked = 3;
-        return 0;
-    }
+    fsp_state.send_readback = fsp_state.send_mismatch == ~0u;   /* 1 only when every dword came back */
+    /* Reported, not obeyed - the same rule the counter it replaced was given, and for a reason this time
+     * that was measured: on the GB207 the channel's data window answers reads with something that is not
+     * what was written to it *at every offset including the first*, while the packet still arrives and the
+     * FSP still consumes it.  A veto here would mean never ringing the doorbell on a card whose writes work,
+     * which is strictly less known than a reply - the mistake the old `send_blocked = 3' made for exactly
+     * one build.  So a mismatch is printed with the dword it starts at, the doorbell is rung anyway, and the
+     * two facts sit next to each other where a reader can tell "the write is not readable back" from "the
+     * write did not land". */
 
-    fsp_state.packet_bytes = total;
-    fsp_state.doorbell = padded + 4u;        /* the tail names the last dword written, not the one after it */
     write32(&w_fsp, NV_PFSP_QUEUE_TAIL, fsp_state.doorbell);
     write32(&w_fsp, NV_PFSP_QUEUE_HEAD, 0);
     return 1;

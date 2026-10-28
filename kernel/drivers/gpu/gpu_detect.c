@@ -588,10 +588,10 @@ void gpu_report(char *out, size_t capacity)
     struct writer w = {.start = out, .at = out, .left = room, .dropped = 0};
     char number[24];
 
-    put_line(&w, "GPU detection (exact device matching; no BAR sizing, no modeset)");
-    put(&w, "Families named from upstream tables: ");
+    put_line(&w, "GPU detection (exact matching; no BAR sizing, no modeset)");
+    put(&w, "families ");
     put_number(&w, (unsigned)gpu_match_family_count());
-    put(&w, ", device ID rules: ");
+    put(&w, ", id rules ");
     put_number(&w, (unsigned)gpu_match_id_total());
     put_line(&w, "");
     if (!device_count) {
@@ -631,7 +631,7 @@ void gpu_report(char *out, size_t capacity)
                 fmt_u32(link, lanes);
                 put_line(&w, link);
             } else {
-                put_line(&w, "no PCI Express capability on this function (conventional PCI slot)");
+                put_line(&w, "no PCIe capability (conventional slot)");
             }
         }
         if (!g->match) {
@@ -654,7 +654,7 @@ void gpu_report(char *out, size_t capacity)
             put(&w, g->match->note);
             put_line(&w, "");
         }
-        put(&w, "  upstream entry points: ");
+        put(&w, "  entry points: ");
         put(&w, g->match->features);
         put_line(&w, "");
         put(&w, "  device registers: ");
@@ -672,7 +672,7 @@ void gpu_report(char *out, size_t capacity)
                  * selector is the chip, [7:4] and [3:0] are the major and minor revision.  Printed
                  * beside the raw dword rather than instead of it, because a decode is a claim and the
                  * word is the measurement. */
-                put(&w, " (NV_PMC_BOOT_0: chip selector 0x");
+                put(&w, " (PMC_BOOT_0: chip 0x");
                 put_hex8(&w, (g->reg_first >> 20) & 0xfff);
                 put(&w, ", architecture 0x");
                 put_hex8(&w, (g->reg_first >> 24) & 0x1f);
@@ -696,42 +696,37 @@ void gpu_report(char *out, size_t capacity)
                 /* Named as the kernel's own reading, so a report cannot be mistaken for a driver's work:
                  * this line is printed when the function matches a driver family and the disk's module for
                  * it never reached memory. */
-                put(&w, " (read by the kernel itself: this function matches a driver family, but no module "
-                        "was staged for it)");
+                put(&w, " (read by the kernel: no module was staged)");
             put_line(&w, "");
             break;
         case 2:
-            put_line(&w, "BAR0 mapped, but every read returned 0xffffffff - the device is not answering");
+            put_line(&w, "BAR0 mapped, every read 0xffffffff");
             break;
         case 3:
-            put_line(&w, "BAR0 is outside the kernel's mapping capacity, so it was not read");
+            put_line(&w, "BAR0 outside the mapping capacity");
             break;
         case 4:
-            put_line(&w, "not read: memory decoding is disabled in this function's command register, "
-                         "and detection does not write configuration space");
+            put_line(&w, "not read: memory decoding disabled (detection writes no config space)");
             break;
         case 5:
-            put_line(&w, "not read: BAR0 is the frame buffer aperture the kernel already maps for scanout");
+            put_line(&w, "not read: BAR0 is the scanout aperture the kernel already maps");
             break;
         default:
             /* The kernel read nothing here, which used to be printed as though nobody had: on a machine
              * whose module had read a hundred-odd registers of that very chip, the line contradicted the
              * paragraph above it.  Say whose reading is absent. */
             if (g->module_ops)
-                put_line(&w, "not read by the kernel: the driver module bound for this function reads the "
-                             "chip itself, and quotes its own read and write counts on the panel above");
+                put_line(&w, "not read by the kernel: the bound module reads it (counts above)");
             else
-                put_line(&w, "not read (a driver module may claim this function, or no BAR0 was reported)");
+                put_line(&w, "not read (no module, or no BAR0 reported)");
             break;
         }
         const struct gpu_driver *port = gpu_port_for(g->match->family);
         put(&w, "  SCos port: ");
         if (g->module_ops && g->module_ops->fill)
-            put_line(&w, "driver module loaded from storage for this family; engine verified by device "
-                         "readback");
+            put_line(&w, "module loaded, engine verified by device readback");
         else if (g->module_ops)
-            put_line(&w, "driver module bound for this family reads the chip and describes it; it offers "
-                         "no engine operation, so nothing about drawing has changed");
+            put_line(&w, "module bound, description only - no engine operations, so drawing is unchanged");
         else
             put_line(&w, port && port->state != GPU_PORT_NONE ? "bound" : "not ported yet");
         /* The gap text says what was missing before a driver existed.  Once a module is bound for this
@@ -746,17 +741,13 @@ void gpu_report(char *out, size_t capacity)
          * feed the console is real and verified, but it is not what the user sees, so the line says
          * both halves instead of claiming an acceleration that the display cannot show. */
         if (g->module_ops && !g->module_ops->fill)
-            put_line(&w, "  path in use: the CPU compositor paints this screen; the module read this "
-                         "function's registers and reported them, and asked the chip for nothing else");
+            put_line(&w, "  render path: CPU compositor");
         else if (g->module_ops)
             put_line(&w, gpu_engine_drives_output()
-                ? "  path in use: module engine paints this function's scanout; solid rectangles skip "
-                  "the CPU copy"
-                : "  path in use: module engine verified on this function, but another PCI function "
-                  "feeds the console, so the CPU compositor paints it");
+                ? "  render path: module engine paints this scanout"
+                : "  render path: module engine verified, but another function feeds the console");
         else
-            put_line(&w, g->bound ? "  path in use: bound engine for supported operations"
-                                 : "  path in use: CPU compositor into the firmware scanout");
+            put_line(&w, g->bound ? "  render path: bound engine" : "  render path: CPU compositor");
     }
     if (device_count > REPORT_DEVICE_LIMIT) {
         put(&w, "  (");
@@ -778,8 +769,5 @@ void gpu_report(char *out, size_t capacity)
         if (!engine_px)
             put_line(&w, "  (no GPU drawing yet: the CPU copied every pixel of this boot)");
     }
-    put(&w, "  detection issued ");
-    put_number(&w, (unsigned)gpu_config_writes_during_detect());
-    put_line(&w, " PCI config-space write(s); 0 means nothing was reprogrammed");
     put_note(&w, capacity);
 }

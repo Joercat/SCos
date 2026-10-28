@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-FSP_CHECKS = 132                    # the modelled mailbox, pinned: a dropped case is a silent loosening
+FSP_CHECKS = 133                    # the modelled mailbox, pinned: a dropped case is a silent loosening
 FSP_SIZES = (48, 97, 96)            # what a GB2xx FSP asks the container for, from the reference driver
 
 # The published register description, transcribed rather than read out of the file under test:
@@ -162,21 +162,16 @@ def test_the_panel_says_what_was_asked_and_what_was_not():
     panel = source('kernel/desktop/graphics.c')
     assert 'put_fsp_report(&w, gpu_fsp_state());' in panel, \
         'the paragraph exists but is never emitted, so the panel is quiet about the mailbox either way'
-    for needle in ('FSP mailbox: ', 'not asked, and not because anything failed',
-                   '0xbadf4100 refusal that says the coprocessor',
-                   # The handover's three endings, each of which has to stay sayable: sent and the block opened,
-                   # sent and it did not, and not sent because the queue said it was busy.  The middle clause of
-                   # the first sentence used to read "only after the FSP has answered a query cleanly", which was
-                   # the third self-written precondition this card disproved - it guaranteed the one message that
-                   # matters was never put on the wire - so the pin is now the sentence that replaced it, and the
-                   # reason for replacing it.
-                   'first and without conditions, because that is what the driver that boots this chip does',
-                   'the block that refused every read on this panel is answering',
-                   'still the locked-target refusal - the FSP took the message ',
-                   'A submission also needs a clock and a doorbell',
-                   # the other half of the same sentence pair: what the panel says when a handover did go out
-                   'including one handover of a firmware image the boot volume supplied',
-                   'a code this build does not have a name for'):
+    for needle in ('FSP mailbox: ', 'not asked: this display function is vendor 0x',
+                   # The handover has to stay sayable in each of its states: written, attempted and refused,
+                   # and not attempted.  Each is one clause on the first line and one on the mailbox line, so
+                   # the pin is the clause rather than the paragraph that used to explain it.
+                   ', handover ', 'written, refused(', 'handover attempted, no answer',
+                   ', lock 0x', 'bit13=', 'fw version ', 'hwcfg2 0x1100f4 = 0x',
+                   # And the read-back is reported without being obeyed, which is what a real GB207 taught
+                   # this path: the mismatch is named at its dword and the doorbell goes out anyway.
+                   'read back: ', 'ring-anyway: this window does not read back what it takes',
+                   'no door into the queue', 'fw version ', 'clock 0x9400 '):
         assert needle in panel, 'the panel no longer says: %s' % needle
     # The tail is printed whole or not at all, and the reader is told where the rest is.  This is the one
     # structural answer to the pastes that came back cut inside the detection list: a limit that says so is a
@@ -284,10 +279,9 @@ def test_the_generation_table_is_the_reference_driver_and_not_a_convenience():
                                     'would still get a packet written into its aperture'
     # ...and the panel has to print the expectation, not just the verdict.
     panel = source('kernel/desktop/graphics.c')
-    for needle in ('The architecture field of NV_PMC_BOOT_0 reads 0x', 'whose FSP wants a hash of ',
-                   "Hopper's table says 48/384/384", 'no FSP mailbox for arch 0x', 'bit13=',
-                   "NV_PFALCON_FALCON_HWCFG2_RISCV_BR_PRIV_LOCKDOWN", "The falcon's own mailbox pair read 0x",
-                   'ms of the ', 'reads at 0xad00bc', 'cot '):
+    for needle in ('arch 0x', 'no FSP mailbox for arch 0x', 'cot ', 'bit13=',
+                   'boot scratch 0xad00bc = 0x', ', mailboxes 0x', 'hwcfg2 0x1100f4 = 0x',
+                   'refused 0xbadf4100)'):
         assert needle in panel, 'the panel never prints %r, so a refusal cannot be told from a guess' % needle
 
 

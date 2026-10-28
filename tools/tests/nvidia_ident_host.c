@@ -384,7 +384,7 @@ int main(void)
           "an unpublished class number is reported as a number, and is not refused");
     check(!has(text, "=published"),
           "and it is not labelled as a generation nobody documented for this chip");
-    check(has(text, "documented for Volta and Turing, not Blackwell"),
+    check(has(text, "Volta/Turing page, not Blackwell"),
           "but it does say that the number belongs to a page this generation never documented, which is the "
           "difference between a measurement and an expectation");
 
@@ -395,7 +395,7 @@ int main(void)
     timer_frozen = 1;
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(has(text, "clock silent here"), "a clock that does not advance is reported as silent, in that page");
+    check(has(text, "clock still"), "a clock that does not advance is reported as silent, in that page");
     check(!has(text, "so nothing was submitted through it"),
           "and with no engine block measured on this fixture the report stops at the clock: it draws no "
           "conclusion about submission it did not have a target for");
@@ -618,7 +618,7 @@ int main(void)
     registers[TOP_AT(0x22800u, 5)] = TOP2_ROW2(3u, 0x1a00u);
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(verdict == 0 && has(text, "engines at 0x22800 v2 (4 devices x 3 rows of 12, 12 read)"),
+    check(verdict == 0 && has(text, "engines at 0x22800 v2 4x3/12 rows, 12 read"),
           "a v2 table is decoded from the dimensions it reported itself, and the rows read are counted aloud");
     check(has(text, "LCE 1/VIC 0/GFX 1"),
           "the devices are tallied by the type field at 30:24, where LCE is 0x13 as on Turing and Ampere");
@@ -633,7 +633,7 @@ int main(void)
           "chip said exist and four scratch words: nothing is read past the end of the table it decoded");
     check(has(text, "FSP scratch at 0x8f0320 answers 0x00000000/0x00000000/0x00000000/0x00000000"),
           "a block that answers with its published initial values is reported as answering, not as free");
-    check(has(text, "all zeros, which is what the vendor's driver says a CPU read of that region returns"),
+    check(has(text, "zeros (decoupled access, not debug words)"),
           "and the report says out loud that zeros from that region are the decoupler answering, not content "
           "and not silence");
     check(!has(text, "base unit"), "no engine address is derived when the table names no GSP entry to "
@@ -728,19 +728,19 @@ int main(void)
     check(verdict == 0 && str_len(text) < 2048,
           "the longest inventory this format can describe, with every target clause it can print, still "
           "fits the kernel's field unclipped");
-    check(has(text, "the window answered but its clock did not tick") &&
+    check(has(text, "window up but clock still") &&
           !has(text, "would not fit this module's own buffer"),
           "and the widest case carries the clause that clipped a real card, with nothing dropped from it");
     check(has(text, "the first LCE's block at 0x104000 answers 0x12345678/0x9abcdef0") &&
           has(text, "FSP scratch at 0x8f0320 answers 0xf00dbabe") &&
-          has(text, "GSP block at 0x110000 refused all five reads"),
+          has(text, "GSP block 0x110000 locked (0x"),
           "and every clause that has to be there for the measurement to mean anything is, in its longest form");
     check(has(text, "LCE 3/VIC 1/GFX 2/ENC 2/DEC 1/SEC 1/GSP 2/JPG 1 of 17 devices"),
           "and every device the seeded table named is tallied, including the codec and bus blocks");
-    check(has(text, "17 engines per its own IS_ENGINE, 4 bus"),
+    check(has(text, "17 engines (IS_ENGINE), 4 bus"),
           "the chip's own engine flag and the bus count are both reported, so devices and engines cannot "
           "be confused for each other by a reader or by this driver");
-    check(has(text, "the window answered but its clock did not tick, so nothing was submitted through it"),
+    check(has(text, "window up but clock still: nothing submitted"),
           "and a report whose window answers while its clock stands still says nothing was submitted "
           "through it, which is the clause a real GB207 produced and this fixture had never seeded");
     check(!has(text, "clock +") && !has(text, "no submission window answered"),
@@ -830,16 +830,16 @@ int main(void)
     ce_block[0] = ce_block[1] = 0xbadf4100u;
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(verdict == 0 && has(text, "GSP block at 0x110000 refused all five reads (0xbadf4100"),
+    check(verdict == 0 && has(text, "GSP block 0x110000 locked (0xbadf4100"),
           "a reply the chip means as a refusal is reported as a refusal");
     check(!has(text, "reset status") && !has(text, "out of reset") && !has(text, "in reset"),
           "and no field is decoded out of it - the state the last build invented from this same dword");
-    check(has(text, "base unit measured on this chip: the GSP entry's field 0x001100 x 256 is the published 0x110000"),
+    check(has(text, "base unit 0x001100 x 2^8 = 0x110000"),
           "the unit of an undocumented 18-bit field is taken from the one entry whose block is published, "
           "instead of being picked because it looked plausible");
     check(has(text, "the first LCE's block at 0x104000 refused the same way"),
           "and the engine a submission would be built for is measured to be shut as well, not assumed to be");
-    check(has(text, "FSP scratch at 0x8f0320 refused too"),
+    check(has(text, "FSP scratch 0x8f0320 refused too"),
           "the microcontroller whose release the lock waits for does not answer either, which is the fact "
           "that says a driver on this side of the boot sequence has nothing to wait on");
     check(maps == 3 && far_maps == 1,
@@ -875,7 +875,7 @@ int main(void)
     text = ops->describe(ops->context);
     check(verdict == 0 && has(text, "the first LCE's block at 0x104000 answers 0x00000300/0x00000001"),
           "a block that replies is reported as replying, at the address the chip's own table named");
-    check(has(text, "which is content"),
+    check(has(text, ": content"),
           "and the claim stops at \"this is a reply and not an error code\": gb100 publishes no register "
           "names inside a copy engine, so nothing here says what the two words mean");
     check(!has(text, "a refused read, named"),
@@ -898,14 +898,14 @@ int main(void)
     ce_block[1] = 0xbadf5040u;
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(has(text, "a refused read, named a client error at a target it would not decode") &&
+    check(has(text, "refused: a client error at a target it would not decode") &&
           !has(text, "which is content"),
           "0xbadf5040 is named for what it is: FECS_PRI_CLIENT_ERR, a bus fault with an information byte");
-    check(has(text, "the FSP scratch at 0x8f0320 refused too"),
+    check(has(text, "FSP scratch 0x8f0320 refused too"),
           "and the block behind it is still reported as refusing, not as answering badly");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
-    check(has(text, "GSP block at 0x110000 refused all five reads (0xbadf4100"),
+    check(has(text, "GSP block 0x110000 locked (0xbadf4100"),
           "and the coprocessor's refusal is still reported next to it, unhedged");
     check(!has(text, "is locked the same way"),
           "the engine block is not swept into the coprocessor's answer by a shared prefix");
@@ -926,8 +926,7 @@ int main(void)
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
     check(verdict == 0 &&
-          has(text, "no base unit: the GSP entry's field 0x001040 scales to no candidate that reaches the "
-                    "published 0x110000"),
+          has(text, "no base unit: field 0x001040 reaches no 0x110000"),
           "a table whose entry disagrees with the published base is reported as disagreement");
     check(ce_block_reads == 0,
           "and no read is issued at the address the unconfirmed scaling would have implied: an unproven "
@@ -977,13 +976,13 @@ int main(void)
     vram_word = 8192u;                           /* 8 GiB, as the MiB count the firmware stores */
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
-    check(verdict == 0 && f.report.vram_bytes == (8192u << 20),
+    check(verdict == 0 && f.report.vram_bytes == (8192ull << 20),
           "the frame buffer's size is handed to the kernel, in bytes");
     check(f.report.vram_register == 0x001183a4u && f.report.vram_units == 1024u * 1024u,
           "and the report names the register and the unit it was read in, so the number can be checked");
-    check(has(text, "video memory 8192 MiB"), "the panel states it with the register that answered");
-    check(has(text, "the top of video memory a firmware reservation is placed back from"),
-          "and says what it is for, rather than leaving a number for the reader to guess about");
+    check(has(text, "VRAM 8192 MiB (0x1183a4)"), "the panel states it with the register that answered");
+    check(f.report.vram_bytes && !has(text, "VRAM unknown"),
+          "and only a word that passed the checks is reported as a size");
     check(stores == 0, "the scratch word was read, never written");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
@@ -995,7 +994,7 @@ int main(void)
     text = ops->describe(ops->context);
     check(verdict == 0 && f.report.vram_bytes == 0,
           "all ones reports no size, so the kernel's zero keeps meaning \"the chip did not say\"");
-    check(has(text, "unknown: the scratch word at 0x1183a4 answers all ones"),
+    check(has(text, "VRAM unknown: 0x1183a4 all ones"),
           "and the panel says why, instead of printing a size of 4096 GiB");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
@@ -1006,7 +1005,7 @@ int main(void)
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
     check(verdict == 0 && f.report.vram_bytes == 0, "a refusal to this reader is not a size either");
-    check(has(text, "a refusal to this reader and not a size"),
+    check(has(text, "0xbadf4100 (refused)"),
           "and is named for what it is, which is the difference between a locked block and a zero");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);
@@ -1028,7 +1027,7 @@ int main(void)
     verdict = scos_module_init(&f.exports, &ops);
     text = ops->describe(ops->context);
     check(verdict == 0 && f.report.vram_bytes == 0 &&
-          has(text, "the register window does not reach 0x1183a4"),
+          has(text, "window stops short of 0x1183a4"),
           "a window that stops short of the register says so, and reports no size rather than a stale one");
     if (ops && ops->teardown) ops->teardown(ops->context);
     scos_module_teardown(ops);

@@ -518,12 +518,12 @@ gpu: a driver read the chip and reported it; nothing was asked of the chip, so r
 
 with the panel saying `GPU acceleration: driver module cirrus (family cirrus) read this chip's own registers
 and reports what it found; it offers no engine operation; the CPU compositor still paints every pixel of
-this screen`, the report line `SCos port: driver module bound for this family reads the chip and describes
-it; it offers no engine operation, so nothing about drawing has changed`, and - the number that decides
+this screen`, the report line `SCos port: module bound, description only - no engine operations, so drawing
+is unchanged` and `render path: CPU compositor`, and - the number that decides
 whether any of it was a regression - `pixels painted: 0 by the GPU's 2D engine, 17312532 by the CPU
 compositor`, the same figure the boot before the module carried, plus `Renderer: CPU software compositor,
 driver module read the chip and offers no engine` instead of a sentence that would have called it an engine.
-The per-device line `link: no PCI Express capability on this function (conventional PCI slot)` is QEMU's
+The per-device line `link: no PCIe capability (conventional slot)` is QEMU's
 Cirrus being honest about the slot it is in; on the real card the same field decodes to what the board
 negotiated, which is why it is read from the capability and never from a table.
 

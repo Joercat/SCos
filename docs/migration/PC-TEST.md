@@ -425,33 +425,34 @@ The Graphics report now has a paragraph starting `FSP mailbox:` - the card's own
 the thing that has to answer before any part of this GPU can be driven.  It is read on every boot.  One thing is
 written, and only after the read has come back clean: a capability query goes into the mailbox, and if the FSP
 answers it with a well-formed reply and no error, the FMC image this build was given is handed over (see
-`r-cot-send` below).  Anything that has not answered a query is never handed an image.  Four endings are worth
-knowing the difference between, and all four are information:
+`r-cot-send` below).  Anything that has not answered a query is never handed an image.  The panel reports facts, one clause each; it no longer explains itself at length.  What to look for:
 
-* `not asked, and not because anything failed ... vendor 0xNNNN` - this machine's display function is not an
-  NVIDIA one, so the offsets were never touched.  On a QEMU boot it reads `0x00001013` and that is correct.
-* `The FSP's boot-complete scratch ... reads 0x...`, where the low byte is not `ff` - the FSP has not reported
-  itself booted.  This is the expected answer on a card whose own firmware never got going, and it is a real
-  measurement rather than a missing one.
-* `asked of the card at BAR0 0x...` with a query sent and a reply read, or refused - the mailbox is alive.  The
-  sentence after it says which of the four ways a request can fail applies, and how many registers were written.
-
-Below that, a `GSP handover:` paragraph says what became of the FMC image on the stick.  It has four endings now,
-and which one you have is the single most useful sentence to report:
-
-* `the ... payload was written into the channel and the doorbell rung.  It carried the FMC image of N bytes at
-  physical 0x..., CRC32 0x...; the FSP answered in 28 bytes with error 0x.. (FLCN_...)` - the card took the
-  image.  The rest of the paragraph gives the coprocessor's capability word *before* and *after* the message
-  and the same for the FSP's boot-complete scratch: those two are the measurement, so report both numbers.
-  `FLCN_ERR_FMC_BOOT_FROM_INVALID_WPR` or `..._INVALID_DMA_TARGET` are ordinary answers and each points at a
-  different missing piece; `FLCN_OK` with the capability word changing is the one that means something started.
-* `... and no answer came back` - the message went out and the reply queue never separated.  Say which, because
-  a card that answers a query and not a handover is a different machine from one that answers neither.
-* `... the write was refused before the doorbell could be rung` - the queue registers themselves refused while
-  the second message was being prepared, which says the first one is possibly still being read.
-* `It goes on the wire only after the FSP has answered the query cleanly` - the query did not come back, so the
-  image stayed in memory.  This is the same ending a machine with no firmware on the stick produces, and the
-  sentence before it says which of the two applies.
+* `FSP: not asked: this display function is vendor 0xNNNN, and every offset on this path is NVIDIA's.` - this
+  machine's display function is not an NVIDIA one, so nothing of that card was touched.  On a QEMU boot it reads
+  `0x00001013` and that is correct.
+* `FSP: cot 48/97/96 v2, boot 0x000000ff booted, mailbox answers, query written, no reply, ...` - the first line
+  carries the whole decision in clauses: the generation's container widths, the boot-complete scratch, whether
+  the mailbox took a packet, what came back, the handover's fate, the lock bit, the clock, the VF page, the
+  firmware count and the card's own read/write tally.
+* `FSP mailbox: BAR0 0x..., 5 windows, N writes / M reads (K refused 0xbadf4100).` and then
+  `  arch 0x...: cot 48/97/96 v2` - which offsets were used, and how the chip answered them.
+* `  boot scratch 0xad00bc = 0x... (not booted; waited 4000 of 4000 ms)` - the FSP has not reported itself up.
+  This is the expected answer on a card whose own firmware never got going, and it is a measurement.
+* `   query: reply 28 B, type 0x15, command 0x0, error 0x0.` / `query: sent, no reply after N looks` - the
+  mailbox is alive or it is not.  `not sent, the queue never fell idle` is a third, different state.
+* ` reply queue: wrote 0/0, read back 0x0/0x0 (store lands). request: 868 B in 4 windows, read back: identical`
+  - the request is in the channel as written.
+* `read back: differs from the packet at dword N (ring-anyway: this window does not read back what it takes)` -
+  measured on GB207 at dword 0, on packets the card then answers.  The doorbell is rung regardless; whether the
+  packet arrived is the card's answer, not this kernel's inference.
+* `GSP handover: 868 B for the NNNNNN B FMC image at 0x... (CRC32 0x...), answered in 28 B, error 0x.. (FLCN_...)`
+  - the card took the image.  `0xdf` (`..._FMC_BOOT_FROM_INVALID_WPR`) and `0xdd` (`..._INVALID_DMA_TARGET`) are
+  ordinary answers and each points at a different missing piece; `FLCN_OK` with `hwcfg2 ... -> ... (lock
+  released)` is the one that means something started.
+* `GSP handover: not sent, refused(3).` and `not attempted: the queue registers refused.` - the two ways this
+  side stops before the card sees anything.
+* `GSP path: nothing written to the card this boot.` on the whole panel - one line, and it is the sentence to
+  quote when the question is "did it even try".
 
 **How to report it without losing the end of it.**  The panel is longer than what a console paste carries, and
 the last three reports came back cut off inside the detection list - which is upstream of the two paragraphs

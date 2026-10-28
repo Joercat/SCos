@@ -612,7 +612,8 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
     if (report.size >= sizeof(report) && report.vram_bytes) {
         device->vram_bytes = report.vram_bytes;
         klog(MODULE_LOG_PREFIX "the module read %u MiB of video memory from 0x%x (unit %u B); that is "
-             "the number a firmware carve-out has to be placed against", report.vram_bytes >> 20,
+             "the number a firmware carve-out has to be placed against",
+             (unsigned)(report.vram_bytes >> 20),
              report.vram_register, report.vram_units);
     }
     if (ops->abi != SCOS_GPU_ABI_VERSION || ops->size > sizeof(*ops) ||

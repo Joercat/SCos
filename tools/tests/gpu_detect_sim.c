@@ -569,7 +569,7 @@ int main(void)
             gpu_report(text, sizeof(text));
             expect(find_substring(text, "link: PCIe gen4 x16") != NULL,
                    "the report prints the negotiated link for the card that has one");
-            expect(find_substring(text, "no PCI Express capability on this function") != NULL,
+            expect(find_substring(text, "no PCIe capability (conventional slot)") != NULL,
                    "and says so plainly for the one that does not");
         }
         expect(owner && owner->reg_state == 0, "the kernel does not map a BAR the module was staged for");
@@ -590,8 +590,7 @@ int main(void)
         {
             char text[4096];
             gpu_report(text, sizeof(text));
-            expect(find_substring(text, "read by the kernel itself: this function matches a driver family, "
-                                        "but no module was staged for it") != NULL,
+            expect(find_substring(text, "(read by the kernel: no module was staged)") != NULL,
                    "the report says so in as many words, so the number cannot be mistaken for a driver's");
         }
         sim_maps = 0;
@@ -615,7 +614,7 @@ int main(void)
             gpu_report(text, sizeof(text));
             expect(find_substring(text, "device registers: BAR0 at 0x00000000e0100000 read: first dword 0x2b0000a1") != NULL,
                    "the report quotes the address and the value that were read");
-            expect(find_substring(text, "chip selector 0x000002b0, architecture 0x0000000b, "
+            expect(find_substring(text, "PMC_BOOT_0: chip 0x000002b0, architecture 0x0000000b, "
                                         "implementation 0x00000000, revision A.1") != NULL,
                    "the NVIDIA fields are decoded where NVIDIA documents them: selector [31:20], "
                    "architecture [28:24], implementation [23:20], revision [7:4].[3:0]");
@@ -629,7 +628,7 @@ int main(void)
         {
             char text[4096];
             gpu_report(text, sizeof(text));
-            expect(find_substring(text, "BAR0 mapped, but every read returned 0xffffffff") != NULL,
+            expect(find_substring(text, "BAR0 mapped, every read 0xffffffff") != NULL,
                    "a dead function is described as not answering, not as a chip id");
             expect(find_substring(text, "first dword 0xffffffff") == NULL,
                    "an unreachable device is never reported as if the all-ones value were an id");

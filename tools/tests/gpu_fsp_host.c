@@ -914,13 +914,17 @@ static void test_a_full_query_and_reply(void)
           model.tail_writes == 1);
 
     ask(M_NO_AINC);
-    /* A channel whose window never walks stores every dword of the packet on top of the first one, so the
-     * packet is not in the channel and the host now *knows* that instead of ringing anyway: the read-back is
-     * what turns "no reply" into "the request was never delivered". */
+    /* A channel whose window never walks stores every dword of the packet on top of the first one.  The
+     * read-back is what makes that visible; it is reported and not obeyed, because a GB207 measured here does
+     * the same thing to a 4-dword query that it accepts and answers, so a host that vetoed the send on the
+     * mismatch would never ring the doorbell on that card.  The measurement is the fact; the doorbell goes out
+     * anyway, and whether the card took the packet is answered by the card. */
     check("a window that does not walk is caught by the read-back rather than by a counter",
-          !fsp_state.send_readback && fsp_state.send_blocked == 3 && fsp_state.send_mismatch != ~0u);
-    check("and the doorbell is not rung on a packet the channel is not holding",
-          !fsp_state.queried && model.tail_writes == 0);
+          !fsp_state.send_readback && fsp_state.send_mismatch != ~0u && fsp_state.send_mismatch != UINT32_MAX);
+    check("and the mismatch is reported at the dword it started, without a veto code",
+          fsp_state.send_blocked == 0);
+    check("and the doorbell goes out anyway, because not reading back is not the card refusing the packet",
+          fsp_state.queried && model.tail_writes == 1 && fsp_state.doorbell == 8);
 }
 
 static void test_the_handover_payload(void)

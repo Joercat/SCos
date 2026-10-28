@@ -43,7 +43,10 @@ typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
 
-#define SCOS_GPU_ABI_VERSION 1u
+/* 2: scos_gpu_device_report.vram_bytes became 64-bit.  A card with 8 GiB answered a 32-bit field with
+ * 0x200000000, which truncates to zero - "the chip did not say" - and a zero there is what stops a
+ * firmware reservation being placed at all.  The field is now the width of an address space. */
+#define SCOS_GPU_ABI_VERSION 2u
 
 /* "SGPM" in byte order: a file whose first four bytes are not these is not a module. */
 #define SCOS_GPU_MODULE_MAGIC 0x4d504753u
@@ -143,10 +146,11 @@ struct scos_gpu_device_info {
  * firmware reservation at offset 0. */
 struct scos_gpu_device_report {
     u32 size;
-    u32 vram_bytes;             /* total video memory, 0 if the chip would not say */
     u32 vram_register;          /* the published register whose value became vram_bytes, 0 for none */
     u32 vram_units;             /* the register's unit in bytes (1 MiB for the GC6 scratch word) */
-    u32 reserved[4];
+    u32 reserved;
+    u64 vram_bytes;             /* total video memory, 0 if the chip would not say; 64-bit because 8 GiB
+                                 * does not fit a u32 and truncating it would read as "no answer" */
 };
 
 /* The kernel's side of the contract.  Pass-through helpers only: each one exists so the module

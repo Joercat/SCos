@@ -110,7 +110,7 @@ def test_engine_paints_the_console():
         assert '800x600 stride 800' in serial, serial[-1500:]
 
         text = report(g)
-        assert "module engine paints this function's scanout" in text, text[-2000:]
+        assert "render path: module engine paints this scanout" in text, text[-2000:]
         assert 'hand-authored id row and capability record' in text, text[-2000:]
 
         assert g.call('gpu_engine_drives_output') == 1, 'engine bound but not driving the console'

@@ -263,14 +263,14 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
             # reader who sees a coprocessor's registers quoted has to be able to see which of the two amounts was
             # actually put on the wire.  On this disk, with no firmware staged, the panel has to pick the short
             # of the two branches, and it has to say so in the sentence rather than by omission.
-            assert 'GSP path: the clause above quotes' in panel, panel[-1400:]
-            assert 'nothing was written at all' in panel, \
-                   'a machine that asked nothing still describes itself as having asked for anything: ' + panel[-1400:]
-            assert 'assembles the handover, and asks the FSP to use it' in panel, panel[-1400:]
+            # Six characters of heading and one measured clause: what this boot put on the wire.  The
+            # paragraph that used to explain why nobody answered has gone; the finding stays, because a
+            # reader has to be able to tell "nothing was sent" from "something was sent and ignored".
+            assert 'GSP path: nothing written to the card this boot' in panel, panel[-1400:]
             # Which brings the firmware line onto this panel too.  On a disk that stages nothing it has to say
             # so and name the five roles, because that is the one thing the person standing at this machine can
             # change without a rebuild, and this panel is the only place they will read it.
-            assert 'GSP firmware: none of the images the open driver loads' in panel, panel[-1400:]
+            assert 'GSP firmware: none on the volume' in panel, panel[-1400:]
             for esp in ('GSP.BIN', 'GSPFMC.BIN', 'GSPBL.BIN', 'GSPBTL.BIN', 'GSPBTU.BIN'):
                 assert esp in panel, 'the panel never names %s, so nobody can be told to stage it' % esp
             # `Device access: none' on its own was read as "nobody has touched my card" on the one machine
@@ -288,9 +288,8 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
                         'a Device access line that says only "none" hides who read the chip: ' + l
             g.call('gpu_report', g.scratch, 4096)
             report = g.string(g.scratch, 4096)
-            assert 'SCos port: driver module bound for this family reads the chip and describes it' \
-                   in report, report[-1600:]
-            assert 'path in use: the CPU compositor paints this screen' in report, report[-1600:]
+            assert 'SCos port: module bound, description only' in report, report[-1600:]
+            assert 'render path: CPU compositor' in report, report[-1600:]
             assert 'pixels painted: 0 by the GPU' in report, report[-1600:]
             assert 'link:' in report, 'every device line states the negotiated link, or says there is none'
     finally:

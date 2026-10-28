@@ -307,10 +307,9 @@ def test_qemu_emulated_adapters():
         assert 'GPU acceleration: driver module' in report, report
         assert 'verified by device readback' in report, report
         assert 'not used for output: another PCI function feeds this display' in report, report
-        assert 'module engine verified on this function, but another PCI function feeds the console' \
-            in report, report
+        assert 'module engine verified, but another function feeds the console' in report, report
         assert 'used for solid output rectangles' not in report, report
-        assert 'driver module loaded from storage for this family' in report, report
+        assert 'loaded from storage and verified by device readback' in report, report
 
         # The compositor boundary itself, not just the log: an engine must be reachable from the code
         # that decides whether to hand a rectangle to the GPU, and on this machine the answer to

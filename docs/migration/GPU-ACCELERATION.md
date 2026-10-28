@@ -366,27 +366,36 @@ out", which was true, and none of them asked what the channel was holding afterw
 **What the fix is.**  `emem_write()` and `emem_read()` in `kernel/drivers/gpu/gpu_fsp.c` arm the window for
 each 256-byte burst (`FSP_EMEM_BURST_BYTES`), and every access the file makes to the channel goes through
 them.  Then, before the doorbell, the packet is **read back out of the channel and compared with what was
-written**; a mismatch is not sent, and the panel names the first dword that differed.  The read-back happens
-before the ring on purpose: the FSP writes its reply into the same channel from offset 0, so a check that ran
-afterwards could compare the answer with the request and call the answer damage.  Replies are read the same
-way, and read twice, because "seven dwords came out of one register" is only a measurement if the same seven
-come out again.
+written**.  The read-back happens before the ring on purpose: the FSP writes its reply into the same channel
+from offset 0, so a check that ran afterwards could compare the answer with the request and call the answer
+damage.  Replies are read the same way, and read twice, because "seven dwords came out of one register" is
+only a measurement if the same seven come out again.
+
+**What the card then answered, and why the read-back is reported and not obeyed.**  The first GB207 to run
+this produced `send blocked(3)` on a *four-dword capability query* - a packet far inside one 256-byte burst,
+written to a channel the card then answered a query on.  The mismatch started at **dword 0**: this silicon's
+data window does not return what was written to it, at any offset, while the writes themselves land.  A veto
+built on that comparison therefore means *never ringing the doorbell on this card*, which is strictly less
+known than a reply.  So the tree reports the mismatch - with the dword it starts at, and the word "ring-anyway"
+beside it - and rings the doorbell.  Whether the packet arrived is then a fact the card states, not one this
+kernel infers from a window it has measured to be write-only.  `send_blocked` now only carries the two
+conditions the card itself gives (queue busy for the whole wait, or the queue registers unreadable); the
+read-back outcome lives in `send_readback` and `send_mismatch`.
 
 **What this machine measured afterwards**, in QEMU with the fetched set staged (the one place in this
-repository that boots at all): the three images read, `63972328 B`, `pw 3/5`, and the paragraph below still
-says what it said.  What it *cannot* measure is the thing the bug was about - QEMU models no NVIDIA function
-- so the evidence for this fix is structural: `tools/tests/gpu_fsp_host.c` now models the window as hardware
-does, wrapping at 64 dwords, and asserts that a full 868-byte handover arrives byte for byte in **four**
-bursts, that the read-back ran before the doorbell, and that a window that never walks is caught by the
-read-back (the send blocked, the doorbell not rung) rather than by a counter that cannot see it.  The count
-is pinned at 132 checks.
+repository that boots at all): the three images read, `63972328 B`, `pw 3/5`.  What it *cannot* measure is the
+thing the bug was about - QEMU models no NVIDIA function - so the evidence for this fix is structural:
+`tools/tests/gpu_fsp_host.c` models the window as hardware does, wrapping at 64 dwords, and asserts that a
+full 868-byte handover arrives byte for byte in **four** bursts, that the read-back ran before the doorbell,
+and that a window which never walks is caught by the read-back (mismatch reported, no veto, doorbell rung).
+The count is pinned at 133 checks.
 
 **What the next boot should show, and what each answer means.**
 
 | On the panel | What it means |
 | --- | --- |
 | `The request was written into the channel in 4 windows ... every dword of it came back identical` | the packet is in the channel; whatever follows is the card's answer and not this OS dropping it |
-| `the words differ ... starting at dword N` | the channel did not keep what was written; the doorbell was not rung, and N says where the two diverge |
+| `read back: differs from the packet at dword N` | the channel does not return what was written (measured on GB207 at dword 0, on packets it then answers); the doorbell is rung anyway, and N says where the two diverge |
 | `GSP handover: ... error 0x..` with a code | the FSP read the whole record and refused it by name: `0xdf` is the WPR/FRTS one, `0xdb` the boot check, `0xdd` a bad DMA target |
 | `no answer came back` after the above | the FSP took a well-formed record and did not reply, which is a different claim from the one this tree was making an hour ago |
 
@@ -398,3 +407,20 @@ page-table array behind it (`r535_gsp_libos_init`).  This tree stages no such re
 handover here means *the FSP took the image*, not *the RM started with arguments it understood*, and that
 distinction is now written at the assignment as well as here.  Staging that record is the first task after
 this one, and the panel's handover paragraph is what will say whether it is the one that matters.
+
+## 9. The video-memory size that arrived as zero
+
+A second bug was found while making the panel shorter, and it would have stopped the next stage at the first
+step.  The NVIDIA module reads the frame buffer's size from the boot firmware's scratch word
+(`NV_PGC6_AON_SECURE_SCRATCH_GROUP_42`, 0x001183a4, a count of MiB) and hands it to the kernel through the
+module ABI.  That field was 32 bits.  A 512 MiB test card fits; this machine's 8 GiB does not - `8192 << 20`
+truncates to `0` - and zero is the ABI's word for *the chip did not say*.  A kernel that reads zero there has
+nowhere to place a firmware reservation, so the WPR2 stage would have been refused with a message about a card
+that never gave a size.
+
+`scos_gpu_device_report.vram_bytes` is now 64 bits and the ABI version moved to 2, which also means a stale
+`*.mod` from before this change is refused by name instead of being trusted.  `tools/build_gpu_module.py` no
+longer carries its own copy of the version number: it parses it out of `kernel/include/gpu_abi.h`, because a
+packer holding a constant is exactly how a module ends up written for an ABI the kernel has moved past.  And a
+module load that finds the scratch word unusable now *clears* the report rather than leaving the previous
+load's number in it - a stale size is a place a reservation would be put.
