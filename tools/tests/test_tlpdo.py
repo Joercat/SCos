@@ -121,7 +121,7 @@ def test():
         g.type('y\n')
         g.run(.5)
         assert g.read('home/apps/priv-test.cat') is None, 'the confirmed uninstall did not run'
-        assert g.read('home/appdata/priv-test/kept.txt') is None
+        assert g.read('home/appdata/root/priv-test/kept.txt') is None
 
         # ---- the password is masked, and three wrong tries abort ----------
         install(g, 'priv-two')

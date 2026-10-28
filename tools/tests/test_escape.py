@@ -61,7 +61,7 @@ def test_the_escape_app_finds_no_way_out():
         assert pid and g.call('proc_pid_isolated', pid) == 1
         assert g.call('user_pid_mapped', pid, 0x600000040000) == 1
 
-        report = wait_for_report(g, 'home/appdata/isolation/report.txt')
+        report = wait_for_report(g, 'home/appdata/root/isolation/report.txt')
         assert report, 'the escape app wrote no report'
         text = report.decode('utf-8', 'replace')
         print(text, flush=True)
@@ -76,17 +76,17 @@ def test_the_escape_app_finds_no_way_out():
 
         # Nothing the app tried may exist outside its own data directory.
         for path in ('escape.txt', 'home/escape.txt', 'home/evil.txt',
-                     'home/appdata/notepad/steal.txt',
-                     'home/appdata/isolation/../notepad/steal.txt'):
+                     'home/appdata/root/notepad/steal.txt',
+                     'home/appdata/root/isolation/../notepad/steal.txt'):
             assert g.read(path) is None, 'traversal left a file behind: ' + path
-        assert g.read('home/appdata/isolation/own.txt') is None, \
+        assert g.read('home/appdata/root/isolation/own.txt') is None, \
             'a probe file outlived the app'
-        assert g.read('home/appdata/isolation/sub/evil.txt') is None
+        assert g.read('home/appdata/root/isolation/sub/evil.txt') is None
 
         # The boundary held without faults, and the app still owns its data.
         assert g.call('user_fault_count') == 0
         assert g.call('user_syscall_count') > 0
-        assert g.read('home/appdata/isolation/report.txt')
+        assert g.read('home/appdata/root/isolation/report.txt')
 
         g.call('wm_close_window', w)
         assert g.call('proc_count') == 0, 'process leaked after close'
@@ -157,13 +157,13 @@ def test_isolated_and_normal_hosts_expose_the_same_api():
             assert pid
             assert g.call('proc_pid_isolated', pid) == (1 if mode == SC_ISO_ALWAYS else 0)
             g.run(0.8)
-            data = g.read('home/appdata/parity/sig.txt')
+            data = g.read('home/appdata/root/parity/sig.txt')
             assert data, label + ' run wrote no signature'
             signatures[label] = data.decode()
             g.call('wm_close_window', w)
-            g.read('home/appdata/parity/sig.txt')
+            g.read('home/appdata/root/parity/sig.txt')
             # clear the file so a stale copy cannot pass the next round
-            g.save('home/appdata/parity/sig.txt', b'')
+            g.save('home/appdata/root/parity/sig.txt', b'')
             g.run(0.1)
         assert signatures['isolated'] == signatures['normal'], \
             'API signatures differ\n--- isolated ---\n%s\n--- normal ---\n%s' % (
@@ -248,7 +248,7 @@ def test_an_unisolated_launch_does_not_probe_or_ask_for_the_theme():
         assert w
         g.run(1.0)
         assert g.call('wm_dialog_active') == 0, 'an unisolated launch asked for something'
-        assert g.read('home/appdata/isolation/report.txt') is None, \
+        assert g.read('home/appdata/root/isolation/report.txt') is None, \
             'an unisolated launch still ran the escape probes'
         assert g.call('user_fault_count') == 0
         assert 'panic' not in g.serial().lower()

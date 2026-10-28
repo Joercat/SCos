@@ -103,13 +103,14 @@ limits, but their C code still runs at CPL0. Each account also gets a private
 `home/users/<name>/` tree enforced at the VFS boundary.
 
 **App data is its own namespace.** An app's files live in
-`home/appdata/<id>/` and nowhere else: the id comes from the kernel-held
-registration, a package names a *file* rather than a path, the namespace is
-flat (16 files / 64 KiB) and it is private whether or not the owner chose to
-run the app isolated. `vfs_read/write/mkdir/delete/rename` enforce the same
+`home/appdata/<account>/<id>/` and nowhere else: the account and the id come
+from the kernel-held session and registration, a package names a *file* rather
+than a path, the namespace is flat (16 files / 64 KiB) and it is private
+whether or not the owner chose to run the app isolated - and private between
+accounts, so two people running the same package never share a file. `vfs_read/write/mkdir/delete/rename` enforce the same
 rule, so a native app calling the VFS directly is confined too. Uninstalling an
-app **erases that directory**, so reinstalling the same id starts with no data
-at all.
+app **erases that directory for every account**, so reinstalling the same id
+starts with no data at all.
 
 **Privileged commands need a password, like `sudo`.** `tlpdo <command>` asks
 for the account password in the terminal's own masked field and runs the inner

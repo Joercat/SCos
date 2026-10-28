@@ -307,20 +307,26 @@ extern const char *const panic_art[];
 extern const int panic_art_lines, panic_art_width;
 char *vfs_parent_path(const char *path, char *out);   /* "a/b/c" -> "a/b/" */
 
-/* Per-app private storage: home/appdata/<id>/.  Always private, independent of
- * the owner's per-app isolation choice, and wiped when the app is uninstalled. */
+/* Per-app private storage: home/appdata/<account>/<id>/.  Always private,
+ * independent of the owner's per-app isolation choice, separate per account,
+ * and wiped for every account when the app is uninstalled. */
 #define APP_STORAGE_MAX_FILES 16
 #define APP_STORAGE_MAX_BYTES (64u * 1024u)
 int  app_storage_id_valid(const char *id);
 int  app_storage_name_valid(const char *name);
 int  app_storage_dir(const char *id, char *out, size_t cap);
+int  app_storage_dir_for(const char *account, const char *id, char *out, size_t cap);
 int  app_storage_path(const char *id, const char *name, char *out, size_t cap);
 int  app_storage_ensure(const char *id);
+int  app_storage_ensure_for(const char *account, const char *id);
 int  app_storage_used(const char *id, int *files, u32 *bytes);
 int  app_storage_check(const char *id, const char *name, u32 bytes);
 int  app_storage_wipe(const char *id, int *files, u32 *bytes);
+int  app_storage_wipe_all(const char *id, int *files, u32 *bytes);
 int  app_storage_owns_path(const char *id, const char *path);
 int  app_storage_allowed(const char *path);
+/* Set only while this module creates or removes home/appdata/<account>/. */
+int  app_storage_maintenance(void);
 
 /* ----------------------------------------------------------------- ata ---- */
 const char *ata_model(void);                  /* IDENTIFY model string or NULL */

@@ -355,7 +355,7 @@ around **every** app callback (`APP_T0` / `APP_T1` in `wm.c`):
    are absent at lookup and denied at read/write. This applies to native C apps
    too — the check is in `vfs.c`, not in an app-facing helper. Independently of
    this choice, `app_storage_allowed()` keeps every app out of every other
-   app's `home/appdata/<id>/`, isolated or not.
+   app's `home/appdata/<account>/<id>/`, isolated or not.
 
 Built-in native C apps are compiled-in ring-0 OS components; they keep the
 page-table domains, mount namespace, capabilities and resource limits above but
@@ -364,14 +364,16 @@ isolated. An app the owner chose **never** to isolate gets `PROC_CAP_ALL`, no
 domain and the original unrestricted behaviour — nothing is forced.
 
 **Storage separation is not part of that choice.** Whatever the owner decides
-about isolation, every app's data lives in `home/appdata/<id>/` and nowhere
+about isolation, every app's data lives in `home/appdata/<account>/<id>/` and nowhere
 else. `kernel/desktop/app_storage.c` owns the id and filename validators, path
 construction, the 16-file/64 KiB quota and the wipe; the Lua API, the VFS and
 the uninstaller all call it. The VFS checks `app_storage_allowed()` on read,
 write, mkdir, delete and rename while an app process is current, so a native
 app calling `vfs_write("home/appdata/<other>/x")` is refused just like a CAT
-package. Uninstalling wipes the directory: reinstalling the same id cannot read
-the previous installation's saves.
+package. The directory is per account (`home/appdata/<account>/<id>/`), the
+VFS also denies the shell `home/appdata` and every other account's subtree, and
+uninstalling wipes the directory for **every** account plus the older flat
+path: reinstalling the same id cannot read anyone's previous saves.
 
 **Privileged commands and `tlpdo`.** `security_privileged_command()` is the one
 table: `save`, `shutdown`/`poweroff`/`reboot`/`panic`/`sysrq`, `appuninstall`,

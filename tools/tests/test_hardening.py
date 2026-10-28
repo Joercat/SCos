@@ -53,7 +53,17 @@ def test_the_fixes_are_wired():
     assert 'cap_ok(writing ? PROC_CAP_VFS_WRITE' in um, \
         'CPL3 file syscalls do not check capabilities'
     vfs = (ROOT / 'kernel/desktop/vfs.c').read_text()
-    assert "sc_neq(p, \"home/users\", 10)" in vfs
+    assert '"home/users"' in vfs and '"home/appdata"' in vfs, \
+        'the account-scoped VFS guard does not cover both private trees'
+    storage = (ROOT / 'kernel/desktop/app_storage.c').read_text()
+    assert 'app_storage_dir_for' in storage and 'app_storage_wipe_all' in storage
+    assert "app_storage_dir_for" in um and "app_storage_dir_for" in \
+        (ROOT / 'kernel/desktop/process.c').read_text(), \
+        'a host still builds home/appdata/<id>/ by hand instead of asking storage'
+    assert 'app_storage_wipe_all' in (ROOT / 'kernel/desktop/lua_apps.c').read_text(), \
+        'uninstall does not erase every account\'s copy of the app data'
+    assert 'app_storage_check' in um, \
+        'the CPL3 host does not ask the shared quota validator'
     settings = (ROOT / 'kernel/desktop/app_settings.c').read_text()
     assert 'Security' in settings and 'security_api_policy_set' in settings
     assert 'sec_y' in settings, 'no security section in Settings'

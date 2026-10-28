@@ -28,7 +28,7 @@ static u64 limits[USER_RLIMIT_COUNT];
 static u64 faults, syscalls, denied, timeouts;
 static int active_pid;
 static struct window *active_window;
-static char ns_dir[96];             /* private root, e.g. home/appdata/<id>/ */
+static char ns_dir[96];         /* private root: home/appdata/<account>/<id>/ */
 static char ns_dir_of[PROC_MAX + 1][96];
 static struct window *win_of[PROC_MAX + 1];
 static u32 episode_syscalls;
@@ -199,15 +199,24 @@ int user_attach(int pid, struct window *w)
         }
         safe[k] = 0;
         if (!k) sc_copy(safe, sizeof(safe), "app");
-        sc_copy(ns_dir, sizeof(ns_dir), "home/appdata/");
-        sc_cat(ns_dir, sizeof(ns_dir), safe);
+        /* The account segment comes from the same function the kernel-side
+         * host uses, and from the account that created this process, so both
+         * hosts see home/appdata/<account>/<id>/ even after a user switch. */
+        if (!app_storage_dir_for(proc_owner(pid), safe, ns_dir, sizeof(ns_dir) - 1))
+            sc_copy(ns_dir, sizeof(ns_dir), "home/appdata/nobody/app");
         sc_cat(ns_dir, sizeof(ns_dir), "/");
     }
-    /* Private root is created by the kernel, never by app code. */
+    /* Private root is created by the storage layer, never by app code: it is
+     * the one module that knows the account segment and may create it. */
     sc_copy(tmp, sizeof(tmp), ns_dir);
     tmp[strlen(tmp) - 1] = 0;
-    vfs_mkdir("home/appdata");
-    vfs_mkdir(tmp);
+    if (!vfs_lookup(tmp)) {
+        /* create the account root and this app's directory as that account */
+        char dir[96];
+        if (!app_storage_dir_for(proc_owner(pid), proc_pid_app_id(pid), dir, sizeof(dir)))
+            return 0;
+        if (!app_storage_ensure_for(proc_owner(pid), proc_pid_app_id(pid))) return 0;
+    }
     sc_copy(ns_dir_of[pid], sizeof(ns_dir_of[pid]), ns_dir);
     win_of[pid] = w;
     user_attach_result = 1;

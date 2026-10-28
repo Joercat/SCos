@@ -67,7 +67,7 @@ def test_the_gate_and_protection_are_wired():
         'the terminal does not gate privileged commands through tlpdo'
     assert 'app_storage_allowed(' in (ROOT / 'kernel/desktop/vfs.c').read_text(), \
         'per-app storage is not enforced at the VFS boundary'
-    assert 'app_storage_wipe(' in (ROOT / 'kernel/desktop/lua_apps.c').read_text(), \
+    assert 'app_storage_wipe_all(' in (ROOT / 'kernel/desktop/lua_apps.c').read_text(), \
         'uninstalling an app does not erase its private data'
     tty = (ROOT / 'kernel/desktop/tty.c').read_text()
     assert 'security_reauthenticate(' in tty, 'the maintenance console has no re-auth gate'

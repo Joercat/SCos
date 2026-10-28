@@ -79,7 +79,7 @@ def test():
         assert g.call('lua_app_install', stringarg(g, 'home/apps/tty-app.cat'))
         w = g.launch('home/apps/tty-app.cat')
         assert g.state(w) == (0, '')
-        assert g.read('home/appdata/tty-app/kept.txt') == b'kept'
+        assert g.read('home/appdata/root/tty-app/kept.txt') == b'kept'
         g.close(w)
         term = g.launch('terminal')          # stays open across the VT switch
 
@@ -123,7 +123,7 @@ def test():
         send(g, 'y\n')
         g.run(.6)
         assert g.read('home/apps/tty-app.cat') is None, 'the confirmed uninstall did not run'
-        assert g.read('home/appdata/tty-app/kept.txt') is None, 'the console uninstall kept the data'
+        assert g.read('home/appdata/root/tty-app/kept.txt') is None, 'the console uninstall kept the data'
 
         # ---- no nesting, and the shell is still usable --------------------
         send(g, 'tlpdo tlpdo save\n')

@@ -73,7 +73,7 @@ int confirm_command(struct shell_confirm *c, char *line, unsigned cap,
         struct app *a=valid?app_find(id):NULL;removal=a&&a->external;
     }
     if(removal){
-        strcpy(storage_action,"Uninstall this app, close its windows and ERASE its\nprivate app data (home/appdata/<id>)?");
+        strcpy(storage_action,"Uninstall this app, close its windows and ERASE its\nprivate app data (home/appdata/<account>/<id>)?");
         if(fs_image_available()){strcat(storage_action,"\nSaves filesystem to: ");strncat(storage_action,fs_image_target(),36);}
         else strcat(storage_action,"\nSession RAM only; no disk write.");
         action=storage_action;

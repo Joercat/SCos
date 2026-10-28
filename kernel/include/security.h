@@ -321,6 +321,10 @@ int  security_api_force_change(void);
 int  security_api_session(void);
 const char *security_api_session_name(void);
 int  security_api_user_count(void);
+/* Name of account `index` (0-based), or 0 when there is no such account.  Used
+ * by the per-app storage layer to erase one application's data for every
+ * account, not only for whoever happens to be signed in. */
+int  security_api_user_name(int index, char *out, size_t cap);
 int  security_api_persistent(void);
 /* True while the shipped default account still uses its initial password.
  * The console may show a hint; `passwd` clears it. */

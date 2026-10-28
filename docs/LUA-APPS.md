@@ -154,15 +154,17 @@ clicks in `mouse` and call `hit` yourself. There is no hidden widget state.
 | `message(text)` | Native message dialog, ≤192 bytes; boolean indicating whether shown. Not in paint. |
 | `api_info()` | Table: version,source_limit,arena_limit,data_limit,data_files,theme_permission. |
 
-Private files live in `/home/appdata/<id>/`. Names allow ASCII letters/digits,
-`.`, `_`, `-`, but not a leading `.`, `.`/`..` or slashes. Up to 16 files/64 KiB
-per ID. Instances share that directory but have separate Lua states. There is
+Private files live in `/home/appdata/<account>/<id>/` - one directory per
+signed-in account, so two accounts running the same package never share a file.
+Names allow ASCII letters/digits, `.`, `_`, `-`, but not a leading `.`, `.`/`..`
+or slashes. Up to 16 files/64 KiB per ID per account. Instances share that directory but have separate Lua states. There is
 no general filesystem, shell, network or device access.
 
 That directory is private **always**, not only when the owner chose to run the
-app isolated: the directory name comes from the kernel-held registration (the
-package cannot pass one), one validator in `kernel/desktop/app_storage.c`
-decides every filename, and the VFS itself refuses `home/appdata/<other-id>/…`
+app isolated: the path comes from the kernel-held registration and the signed-in
+account (the package cannot pass either), one validator in
+`kernel/desktop/app_storage.c` decides every filename, and the VFS itself
+refuses `home/appdata/<other-account>/…` and `home/appdata/<account>/<other-id>/…`
 while an app process is current. A native app that calls `vfs_write()`
 directly gets the same answer. Uninstalling the app deletes the directory, so a
 reinstall starts with no data at all - there is no "kept data" state to
@@ -283,8 +285,8 @@ system warnings. The three-card desktop queue can evict older notices.
 
 Use the icon's menu or `tlpdo appuninstall <id>` to remove a package, with a
 default-no confirmation after the password. The package under `/home/apps` and
-the private `home/appdata/<id>/` directory are both deleted, so a reinstall
-starts clean; the original project source (`home/projects/…`, demos) is not an
+the private `home/appdata/<account>/<id>/` directories - one per account - are
+all deleted, so a reinstall starts clean; the original project source (`home/projects/…`, demos) is not an
 installed package and is left alone. `appuninstall` is a privileged command:
 without `tlpdo` it is refused, and the icon path keeps the default-no dialog.
 Installing from RAM-only storage is session-only. Supported ATA saves persist

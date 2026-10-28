@@ -137,7 +137,7 @@ def test_isolated_cat_packages_run_at_ring3():
         assert g.call('proc_pid_isolated', pid) == 1
         assert g.call('user_pid_mapped', pid, USER_BASE) == 1
         assert g.state(w) == (0, ''), g.state(w)
-        assert g.read('home/appdata/ring3/ring3.txt') == b'cpl3 data'
+        assert g.read('home/appdata/root/ring3/ring3.txt') == b'cpl3 data'
         assert g.call('user_syscall_count') > 0
         assert g.call('user_fault_count') == 0
         assert 'panic' not in g.serial().lower()

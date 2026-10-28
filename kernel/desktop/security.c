@@ -1048,6 +1048,15 @@ int  security_api_gate_satisfied(void) { return S.ready && S.session >= 0 && !S.
 int  security_api_force_change(void) { return S.force_change; }
 int  security_api_session(void) { return S.session; }
 int  security_api_user_count(void) { return S.count; }
+
+int security_api_user_name(int index, char *out, size_t cap)
+{
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    if (index < 0 || index >= S.count) return 0;
+    sc_copy(out, cap, S.users[index].name);
+    return out[0] != 0;
+}
 int  security_api_persistent(void) { return S.have_disk && fs_image_available(); }
 int  security_api_denied(void) { return (uint64_t)tick_count < S.deny_until; }
 

@@ -20,25 +20,39 @@
 static int vfs_user_private(const char *path)
 {
     const char *p, *name, *slash, *me;
-    size_t n;
-    if (!path || !security_initialized() || security_bypass_active()) return 0;
+    size_t n, root;
+    int matched = 0;
+    static const char *const private_roots[] = { "home/users", "home/appdata", 0 };
+    if (!path || !security_initialized() || security_bypass_active() ||
+        app_storage_maintenance()) return 0;
     /* The saved tree is replayed BEFORE sign-in (image_apply), when there is
      * no session yet.  Kernel metadata I/O must not be blocked there. */
     if (security_api_session() < 0) return 0;
     p = path;
     while (*p == '/') p++;
-    if (sc_neq(p, "home/users", 10)) return 0;
-    /* The bare parent directory lists every account name: deny it.  A dotted
-     * id or a name that merely starts with "home/users" is denied too. */
-    if (p[10] != '/') return 1;
+    /* Both private trees are per account: home/users/<name>/ is the account's
+     * own files, home/appdata/<name>/<app>/ is the private storage of an app
+     * that account ran.  Two accounts never share either one. */
+    for (int i = 0; private_roots[i]; i++) {
+        root = sc_len(private_roots[i]);
+        if (sc_neq(p, private_roots[i], root)) continue;
+        /* The bare parent directory lists every account name: deny it.  A name
+         * that merely starts with the root is not this root. */
+        if (p[root] != '/') return 1;
+        p += root + 1;
+        matched = 1;
+        break;
+    }
+    if (!matched) return 0;              /* not one of the private trees */
+    if (!*p) return 1;                   /* the bare root lists account names */
     /* vfs_lookup honours "..", so reject traversal before any comparison. */
-    for (const char *q = p + 11; *q; q++) {
+    for (const char *q = p; *q; q++) {
         if (*q == '.' && q[1] == '.' &&
             (q[2] == 0 || q[2] == '/')) return 1;
         if (*q == '/' && q[1] == '.' && q[2] == '.' &&
             (q[3] == 0 || q[3] == '/')) return 1;
     }
-    name = p + 11;
+    name = p;
     slash = name;
     while (*slash && *slash != '/') slash++;
     n = (size_t)(slash - name);

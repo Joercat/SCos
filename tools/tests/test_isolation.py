@@ -114,16 +114,16 @@ def test_a_booted_guest_enforces_isolation():
         # The real VFS access path, evaluated AS the process (not a helper).
         assert g.call('proc_pid_access', p1, put(512, 'home/documents/welcome.txt'), 0) == 0
         assert g.call('proc_pid_access', p1, put(512, 'system/settings.json'), 1) == 0
-        assert g.call('proc_pid_access', p1, put(512, 'home/appdata/about/secret'), 1) == 0
-        assert g.call('proc_pid_access', p1, put(512, 'home/appdata/notepad/x'), 1) == 1
-        assert g.call('proc_pid_access', p1, put(512, 'home/appdata/notepad'), 1) == 1
+        assert g.call('proc_pid_access', p1, put(512, 'home/appdata/root/about/secret'), 1) == 0
+        assert g.call('proc_pid_access', p1, put(512, 'home/appdata/root/notepad/x'), 1) == 1
+        assert g.call('proc_pid_access', p1, put(512, 'home/appdata/root/notepad'), 1) == 1
         assert g.call('proc_pid_access', 0, put(512, 'home/documents/welcome.txt'), 0) == 1
         # A real mount namespace: vfs_lookup honours "..", so traversal,
         # nested paths and "." segments must all be refused before any lookup.
-        for escape in ('home/appdata/notepad/../about/x',
-                       'home/appdata/notepad/./x',
-                       'home/appdata/notepad/sub/x',
-                       'home/appdata/notepad/../../documents/welcome.txt',
+        for escape in ('home/appdata/root/notepad/../about/x',
+                       'home/appdata/root/notepad/./x',
+                       'home/appdata/root/notepad/sub/x',
+                       'home/appdata/root/notepad/../../documents/welcome.txt',
                        'home/apps/notepad.cat/../x'):
             assert g.call('proc_pid_access', p1, put(512, escape), 1) == 0, \
                 'namespace traversal accepted: ' + escape
@@ -157,7 +157,7 @@ def test_a_booted_guest_enforces_isolation():
         assert g.call('proc_pid_isolated', p4) == 1
         assert g.call('user_pid_mapped', p4, 0x600000040000) == 1
         assert g.state(w4) == (0, ''), g.state(w4)
-        assert g.read('home/appdata/iso-app/iso.txt') == b'private data'
+        assert g.read('home/appdata/root/iso-app/iso.txt') == b'private data'
         # Its Lua VM, heap and bytecode executed at CPL3 through syscalls.
         assert g.call('user_syscall_count') > 0
         assert g.call('user_fault_count') == 0

@@ -220,13 +220,30 @@ int proc_pid_path_allowed(int pid, const char *path, int write)
             (n == 2 && q[0] == '.' && q[1] == '.')) return 0;
         q = *slash ? slash + 1 : slash;
     }
-    sc_copy(own, sizeof(own), "home/appdata/");
-    sc_cat(own, sizeof(own), P[pid - 1].app_id);
+    /* The private root is home/appdata/<account>/<id>, from the one module
+     * that knows the account segment - and the account is the one that created
+     * this process, not whoever is signed in now.  Building the path by hand
+     * here is how the two could drift apart and let an isolated app name
+     * another account's copy of its own package. */
+    if (!app_storage_dir_for(P[pid - 1].owner, P[pid - 1].app_id,
+                             own, sizeof(own))) return 0;
     own_len = sc_len(own);
     sc_copy(prefix, sizeof(prefix), own);
     sc_cat(prefix, sizeof(prefix), "/");
     if (sc_eq(norm, "home") || sc_eq(norm, "home/appdata") || sc_eq(norm, own))
         return 1;
+    {
+        /* home/appdata/<account> is reachable (it is the parent of the app's
+         * own directory) but lists nothing this process may open. */
+        char parent[96];
+        size_t cut = 0;
+        for (size_t k = 0; own[k]; k++) if (own[k] == '/') { cut = k; break; }
+        if (cut) {
+            memcpy(parent, own, cut);
+            parent[cut] = 0;
+            if (sc_eq(norm, parent)) return 1;
+        }
+    }
     /* The runtime loader may read its OWN package, and nothing else, from the
      * two package directories.  No subdirectories, no traversal. */
     static const char *const dirs[] = { "home/apps/", "home/demos/", 0 };

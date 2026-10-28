@@ -208,11 +208,21 @@ package left `home/appdata/<id>/` in place, so reinstalling the same id read the
 previous installation's saves - the user's own report.
 
 `kernel/desktop/app_storage.c` is now the single source of truth: id validator,
-filename validator (flat, no leading dot, no separators), path construction,
-usage, quota and wipe. `vfs_read`, `vfs_write`, `vfs_mkdir`, `vfs_delete` and
-`vfs_rename` call `app_storage_allowed()` while an app process is current and
-refuse any other app's `home/appdata/<id>/` - so even a native app that
-bypasses the Lua API is confined. `app_uninstall()` captures the id before it
+account validator, filename validator (flat, no leading dot, no separators),
+path construction, usage, quota and wipe. `vfs_read`, `vfs_write`, `vfs_mkdir`,
+`vfs_delete` and `vfs_rename` call `app_storage_allowed()` while an app process
+is current and refuse any other app's `home/appdata/<account>/<id>/` - so even
+a native app that bypasses the Lua API is confined.
+
+The directory is per **account** as well as per app. That was the second fault
+found while re-auditing: with `home/appdata/<id>/` alone, two accounts running
+the same installed package shared one directory, and either account could read
+the other's copy from a shell. The path is now
+`home/appdata/<account>/<id>/`, decided by the account that *created* the
+process (recorded in the process table, so a user switch cannot retarget a
+running app), `vfs_user_private()` denies `home/appdata` and every other
+account's subtree to the shell, and uninstalling erases the directory for every
+account plus the older flat path. `app_uninstall()` captures the id before it
 clears the registration, wipes the directory and says so; a reinstall starts
 empty. Storage separation is deliberately independent of the per-app isolation
 choice, which remains the owner's to decline.

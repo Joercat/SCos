@@ -366,10 +366,11 @@ int app_uninstall(const char *id,char *message,size_t capacity)
         if(!strncmp(a->path,"home/apps/",10)&&installed&&(installed->is_dir||!vfs_delete(a->path))){result="Cannot remove installed package; application unchanged.";break;}
         for(int j=wm_win_count()-1;j>=0;j--){struct window *w=wm_win_at(j);if(w->app==&a->app)wm_close_window(w);}
         wm_desktop_remove_app(a->id);app_unregister(&a->app);memset(a,0,sizeof(*a));
-        /* Uninstall means the data goes too.  A reinstall must start clean;
-         * leaving a save behind was the previous behaviour and it leaked one
-         * installation's private files into the next. */
-        wiped=app_storage_wipe(app_id,&data_files,&data_bytes);
+        /* Uninstall means the data goes too - for every account, since the
+         * package is registered for the machine.  A reinstall must start
+         * clean; leaving a save behind leaked one installation's private
+         * files into the next. */
+        wiped=app_storage_wipe_all(app_id,&data_files,&data_bytes);
         ok=1;
         if(!wiped){
             result="Uninstalled, but WARNING: its private app data could not be erased. Run save and check the filesystem.";

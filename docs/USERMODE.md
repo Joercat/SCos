@@ -46,7 +46,7 @@ plus a stack switch.
 | Linux primitive | SCos implementation | Where |
 | --- | --- | --- |
 | user mode / CPL3 | `SYSCALL`/`SYSRET`, `EFER.SCE`, `STAR`, `LSTAR`, `SFMASK`, DPL-3 GDT segments, TSS `RSP0` | `kernel/x86_64/usermode.S`, `kernel/src/interrupt.c` |
-| namespaces (mount) | every path is a **basename** resolved under `home/appdata/<id>/`; `/`, `..` and separators are rejected before any VFS call | `ns_path()` in `kernel/desktop/usermode.c` |
+| namespaces (mount) | every path is a **basename** resolved under `home/appdata/<account>/<id>/`; `/`, `..` and separators are rejected before any VFS call | `ns_path()` in `kernel/desktop/usermode.c` |
 | namespaces (PID/IPC/net) | only the app's own window is visible; no process list, no cross-app messages, no network | dispatcher `SC_NR_WINDOW`, `SC_NR_FOCUSED`, `PROC_CAP_IPC` |
 | user namespaces / capabilities | `PROC_CAP_VFS_READ/WRITE/THEME/IPC/APPCTL/SYSINFO` held in kernel memory | `process.h`, `cap_ok()` |
 | seccomp-bpf | default-deny allowlist over `SC_NR_1..SC_NR_MAX`; owner-adjustable with `user_set_seccomp()`. The syscall number is compared at full 64-bit width and capabilities are checked again per file syscall | `allow[]`, `user_seccomp_allowed()`, `cap_ok()` |
@@ -132,7 +132,7 @@ what the package's own code does. Both hosts are therefore the same API v2:
 | theme / date | live `theme()` + `date()` table | same values through the shared page |
 | `interval(ms)` | 100 … 60000 ms scheduling | stored per process, honoured by the scheduler |
 | drawing | 4,000,000-pixel budget per callback, `drawing budget exceeded` | same budget per episode, same error |
-| data files | `home/appdata/<id>/`, flat, 16 files / 64 KiB, always private to that app (independent of the isolation choice) and erased on uninstall | same namespace via syscalls, the same `app_storage_check()` quota, and the same `app data quota exceeded (16 files / 64 KiB)` error (`SC_FILE_QUOTA_REFUSED`) rather than a silent success |
+| data files | `home/appdata/<account>/<id>/`, flat, 16 files / 64 KiB, always private to that app and that account (independent of the isolation choice) and erased on uninstall | same namespace via syscalls, the same `app_storage_check()` quota, and the same `app data quota exceeded (16 files / 64 KiB)` error (`SC_FILE_QUOTA_REFUSED`) rather than a silent success |
 | `scos.api_info().isolated` | true only when the window really is sandboxed | always true here |
 
 Capabilities are the only difference, and they are the owner's choice: an
