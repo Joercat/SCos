@@ -84,6 +84,10 @@ void klog(const char *fmt, ...) { (void)fmt; }
 #define M_NO_IDENTITY 32768u /* even NV_PMC_BOOT_0 refuses: nobody can say which chip this is */
 #define M_SCRATCH_REFUSES 65536u /* the boot-complete scratch itself answers the locked-target refusal, which is
                                   * what a real GB207 did: BAR0+0xad00bc unreadable while the FSP was booting */
+#define M_EMEM_JUNK  131072u  /* the channel takes the writes and hands back something else - the shape the GB207
+                               * reported, where the read-back differed at dword 0 on a packet that landed */
+#define M_DROP_TAIL  262144u  /* the command queue's tail register accepts the store and reads back 0, which is a
+                               * doorbell the card never heard */
 
 static uint8_t model_therm[0x1000];
 static uint8_t model_fsp[0x4000];
@@ -369,7 +373,7 @@ uint32_t gpu_io_read32(const volatile uint32_t *window, uint64_t within)
     if (which == 4 && index == TIMER_TIME_0 && !(model.mode & M_TIMER_FROZEN)) return model.timer_step += 0x400u;
     if (which == 1 && index == R_EMEMC) return ememc_value();
     if (which == 1 && index == R_EMEMD) {
-        value = channel_dword(emem_current());
+        value = (model.mode & M_EMEM_JUNK) ? 0x00000020u : channel_dword(emem_current());
         if (model.ainc_read && !(model.mode & M_NO_AINC)) model.emem_walk++;
         return value;
     }
@@ -411,6 +415,9 @@ void gpu_io_write32(volatile uint32_t *window, uint64_t within, uint32_t value)
         model.tail_writes++;
         model.last_tail = value;
         model.tail_seq++;
+        /* A tail the register will not hold: the store is taken and read back as zero, so the packet is in the
+         * channel and the doorbell that would have announced it never happened. */
+        if (model.mode & M_DROP_TAIL) { page_of(which)[index] = 0; model.tail_seq--; }
     }
     if (index == R_QUEUE_HEAD && model.tail_seq != model.consumed_seq) {
         model.pending_consume = 1;
@@ -1320,6 +1327,52 @@ static void test_the_handover_answers(void)
           fsp_state.submit_valid && !fsp_state.submit_consumed && fsp_state.submit_head == 0);
 }
 
+/* The three readings that turn "no reply" into a direction, exercised against the three ways a card really has
+ * produced that sentence on this machine. */
+static void test_the_channel_that_cannot_be_read_back(void)
+{
+    /* The GB207's shape: the writes are taken - the model's channel holds the packet - and reads through the
+     * window hand back something that is not in it.  What must come out of that is a mismatch *and* a scan that
+     * finds the packet nowhere, because those two together are what says "the read-back is the liar", not "the
+     * store did not land". */
+    ask_with(M_EMEM_JUNK, 48, 97, 96, -1, 0);
+    check("a card whose window does not read back what was written is reported as a mismatch, not as a refusal",
+          !fsp_state.send_readback && fsp_state.send_mismatch == 0 && fsp_state.emem_got0 == 0x20u);
+    check("and the four dwords it hands back are kept beside the four that went in, so the two can be compared",
+          fsp_state.emem_got[0] == 0x20u && fsp_state.emem_got[1] == 0x20u &&
+          fsp_state.emem_want[0] == 0xc0000000u);
+    check("the scan then says the packet is nowhere in the first kilobyte - while the model's channel has it, "
+          "which is the whole distinction the scan exists to draw",
+          fsp_state.packet_at == 0xffffffffu && model.packet[0] == 0xc0000000u);
+    check("and the handover's own channel numbers were kept rather than the query's that followed it",
+          fsp_state.handover_have_channel && fsp_state.handover_got[0] == 0x20u &&
+          fsp_state.handover_want[0] == 0xc0000000u && fsp_state.handover_packet_at == 0xffffffffu &&
+          fsp_state.handover_bursts == 4);
+    check("the packet the model's card took is the whole 868 bytes, in order, header first",
+          model.cot_bytes == 868 && model.cot[0] == 0xc0000000u);
+    check("nor is the handover's channel reading taken after the doorbell: dword 0 after the wait is the "
+          "model's own channel, which still holds the packet because this card never reads it",
+          fsp_state.handover_emem0_after == 0x20u);
+}
+
+static void test_a_doorbell_that_does_not_land(void)
+{
+    ask_with(M_DROP_TAIL, 48, 97, 96, -1, 0);
+    check("a tail register that accepts a store and reads back zero is reported as a doorbell that did not "
+          "land, which is a different fact from a doorbell nobody answered",
+          fsp_state.handover_sent && !fsp_state.handover_db_landed && fsp_state.handover_db_tail == 0 &&
+          fsp_state.handover_doorbell == 864u);
+    check("and the wait that follows is still reported, with the tail it left behind beside the one it wanted",
+          !fsp_state.settled && fsp_state.handover_tail != fsp_state.handover_doorbell);
+    check("the packet itself was written and read back first, and is not blamed for the doorbell's failure",
+          fsp_state.send_readback && fsp_state.handover_bursts == 4u && fsp_state.handover_packet_at == 0u &&
+          m_read(model_channel) == 0xc0000000u && model.cot_bytes == 0);
+
+    ask_with(0, 48, 97, 96, -1, 0);
+    check("and a card that takes the doorbell says so, with the tail it read back holding the value written",
+          fsp_state.handover_db_landed && fsp_state.handover_db_tail == 864u);
+}
+
 /* The two things a submission needs, measured where this generation publishes them.  The legacy user-mode page
  * is not consulted by this file at all: an earlier build drew a conclusion about the card's clock from that
  * page, and these checks are the boundary against doing that again. */
@@ -1445,6 +1498,8 @@ int main(void)
     test_the_boot_descriptors();
     test_the_reservation();
     test_the_handover_answers();
+    test_the_channel_that_cannot_be_read_back();
+    test_a_doorbell_that_does_not_land();
     test_the_clock_and_the_doorbell_page();
     test_the_generation_table();
     printf("%u check(s), %u failure(s)\n", checks_run, failures_run);

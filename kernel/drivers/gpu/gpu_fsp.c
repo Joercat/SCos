@@ -80,6 +80,9 @@
  * EMEM port is declared `min = 4, max = 0x100' (gp102_flcn_emem_pio) and its transfer loop re-arms the window
  * per chunk.  A longer burst does not fail, it wraps, and overwrites the start of what it just wrote. */
 #define FSP_EMEM_BURST_BYTES              0x100u
+/* How much of the channel the "where did it land" scan reads.  The channel is 1 KiB and the largest packet that
+ * goes in it is 1016 bytes, so the first kilobyte is the whole of the space the packet could be in. */
+#define FSP_EMEM_SCAN_BYTES               0x400u
 #define FSP_REFUSED(v)                   (((v) & 0xffffff00u) == 0xbadf4100u)
 /* Any value in the 0xBADF.... family, of which the line above is the one cause.  The coprocessor's driver
  * masks a read against FLCN_CSB_PRIV_PRI_ERROR_CODE 0xBADF0000 under 0xFFFF0000 before it believes a value
@@ -278,34 +281,27 @@ static void map_mailbox_pages(uint64_t bar0)
      * having it mapped says nothing about the mailbox, so nothing below depends on it. */
 }
 
-/* The channel's window: one control register, one data register, and a counter that is *not* a register a
- * reader can trust.
+/* The channel's window: one control register, one data register, and an address inside the control word.
  *
- * The control write carries a byte offset of the channel, the direction of the transfer in bit 24 (write) or
- * bit 25 (read), and from that point every access to the data register lands at the next four bytes and moves
- * the window along by itself.  This file used to write that control word once and then push 217 dwords
- * through the data register, and it read the control register back afterwards to see how far the window had
- * walked.
+ * The control write carries a byte offset in the low bits - the published field is OFFS 7:2 with a block index
+ * in 15:8 - and the direction in bit 24 (write) or bit 25 (read).  The reference driver spells that out as
+ * `BIT(24) | emem_base' and `BIT(25) | emem_base' (drivers/gpu/drm/nouveau/nvkm/falcon/gp102.c,
+ * `gp102_flcn_pio_emem_wr_init' and `..._emem_rd_init'), and from the arm onwards every access to the data
+ * register lands at the next four bytes, so a transfer longer than one window is written without re-arming at
+ * all - `gh100_fsp_send' arms once and hands over all 868 bytes of the COT packet.
  *
- * Both halves of that are wrong, and the published driver says by how much: its own EMEM transfer is declared
- * as `min = 4, max = 0x100' (drivers/gpu/drm/nouveau/nvkm/falcon/gp102.c, `gp102_flcn_emem_pio'), and the
- * core loop that uses it re-arms the window for every chunk (`pio->wr_init(falcon, port, sec, mem_base)'
- * inside the do/while in nvkm/falcon/base.c).  The window counter is eight bits wide, so a transfer longer
- * than 256 bytes wraps back to the start of the window and overwrites bytes it has already written.  An
- * 868-byte handover therefore put its first 256 bytes in place, then wrote the next 612 over them, and the FSP
- * was handed a packet whose hash, key and signature were not where its own header said they were - which is
- * the shape of "written and answered with nothing" that this machine reported, not the shape of a card that
- * refused an image.
+ * The control register reads back as the base with the walked counter added to it, which is what the GB207
+ * reported: `0x200000c' after three dwords had been read at base 0 is base 0 plus twelve bytes of walk, not an
+ * arm that named a length.  This file re-arms for every 256 bytes, which sets the counter back to where it
+ * already was, and is why the burst loop and the reference's single arm put the same bytes in the same places.
  *
- * Reading the control register to prove the transfer walked is wrong in the other direction: on this hardware
- * that field is a counter inside the window, not a statement about the packet, and it read 1 dword after the
- * 217 that were written.  What proves a packet arrived is reading it back out and comparing it, which is what
- * `send_packet' does now - before the doorbell, so the reply that will land in the same channel cannot be
- * mistaken for the request that is still being checked.
+ * What proves a packet arrived is reading it back out and comparing it, which is what `send_packet' does
+ * before the doorbell - and when that comparison disagrees, the scan below asks the only question left: where
+ * in the channel, if anywhere, the packet's first dword actually is.
  */
-static void emem_arm(uint32_t bytes, int write)
+static void emem_arm(uint32_t at, int write)
 {
-    write32(&w_fsp, NV_PFSP_EMEMC, (write ? (1u << 24) : (1u << 25)) | (bytes & ~3u));
+    write32(&w_fsp, NV_PFSP_EMEMC, (write ? (1u << 24) : (1u << 25)) | (at & 0x3fffffu));
 }
 
 /* Every access the channel gets goes through these two, and both re-arm the window every 256 bytes, which is
@@ -330,6 +326,24 @@ static void emem_read(uint32_t at, uint8_t *data, uint32_t bytes)
         for (uint32_t i = 0; i + 4 <= burst; i += 4) store32(data + done + i, read32(&w_fsp, NV_PFSP_EMEMD));
         done += burst;
     }
+}
+
+/* Where did the packet go?  Asked only after a read-back disagreed with what was written, and asked by reading
+ * the window back from the start of the channel and looking for the packet's own first dword: a packet that
+ * landed at a different offset than the one it was armed for says so as a number, and a packet that is nowhere
+ * in the channel says the writes never landed - two answers that a mismatch alone cannot tell apart.  Reads
+ * only: this cannot make a broken channel worse, and it costs nothing on a card whose read-back agrees. */
+static uint32_t emem_scan(uint32_t want)
+{
+    for (uint32_t at = 0; at < FSP_EMEM_SCAN_BYTES; at += FSP_EMEM_BURST_BYTES) {
+        uint8_t block[FSP_EMEM_BURST_BYTES];
+        uint32_t burst = FSP_EMEM_SCAN_BYTES - at > FSP_EMEM_BURST_BYTES ? FSP_EMEM_BURST_BYTES
+                                                                        : FSP_EMEM_SCAN_BYTES - at;
+        emem_read(at, block, burst);
+        for (uint32_t i = 0; i + 4u <= burst; i += 4u)
+            if (load32(block + i) == want) return at + i;
+    }
+    return 0xffffffffu;                                  /* not in the first kilobyte of the channel */
 }
 
 /* All four pointers, in one place, because "may I send" is the same question as "is there a reply": the FSP
@@ -489,7 +503,10 @@ static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type
         uint8_t back[FSP_EMEM_BURST_BYTES];
         uint32_t burst = total - at > FSP_EMEM_BURST_BYTES ? FSP_EMEM_BURST_BYTES : total - at;
         emem_read(at, back, burst);
-        if (at == 0) fsp_state.emem_got0 = load32(back);      /* what the window hands back for the first dword */
+        if (at == 0) {                                        /* what the window hands back for the first four */
+            for (uint32_t k = 0; k < 4u; k++) fsp_state.emem_got[k] = load32(back + k * 4u);
+            fsp_state.emem_got0 = fsp_state.emem_got[0];
+        }
         for (uint32_t i = 0; i + 4 <= burst; i += 4)
             if (fsp_state.send_mismatch == ~0u && memcmp(back + i, packet + at + i, 4) != 0)
                 fsp_state.send_mismatch = (at + i) / 4u;
@@ -500,7 +517,9 @@ static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type
      * read, not holding different bytes; one that answers 0 for a packet written over zeros is telling us the
      * write did not land at all. */
     fsp_state.emem_want0 = load32(packet);
+    for (uint32_t k = 0; k < 4u; k++) fsp_state.emem_want[k] = load32(packet + k * 4u);
     fsp_state.ememc_after = read32(&w_fsp, NV_PFSP_EMEMC);
+    if (!fsp_state.send_readback) fsp_state.packet_at = emem_scan(fsp_state.emem_want0);
     /* Reported, not obeyed - the same rule the counter it replaced was given, and for a reason this time
      * that was measured: on the GB207 the channel's data window answers reads with something that is not
      * what was written to it *at every offset including the first*, while the packet still arrives and the
@@ -512,6 +531,13 @@ static int send_packet(const uint8_t *payload, uint32_t size, uint32_t nvdm_type
 
     write32(&w_fsp, NV_PFSP_QUEUE_TAIL, fsp_state.doorbell);
     write32(&w_fsp, NV_PFSP_QUEUE_HEAD, 0);
+    /* Read back at once, before the FSP has had a chance to consume: this is the only moment at which the pair
+     * says whether the store landed at all.  A tail that reads back as 0 over a packet that was handed 0x360 is
+     * a doorbell the card dropped, and every later reading of the pair - idle, consumed, or full - would be
+     * indistinguishable from a coprocessor that read it. */
+    fsp_state.doorbell_head = read32(&w_fsp, NV_PFSP_QUEUE_HEAD);
+    fsp_state.doorbell_tail = read32(&w_fsp, NV_PFSP_QUEUE_TAIL);
+    fsp_state.doorbell_landed = fsp_state.doorbell_tail == fsp_state.doorbell;
     return 1;
 }
 
@@ -1329,11 +1355,23 @@ static void hand_over_fmc(void)
     }
     fsp_state.handover_sent = 1;
     fsp_state.handover.request_bytes = fsp_state.packet_bytes;
+    /* The channel's own numbers, taken here and kept: the capability query is sent after this and would
+     * overwrite them, and it is the handover's 868 bytes that matter. */
+    fsp_state.handover_have_channel = 1;
+    fsp_state.handover_packet_at = fsp_state.packet_at;
+    fsp_state.handover_bursts = fsp_state.send_bursts;
+    for (uint32_t k = 0; k < 4u; k++) {
+        fsp_state.handover_got[k] = fsp_state.emem_got[k];
+        fsp_state.handover_want[k] = fsp_state.emem_want[k];
+    }
     /* Four seconds, the reference's budget for this boot, and the same clock the readiness wait used. */
     fsp_state.settled = wait_for_timed(gsp_fmc_settled, &fsp_state.handover_polls, FSP_WAIT_BOOT_MS,
                                        &fsp_state.handover_ms_used);
     note_submit();
     fsp_state.handover_doorbell = fsp_state.doorbell;
+    fsp_state.handover_db_head = fsp_state.doorbell_head;
+    fsp_state.handover_db_tail = fsp_state.doorbell_tail;
+    fsp_state.handover_db_landed = fsp_state.doorbell_landed;
     fsp_state.handover_head = fsp_state.submit_head;
     fsp_state.handover_tail = fsp_state.submit_tail;
     fsp_state.handover_submit_valid = fsp_state.submit_valid;
@@ -1356,6 +1394,14 @@ static void hand_over_fmc(void)
         fsp_state.handover_head = fsp_state.submit_head;
         fsp_state.handover_tail = fsp_state.submit_tail;
         fsp_state.handover_consumed = fsp_state.submit_consumed;
+    }
+    /* What is in the channel now: the packet's own first dword if nobody read it, a reply header if the FSP
+     * answered into the channel without moving its queue, or something else entirely.  One read, and it is the
+     * only evidence about the packet that is taken *after* the doorbell. */
+    {
+        uint8_t head[4];
+        emem_read(0, head, 4u);
+        fsp_state.handover_emem0_after = load32(head);
     }
     read_status_queue();
     /* A reply is still read if the FMC did send one - its error path does - but it is no longer the thing this
@@ -1440,7 +1486,16 @@ static void probe_mailbox(void)
     fsp_state.gsp_mailbox0 = read32(&w_gsp, NV_PGSP_MAILBOX0);
     fsp_state.gsp_mailbox1 = read32(&w_gsp, NV_PGSP_MAILBOX1);
     int queue_readable = queues(&idle);
-    if (!queue_readable) probe_queue_write_access();   /* a refusing card gets asked the one question that is
+    if (!queue_readable) probe_queue_write_access();
+    else {
+        /* The pair answered, so there was nothing to ask by storing: reporting "store refused" over a write
+         * of zero to a register that already read zero was a sentence about nothing, and it is why three
+         * pastes said the reply queue had no door into it while the queue was answering. */
+        fsp_state.reset_head = fsp_state.msgq_head;
+        fsp_state.reset_tail = fsp_state.msgq_tail;
+        fsp_state.queue_writable = 1;
+        fsp_state.queue_probed = 0;
+    }   /* a refusing card gets asked the one question that is
                                                            left; a card that answers is not reset under itself */
     /* The gate used to be "can we read the pair"; on a card that answers 0xbadf... to reads and would take a
      * store, that turned into a boot where nothing was ever written and nothing was ever learned.  It is now

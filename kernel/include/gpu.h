@@ -353,9 +353,24 @@ struct gpu_fsp_state {
      * back as, and the first dwords the data window returns against the ones written.  "differs at dword 0" is
      * not a diagnosis; the pair of values is. */
     uint32_t ememc_after, emem_got0, emem_want0;
+    /* The first four dwords the window hands back against the four that were written, and - when they disagree
+     * - the offset in the channel where the packet's first dword was actually found (0xffffffff for nowhere in
+     * the first kilobyte).  A packet at a different offset and a packet that never landed are different faults
+     * with the same symptom, and the scan is what separates them. */
+    uint32_t emem_got[4], emem_want[4], packet_at;
+    int handover_have_channel;               /* the numbers above belong to the handover, not to the query */
+    uint32_t handover_got[4], handover_want[4], handover_packet_at, handover_bursts;
+    uint32_t handover_emem0_after;           /* the channel's first dword after the wait, not before it */
     /* The submit queue as it stood when the handover's wait ended.  Kept apart from the query's, which is a
      * different wait over a different packet, because the handover is the one that matters. */
     uint32_t handover_head, handover_tail, handover_doorbell;
+    /* What the two submit pointers held the instant after the doorbell was written - before any wait could let
+     * the FSP consume.  A tail that reads back as what was written is a store that landed; a tail that reads
+     * back as something else is a doorbell nobody ever got, and the two look identical in a wait that ends. */
+    uint32_t doorbell_head, doorbell_tail;
+    int doorbell_landed;
+    uint32_t handover_db_head, handover_db_tail;
+    int handover_db_landed;
     int handover_submit_valid, handover_consumed, handover_retried;
     /* What the reference driver's own per-chip FSP table decides, read from the chip's architecture field
      * rather than assumed: nouveau's `nvkm_fsp_func.cot' in nvkm/subdev/fsp/{gh100,gb100,gb202}.c, the driver

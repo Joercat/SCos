@@ -314,11 +314,19 @@ static void put_fsp_mailbox(struct writer *w, const struct gpu_fsp_state *f)
 {
     char number[24];
 
-    put(w, " reply queue: wrote 0/0, read back 0x");
-    put_hex(w, f->reset_head);
-    put(w, "/0x");
-    put_hex(w, f->reset_tail);
-    put(w, f->queue_writable ? " (store lands)" : " (store refused: no door into the queue)");
+    if (f->queue_probed) {
+        put(w, " reply queue: wrote 0/0, read back 0x");
+        put_hex(w, f->reset_head);
+        put(w, "/0x");
+        put_hex(w, f->reset_tail);
+        put(w, f->queue_writable ? " (store lands)" : " (store refused: no door into the queue)");
+    } else {
+        put(w, " reply queue: reads 0x");
+        put_hex(w, f->reset_head);
+        put(w, "/0x");
+        put_hex(w, f->reset_tail);
+        put(w, " (answered, so nothing was written to ask)");
+    }
     put(w, ". request: ");
     if (!f->queried && !f->send_blocked) {
         put(w, "not sent.\n");
@@ -670,6 +678,14 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
         } else {
             put(w, "lockdown bit 13 clear");
         }
+    } else if (f->booted) {
+        /* The contradiction this panel used to print without noticing it was one: the therm scratch says the
+         * FSP finished booting, and the lockdown that boot releases never lifts.  Both cannot be true of a
+         * chip that read the packet, so the pair is stated as what it is - a boot report with no handover
+         * behind it - instead of being filed under "no answer". */
+        put(w, "nothing in ");
+        put_number(w, (unsigned)f->handover_ms_used);
+        put(w, " of 4000 ms, though the scratch says the FSP booted: lockdown never lifted");
     } else {
         put(w, "no answer in ");
         put_number(w, (unsigned)f->handover_ms_used);
@@ -707,20 +723,55 @@ static void put_fsp_report(struct writer *w, const struct gpu_fsp_state *f)
         put(w, f->handover_consumed ? " (read)" : " (never read)");
         put(w, f->handover_tail == f->handover_doorbell ? ", tail holds 0x" : ", tail does NOT hold 0x");
         put_hex(w, f->handover_doorbell);
+        /* The instant after the ring, which is the only reading that separates a dropped doorbell from a
+         * consumed one: if the tail would not take the value at all, nothing downstream is about the FSP. */
+        put(w, f->handover_db_landed ? ", doorbell landed 0x" : ", doorbell did NOT land 0x");
+        put_hex(w, f->handover_db_tail);
         if (f->handover_retried) put(w, ", rung twice");
     }
     put(w, ", scratch 0x");
     put_hex(w, f->boot_scratch_after);
     put(w, ", queue ");
     put(w, f->queues_idle_after ? "idle" : "busy");
+    if (f->handover_have_channel) {
+        put(w, ", channel dword 0 after the wait 0x");
+        put_hex(w, f->handover_emem0_after);
+    }
     put(w, ".\n");
-    put(w, "  channel: arm 0x");
-    put_hex(w, f->ememc_after);
-    put(w, ", window returns 0x");
-    put_hex(w, f->emem_got0);
-    put(w, " where 0x");
-    put_hex(w, f->emem_want0);
-    put(w, " was written.\n");
+    /* What the channel did with the handover packet, in the numbers that separate the faults that all print as
+     * "no reply": the arm and the offset it names, the four dwords the window hands back against the four that
+     * went in, and where - if anywhere - the packet's own first dword is in the first kilobyte of the channel. */
+    {
+        const uint32_t *got = f->handover_have_channel ? f->handover_got : f->emem_got;
+        const uint32_t *want = f->handover_have_channel ? f->handover_want : f->emem_want;
+        uint32_t bytes = f->handover_have_channel ? f->handover.request_bytes : f->packet_bytes;
+        uint32_t found = f->handover_have_channel ? f->handover_packet_at : f->packet_at;
+
+        put(w, "  channel: arm 0x");
+        put_hex(w, f->ememc_after);
+        put(w, " naming offset 0x");
+        put_hex(w, f->ememc_after & 0x3fffffu);
+        put(w, " (last window 0x");
+        put_hex(w, bytes > 0x100u ? ((bytes - 1u) & ~0xffu) : 0u);
+        put(w, "); window returns");
+        for (unsigned k = 0; k < 4u; k++) {
+            /* Only the dwords the packet actually has: a twelve-byte packet has three, and printing a fourth
+             * would be a comparison against a zero that was never written. */
+            if (k * 4u + 4u > bytes) break;
+            put(w, " 0x");
+            put_hex(w, got[k]);
+        }
+        put(w, " where");
+        for (unsigned k = 0; k < 4u; k++) {
+            if (k * 4u + 4u > bytes) break;
+            put(w, " 0x");
+            put_hex(w, want[k]);
+        }
+        put(w, " went in; scan finds the packet at ");
+        if (found == 0xffffffffu) put(w, "no offset in the first 1 KiB");
+        else { put(w, "0x"); put_hex(w, found); }
+        put(w, ".\n");
+    }
     /* What RM itself said, which is the only reading here that comes from the resource manager rather than
      * from the falcon that was supposed to start it. */
     if (!f->queue_staged) {
