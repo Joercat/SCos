@@ -1,8 +1,8 @@
 {
  "branch": "arena/9dd682cf-scos",
  "build_tag": "x64-dev",
- "built": "2026-10-28T11:12:39Z",
- "commit": "d3bb49cbd94e",
+ "built": "2026-10-28T19:03:21Z",
+ "commit": "d9d618de929a",
  "firmware": [
   {
    "bytes": 287869,
@@ -11,23 +11,23 @@
   }
  ],
  "image_bytes": 67108864,
- "kernel_bytes": 874768,
- "kernel_sha256": "82cde6322d858cf0d555829c59642cfe294201c4ebb8087105de303d28808905",
+ "kernel_bytes": 850224,
+ "kernel_sha256": "b50c272bc502ce70c3ffd49b5c7200ed944c52ade41a4a80b41cfa4ab4559189",
  "modules": [
   {
    "bytes": 13536,
    "name": "ATI.MOD",
-   "sha256": "89d8b373edcc7b213fd0c582e2ab860a45c01a4368414c6e67f85baa215c491c"
+   "sha256": "9895cd3b06fa4670b44781a91d0d1f7790265dcd7a670faa1d8441a84c74058a"
   },
   {
    "bytes": 7216,
    "name": "CIRRUS.MOD",
-   "sha256": "96cd5a819788921ab4ba9a1765f52bb95d8fa98fe361ea7bf74e3ad6d5441565"
+   "sha256": "8e998740f1ad1c94055fd09dee26b7a1db007c121cf2197a7f650eca85296528"
   },
   {
-   "bytes": 46496,
+   "bytes": 45200,
    "name": "NVIDIA.MOD",
-   "sha256": "9a96f42d2f7441746e24faa65f40e58a48ee3b76d225fbc3a9808397a4118d54"
+   "sha256": "2e15ebd3def8e277840a28013b641c0255006a26ff79eed96b38aae7e186f0e3"
   }
  ],
  "tree": "clean"
