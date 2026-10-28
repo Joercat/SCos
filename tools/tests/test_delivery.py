@@ -84,12 +84,33 @@ def test_a_record_missing_a_built_driver_is_refused():
     expect_problem('a delivery whose record left the driver modules out', 'the tree builds')
 
 
+def unrelated_commit():
+    """A commit this clone really has, which is not an ancestor of HEAD.
+
+    This used to be a literal hash, and it rotted: the fixture was a commit from a history this checkout no
+    longer contains, so the checker answered with the *other* correct refusal ("this repository does not
+    contain") and the test failed while the behaviour it guards was fine.  Asking git for a commit on another
+    branch keeps the fixture meaningful - the record is well-formed and describes a real build, it is simply
+    a build of a different line of work.
+    """
+    have = subprocess.run(['git', 'rev-list', '--all'], cwd=ROOT, capture_output=True, text=True).stdout.split()
+    for commit in have:
+        if subprocess.run(['git', 'merge-base', '--is-ancestor', commit, 'HEAD'],
+                          cwd=ROOT, capture_output=True).returncode != 0:
+            return commit
+    return None
+
+
 def test_a_record_from_before_an_image_input_change_is_refused():
     """The state a branch reaches by committing kernel work without running make dist."""
     if not (ROOT / 'dist/scos.img').is_file():
         print('skip: dist/scos.img is not built')
         return
-    prepare(record_edits={'commit': 'f1ec437', 'tree': 'clean'})
+    commit = unrelated_commit()
+    if commit is None:
+        print('skip: this clone holds no commit outside HEAD to name')
+        return
+    prepare(record_edits={'commit': commit, 'tree': 'clean'})
     expect_problem('an image older than the source it claims', 'predates commits that change what gets packed')
 
 

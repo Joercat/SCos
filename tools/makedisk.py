@@ -417,6 +417,10 @@ def main(directory, sectors=None, firmware_dir=None, out=None):
     record_text, record_json = build_record(v, elf,
                                             [(stem + '.MOD', blob) for stem, blob in modules], firmware)
     (d / 'BUILD.TXT').write_text(record_text)
+    # The volume's own size goes in the JSON and not in BUILD.TXT: it is not a fact about the kernel, but it is
+    # the one number a checker cannot derive from anything else - `dist' is 64 MiB by rule while a Ventoy image
+    # is whatever the firmware staged for it needs, and both are packed by this same code.
+    record_json['image_bytes'] = total_sectors * SECTOR
     (d / 'build.json').write_text(json.dumps(record_json, sort_keys=True, indent=1) + '\n')
     # Every byte that has to land on the volume is known here, so this is where the volume is asked whether it
     # is big enough - before the first cluster of the big files is handed out, and with the size that would fit

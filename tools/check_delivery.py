@@ -9,7 +9,9 @@ delivery that has drifted fails the build that made it.
 
 What it checks, in the order the failure modes matter:
 
-  1. the three files exist, the image is 67108864 bytes, and its sha256 is what dist/scos.img.sha256 says;
+  1. the three files exist, the image is the size its record claims (67108864 bytes for an image whose record
+     predates that field, which is what `dist' has always been), and its sha256 is what dist/scos.img.sha256
+     says;
   2. the record's tree state is `clean` - an experiment is not a delivery;
   3. the record names a commit that is reachable from HEAD, so it describes this branch;
   4. the bytes *inside* the image match the record: KERNEL.ELF and every .MOD are read back out of the
@@ -33,6 +35,9 @@ ROOT = Path(__file__).resolve().parents[1]
 IMAGE = 'dist/scos.img'
 RECORD = 'dist/scos.img.build.json'
 CHECKSUM = 'dist/scos.img.sha256'
+# The tracked image is 64 MiB by rule.  That is a fact about `dist/', not about this checker: a Ventoy image
+# carrying the resource manager is 69 MB and grows with whatever firmware was staged, so the size is read from
+# the record and this constant is only the fallback for a record written before the field existed.
 IMAGE_BYTES = 67108864
 # Everything that ends up packed into the image.  A change here between the record's commit and HEAD means
 # the artifact on the branch is not the artifact this source would produce.
@@ -65,8 +70,6 @@ def check(root=ROOT, repo=None):
         return problems
 
     blob = image.read_bytes()
-    if len(blob) != IMAGE_BYTES:
-        problems.append('%s is %d bytes, not %d' % (IMAGE, len(blob), IMAGE_BYTES))
     digest = hashlib.sha256(blob).hexdigest()
     wanted = (checksum.read_text().strip().split() or [''])[0]
     if digest != wanted:
@@ -76,6 +79,17 @@ def check(root=ROOT, repo=None):
         meta = json.loads(record.read_text())
     except ValueError as exc:
         return problems + ['%s is not readable JSON: %s' % (RECORD, exc)]
+    wanted_bytes = meta.get('image_bytes')
+    if wanted_bytes is None:
+        # A record without the field is a delivery made before the packer wrote it; it is only trustworthy for
+        # the size the tracked image has always been, and anything else has to be repacked and re-recorded.
+        wanted_bytes = IMAGE_BYTES if len(blob) == IMAGE_BYTES else None
+        if wanted_bytes is None:
+            problems.append('%s is %d bytes and its record does not say what size it should be: repack it with '
+                            'this revision of tools/makedisk.py so the record names the volume it packed'
+                            % (IMAGE, len(blob)))
+    elif len(blob) != wanted_bytes:
+        problems.append('%s is %d bytes, not the %d its record names' % (IMAGE, len(blob), wanted_bytes))
     if meta.get('tree') != 'clean':
         problems.append('the record says tree %r: an image built from an uncommitted tree is an experiment, '
                         'not a delivery' % meta.get('tree'))
