@@ -1,10 +1,17 @@
 {
  "branch": "arena/01a09dfd-scos",
  "build_tag": "x64-dev",
- "built": "2026-10-27T21:04:48Z",
- "commit": "cf4c9faae693",
+ "built": "2026-10-28T00:41:34Z",
+ "commit": "82c53b0453e1",
+ "firmware": [
+  {
+   "bytes": 287869,
+   "name": "GSPFMC.BIN",
+   "sha256": "fc0451890fdbc17aac8cf3fa9bb349a12b6420f485209cc235d0d0be175e7261"
+  }
+ ],
  "kernel_bytes": 866168,
- "kernel_sha256": "6e861b1fb01f451dcc2ddcb1b4ff24142e48b4546b4a0c6b287a43059b5310ad",
+ "kernel_sha256": "604540f03ec03bba2d2d0d24a07e72dff6f7ee7ed534a594d9d73ce88f6856ed",
  "modules": [
   {
    "bytes": 13536,
@@ -22,5 +29,5 @@
    "sha256": "0a596c005f8829b1afc56d45290639d8d118f6208dd340f481c69e10a03678d8"
   }
  ],
- "tree": "clean"
+ "tree": "modified"
 }
