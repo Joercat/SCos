@@ -1,18 +1,28 @@
 {
  "branch": "arena/9dd682cf-scos",
  "build_tag": "x64-dev",
- "built": "2026-10-28T21:06:35Z",
- "commit": "e030a4f12a19",
+ "built": "2026-10-28T21:20:38Z",
+ "commit": "7a0a8b9a8242",
  "firmware": [
   {
-   "bytes": 287869,
+   "bytes": 63571696,
+   "name": "GSP.BIN",
+   "sha256": "a8c3ebeed280323aedb51c061f321e73379cce7a9ae643a33dd03915df027f7f"
+  },
+  {
+   "bytes": 199820,
    "name": "GSPFMC.BIN",
-   "sha256": "fc0451890fdbc17aac8cf3fa9bb349a12b6420f485209cc235d0d0be175e7261"
+   "sha256": "cb59a35c1d4bd1274d7267fd10243c29f843ff41c851b9cbd59f5af2ddd7fece"
+  },
+  {
+   "bytes": 200812,
+   "name": "GSPBL.BIN",
+   "sha256": "d40b48e431d1707dc77af3605db358ed7a32ebfc2830eb74de2eddb4d3025071"
   }
  ],
- "image_bytes": 67108864,
+ "image_bytes": 69206016,
  "kernel_bytes": 854440,
- "kernel_sha256": "4ad621017d7b0b1097c417308771188ed3d17b755600c581217714eb24f1ae76",
+ "kernel_sha256": "539a4a5cee471d56c7c8fea6fe79ab6be90b112ea857ffca6b98fe324c595bee",
  "modules": [
   {
    "bytes": 13536,
