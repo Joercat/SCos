@@ -131,7 +131,9 @@ FIRMWARE_ROLES = (("gsp", "GSP.BIN", "gsp"), ("fmc", "GSPFMC.BIN", "fmc"),
 # The boot stub's own bound (BOOT_FIRMWARE_FILE_MAX in kernel/include/boot.h), duplicated here on purpose so a
 # volume can never be packed with a file the stub would refuse to read.  It used to be 16 MiB on both sides,
 # which is under the size of the resource-manager image this generation loads (gsp-570.144.bin is 63571696 B),
-# so that file could not have been carried at any price.
+# so that file could not be carried at any price.  `make gsp-firmware-set' now fetches it (linux-firmware, by
+# partial clone, verified per role), and the size of the *volume* is the remaining constraint: 64 MiB cannot
+# hold it, `make ventoy' grows the disk to what the staged set needs.
 FIRMWARE_MAX = 72 * 1024 * 1024
 
 

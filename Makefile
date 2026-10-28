@@ -41,11 +41,16 @@ milestone-check:
 # `all' writes the image.  Reversed, a clean build/ produced an image with no drivers and no firmware, which is
 # the delivery that arrived on the last flash and reported fw 0/5.
 # A Ventoy-ready image.  Ventoy boots an image *file*, so a stick that already has it needs no raw write:
-# `make ventoy' packs the same bytes, sized to whatever firmware is staged (VENTOY_FIRMWARE is where an
-# installed driver's gsp-*.bin goes - the one file no public archive ships), and leaves the result in build/.
+# `make ventoy' packs the same bytes, sized to whatever firmware is staged (VENTOY_FIRMWARE is where
+# `make gsp-firmware-set' or an installed driver puts gsp-*.bin), and leaves the result in build/.
 # It is deliberately not committed: a second image in dist/ would double the size of every delivery for a file
 # anyone can rebuild in a second, and the size depends on firmware that only exists on the target machine.
-VENTOY_FIRMWARE ?= $(firstword $(wildcard /lib/firmware/nvidia/*/gsp))
+# Where the coprocessor's images come from, best first: the set `make gsp-firmware-set' fetched and verified
+# from linux-firmware, then an installed driver's own directory.  Both are optional and `make dist' uses
+# neither - the tracked 64 MiB image is sized for the kernel alone, and a 63,571,696-byte resource manager
+# does not fit in it at any price.
+GSP_SET ?= build/gsp-set
+VENTOY_FIRMWARE ?= $(firstword $(wildcard $(GSP_SET)) $(wildcard /lib/firmware/nvidia/*/gsp))
 VENTOY_SIZE = $(shell python3 tools/makedisk.py build --min-size \
 	$(if $(VENTOY_FIRMWARE),--firmware $(VENTOY_FIRMWARE)) | cut -f1)
 ventoy: gpu-modules gsp-firmware all
@@ -133,6 +138,15 @@ $(foreach family,$(MODULE_FAMILIES),$(eval $(call MODULE_rules,$(family))))
 
 $(MODULE_DIR):
 	mkdir -p $@
+# The driver's own three firmware files, fetched from linux-firmware and checked before anything is packed.
+# Network at this step and only at this step: `dist' must stay reproducible offline.
+GSP_VERSION ?= 570.144
+GSP_CHIP ?= gb202
+.PHONY: gsp-firmware-set
+gsp-firmware-set:
+	python3 tools/gsp-firmware.py --fetch-driver $(GSP_VERSION) --chip $(GSP_CHIP) --set-out $(GSP_SET)
+	python3 tools/gspcheck.py $(GSP_SET)
+
 gpu-modules: $(GPU_MODULE_FILES)
 	python3 tools/build_gpu_module.py --verify
 

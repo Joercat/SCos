@@ -26,6 +26,15 @@ license MIT, files generated from `kernel/inc/gspcc/bin/*.bin'.  `--notice' prin
     python3 tools/gsp-firmware.py --dir /path/to/open-gpu-kernel-modules/src/nvidia/generated \
             --version 615.71.10 --chip gb202 --out build/gsp
     python3 tools/gsp-firmware.py --dir build/gsp/src --version 615.71.10 --out build/gsp && make dist
+
+The other three roles the coprocessor needs - the resource manager itself, the bootloader and the FMC as the
+driver distributes it - are not in the open kernel modules but are in `linux-firmware`, which is a Git
+repository like any other and therefore fetchable with a partial clone: `--fetch-driver` reads
+`nvidia/<chip>/gsp/{gsp,fmc,bootloader}-<version>.bin` out of it, follows the symlinks that chip directories
+use (several are two levels up, into the family that publishes the file), and checks each one is the class of
+container its role implies before writing it under the ESP names the boot stub reads.  That set is what makes
+a handover a boot rather than a stub: without `gsp-<version>.bin` an FMC that the FSP accepts has no resource
+manager to start.
 """
 
 import argparse
@@ -36,6 +45,7 @@ import re
 import struct
 import subprocess
 import sys
+import tempfile
 import zlib
 
 ARCHIVE = 'g_bindata_kgspGetBinArchive{kind}_{chip}.c'
@@ -58,6 +68,18 @@ NOTICE = ('GPU firmware in this image: rebuilt from the generated bindata arrays
           'NVIDIA open-gpu-kernel-modules %s (chip %s), license MIT, original files '
           'kernel/inc/gspcc/bin/*.bin as published by NVIDIA. The image bytes are unmodified; only the '
           'container around them is this build\'s.')
+
+
+# The driver's own firmware set.  `linux-firmware` is the archive that ships it, and one repository mirrors
+# the kernel.org tree; the file names are the ones nouveau's MODULE_FIRMWARE lines ask for, so a set read from
+# here is the set the driver itself would load - not a reconstruction.
+FIRMWARE_REPO = 'pop-os/linux-firmware'
+FIRMWARE_ROLES = (('gsp', 'GSP.BIN'), ('fmc', 'GSPFMC.BIN'), ('bootloader', 'GSPBL.BIN'))
+# Where a chip's files live when its own directory does not have them.  On this generation the resource
+# manager is published once for the family - nouveau's gb202.c lists gb202..gb207 under ga102's firmware
+# names - so an archive that mirrors the kernel.org tree has `nvidia/ga102/gsp/gsp-<ver>.bin` and, for the
+# chips that reuse it, either a symlink or nothing at all.  Both shapes are read; neither is guessed at.
+FIRMWARE_FAMILY = {'gb20': 'ga102', 'gb10': 'gb100', 'gh10': 'gh100', 'ad10': 'ad102', 'tu11': 'tu116'}
 
 
 class Refused(Exception):
@@ -192,6 +214,151 @@ def fetch(ref, chip, into):
     return written
 
 
+def _elf_sections(data):
+    """(class, [(name, type, offset, size)]) for an ELF32 or ELF64 image, or None if it is not one.
+
+    Written out rather than imported because this has to run on a stock python3 with no packages, and because
+    the two classes have different header widths - reading an ELF64 with the ELF32 layout is how a check
+    passes on a file it never understood."""
+    if len(data) < 64 or data[:4] != b'\x7fELF':
+        return None
+    elf_class = data[4]
+    if elf_class == 1:
+        try:
+            shoff, = struct.unpack_from('<I', data, 0x20)
+            shentsize, shnum, shstrndx = struct.unpack_from('<HHH', data, 0x2e)
+            fields = '<IIIIII'
+        except struct.error:
+            return None
+    elif elf_class == 2:
+        try:
+            shoff, = struct.unpack_from('<Q', data, 0x28)
+            shentsize, shnum, shstrndx = struct.unpack_from('<HHH', data, 0x3a)
+            fields = '<IIQQQQ'
+        except struct.error:
+            return None
+    else:
+        return None
+    if not shoff or not shentsize or not shnum or shoff + shnum * shentsize > len(data):
+        return None
+    sections = []
+    for i in range(shnum):
+        name, kind, _, _, off, size = struct.unpack_from(fields, data, shoff + i * shentsize)
+        sections.append([name, kind, off, size])
+    try:
+        str_off = sections[shstrndx][2]
+    except IndexError:
+        return None
+    out = []
+    for name, kind, off, size in sections:
+        end = data.find(b'\0', str_off + name) if name else -1
+        out.append((data[str_off + name:end].decode('latin-1') if end > 0 else '', kind, off, size))
+    return elf_class, out
+
+
+def examine_role(role, data):
+    """What class of container this file is, for the role it is being staged as.
+
+    The two shapes are the ones the boot stub already distinguishes (boot/uefi/gsp_fw.h): the resource
+    manager is ELF64 with a `.fwimage' and a per-chip `.fwsignature_*', and the FMC is the ELF32 container
+    whose four sections the kernel parses.  The bootloader is a flat sequence and is only checked for being
+    non-trivial.  A file that fails here is refused *before* it is written, so a wrong download cannot reach a
+    disk and be reported as a firmware role that the chip then rejects."""
+    if role == 'bootloader':
+        if len(data) < 4096:
+            raise Refused('the bootloader is %d bytes, which is not an image' % len(data))
+        return 'flat sequence of %d bytes' % len(data)
+    parsed = _elf_sections(data)
+    if not parsed:
+        raise Refused('%s is not an ELF container' % role)
+    elf_class, sections = parsed
+    names = [name for name, _, _, _ in sections]
+    if role == 'gsp':
+        if elf_class != 2:
+            raise Refused('the resource manager is ELF32; this generation loads ELF64')
+        if '.fwimage' not in names:
+            raise Refused('the resource manager has no .fwimage section: %s' % ', '.join(n for n in names if n))
+        signatures = [n for n in names if n.startswith('.fwsignature_')]
+        if not signatures:
+            raise Refused('the resource manager carries no .fwsignature section for any chip')
+        image = next(size for name, _, _, size in sections if name == '.fwimage')
+        return 'ELF64, .fwimage %d B, signature %s' % (image, signatures[0])
+    # FMC
+    if elf_class != 1:
+        raise Refused('the FMC is ELF64; the container the FSP is handed is ELF32')
+    wanted = ['hash', 'publickey', 'signature', 'image']
+    missing = [name for name in wanted if name not in names]
+    if missing:
+        raise Refused('the FMC container is missing section(s) %s' % ', '.join(missing))
+    image = next(size for name, _, _, size in sections if name == 'image')
+    return 'ELF32, four sections, image %d B' % image
+
+
+def fetch_driver_set(chip, version, out_dir, repo=FIRMWARE_REPO):
+    """Fetch, verify and stage the three files the driver itself loads, from `repo` at the tag `version`.
+
+    A partial clone rather than the contents API: the resource-manager image is 63 MB and the API's JSON
+    encoding of it is a third larger again, while a blobless clone transfers only the trees and the three
+    blobs actually read.  The chip directory may hold symlinks (gb202's `gsp-570.144.bin` is a link two levels
+    up into ga102), so a link is resolved against the directory it was found in and read again - the bytes are
+    the same file the driver would open, which is the point of taking them from here at all."""
+    os.makedirs(out_dir, exist_ok=True)
+    written = []
+    with tempfile.TemporaryDirectory() as tmp:
+        clone = os.path.join(tmp, 'linux-firmware')
+        # A local path or a full URL is taken as given, so the same code path can be driven by a repository
+        # built in a test - which is the only way the reader's refusals are measured without a network.
+        source = repo if (repo.startswith(('/', '.', 'file://')) or '://' in repo) else \
+            'https://github.com/%s.git' % repo
+        subprocess.run(['git', 'clone', '-q', '--filter=blob:none', '--no-checkout', '--depth', '1',
+                        source, clone], check=True)
+        for ref in (version, 'HEAD'):
+            probe = subprocess.run(['git', '-C', clone, 'rev-parse', '--verify', '--quiet', ref + '^{commit}'],
+                                   capture_output=True)
+            if probe.returncode == 0:
+                rev = ref
+                break
+        else:
+            raise Refused('%s has neither a %s tag nor a HEAD' % (repo, version))
+        chip = chip.lower()
+        bases = ['nvidia/%s/gsp' % chip]
+        family = FIRMWARE_FAMILY.get(chip[:4])
+        if family and family != chip:
+            bases.append('nvidia/%s/gsp' % family)
+        for role, esp in FIRMWARE_ROLES:
+            data = path = None
+            for base in bases:
+                path = '%s/%s-%s.bin' % (base, role, version)
+                data = _cat(clone, rev, path)
+                if data is not None:
+                    break
+            if data is None:
+                raise Refused('%s-%s.bin is in neither %s nor %s at %s; the archive may name the version '
+                              'differently, and nothing is guessed: pass --version with the one it has'
+                              % (role, version, bases[0], bases[-1], rev))
+            # A symlink in a Git tree is a blob whose content is the path it points at.
+            if len(data) < 4096 and b'\n' not in data.rstrip(b'\n') and (b'/' in data or b'.bin' in data):
+                target = os.path.normpath(os.path.join(os.path.dirname(path), data.decode().strip()))
+                data = _cat(clone, rev, target)
+                if data is None:
+                    raise Refused('%s is a link to %s, which is not in this tree' % (path, target))
+                path = target
+            detail = examine_role(role, data)
+            dest = os.path.join(out_dir, esp)
+            with open(dest, 'wb') as handle:
+                handle.write(data)
+            written.append(dest)
+            print('  %-10s %9d B  crc32 0x%08x  %s  <- %s' %
+                  (esp, len(data), zlib.crc32(data) & 0xffffffff, detail, path))
+    return written
+
+
+def _cat(clone, rev, path):
+    result = subprocess.run(['git', '-C', clone, 'cat-file', 'blob', '%s:%s' % (rev, path)],
+                            capture_output=True)
+    return result.stdout if result.returncode == 0 and result.stdout else None
+
+
 def build(src_dir, version, chip, out_dir, kinds=('GspRmFmcGfwProdSigned',)):
     report = {'version': version, 'chip': chip, 'files': {}, 'hash_matches_image': None, 'notes': []}
     parts, order = {}, []
@@ -248,10 +415,28 @@ def main():
     ap.add_argument('--version', default='615.71.10', help='the driver version the arrays came from, used in '
                                                            'the file name the ESP is asked to carry')
     ap.add_argument('--out', default='build/gsp', help='where fmc-<version>.bin goes; make dist packs it')
+    ap.add_argument('--fetch-driver', metavar='VERSION', help='fetch the driver\'s own three firmware files '
+                                                              '(resource manager, FMC, bootloader) from '
+                                                              'linux-firmware at this driver version')
+    ap.add_argument('--repo', default=FIRMWARE_REPO, help='the linux-firmware mirror to read (default %s)'
+                                                          % FIRMWARE_REPO)
+    ap.add_argument('--set-out', default=None, help='where --fetch-driver writes GSP.BIN and its two '
+                                                     'companions (default <out>/driver)')
     ap.add_argument('--notice', action='store_true', help='print the provenance text and stop')
     args = ap.parse_args()
     if args.notice:
         print(NOTICE % (args.fetch or args.dir, args.chip))
+        return 0
+    if args.fetch_driver:
+        set_out = args.set_out or os.path.join(args.out, 'driver')
+        print('gsp-firmware: driver set %s from %s, chip %s' % (args.fetch_driver, args.repo, args.chip.lower()))
+        try:
+            files = fetch_driver_set(args.chip, args.fetch_driver, set_out, args.repo)
+        except (Refused, subprocess.CalledProcessError) as e:
+            raise SystemExit('gsp-firmware: %s' % e)
+        print('  staged %d file(s) in %s' % (len(files), set_out))
+        print('  next: python3 tools/gspcheck.py %s, then make ventoy (the committed image is sized for the '
+              'kernel alone)' % set_out)
         return 0
     src = args.dir
     if args.fetch:

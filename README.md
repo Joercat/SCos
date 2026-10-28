@@ -149,8 +149,11 @@ still renders nothing**: submission there needs GSP firmware and a resource
 manager, which this tree does not have. What that path needs from the card is
 now measured rather than assumed - the module reads the frame buffer's size from
 the chip's own scratch word and the kernel computes the firmware's reservation
-from it, refusing with a reason when the card will not say - but no reservation is
-sent until a resource-manager image can be staged, which this repository cannot
-supply. See
+from it, refusing with a reason when the card will not say. The coprocessor's three
+firmware files are fetched and verified by `make gsp-firmware-set` (partial clone of
+linux-firmware, per-role container checks) and packed by `make ventoy`, which sizes
+the disk for them; the committed image carries the FMC only, because 63 MB of
+resource manager does not fit in 64 MiB. What is still missing is the code that
+submits work once the coprocessor runs: See
 [why the GPU was not accelerating, and what was fixed](docs/migration/GPU-ACCELERATION.md).
 GOP/PAT/write combining are not GPU rendering. Browser integration remains deferred.

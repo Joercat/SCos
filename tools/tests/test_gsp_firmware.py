@@ -306,6 +306,71 @@ def test_the_kernel_reads_the_fmc_contract_the_loader_writes():
                                                    else 'the class byte', result.stdout)
 
 
+def test_the_driver_set_is_fetched_by_shape_not_by_hope():
+    """`--fetch-driver' against a repository built here, so the reading and the refusals are measured offline.
+
+    The three files this fetches are the difference between a handover that describes a boot and one that
+    starts one, and they are the files a mirror is most likely to get wrong: the resource manager is ELF64
+    behind a per-chip signature section, the FMC is ELF32 with four named sections, and several chip
+    directories do not hold the resource manager at all but link to the family that publishes it.  So the
+    fixture is a real Git repository with those three shapes, and what is asserted is that the reader follows
+    the link, that it refuses a file whose class is wrong for its role *before* writing anything, and that a
+    version the archive does not have is refused rather than approximated.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('scos_gsp_firmware', ROOT / 'tools' / 'gsp-firmware.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp) / 'linux-firmware'
+        (repo / 'nvidia' / 'ga102' / 'gsp').mkdir(parents=True)
+        (repo / 'nvidia' / 'gb202' / 'gsp').mkdir(parents=True)
+        rm = build_container()                       # the ELF64 shape, from the builder above
+        (repo / 'nvidia' / 'ga102' / 'gsp' / 'gsp-1.2.3.bin').write_bytes(rm)
+        # gb202 holds a link to it, which is how the archive avoids carrying 63 MB twice.
+        (repo / 'nvidia' / 'gb202' / 'gsp' / 'gsp-1.2.3.bin').symlink_to('../../ga102/gsp/gsp-1.2.3.bin')
+        (repo / 'nvidia' / 'gb202' / 'gsp' / 'fmc-1.2.3.bin').write_bytes(fmc_container())
+        (repo / 'nvidia' / 'gb202' / 'gsp' / 'bootloader-1.2.3.bin').write_bytes(b'\xa5' * 8192)
+        git = ['git', '-C', str(repo)]
+        run(git + ['init', '-q'])
+        run(git + ['add', '-A'])
+        run(git + ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'set'])
+        run(git + ['tag', '1.2.3'])
+
+        out = Path(tmp) / 'set'
+        produced = module.fetch_driver_set('gb202', '1.2.3', str(out), repo=str(repo))
+        names = sorted(Path(p).name for p in produced)
+        assert names == ['GSP.BIN', 'GSPBL.BIN', 'GSPFMC.BIN'], names
+        assert (out / 'GSP.BIN').read_bytes() == rm, \
+            'the resource manager that landed is not the one the link points at'
+        assert (out / 'GSPFMC.BIN').read_bytes() == fmc_container()
+
+        # A resource manager that is not one: the ELF32 FMC standing in for it must be refused by class.
+        (repo / 'nvidia' / 'ga102' / 'gsp' / 'gsp-2.0.0.bin').write_bytes(fmc_container())
+        (repo / 'nvidia' / 'gb202' / 'gsp' / 'fmc-2.0.0.bin').write_bytes(fmc_container())
+        (repo / 'nvidia' / 'gb202' / 'gsp' / 'bootloader-2.0.0.bin').write_bytes(b'\xa5' * 8192)
+        run(git + ['add', '-A'])
+        run(git + ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'wrong class'])
+        run(git + ['tag', '2.0.0'])
+        bad = Path(tmp) / 'bad'
+        try:
+            module.fetch_driver_set('gb202', '2.0.0', str(bad), repo=str(repo))
+        except module.Refused as error:
+            assert 'ELF32' in str(error) and 'ELF64' in str(error), str(error)
+            assert not (bad / 'GSP.BIN').exists(), 'a file refused for its class was written anyway'
+        else:
+            raise AssertionError('an ELF32 image was accepted as the resource manager')
+
+        # And a version the archive does not carry is a refusal, not the nearest one it does have.
+        try:
+            module.fetch_driver_set('gb202', '9.9.9', str(Path(tmp) / 'none'), repo=str(repo))
+        except module.Refused as error:
+            assert '9.9.9' in str(error), str(error)
+        else:
+            raise AssertionError('a version the archive does not have was invented')
+
+
 def test_a_staged_set_reaches_the_panel_on_a_booted_machine():
     """The order is not stylistic: the boot volume handle is closed before the kernel exists, and a read
     attempted afterwards is a use-after-close in code with no fault handler."""
@@ -370,6 +435,37 @@ def test_the_intake_refuses_what_it_cannot_carry():
             raise AssertionError('an empty image was accepted')
         except ValueError as exc:
             assert 'is empty' in str(exc), exc
+
+
+def fmc_container(hash_bytes=48, key_bytes=97, signature_bytes=96, image_bytes=512):
+    """The ELF32 shape an `fmc-<version>.bin' has: a 52-byte header and one section per blob, named.
+
+    Enough for the reader's class-and-names test, which is what a fetch has to establish before it writes
+    anything; the CRC-per-section rules belong to the kernel's own parser and are pinned elsewhere."""
+    names = b'\0hash\0publickey\0signature\0image\0'
+    shoff, shnum, shentsize = 52, 6, 40        # null, the string table, then the four blobs
+    names_at = shoff + shnum * shentsize
+    blobs = [(b'hash', hash_bytes), (b'publickey', key_bytes), (b'signature', signature_bytes),
+             (b'image', image_bytes)]
+    data = bytearray(names_at + len(names))
+    data[0:4] = b'\x7fELF'
+    data[4] = 1                                        # ELF32
+    data[5] = 1                                        # little endian
+    struct.pack_into('<I', data, 0x20, shoff)
+    struct.pack_into('<HHH', data, 0x2e, shentsize, shnum, 1)   # e_shentsize, e_shnum, e_shstrndx
+    data[names_at:names_at + len(names)] = names
+    at = names_at + len(names)
+    for index, (name, size) in enumerate(blobs, start=2):
+        header = shoff + index * shentsize
+        struct.pack_into('<I', data, header, names.index(name + b'\0'))
+        struct.pack_into('<I', data, header + 4, 1)   # SHT_PROGBITS
+        struct.pack_into('<II', data, header + 16, at, size)
+        data.extend(b'\x5a' * size)
+        at += size
+    strtab = shoff + shentsize
+    struct.pack_into('<I', data, strtab + 4, 3)       # SHT_STRTAB
+    struct.pack_into('<II', data, strtab + 16, names_at, len(names))
+    return bytes(data)
 
 
 def test_the_container_the_intake_accepts_is_the_one_the_loader_reads():

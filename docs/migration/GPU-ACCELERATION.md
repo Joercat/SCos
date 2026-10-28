@@ -299,15 +299,30 @@ What is measured, and how:
 
 What is still missing, stated plainly because the panel is easy to read as more than it is:
 
-* **The resource-manager image.**  `GSP.BIN` - `nvidia/gb202/gsp/gsp-<ver>.bin`, roughly 30 MB - is
-  not in NVIDIA's open kernel modules (they carry the FMC, the booter and their own RM-side bindata,
-  which is what `tools/gsp-firmware.py` rebuilds).  The mirrors reachable from this build environment
-  carry only `bootloader-<ver>.bin` and `fmc-<ver>.bin` for `gb202`; the RM image is distributed with
-  the proprietary driver and with `linux-firmware`.  Without it a booted FMC has no operating system
-  to start, which is why the plan is computed and reported but the *send* is unchanged.
-* **Steps 3-5 of §4.**  Once an RM image is on the volume, the reservation above is what the handover
-  will describe; after that the GSP's own message queue, a channel and a class submission are the
-  remaining work, and none of it can be verified here - QEMU models no NVIDIA function, and there is
+* **The resource-manager image is no longer a matter of asking somebody.**  Earlier revisions of this
+  document said `GSP.BIN` - `nvidia/<chip>/gsp/gsp-<ver>.bin`, 63,571,696 bytes - "has to come off a machine
+  with the driver installed", and that was simply wrong: it is in `linux-firmware`, which is a Git repository
+  and therefore fetchable, and several chip directories do not hold it at all but *link* to the family that
+  publishes it (gb202's is a symlink into `ga102`).  `python3 tools/gsp-firmware.py --fetch-driver 570.144
+  --chip gb202 --set-out build/gsp-set` now reads the three files by partial clone, resolves the links,
+  checks each one is the container class its role implies **before writing anything**, and stages them under
+  the ESP names the boot stub reads.  Measured on the set it produced: `GSP.BIN` 63,571,696 B ELF64 with
+  `.fwimage` 63,541,248 B and `.fwsignature_gb20x`; `GSPFMC.BIN` 199,820 B ELF32 with the four sections;
+  `GSPBL.BIN` 200,812 B; `tools/gspcheck.py` then reports **fw 3/5** and the handover builds from the FMC.
+  A booted image carrying that set reports `gsp firmware: 3 of 5 images read by the stub, 63972328 B`, and
+  `3 image(s) held ... (63979520 B), parsed by this kernel` - the resource manager included, which is the
+  first time this tree has carried one.
+* **The volume has to be bigger than 64 MiB.**  63.5 MB of firmware does not fit in the tracked image, so
+  `make ventoy` grows the disk to what the staged set needs (`--min-size` on the same packer); the committed
+  `dist/scos.img` stays at 64 MiB and carries the FMC alone.  A 128 MiB guest could not even *keep* the set -
+  the stub read all three files and had no pool for the resource manager, which the panel reported as two
+  images held rather than as a missing file - so the machine that boots it wants a few hundred MiB of RAM,
+  as any machine with an RTX 5050 has.
+* **Steps 3-5 of §4.**  With the set staged, the reservation above is what the handover describes - proven
+  end to end in `tools/tests/gpu_fsp_host.c`, where a card reporting 8 GiB gets a plan whose offsets appear
+  identically in `GspFwWprMeta` and in the payload's FRTS fields, and a 2 MiB card keeps the declined
+  encoding.  What remains is the GSP's own message queue, a channel and a class submission, and none of it
+  can be verified here - QEMU models no NVIDIA function, and there is
   no Blackwell card in this environment.  A successful plan on a real machine would be visible as a
   `graphics` panel line naming the MiB it read and the offsets it derived; it is *not* rendering, and
   nothing in this tree claims it is.

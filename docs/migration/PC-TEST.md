@@ -307,6 +307,9 @@ where this OS's intake contract came from:
 
     sudo mkdir -p /mnt/esp/SCOS
     sudo cp /lib/firmware/nvidia/gb207/gsp/fmc-570.144.bin        /mnt/esp/SCOS/GSPFMC.BIN
+    # or, without a machine that has the driver installed:
+    make gsp-firmware-set GSP_CHIP=gb202 && sudo cp build/gsp-set/GSP*.BIN /mnt/esp/SCOS/
+    # and with an installed driver, the three files by name:
     sudo cp /lib/firmware/nvidia/gb207/gsp/gsp-570.144.bin         /mnt/esp/SCOS/GSP.BIN
     sudo cp /lib/firmware/nvidia/gb207/gsp/bootloader-570.144.bin  /mnt/esp/SCOS/GSPBL.BIN
 

@@ -439,9 +439,13 @@ static void check(const char *what, int ok)
     printf("FAIL: %s\n", what);
 }
 
+/* What a driver module read off the chip as its video memory, or 0 when nothing did: the one input the
+ * reservation cannot be computed without, and the reason the layout is a function of it. */
+static uint64_t model_vram;
 static void model_reset(unsigned mode)
 {
     memset(&fsp_state, 0, sizeof fsp_state);
+    model_vram = 0;
     memset(model_therm, 0, sizeof model_therm);
     memset(model_fsp, 0, sizeof model_fsp);
     memset(model_gsp, 0, sizeof model_gsp);
@@ -635,6 +639,8 @@ static void ask_with(unsigned mode, uint32_t hash, uint32_t key, uint32_t signat
 
     memset(&handoff, 0, sizeof handoff);
     stage(hash, key, signature, unnamed, bad_crc);
+    device.vram_bytes = model_vram;         /* whatever the module read, or nothing - read before the
+                                             * reset, which clears the model's state and not the card's */
     model_reset(mode);
     gpu_fsp_note(&device, &handoff);
 }
@@ -1081,6 +1087,81 @@ static void test_the_boot_descriptors(void)
           memcmp((const uint8_t *)model.cot + FSP_HEADER_BYTES, payload, COT_SIZE) == 0);
 }
 
+
+/* The reservation, with the number it needs.  Until a driver could read the frame buffer's size this file
+ * could only prove that the fields were *declined*; now that both halves exist - `probe_vram()' in the module
+ * and `gsp_fb_plan()' in the kernel - the case that matters is that the metadata and the payload carry the
+ * same offsets, that they are inside the memory the chip reported, and that a card too small for them gets the
+ * declined encoding rather than a placement it cannot hold. */
+static void test_the_reservation(void)
+{
+    const uint64_t gib8 = 8ull << 30, mib = 1ull << 20;
+    const struct gsp_fw_wpr_meta *meta;
+    const uint8_t *payload;
+
+    stage_rm = 1;
+    model_vram = gib8;
+    ask_with(0, 48, 97, 96, -1, 0);
+    stage_rm = 0;
+    model_vram = 0;
+    meta = (const struct gsp_fw_wpr_meta *)(uintptr_t)fsp_state.wpr_meta_phys;
+    payload = fsp_state.payload;
+
+    check("a card that reports its video memory gets a reservation placed in it",
+          fsp_state.params_staged && fsp_state.plan_ready && fsp_state.plan.vram_bytes == gib8 &&
+          fsp_state.plan.usable_top == gib8);
+    check("the plan's own numbers are the ones the metadata carries",
+          meta->fb_size == gib8 && meta->frts_offset == fsp_state.plan.frts_offset &&
+          meta->frts_size == fsp_state.plan.frts_bytes &&
+          meta->gsp_fw_wpr_start == fsp_state.plan.wpr2_start &&
+          meta->gsp_fw_wpr_end == fsp_state.plan.wpr2_end &&
+          meta->gsp_fw_heap_offset == fsp_state.plan.heap_offset &&
+          meta->gsp_fw_heap_size == fsp_state.plan.heap_bytes &&
+          meta->boot_bin_offset == fsp_state.plan.bootloader_offset &&
+          meta->gsp_fw_offset == fsp_state.plan.elf_offset &&
+          meta->non_wpr_heap_offset == fsp_state.plan.non_wpr_heap_offset &&
+          meta->non_wpr_heap_size == fsp_state.plan.non_wpr_heap_bytes &&
+          meta->gsp_fw_rsvd_start == fsp_state.plan.rsvd_start);
+    check("the reservation ends back from the top of that memory, one MiB of FRTS and no further",
+          meta->frts_offset + meta->frts_size == gib8 &&
+          meta->gsp_fw_wpr_end == gib8 && meta->gsp_fw_wpr_start < meta->gsp_fw_wpr_end &&
+          meta->gsp_fw_wpr_end - meta->gsp_fw_wpr_start <= 4u * mib &&
+          meta->frts_offset % (128u * 1024u) == 0 && meta->gsp_fw_wpr_start % mib == 0);
+    check("the workspace the firmware expects below its carve-out is named, and the boot count is a cold boot",
+          meta->vga_workspace_offset == gib8 - GSP_VGA_WORKSPACE_SIZE && meta->boot_count == 0);
+    check("the payload's FRTS field is the same offset as the metadata's, not a second opinion",
+          m_read(payload + COT_OFF_FRTS_VIDMEM) == (uint32_t)fsp_state.plan.frts_offset &&
+          m_read(payload + COT_OFF_FRTS_VIDMEM + 4) == (uint32_t)(fsp_state.plan.frts_offset >> 32) &&
+          *(const uint32_t *)(payload + COT_OFF_FRTS_VIDMEM_SIZE) == (uint32_t)fsp_state.plan.frts_bytes);
+    check("and every region the plan names lies inside the memory the chip reported, in the order the "
+          "firmware walks them",
+          fsp_state.plan.non_wpr_heap_offset + fsp_state.plan.non_wpr_heap_bytes ==
+              fsp_state.plan.wpr2_start &&
+          fsp_state.plan.wpr2_start <= fsp_state.plan.heap_offset &&
+          fsp_state.plan.heap_offset + fsp_state.plan.heap_bytes == fsp_state.plan.elf_offset &&
+          fsp_state.plan.elf_offset + fsp_state.plan.elf_bytes <= fsp_state.plan.bootloader_offset &&
+          fsp_state.plan.bootloader_offset + fsp_state.plan.bootloader_bytes <= fsp_state.plan.frts_offset &&
+          fsp_state.plan.wpr2_end <= gib8);
+
+    /* A card whose frame buffer cannot hold the reservation: the fields go back to the encoding a machine
+     * with nothing to reserve sends, because a placement that does not fit is worse than none at all. */
+    stage_rm = 1;
+    model_vram = 2ull * mib;
+    ask_with(0, 48, 97, 96, -1, 0);
+    stage_rm = 0;
+    model_vram = 0;
+    meta = (const struct gsp_fw_wpr_meta *)(uintptr_t)fsp_state.wpr_meta_phys;
+    payload = fsp_state.payload;
+    check("a card too small for the reservation is refused, with the reason kept",
+          !fsp_state.plan_ready && fsp_state.plan_state != 0);
+    check("and nothing is placed: the FRTS keeps the size this tree has always declared and the offset it "
+          "has always declined",
+          meta->frts_offset == 0 && meta->frts_size == GSP_FRTS_SIZE && meta->fb_size == 0 &&
+          meta->gsp_fw_wpr_start == 0 &&
+          m_read(payload + COT_OFF_FRTS_VIDMEM) == 0 &&
+          *(const uint32_t *)(payload + COT_OFF_FRTS_VIDMEM_SIZE) == GSP_FRTS_SIZE);
+}
+
 static void test_the_handover_answers(void)
 {
     ask_with(M_COT_WPR, 48, 97, 96, -1, 0);
@@ -1230,6 +1311,7 @@ int main(void)
     test_a_full_query_and_reply();
     test_the_handover_payload();
     test_the_boot_descriptors();
+    test_the_reservation();
     test_the_handover_answers();
     test_the_clock_and_the_doorbell_page();
     test_the_generation_table();
