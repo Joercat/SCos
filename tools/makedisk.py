@@ -122,7 +122,11 @@ FIRMWARE_ROLES = (("gsp", "GSP.BIN", "gsp"), ("fmc", "GSPFMC.BIN", "fmc"),
                   ("booter unload", "GSPBTU.BIN", "booter_unload"))
 # The boot stub cannot read past this, so a bigger file is refused at build time instead of arriving on the
 # panel as "unreadable" with no size attached to it.
-FIRMWARE_MAX = 16 * 1024 * 1024
+# The boot stub's own bound (BOOT_FIRMWARE_FILE_MAX in kernel/include/boot.h), duplicated here on purpose so a
+# volume can never be packed with a file the stub would refuse to read.  It used to be 16 MiB on both sides,
+# which is under the size of the resource-manager image this generation loads (gsp-570.144.bin is 63571696 B),
+# so that file could not have been carried at any price.
+FIRMWARE_MAX = 72 * 1024 * 1024
 
 
 def firmware_blobs(directory):
@@ -194,7 +198,7 @@ def provenance(directory, elf):
     return v
 
 
-def build_record(v, elf, modules):
+def build_record(v, elf, modules, firmware=()):
     lines = ['SCos x64 UEFI image - build record',
              '  build tag   : x64-dev',
              '  commit      : %s' % v['COMMIT'],
@@ -204,6 +208,14 @@ def build_record(v, elf, modules):
              '  kernel.elf  : %d B sha256 %s' % (len(elf), hashlib.sha256(elf).hexdigest())]
     for path, blob in modules:
         lines.append('  module %-9s: %d B sha256 %s' % (path, len(blob), hashlib.sha256(blob).hexdigest()))
+    # Named in the record next to the modules, because the absence is as much a fact about the image as a
+    # presence: an image packed while build/gsp happened to be empty carries no coprocessor firmware, boots,
+    # and reports fw 0/5 - which reads like a missing file on somebody else's disk unless the record says it.
+    for esp, blob in firmware:
+        lines.append('  firmware %-9s: %d B sha256 %s' % (esp, len(blob), hashlib.sha256(blob).hexdigest()))
+    if not firmware:
+        lines.append('  firmware   : none staged.  This volume cannot start the coprocessor; run '
+                     '`make gsp-firmware' + chr(39) + ' and repack (the dist rule now does both)')
     if v['TREE'] != 'clean':
         lines.append('  WARNING: this image was built with uncommitted changes. Treat it as an experiment:')
         lines.append('           features it lacks, or has, say nothing about any commit in the repository.')
@@ -212,7 +224,9 @@ def build_record(v, elf, modules):
                              'tree': v['TREE'], 'built': v['DATE'], 'kernel_bytes': len(elf),
                              'kernel_sha256': hashlib.sha256(elf).hexdigest(),
                              'modules': [{'name': n, 'bytes': len(b), 'sha256': hashlib.sha256(b).hexdigest()}
-                                         for n, b in modules]}
+                                         for n, b in modules],
+                             'firmware': [{'name': n, 'bytes': len(b), 'sha256': hashlib.sha256(b).hexdigest()}
+                                          for n, b in firmware]}
 
 
 def main(directory):
@@ -309,7 +323,7 @@ def main(directory):
     # The record names the modules as the ESP holds them (FAT is upper-case), which is what a reader
     # checking the stick with another OS will see, so the two must not use different spellings.
     record_text, record_json = build_record(v, elf,
-                                            [(stem + '.MOD', blob) for stem, blob in modules])
+                                            [(stem + '.MOD', blob) for stem, blob in modules], firmware)
     (d / 'BUILD.TXT').write_text(record_text)
     (d / 'build.json').write_text(json.dumps(record_json, sort_keys=True, indent=1) + '\n')
     bc = allocate(record_text.encode())

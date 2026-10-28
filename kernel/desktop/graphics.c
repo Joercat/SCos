@@ -362,7 +362,7 @@ static void put_firmware_report(struct writer *w, const struct gpu_firmware_stat
            "What was checked is shape, not signature: a role reading no container means the file is neither of "
            "the two ELF images "
            "the driver names - a text file, an HTML download page, or a copy interrupted halfway - and an "
-           "unreadable one means the firmware could not open it at all, which its read caps at 16 MiB. The "
+           "unreadable one means the firmware could not open it at all, past the 72 MiB the boot stub will read. The "
            "blobs inside a signature section are verified by the hardware, which is the only party able to, "
            "and nothing here claims to have approved one.\n");
 }

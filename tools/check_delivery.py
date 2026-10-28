@@ -132,6 +132,34 @@ def check(root=ROOT, repo=None):
         elif hashlib.sha256(blob_for_name).hexdigest() != want.get('sha256'):
             problems.append('%s inside the image does not hash to the record value' % name)
 
+    # The firmware, read back the same way.  A driver module the kernel cannot load is a desktop without GPU
+    # acceleration; firmware the stub cannot find is a card that is never started at all, and the second case is
+    # the one a build can lose without noticing - a reset that clears build/gsp leaves the packer with nothing to
+    # stage and no reason to complain.  So the image is asked what it holds, and the FMC is required: of the five
+    # roles it is the one this repository can rebuild from the open driver's own arrays, and without it there is
+    # no handover to send and no rendering to talk about.
+    packed_fw = {}
+    for entry in meta.get('firmware', []):
+        name = entry['name']
+        stem, _, ext = name.partition('.')
+        try:
+            packed_fw[name] = reader.read_named_file(image, stem.upper()[:8], ext.upper())
+        except ValueError as exc:
+            problems.append('the firmware %s could not be read back out of the image: %s' % (name, exc))
+            continue
+        if packed_fw[name] is None:
+            problems.append('%s is listed by the record but absent from the image' % name)
+        elif len(packed_fw[name]) != entry.get('bytes'):
+            problems.append('%s: the image holds %d B, the record says %r B'
+                            % (name, len(packed_fw[name]), entry.get('bytes')))
+        elif hashlib.sha256(packed_fw[name]).hexdigest() != entry.get('sha256'):
+            problems.append('%s inside the image is not the hash the record carries' % name)
+    if 'GSPFMC.BIN' not in packed_fw:
+        problems.append('the image carries no GSPFMC.BIN: without the FMC image the FSP has nothing to be handed, '
+                        'so this stick boots a desktop that can never ask the card to paint it.  `make dist' +
+                        chr(39) + ' now depends on `make gsp-firmware' + chr(39) + '; if that rule could not reach '
+                        'the vendor sources, nothing was staged and the panel will read fw 0/5')
+
     if commit and git('cat-file', '-e', commit + '^{commit}').returncode == 0:
         moved = git('diff', '--name-only', commit + '..HEAD').stdout.split()
         changed = [p for p in moved if p.startswith(IMAGE_INPUTS)]
@@ -154,7 +182,9 @@ def main():
     if not problems:
         meta = json.loads((args.root / RECORD).read_text())
         print('PASS: dist/scos.img, its checksum and its record are one delivery from %s (kernel %d B, %d '
-              'module file(s))' % (meta['commit'], meta['kernel_bytes'], len(meta['modules'])))
+              'module file(s), %d firmware file(s): %s)'
+              % (meta['commit'], meta['kernel_bytes'], len(meta['modules']), len(meta.get('firmware', [])),
+                 ', '.join(f['name'] for f in meta.get('firmware', [])) or 'none'))
         return 0
     print('FAIL: the delivery is not self-consistent:')
     for problem in problems:

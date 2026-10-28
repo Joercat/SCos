@@ -37,10 +37,17 @@ milestone-check:
 	python3 tools/check_milestone.py
 # A delivery is the image, its checksum and its build record together; shipping one of the three
 # alone is how a stick ends up carrying something nobody can date.
-dist: all
+# Staged in this order on purpose: `gpu-modules' and `gsp-firmware' fill the directories the packer reads, and
+# `all' writes the image.  Reversed, a clean build/ produced an image with no drivers and no firmware, which is
+# the delivery that arrived on the last flash and reported fw 0/5.
+dist: gpu-modules gsp-firmware all
 	cp $(BUILD)/scos.img dist/scos.img
 	cp $(BUILD)/build.json dist/scos.img.build.json
 	sha256sum dist/scos.img > dist/scos.img.sha256
+# `dist' depends on the modules and the coprocessor firmware, not merely on `all': both are packed into the
+# image, and an image packed while either build directory was empty is a delivery that cannot render - which is
+# exactly what happened once, after a workspace reset cleared build/, when the packer silently wrote a volume
+# with no GSPFMC.BIN and the panel reported fw 0/5 on the machine it was flashed into.
 # The three files are only a delivery if they agree with each other and with the packed bytes, so the last
 # thing `make dist` does is read the record back out of the image it just wrote.  A delivery that drifted
 # fails here rather than on someone's machine a boot cycle later.
@@ -120,9 +127,13 @@ gpu-modules: $(GPU_MODULE_FILES)
 # build with nothing staged still boots and says `fw 0/5' rather than pretending.
 GSP_DRIVER_VERSION ?= 615.71.10
 GSP_CHIP ?= GB202
-gsp-firmware: | $(BUILD)
+# The container itself is the target, so a build directory that already holds one is not refetched: the
+# download reaches github.com, and re-running it to prove a point costs a minute of every build.
+GSP_FMC_IMAGE := $(BUILD)/gsp/fmc-$(GSP_DRIVER_VERSION).bin
+gsp-firmware: $(GSP_FMC_IMAGE)
+	@python3 tools/gspcheck.py $(BUILD)/gsp
+$(GSP_FMC_IMAGE): | $(BUILD)
 	python3 tools/gsp-firmware.py --fetch $(GSP_DRIVER_VERSION) --chip $(GSP_CHIP) --out $(BUILD)/gsp
-	python3 tools/gspcheck.py $(BUILD)/gsp
 clean:
 	rm -rf $(BUILD)
 

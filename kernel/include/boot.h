@@ -14,12 +14,20 @@
 /* What the kernel will hold on the card's behalf.  Bounded on purpose: on a 128 MiB machine an unbounded
  * carve-out of five 16 MiB files would leave the OS less memory than the firmware is worth, and "we kept
  * what fit and said which we did not" is a truer report than an out-of-memory boot. */
-#define BOOT_FIRMWARE_RESIDENT_MAX (32u * 1024u * 1024u)
+/* 72 MiB.  The clamp exists so that a 128 MiB machine is not squeezed by a carve-out, and it is enforced
+ * role by role - a file that does not fit is reported as read-but-not-kept rather than failing the boot.  It was
+ * 32 MiB, which is smaller than the resource-manager image the open driver loads on this generation
+ * (`gsp-570.144.bin' is 63571696 bytes measured on the installed driver), so the one file that would let the
+ * coprocessor actually start could not have been kept however it arrived: a limit that guarantees the failure is
+ * not a policy, it is the bug. */
+#define BOOT_FIRMWARE_FILE_MAX (72u * 1024u * 1024u)
+#define BOOT_FIRMWARE_RESIDENT_MAX (72u * 1024u * 1024u)
 #define BOOT_FIRMWARE_STATE_ABSENT      0u  /* nothing by that name on the boot volume */
 #define BOOT_FIRMWARE_STATE_STAGED      1u  /* read, sized, examined */
-#define BOOT_FIRMWARE_STATE_TOO_BIG     2u  /* reserved: the stub's read caps at 16 MiB before anything can
-                                             * be sized, so an oversized file is reported as unreadable and
-                                             * this state stays unused rather than claiming a size */
+#define BOOT_FIRMWARE_STATE_TOO_BIG     2u  /* reserved: the stub refuses a file past BOOT_FIRMWARE_FILE_MAX
+                                             * before anything can be sized, so an oversized file is reported as
+                                             * unreadable and this state stays unused rather than claiming a
+                                             * size that was never measured */
 #define BOOT_FIRMWARE_STATE_UNREADABLE  3u  /* the firmware's read failed: present too big, or an I/O
                                              * failure - not the same as absent, and not knowable further here */
 #define BOOT_FIRMWARE_ELF64        1u       /* magic, class, byte order and entry size the loader's walk needs */

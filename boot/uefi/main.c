@@ -82,7 +82,10 @@ static status read_file(struct file *root,const char16 *name,void **data,size_t 
  struct file *f=0;status s=root->open(root,&f,name,1,0);if(FAILED(s))return s;
  uint64_t size=0;s=f->set_position(f,UINT64_MAX);
  if(!FAILED(s))s=f->get_position(f,&size);
- if(!FAILED(s)&&(!size||size>16*1024*1024))s=ERROR(4);
+ /* BOOT_FIRMWARE_FILE_MAX, not a literal: this cap decides which firmware the volume can offer at all, and it
+  * used to be 16 MiB, which is smaller than the resource-manager image this generation needs.  The same bound
+  * applies to the kernel and the modules, which are three orders of magnitude short of it. */
+ if(!FAILED(s)&&(!size||size>BOOT_FIRMWARE_FILE_MAX))s=ERROR(4);
  if(!FAILED(s))s=f->set_position(f,0);
  if(!FAILED(s))s=bs->allocate_pool(2,(size_t)size,data);
  if(!FAILED(s)){
