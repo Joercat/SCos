@@ -1,8 +1,8 @@
 {
  "branch": "arena/9dd682cf-scos",
  "build_tag": "x64-dev",
- "built": "2026-10-28T19:20:57Z",
- "commit": "64c928bd84ce",
+ "built": "2026-10-28T20:07:44Z",
+ "commit": "c3c5b4171e42",
  "firmware": [
   {
    "bytes": 287869,
@@ -11,8 +11,8 @@
   }
  ],
  "image_bytes": 67108864,
- "kernel_bytes": 850224,
- "kernel_sha256": "36273930acf62d0c7e016bd427ea939d36b9fef67f5e0803169e99e2169899ac",
+ "kernel_bytes": 854392,
+ "kernel_sha256": "f259638efd785ef2f9ee8a1d8a62d49e62079a1b02bac6c2c6a36882ade256b6",
  "modules": [
   {
    "bytes": 13536,
@@ -25,9 +25,9 @@
    "sha256": "8e998740f1ad1c94055fd09dee26b7a1db007c121cf2197a7f650eca85296528"
   },
   {
-   "bytes": 44784,
+   "bytes": 44768,
    "name": "NVIDIA.MOD",
-   "sha256": "b9b6e99facfab699443a9a13777078d46328b60b532e6e1acf09e2d730e8a746"
+   "sha256": "4fdd53a04f72b399ddc40f79ae829f7985ea1bf06424ce2ed822f5eaad8c68ae"
   }
  ],
  "tree": "clean"
