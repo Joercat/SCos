@@ -40,6 +40,21 @@ milestone-check:
 # Staged in this order on purpose: `gpu-modules' and `gsp-firmware' fill the directories the packer reads, and
 # `all' writes the image.  Reversed, a clean build/ produced an image with no drivers and no firmware, which is
 # the delivery that arrived on the last flash and reported fw 0/5.
+# A Ventoy-ready image.  Ventoy boots an image *file*, so a stick that already has it needs no raw write:
+# `make ventoy' packs the same bytes, sized to whatever firmware is staged (VENTOY_FIRMWARE is where an
+# installed driver's gsp-*.bin goes - the one file no public archive ships), and leaves the result in build/.
+# It is deliberately not committed: a second image in dist/ would double the size of every delivery for a file
+# anyone can rebuild in a second, and the size depends on firmware that only exists on the target machine.
+VENTOY_FIRMWARE ?= $(firstword $(wildcard /lib/firmware/nvidia/*/gsp))
+VENTOY_SIZE = $(shell python3 tools/makedisk.py build --min-size \
+	$(if $(VENTOY_FIRMWARE),--firmware $(VENTOY_FIRMWARE)) | cut -f1)
+ventoy: gpu-modules gsp-firmware all
+	python3 tools/makedisk.py build $(if $(VENTOY_FIRMWARE),--firmware $(VENTOY_FIRMWARE) ,)--size $(VENTOY_SIZE) \
+		--out $(BUILD)/scos-ventoy.img
+	sha256sum $(BUILD)/scos-ventoy.img > $(BUILD)/scos-ventoy.img.sha256
+	@echo "copy $(BUILD)/scos-ventoy.img onto the Ventoy partition and pick it in the menu"
+	@echo "or run tools/flash.sh --ventoy /run/media/\$$USER/Ventoy, which packs, copies and reads it back"
+
 dist: gpu-modules gsp-firmware all
 	cp $(BUILD)/scos.img dist/scos.img
 	cp $(BUILD)/build.json dist/scos.img.build.json

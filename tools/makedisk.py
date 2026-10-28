@@ -138,6 +138,45 @@ FIRMWARE_MAX = 72 * 1024 * 1024
 _ESP_READER = None
 
 
+def size_bytes(value):
+    """`--size 256M' means 256 * 1024 * 1024, and a bare number means bytes.
+
+    Sizes on this path are quoted in bytes elsewhere, which is precise and unreadable in the same proportion;
+    somebody sizing a stick writes 256M or 1G.  A wrong guess cannot quietly truncate anything, because the
+    packer checks the content against the volume it is about to write and says so."""
+    text = str(value).strip().upper().replace(' ', '')
+    m = re.fullmatch(r'(\d+)(B|K|KB|M|MB|G|GB)?', text)
+    if not m:
+        raise ValueError('%r is not a size; use bytes, or K/M/G after the number, as in 256M' % value)
+    units = {'': 1, 'B': 1, 'K': 1024, 'KB': 1024, 'M': 1024 ** 2, 'MB': 1024 ** 2,
+             'G': 1024 ** 3, 'GB': 1024 ** 3}
+    return int(m.group(1)) * units[m.group(2) or '']
+
+
+def human(value):
+    """A byte count the way a person sizes a stick: 134217728 becomes 128M."""
+    for suffix, unit in (('G', 1024 ** 3), ('M', 1024 ** 2), ('K', 1024)):
+        if value >= unit and value % unit == 0:
+            return '%d%s' % (value // unit, suffix)
+    return '%dB' % value
+
+
+def min_image_bytes(content_bytes, directory_blocks=4):
+    """The smallest whole-disk image that can hold `content_bytes' of files, with the packer's own geometry.
+
+    One direction is trivial - a disk size becomes a cluster count - and this is the other direction, which is
+    what a refusal has to answer with.  A 64 MiB volume holding 1.3 MiB of kernel and drivers cannot take a
+    63,571,696-byte resource-manager image, and 'ESP capacity exceeded' told whoever read that nothing about
+    what to do next."""
+    need = (content_bytes + SECTOR - 1) // SECTOR + directory_blocks
+    esp = need + 32
+    for _ in range(8):
+        esp = need + 32 + 2 * ((esp - 32 + 2 + 129) // 130)
+    tail = SECTORS - DATA_FIRST - DATA_SECTORS          # kept, so the grown layout and this one agree
+    sectors = max(SECTORS, FIRST + esp + 1 + DATA_SECTORS + tail) * SECTOR
+    return (sectors + 1048575) // 1048576 * 1048576    # a whole number of MiB, because it is quoted to people
+
+
 def esp_reader():
     '''The ESP reader lives in tools/verify-stick.py, which is also what dates a stick after it has been
     written; the hyphen in that file's name is why it comes in by path instead of by import.'''
@@ -377,6 +416,19 @@ def main(directory, sectors=None, firmware_dir=None, out=None):
                                             [(stem + '.MOD', blob) for stem, blob in modules], firmware)
     (d / 'BUILD.TXT').write_text(record_text)
     (d / 'build.json').write_text(json.dumps(record_json, sort_keys=True, indent=1) + '\n')
+    # Every byte that has to land on the volume is known here, so this is where the volume is asked whether it
+    # is big enough - before the first cluster of the big files is handed out, and with the size that would fit
+    # in the answer.  A refusal that names a number is the difference between "this firmware cannot be carried"
+    # and "pass --size 128M", and the second one is a thing a person can do.
+    content_bytes = len(efi) + len(elf) + 4 + len(index) + len(record_text.encode()) \
+        + sum(len(blob) for _s, blob in modules) + sum(len(blob) for _e, blob in firmware)
+    wanted = (content_bytes + SECTOR - 1) // SECTOR + 4          # 4: the directory blocks themselves
+    if wanted > clusters:
+        raise ValueError('the ESP of a %s image has %d clusters and this build wants %d: pass --size %s, which '
+                         'is the smallest image that holds the %d bytes of kernel, loader, %d module(s) and %d '
+                         'firmware file(s)'
+                         % (human(total_sectors * SECTOR), clusters, wanted, human(min_image_bytes(content_bytes)),
+                            content_bytes, len(modules), len(firmware)))
     bc = allocate(record_text.encode())
     scos = (dot(0, dirs[3]) + entry('KERNEL.ELF', kc, len(elf)) + entry('KERNEL.CRC', cc, 4)
             + entry('BUILD.TXT', bc, len(record_text.encode())) + entry('DRVLIST.IDX', ic, len(index)))
@@ -426,6 +478,21 @@ def main(directory, sectors=None, firmware_dir=None, out=None):
           f'coprocessor firmware {len(firmware)} file(s), every one read back out of the packed ESP')
 
 
+def min_size_of(directory, firmware_dir=None):
+    """The `--min-size' answer: bytes the whole build wants, grown to the smallest image that holds them.
+
+    Measured off the same files the packer reads, which is the only way this number can be trusted: a figure
+    computed from a remembered list of file sizes is a guess that rounds itself correct."""
+    d = Path(directory)
+    bytes_ = len((d / 'BOOTX64.EFI').read_bytes()) + len((d / 'kernel.elf').read_bytes()) + 4
+    module_dir = d / 'gpu'
+    for path in sorted(module_dir.glob('*.mod')) if module_dir.is_dir() else []:
+        bytes_ += len(path.read_bytes())
+    for _esp, blob in (firmware_blobs(firmware_dir, sub=None) if firmware_dir else firmware_blobs(d)):
+        bytes_ += len(blob)
+    return min_image_bytes(bytes_)
+
+
 def cli():
     '''`makedisk.py [directory] [--size BYTES] [--firmware DIR] [--out FILE]'.
 
@@ -437,18 +504,36 @@ def cli():
     ap = argparse.ArgumentParser(prog='tools/makedisk.py')
     ap.add_argument('directory', nargs='?', default='build',
                     help='the staged build directory to pack (default: build)')
-    ap.add_argument('--size', type=int, default=None, metavar='BYTES',
-                    help='size the whole disk to BYTES, growing the ESP into the rest of it; a whole number of '
-                         '512-byte sectors, at least the 64 MiB the tracked image uses')
+    ap.add_argument('--size', default=None, metavar='BYTES',
+                    help='size the whole disk to BYTES (K/M/G suffixes allowed, as in 256M), growing the ESP '
+                         'into the rest of it; a whole number of 512-byte sectors, at least the 64 MiB the '
+                         'tracked image uses')
+    ap.add_argument('--min-size', action='store_true',
+                    help='print the smallest image that can hold this build plus the staged firmware, as '
+                         'bytes and as a human size, and write nothing')
     ap.add_argument('--firmware', default=None, metavar='DIR',
                     help='read the firmware roles from DIR instead of build/gsp - for example '
                          '/lib/firmware/nvidia/gb207/gsp, whose gsp-*.bin is the file no public archive ships')
     ap.add_argument('--out', default=None, metavar='FILE',
                     help='write the image to FILE instead of build/scos.img, which is the path the Makefile\'s dist target copies from')
     a = ap.parse_args()
-    if a.size is not None and a.size % SECTOR:
+    try:
+        size = None if a.size is None else size_bytes(a.size)
+    except ValueError as exc:
+        ap.error(str(exc))
+    if a.min_size:
+        smallest = min_size_of(a.directory, a.firmware)
+        print('%d	%s' % (smallest, human(smallest)))
+        return
+    if size is not None and size % SECTOR:
         ap.error('--size has to be a multiple of %d bytes, because that is what a sector is' % SECTOR)
-    main(a.directory, sectors=a.size, firmware_dir=a.firmware, out=a.out)
+    try:
+        main(a.directory, sectors=size, firmware_dir=a.firmware, out=a.out)
+    except ValueError as exc:
+        # Every refusal this packer raises is a sentence written for the person holding a stick, so it is
+        # printed as one.  A traceback buries it under eleven frames of this file's own source, and the one
+        # thing the message exists to say - the size that would have worked - ends up above the fold.
+        raise SystemExit('makedisk: %s' % exc)
 
 
 if __name__ == '__main__':

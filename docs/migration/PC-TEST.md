@@ -81,8 +81,13 @@ and USB device descriptors. The exact GPU/VBIOS and motherboard firmware revisio
 have not been established in this session. Do not infer physical acceptance from
 the CPU name or from the emulator matrix.
 
-1. **Back up the USB stick.** Flash `dist/scos.img` as a raw disk image using a
-   reputable image writer. Merely copying the `.img` file onto a formatted stick
+1. **Get the image onto a stick.** A stick that already runs **Ventoy** needs only the file: `make ventoy`
+   (or `tools/flash.sh --ventoy <mount>`) writes `build/scos-ventoy.img`, and Ventoy boots an image file by
+   presenting it to the firmware as a block device - no extraction, and the file may be fragmented. Copy it in
+   beside the ISOs and pick it from the menu; nothing on the stick is rewritten. Any other stick takes a raw
+   write: flash `dist/scos.img` as a whole disk image using a reputable image writer (or
+   `tools/flash.sh --device /dev/sdX`, which refuses a disk that carries a Ventoy filesystem, because that
+   would erase it to install one OS). Merely copying the `.img` file onto a *plain* formatted stick
    will not create this boot medium. Flashing erases/replaces its partition table
    and data; carefully identify the USB device, never an internal system disk.
    The image assumes 512-byte logical disk sectors.
