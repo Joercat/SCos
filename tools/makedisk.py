@@ -266,8 +266,14 @@ def main(directory, sectors=None, firmware_dir=None, out=None):
         raise ValueError('a %d-byte image cannot hold this build; the ESP has to be at least %d bytes and the '
                          'boot loader, kernel, modules and firmware all land inside it'
                          % (total_sectors * SECTOR, SECTORS * SECTOR))
+    # The data partition keeps the same distance from the end of the disk that the tracked layout has, so an
+    # image packed with no --size is laid out byte for byte as it always was - the kernel reaches that partition
+    # by its own arithmetic, and moving it under the ESP while keeping the ESP's old size made the two overlap,
+    # which is how a settings file written before a reboot stopped existing after one.  A grown disk pushes the
+    # same tail of unallocated sectors ahead of it rather than parking the partition against the backup table.
+    tail = SECTORS - globals()['DATA_FIRST'] - DATA_SECTORS      # read before this call's DATA_FIRST exists
     data_sectors = DATA_SECTORS
-    DATA_FIRST = total_sectors - GPT_BACKUP_SECTORS - 1 - data_sectors
+    DATA_FIRST = total_sectors - tail - data_sectors
     FIRST, LAST = 2048, DATA_FIRST - 1
     target = d / 'scos.img' if out is None else Path(out)
     Path(target).parent.mkdir(parents=True, exist_ok=True)
