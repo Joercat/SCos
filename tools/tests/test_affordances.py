@@ -162,13 +162,27 @@ def bar_slot(g, app_id, index=False):
     raise AssertionError('%s is not pinned to the bar' % app_id)
 
 
+def empty_wallpaper(g):
+    """A wallpaper pixel with neither an icon, a window nor a notification on it.
+
+    Found rather than assumed: the corner that used to be free carries the notification stack now, and a
+    press on a notification dismisses the box instead of reaching the desktop.  The walk starts at the
+    bottom-right corner and moves up and left until a pixel belongs to nothing at all."""
+    sw, sh = g.value('screen_w'), g.value('screen_h')
+    bar = g.call('wm_taskbar_height')
+    for y in range(sh - bar - 40, 200, -40):
+        for x in range(sw - 40, 40, -40):
+            if g.call('win_at_point', x, y): continue
+            if signed(g.call('notice_at', x, y)) >= 0: continue
+            return x, y
+    raise AssertionError('no empty wallpaper left on this screen')
+
+
 def test():
     with Guest('affordances') as g:
         sw, sh = g.value('screen_w'), g.value('screen_h')
         g.call('paint_all')
-        # Bottom-right is the one stretch of wallpaper every screen size has free of both the icon grid
-        # and the boot notification, which stays up until it is dismissed.
-        clear = (sw - 24, sh - 56)
+        clear = empty_wallpaper(g)
 
         # ------------------------------------------------------ double-click is what opens an icon
         about = desk_find(g, app='about')
@@ -293,14 +307,15 @@ def test():
         # staged on the disk; with a firmware image on it the desktop registers as a target a moment later, so
         # this waits for it and reports what it finally saw rather than failing on the first read.
         seen = None
+        drop_x, drop_y = empty_wallpaper(g)      # wallpaper *now*, with the Files window open
         for _attempt in range(16):
             seen = (g.string(g.scratch + 5120, 64)
-                    if g.call('wm_dnd_target', clear[0], 300, g.scratch + 5120, 64) == 0 else None)
+                    if g.call('wm_dnd_target', drop_x, drop_y, g.scratch + 5120, 64) == 0 else None)
             if seen == 'desktop':
                 break
             g.call('paint_all'); g.run(0.5)
         assert seen == 'desktop', 'the wallpaper was not a drop target within 8 s (last read: %r)' % seen
-        assert g.call('wm_dnd_drop', clear[0], 300) == 0
+        assert g.call('wm_dnd_drop', drop_x, drop_y) == 0
         assert g.value('dnd') == 0, 'the drop left a drag running'
         assert desk_find(g, kind=1, path='home/gesture.txt') >= 0, 'the drop left no shortcut'
 

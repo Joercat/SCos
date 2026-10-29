@@ -77,6 +77,12 @@ def test():
       pointer(g,tx+tw//2,ty+th//2)
       event(g,2,button=1,down=1,buttons=1);assert g.call('wm_win_count')==before and g.call('wm_dialog_active')
       g.debug.send('c');g.press('esc');g.pause();g.run();assert not g.call('wm_dialog_active')
+      # The box is painted above the dialog but does not own the press while a window is under it - a
+      # sticky warning would otherwise take that corner of the window for good.  With the window gone the
+      # same pixel is the box's, and one click dismisses it.
+      boxes=g.value('notice_count')
+      pointer(g,tx+tw//2,ty+th//2);event(g,2,button=1,down=1,buttons=1)
+      assert g.value('notice_count')==boxes-1, 'a notification over wallpaper does not dismiss with a click'
       # Desktop paths with aliases must use stable IDs, not label reconstruction.
       w=g.call('wm_open_app',stringarg(g,'files'),stringarg(g,'home//desktop/../desktop',256));assert w;g.run()
       f=Files.from_buffer_copy(g.debug.read(g.ptr(w+80),C.sizeof(Files)))

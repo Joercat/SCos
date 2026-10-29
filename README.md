@@ -313,8 +313,13 @@ shortcuts and pins, but keeps projects, app data and original external sources.
 RAM-only installations are explicitly session-only and disappear at reboot.
 Only existing supported ATA persistence is available; no new storage drivers.
 
-Top-right notifications overlay windows, menus and modals. Click to dismiss;
-normal notices expire after ten seconds. Lua apps can use `scos.notify(text)`.
+Notifications stack upwards from the bottom-right corner, newest nearest the taskbar, painted above
+windows and modals; `wm_notice_rect(index, out4)` gives a box's x/y/width/height. A box never owns a
+window's pixels - painted over a window, the press still belongs to the window, so a message can never
+take a Close button or a resize grip away - and over wallpaper a click dismisses it. Menus and the
+launcher are painted above the boxes and win the hit test. Every box expires on its own: ten seconds
+for an ordinary message, thirty for a warning that carries machine state. Lua apps can use
+`scos.notify(text)`.
 
 `graphics` reports read-only PCI display-device discovery, the renderer and the
 measured split of pixels between the GPU engine and the CPU. Three families have

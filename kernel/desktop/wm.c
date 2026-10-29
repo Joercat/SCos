@@ -236,7 +236,12 @@ void wm_notify(const char *title,const char *text,int warning){
      * == 0) and unisolated apps hold it; isolated apps do not. */
     if (!proc_cap_allowed(PROC_CAP_IPC)) return;
     if(notice_count==NOTICE_MAX){for(int i=1;i<NOTICE_MAX;i++)notices[i-1]=notices[i];notice_count--;}
-    struct notice *n=&notices[notice_count++];memset(n,0,sizeof(*n));strncpy(n->title,title,47);strncpy(n->text,text,sizeof(n->text)-1);n->text[sizeof(n->text)-1]=0;n->warning=!!warning;n->until=warning?0:(u32)tick_count+1000;wm_full();
+    struct notice *n=&notices[notice_count++];memset(n,0,sizeof(*n));strncpy(n->title,title,47);strncpy(n->text,text,sizeof(n->text)-1);n->text[sizeof(n->text)-1]=0;n->warning=!!warning;
+    /* Every box leaves on its own, warnings included: one that never leaves is one that owns a corner of
+     * the screen for the rest of the session.  A warning carries machine state the user may want to read,
+     * so it stays up three times as long - and the detail it points at (the graphics panel, the terminal)
+     * is still there afterwards. */
+    n->until=(u32)tick_count+(warning?3000:1000);wm_full();
     klog("notification: %s: %s",n->title,n->text);
 }
 /* The box is sized by the same layout the painter uses, from the same shared word wrap: a height computed a
@@ -276,11 +281,19 @@ static void notice_remove(int i){if(i<0||i>=notice_count)return;for(int j=i;j<no
 /* Hit-testing walks the same heights, so a click lands on the notice the user can see rather than on the
  * fourth box in a stack of shorter ones. */
 static int launcher_showing(void);   /* the launcher panel owns the bottom-left corner */
+static struct window *win_at_point(int x, int y);
 static int notice_at(int x,int y){
     /* A raised menu or the launcher is painted above the notifications, so it
      * owns the pointer there: the hit test follows the z-order instead of
      * stealing a press that the user aimed at a menu row underneath a box. */
     if(menu.active||launcher_showing())return -1;
+    /* A notification is an overlay, never the owner of a window's pixels.
+     * Painted above a window it hides a corner of it, and the pointer still
+     * belongs to the window: otherwise one message - the boot warning is
+     * sticky - takes that corner away for good, and the corner is where a
+     * window's Close button and its resize grip are.  Over wallpaper the box
+     * is pressable, which is what dismisses it. */
+    if(win_at_point(x,y))return -1;
     for(int i=0;i<notice_count;i++){
         int r[4];if(!wm_notice_rect(i,r))continue;
         if(x>=r[0]&&x<r[0]+r[2]&&y>=r[1]&&y<r[1]+r[3])return i;

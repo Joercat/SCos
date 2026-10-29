@@ -256,9 +256,15 @@ def test_titlebar_and_taskbar_hit_testing():
         assert g.call('bar_hover_at', 200, sh - bar - 20) == BAR_HOVER_NONE
 
         # A notification is pressable ("Click to dismiss"), so it highlights
-        # too - and the highlight follows the pointer off the box again.
+        # too - and the highlight follows the pointer off the box again.  The
+        # window goes back to its own size first: a notification is an overlay
+        # that never owns a window's pixels, so the half of the box that lies
+        # over a window is the window's, and the half over wallpaper is the
+        # box's - which is where a press dismisses it.
         g.debug.write(g.scratch + 2000, b'Notice\0')
         g.debug.write(g.scratch + 2100, b'Hover me\0')
+        key(g, 147, alt=1)               # Alt+F10 back to the window's own size
+        assert win_state(g, w) == STATE_NORMAL, win_state(g, w)
         g.call('wm_notify', g.scratch + 2000, g.scratch + 2100, 1)
         g.call('paint_all')
         g.run(0.1)

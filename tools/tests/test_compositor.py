@@ -10,6 +10,21 @@ def image(g,name):
     p=RESULTS/(g.name+'-'+name+'.ppm');g.qmp('screendump',{'filename':str(p)})
     data=p.read_bytes();magic,w,h,maxval,pixels=data.split(None,4);return pixels[:int(w)*(int(h)-40)*3]
 def crop(pixels,x,y,w,h,screen_width):return b''.join(pixels[((y+r)*screen_width+x)*3:((y+r)*screen_width+x+w)*3] for r in range(h))
+
+def free_point(g):
+    """A wallpaper pixel with neither a window nor a notification on it.
+
+    A press that starts a rubber band has to belong to the desktop.  A notification is painted above a
+    window but never owns a window's pixels, and over wallpaper it owns them (that press is what dismisses
+    it) - so the band has to start where nothing at all is drawn, and the point is found rather than
+    assumed: the corner that used to be empty now carries the notification stack."""
+    sw,sh=g.value('screen_w'),g.value('screen_h');bar=g.call('wm_taskbar_height')
+    for y in range(300,sh-bar-40,40):
+        for x in range(40,sw-40,40):
+            # notice_at answers -1 for "no box here", and a register hands -1 back as 0xffffffff.
+            if g.call('win_at_point',x,y) or g.call('notice_at',x,y)&0xffffffff!=0xffffffff:continue
+            return x,y
+    raise AssertionError('no empty wallpaper left on this screen')
 def equivalent(g,name):
     g.call('paint_partial');partial=image(g,name)
     g.call('paint_all');full=image(g,name+'-reference')
@@ -48,10 +63,10 @@ def test():
         event(g,1,dx,dy,buttons=1);g.call('resize_flush',1);equivalent(g,'held-resize-'+str(i))
       event(g,2,button=1);g.close(upper);g.close(lower)
       # Right drag makes a band, right click opens a context menu only on release.
-      pointer(g,900,620);event(g,2,button=2,down=1,buttons=2)
+      bx,by=free_point(g);pointer(g,bx,by);event(g,2,button=2,down=1,buttons=2)
       assert g.value('band_active') and not g.value('menu')
       event(g,1,-250,180,buttons=2);equivalent(g,'right-band');event(g,2,button=2)
-      assert not g.value('menu');pointer(g,900,620);event(g,2,button=2,down=1,buttons=2)
+      assert not g.value('menu');pointer(g,bx,by);event(g,2,button=2,down=1,buttons=2)
       assert not g.value('menu');event(g,2,button=2);assert g.value('menu');g.call('menu_cancel')
       # Drag an icon beyond the old icon band; compare while still held.
       g.call('paint_all');pointer(g,48,40);event(g,2,button=1,down=1,buttons=1);event(g,1,320,-300,buttons=1)
