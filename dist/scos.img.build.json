@@ -1,25 +1,43 @@
 {
- "branch": "arena/01a09dfd-scos",
+ "branch": "arena/01058b59-scos",
  "build_tag": "x64-dev",
- "built": "2026-09-23T22:38:31Z",
- "commit": "4518e35a9478",
- "kernel_bytes": 831648,
- "kernel_sha256": "4af549d706de2fbf9c42d7af3013b6d8a10afee1115f376400dbcd5dd4e51805",
+ "built": "2026-10-29T19:55:43Z",
+ "commit": "f561df8b0d82",
+ "firmware": [
+  {
+   "bytes": 63571696,
+   "name": "GSP.BIN",
+   "sha256": "a8c3ebeed280323aedb51c061f321e73379cce7a9ae643a33dd03915df027f7f"
+  },
+  {
+   "bytes": 199820,
+   "name": "GSPFMC.BIN",
+   "sha256": "cb59a35c1d4bd1274d7267fd10243c29f843ff41c851b9cbd59f5af2ddd7fece"
+  },
+  {
+   "bytes": 200812,
+   "name": "GSPBL.BIN",
+   "sha256": "d40b48e431d1707dc77af3605db358ed7a32ebfc2830eb74de2eddb4d3025071"
+  }
+ ],
+ "image_bytes": 69206016,
+ "kernel_bytes": 1309248,
+ "kernel_sha256": "958c8394d6092ab279971a7201c3d50348713c7e4d772112d0cb19955076dd86",
  "modules": [
   {
    "bytes": 13536,
    "name": "ATI.MOD",
-   "sha256": "6e7c79c5969f087b33068af09912748fa2987a074565d972d344066bb32becb0"
+   "sha256": "9895cd3b06fa4670b44781a91d0d1f7790265dcd7a670faa1d8441a84c74058a"
   },
   {
    "bytes": 7216,
    "name": "CIRRUS.MOD",
-   "sha256": "1671b52f3d963c1e811160df6b882cf8403580080c49dcc9f9d06f26476bbda4"
+   "sha256": "8e998740f1ad1c94055fd09dee26b7a1db007c121cf2197a7f650eca85296528"
   },
   {
-   "bytes": 34152,
+   "bytes": 44768,
    "name": "NVIDIA.MOD",
-   "sha256": "8cb4013c5a75dd8e7d1836b8892ae4f4b339e600a9ec579d900fe8032bcd9d8b"
+   "sha256": "4fdd53a04f72b399ddc40f79ae829f7985ea1bf06424ce2ed822f5eaad8c68ae"
   }
  ],
  "tree": "clean"
