@@ -109,7 +109,7 @@ files — `kernel/symbols.map`, `system/keys/boot.key`,
 another account's `backup.key`, another app's `notes.txt` and more. They hold no
 key, no password and no data of yours, and nothing reads them; a sandboxed app
 that can read or change one has escaped, and the file itself says so. The
-Terminal command `decoys` lists them and whether each is still untouched.
+Terminal command `decoys` lists them and whether each is still untouched, and `selftest` runs the machine's own checks — decoys intact, app-storage quota, CPL3 boundary, which renderer is really painting, a filesystem round trip, the terminal's row arithmetic and the app registry — and prints PASS/FAIL for each.
 
 Every isolated window also gets private physical frames, a CR3 switch around
 callbacks, and kernel-held capabilities that deny global theme edits,

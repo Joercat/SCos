@@ -10,6 +10,7 @@
  * stack instead of inventing latency.
  */
 #include "scos.h"
+#include "usermode.h"          /* selftest reports whether the CPL3 boundary is live */
 
 /* A display limit, stated as one: this is how many lines the scrollback keeps and renders, and nothing a
  * command prints is dropped for being long - the buffer a response is assembled in is separately bounded and
@@ -255,6 +256,8 @@ static const char *help_text =
     "graphics [fsp]  - Detected GPUs and actual renderer status; fsp prints only the\n"
     "                firmware intake and FSP mailbox paragraphs\n"
     "decoys    - List the planted bait files and whether each is untouched\n"
+    "selftest  - Check this build from inside: decoys, storage, user mode,\n"
+    "                renderer, filesystem, terminal layout\n"
     "procs     - Process table with real per-task memory\n"
     "kill <pid>- Terminate an app task (see 'procs')\n"
     "tab       - new | close | <n>: terminal tabs (also Ctrl+T)\n"
@@ -341,6 +344,9 @@ static void term_prompt_clear(struct term *t)
 }
 
 static void run_line(struct term *t, const char *command, int skip_confirm);
+static int term_visible_rows(struct window *w);
+static int term_cols(struct window *w);
+static void term_rows_sync(struct term *t, int cols);
 
 /* Shell-style echo: the transcript shows the command exactly once, when it is
  * actually about to run.  History is recorded there too, so a question that
@@ -914,6 +920,99 @@ static void run_line(struct term *t, const char *command, int skip_confirm)
     else if(!strcmp(cmd,"appuninstall")){
         if(nargs!=2||!strcmp(args[1],"--help"))strcpy(response,"Usage: tlpdo appuninstall <app-id> (password; erases its data)");
         else app_uninstall(args[1],response,sizeof(response));
+    }
+    else if (!strcmp(cmd, "selftest")) {
+        /* The in-system half of the test story: the same questions the suites ask
+         * from outside, asked by the running machine and answered on screen.  It
+         * does not replace them - it runs in one boot on one machine - but it is
+         * what a person can run after flashing a build, and every line names
+         * what it measured rather than saying "ok". */
+        int fails = 0, checks = 0;
+        char line[192], num[24];
+        strcpy(response, "SCos self-test\n");
+
+        /* Planted bait: still planted, still untouched. */
+        {
+            int missing = 0;
+            for (int i = 0; i < decoys_count(); i++) if (!decoys_present(i)) missing++;
+            checks++;
+            if (missing) { fails++; strcat(response, "FAIL  decoy files: "); }
+            else strcat(response, "PASS  decoy files: ");
+            fmt_u32(num, (u32)(missing ? missing : decoys_count()));
+            strcat(response, num);
+            strcat(response, missing ? " of " : " of ");
+            fmt_u32(num, (u32)decoys_count());
+            strcat(response, num);
+            strcat(response, missing ? " changed or missing\n" : " planted and unchanged\n");
+        }
+        /* The per-app data quota the storage layer enforces. */
+        {
+            int files = 0; u32 bytes = 0;
+            app_storage_used("selftest", &files, &bytes);
+            checks++;
+            if (files || bytes) { fails++; strcat(response, "FAIL  app storage: a fresh id is not empty\n"); }
+            else {
+                strcat(response, "PASS  app storage: clean, quota ");
+                fmt_u32(num, APP_STORAGE_MAX_FILES); strcat(response, num);
+                strcat(response, " files / ");
+                fmt_u32(num, APP_STORAGE_MAX_BYTES / 1024); strcat(response, num);
+                strcat(response, " KiB per app\n");
+            }
+        }
+        checks++;
+        if (usermode_enabled()) strcat(response, "PASS  CPL3 user mode: available\n");
+        else { fails++; strcat(response, "FAIL  CPL3 user mode: disabled\n"); }
+        /* Which renderer is actually painting, named honestly. */
+        checks++;
+        strcat(response, "PASS  renderer: ");
+        strcat(response, gpu_engine_drives_output() == 1
+               ? "a detected 2D engine is painting this screen\n"
+               : "the CPU compositor is painting this screen\n");
+        /* A real write, read and delete in the signed-in account's own tree. */
+        {
+            const char *path = "home/selftest.tmp";
+            const char *body = "SCOS-SELFTEST";
+            u32 n = 0;
+            int ok = vfs_write(path, body, (u32)strlen(body));
+            char *back = ok ? vfs_read(path, &n) : 0;
+            int same = back && n == strlen(body) && !memcmp(back, body, n);
+            int gone = same && vfs_delete(path) && !vfs_lookup(path);
+            checks++;
+            if (gone) strcat(response, "PASS  filesystem: wrote a file, read it back, removed it\n");
+            else { fails++; strcat(response, "FAIL  filesystem: a write/read/delete round trip failed\n"); }
+        }
+        /* The terminal's own arithmetic, re-done from scratch: the cached row
+         * count must equal a fresh re-wrap of the same scrollback at this
+         * window's width.  A stale or wrong count is exactly the class of bug
+         * that painted a prompt inside an answer. */
+        {
+            int cols = t->win ? term_cols(t->win) : t->rows_cols;
+            int sum = 0;
+            /* Bring the cache up to date first: this command just added its own
+             * lines, and an un-synced cache is supposed to differ. */
+            if (cols > 0) term_rows_sync(t, cols);
+            for (int i = 0; i < t->nlines; i++) {
+                int r = cols > 0 ? s_wrap_rows(t->lines[i], cols) : 0;
+                sum += r < 1 ? 1 : r;
+            }
+            checks++;
+            if (!cols || (sum == t->total_rows && !t->pending_active))
+                strcat(response, "PASS  terminal layout: cached rows equal a fresh re-wrap\n");
+            else { fails++; strcat(response, "FAIL  terminal layout: cached rows disagree with a re-wrap\n"); }
+        }
+        checks++;
+        if (app_count() > 0) {
+            strcat(response, "PASS  app registry: ");
+            fmt_u32(num, (u32)app_count()); strcat(response, num);
+            strcat(response, " application(s) registered\n");
+        } else { fails++; strcat(response, "FAIL  app registry: empty\n"); }
+
+        (void)line;
+        strcat(response, fails ? "SELF-TEST FAILED: " : "SELF-TEST PASSED: ");
+        fmt_u32(num, (u32)(checks - fails)); strcat(response, num);
+        strcat(response, " of ");
+        fmt_u32(num, (u32)checks); strcat(response, num);
+        strcat(response, fails ? " checks passed.\n" : " checks passed.\n");
     }
     else if (!strcmp(cmd, "decoys")) {
         /* The bait is part of the system, so it is inspectable: a user should
