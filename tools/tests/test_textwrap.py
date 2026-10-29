@@ -78,7 +78,8 @@ def test_the_desktop_uses_the_shared_layout():
 def notice_heights(guest, name):
     """Heights of the boxes on screen, found by the frame that surrounds each one.
 
-    The stack grows downwards from y=10, so a span per notice, and the last span is the newest one.  The
+    The stack grows upwards from the bottom-right corner above the taskbar, so a span per notice, and the
+    last span (the one nearest the taskbar) is the newest one.  The
     box's own background cannot be used to find its extent - the theme's window colour appears inside it
     everywhere - but the accent frame is a colour nothing else on that column draws.
     """

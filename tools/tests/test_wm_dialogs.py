@@ -262,8 +262,16 @@ def test_titlebar_and_taskbar_hit_testing():
         g.call('wm_notify', g.scratch + 2000, g.scratch + 2100, 1)
         g.call('paint_all')
         g.run(0.1)
-        mouse(g, 1, sw - 330 + 160, 10 + 20)
-        assert g.value('notice_hover', 4) == 0, 'a notification did not highlight'
+        # The box's rectangle comes from the window manager: notifications stack
+        # upwards from the bottom-right corner, newest nearest the taskbar, so a
+        # box can never sit on a window's Minimise/Maximise/Close buttons.
+        box = g.scratch + 6144
+        newest = g.value('notice_count') - 1
+        assert g.call('wm_notice_rect', newest, box), 'the newest notice has no rectangle'
+        nx, ny, nw, nh = struct.unpack('<4i', g.debug.read(box, 16))
+        assert ny + nh <= sh - bar, 'a notice reaches into the taskbar: %r' % ((nx, ny, nw, nh),)
+        mouse(g, 1, nx + 160, ny + 20)
+        assert g.value('notice_hover', 4) == newest, 'a notification did not highlight'
         g.call('paint_all')
         g.snapshot('notice-hover')
         mouse(g, 1, 40, sh - bar - 200)

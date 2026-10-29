@@ -658,6 +658,12 @@ int wm_taskbar_pin(const char *id);
 int wm_taskbar_pinned(const char *id);
 int wm_taskbar_capacity(void);
 void wm_notify(const char *title,const char *text,int warning);
+/* Where a notification box is on screen: x, y, width, height of notice `index'.
+ * The stack grows upwards from the bottom-right corner above the taskbar, newest box nearest the
+ * taskbar, so a notification never covers a window's Minimise/Maximise/Close buttons - the part of
+ * the desktop a user has to be able to press.  Returns 0 when there is no such notice, so a caller
+ * that walks 0.. until it sees 0 never reads a box that was not drawn. */
+int wm_notice_rect(int index,int *out4);
 void graphics_init(const struct boot_framebuffer *fb);
 #include "gpu.h"
 void gpu_init(const struct boot_framebuffer *fb);

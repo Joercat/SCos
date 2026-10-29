@@ -249,25 +249,48 @@ static int notice_rows(const struct notice *n)
     return r<1?1:r;
 }
 static int notice_height(const struct notice *n){return NOTICE_HEAD+notice_rows(n)*FONT_H+NOTICE_FOOT;}
-static int notice_top(int index)
+/* Where a notification is drawn, in screen pixels, for the painter, the hit test
+ * and any caller that wants to point at one (`wm_notice_rect').
+ *
+ * The stack grows UPWARDS from the bottom-right corner, newest box nearest the
+ * taskbar, and it used to grow downwards from the top-right corner instead -
+ * which is where a window's Minimise, Maximise and Close buttons are.  One boot
+ * message owned those pixels for its whole lifetime, so the buttons under it
+ * stopped highlighting and stopped answering clicks: a window you cannot close
+ * because the kernel had something to say.  A notification may cover an
+ * application's own drawing, which one click dismisses, but never a window's
+ * controls. */
+int wm_notice_rect(int index,int *out4)
 {
-    int y=10;
-    for(int i=0;i<index&&i<notice_count;i++)y+=notice_height(&notices[i])+NOTICE_GAP;
-    return y;
+    if(index<0||index>=notice_count)return 0;
+    int y=screen_h-TASKBAR_H-10;
+    for(int i=notice_count-1;i>=index;i--){
+        y-=notice_height(&notices[i]);
+        if(i!=index)y-=NOTICE_GAP;
+    }
+    if(out4){out4[0]=screen_w-NOTICE_W-10;out4[1]=y;out4[2]=NOTICE_W;out4[3]=notice_height(&notices[index]);}
+    return 1;
 }
 
 static void notice_remove(int i){if(i<0||i>=notice_count)return;for(int j=i;j<notice_count-1;j++)notices[j]=notices[j+1];notice_count--;notice_hover=-1;wm_full();}
 /* Hit-testing walks the same heights, so a click lands on the notice the user can see rather than on the
  * fourth box in a stack of shorter ones. */
+static int launcher_showing(void);   /* the launcher panel owns the bottom-left corner */
 static int notice_at(int x,int y){
-    if(x<screen_w-NOTICE_W-10||x>=screen_w-10||y<10)return -1;
-    for(int i=0;i<notice_count;i++){int top=notice_top(i);if(y>=top&&y<top+notice_height(&notices[i]))return i;}
+    /* A raised menu or the launcher is painted above the notifications, so it
+     * owns the pointer there: the hit test follows the z-order instead of
+     * stealing a press that the user aimed at a menu row underneath a box. */
+    if(menu.active||launcher_showing())return -1;
+    for(int i=0;i<notice_count;i++){
+        int r[4];if(!wm_notice_rect(i,r))continue;
+        if(x>=r[0]&&x<r[0]+r[2]&&y>=r[1]&&y<r[1]+r[3])return i;
+    }
     return -1;
 }
 static void paint_notices(void){
     const struct theme *t=theme_current();int x=screen_w-NOTICE_W-10;
     for(int i=0;i<notice_count;i++){
-        struct notice *n=&notices[i];int y=notice_top(i),h=notice_height(n),rows=notice_rows(n);
+        struct notice *n=&notices[i];int r[4];wm_notice_rect(i,r);int y=r[1],h=r[3],rows=notice_rows(n);
         u32 accent=n->warning?0xffbb55:t->main;
         int hot = notice_hover == i;
         s_fill(&screen,x,y,NOTICE_W,h,hot?color_blend(t->win_bg,accent,14):t->win_bg);
@@ -953,6 +976,7 @@ static int dnd_dirty;
 static int dnd_lx, dnd_ly, dnd_lw, dnd_lh;
 static void dnd_rect(int *x, int *y, int *w, int *h);
 static struct { int active; char q[48]; int qpos; int hover, offset; } launch;
+static int launcher_showing(void) { return launch.active; }
 /* The launcher row a press landed on, and where that press was.  A launcher that opened the window on
  * the button-down could not also be a place to pick an application up, so the click is decided at
  * release: same row = launch, moved = drag. */
@@ -1504,7 +1528,7 @@ static void wm_modal_dismiss(void)
 
 /* The last frame drew a button highlight; only a change forces a repaint. */
 static struct window *hover_btn_win;
-static int hover_btn;
+static int hover_btn = -1;
 
 static void draw_win_button(struct surface *s, int x, int y, int kind, u32 fg)
 {
@@ -1625,7 +1649,7 @@ static __attribute__((noinline)) void paint_partial(void)
             drawn[k]=1;struct window *w=wins[k];
             if(w->x<d->x+d->w&&w->x+w->w+4>d->x&&w->y<d->y+d->h&&w->y+w->h+4>d->y)paint_window(w);
         }
-        paint_taskbar();paint_menu();if(launch.active)paint_launcher();paint_notices();paint_dnd();
+        paint_taskbar();paint_notices();paint_menu();if(launch.active)paint_launcher();paint_dnd();
         fb_scene_unclip();
     }
     cur_draw();
@@ -2070,9 +2094,9 @@ static __attribute__((noinline)) void paint_all(void)
     }
     }
     paint_taskbar();
+    if (!ov_active) paint_notices();   /* tiles own the whole work area */
     paint_menu();
     if (launch.active) paint_launcher();
-    if (!ov_active) paint_notices();   /* tiles own the whole work area */
     paint_dnd();                /* the full and the damaged path must agree, or a drag leaves a trail */
     tb_dirty = 0; icons_dirty = 0; menu_dirty = 0; launch_dirty = 0; dnd_dirty = 0; ndmg = 0;
     for (int i = 0; i < win_count; i++) wins[i]->chrome_dirty = 0;

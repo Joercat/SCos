@@ -57,13 +57,24 @@ def test():
       # The band compared is the notification's title row and first line, not a fixed 108 pixels:
       # a notice is as tall as its text, so a crop that reached past a short one compared the gap
       # between two notices - wallpaper in one frame, the modal behind it in the other.
-      g.call('paint_all');initial=crop(image(g,'warning'),g.value('screen_w')-330,10,320,48,g.value('screen_w'))
+      def notice_rect(index):
+        box=g.scratch+6144;assert g.call('wm_notice_rect',index,box),'notice %d has no rectangle'%index
+        return struct.unpack('<4i',g.debug.read(box,16))
+      # The stack grows upwards from the bottom-right corner, newest nearest the taskbar: a notification
+      # never owns a window's Minimise/Maximise/Close buttons, which sit in the opposite corner.  The
+      # geometry comes from the window manager instead of being guessed here, because a suite that
+      # hard-codes it asserts against its own copy of the layout rather than the layout.
+      nx,ny,nw,nh=notice_rect(0)
+      assert nx+nw>g.value('screen_w')-40 and ny+nh<=g.value('screen_h')-g.call('wm_taskbar_height'),\
+        'a notification is not in the bottom-right corner above the taskbar: %r'%((nx,ny,nw,nh),)
+      g.call('paint_all');initial=crop(image(g,'warning'),nx,ny,320,48,g.value('screen_w'))
       # A notification must overlay a modal, and dismiss without resolving it.
       g.call('wm_dialog',stringarg(g,'Modal',0),stringarg(g,'Do not resolve',256),0,0,0)
-      modal=g.call('wm_win_at',0);g.call('wm_move_window',modal,g.value('screen_w')-330,10);g.call('paint_all')
-      assert crop(image(g,'warning-over-modal'),g.value('screen_w')-330,10,320,48,g.value('screen_w'))==initial
+      modal=g.call('wm_win_at',0);g.call('wm_move_window',modal,nx,ny);g.call('paint_all')
+      assert crop(image(g,'warning-over-modal'),nx,ny,320,48,g.value('screen_w'))==initial
       g.call('wm_notify',stringarg(g,'Overlay'),stringarg(g,'Above the modal',256),1);g.call('paint_all')
-      before=g.call('wm_win_count');pointer(g,g.value('screen_w')-30,10+(g.value('notice_count')-1)*114+10)
+      before=g.call('wm_win_count');tx,ty,tw,th=notice_rect(g.value('notice_count')-1)
+      pointer(g,tx+tw//2,ty+th//2)
       event(g,2,button=1,down=1,buttons=1);assert g.call('wm_win_count')==before and g.call('wm_dialog_active')
       g.debug.send('c');g.press('esc');g.pause();g.run();assert not g.call('wm_dialog_active')
       # Desktop paths with aliases must use stable IDs, not label reconstruction.
