@@ -93,6 +93,24 @@ crash, not a kernel panic. Everything it does is a numbered syscall checked by
 a default-deny allowlist (seccomp), a private mount namespace, a capability set
 and cgroup-style memory/file/syscall/CPU limits. See [the user-mode ABI](docs/USERMODE.md).
 
+The escape test ships as a demonstration (`/home/demos/isolation.cat`). It is
+now **151 probes**: traversal and absolute paths in a dozen spellings, other
+accounts' and other apps' files, the theme/notification/dialog capabilities, the
+VM's own escape hatches, argument and resource limits, fractional and NaN
+arguments, the drawing budget, resize and message from inside `paint`, format
+strings through `log`/`title`, and four attacks on each of ten planted decoy
+files. All of them are contained; a build-time test fails if the list of decoys
+in the kernel and in the app ever drift apart. `tools/tests/test_escape.py` also
+requires every decoy to be byte-identical after the run.
+
+**Decoy files are bait, on purpose.** `kernel/desktop/decoys.c` plants ten fake
+files — `kernel/symbols.map`, `system/keys/boot.key`,
+`system/security/accounts.db`, `vault/volume.key`, `home/root-notes.txt`,
+another account's `backup.key`, another app's `notes.txt` and more. They hold no
+key, no password and no data of yours, and nothing reads them; a sandboxed app
+that can read or change one has escaped, and the file itself says so. The
+Terminal command `decoys` lists them and whether each is still untouched.
+
 Every isolated window also gets private physical frames, a CR3 switch around
 callbacks, and kernel-held capabilities that deny global theme edits,
 notifications/dialogs, icon changes and VFS paths outside its namespace.
