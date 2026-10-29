@@ -277,12 +277,30 @@ void gpu_init(const struct boot_framebuffer *fb)
     klog("gpu: scanout owner %s, %u PCI config write(s) issued",
          scanout_index >= 0 ? "identified by BAR address" : "not identified by address",
          (unsigned)(config_writes_after - config_writes_before));
+    /* Two facts about the machine, gathered before any driver code runs and independent of whether one runs
+     * at all: what the boot volume handed over as the coprocessor's firmware, recorded and parsed in its own
+     * file; and what the card's own flight security processor says when it is asked, which is the only thing
+     * on this generation that answers before anything is unlocked.  Both used to be reached from inside the
+     * module loader, which made a machine without a staged module a machine with nothing to report about its
+     * hardware - and the FSP's answer is exactly the fact such a boot most needs. */
+    if (handoff) {
+        gpu_firmware_note(handoff);
+    }
     /* A family being *named* is not a driver.  The one module the firmware read for this machine's
      * chip is validated and exercised here; every other family's file stays on the disk. */
     if (!bound && handoff && handoff->module_state) {
+        /* Two passes, and the order is the whole point: a machine can have two functions of one family
+         * (two cards, or one card whose render function and display function both match), and the engine
+         * only accelerates the console when it is bound to the function that *feeds* the console.  Binding
+         * whichever function the PCI walk happened to list first is how a working, verified engine ends up
+         * on the other card, drawing into memory nobody can see, while the panel says "engine bound".  The
+         * scanout owner gets first refusal; every other function keeps the old order. */
+        for (int pass = 0; pass < 2 && !module_bound; pass++) {
         for (int i = 0; i < device_count; i++) {
             struct gpu_device *g = &devices[i];
             if (!gpu_module_eligible(g)) continue;
+            if (pass == 0 && !g->is_scanout) continue;
+            if (pass == 1 && g->is_scanout) continue;
             if (strncmp(handoff->module_name, g->match->family,
                         strlen(g->match->family)) != 0) continue;
             if (gpu_module_bind(g, handoff) == 0) {
@@ -301,6 +319,32 @@ void gpu_init(const struct boot_framebuffer *fb)
                 break;
             }
         }
+        }
+    }
+    /* Asked after the module, and that order is the reason this call moved.  The handover describes a
+     * reservation in video memory, and every address in it is an offset back from the top of that memory -
+     * a number only the driver module can read, because the register that holds it is inside the window the
+     * module maps.  Asking the FSP before a module had been bound meant the handover was built without it,
+     * which is why the reservation was declined for three revisions.  Nothing else about the probe changed:
+     * it still asks one function, still reads before it writes, and on any card that is not NVIDIA's it has
+     * already returned by the line above. */
+    if (handoff) {
+        /* The card this machine displays on, or the first one this OS has a name for.  Not `gpu_module_eligible':
+         * a chip the naming table knows but no driver claims is exactly the case where asking the security
+         * processor is worth doing, and it is also the case where no module will ever be bound. */
+        {
+            int pick = -1;
+            for (int i = 0; i < device_count; i++)
+                if (devices[i].is_scanout) { pick = i; break; }
+            if (pick < 0 && device_count > 0) pick = 0;      /* nothing owns the screen: ask the first anyway,
+                                                                  * because on a card it is the answer about the
+                                                                  * card that matters, not which of its functions
+                                                                  * happened to be wired to the console */
+            if (pick >= 0) gpu_fsp_note(&devices[pick], handoff);   /* once, and of one function: two asks of
+                                                                        * two functions of one chip would be two
+                                                                        * reports of the same mailbox, and a
+                                                                        * panel cannot say which one to believe */
+        }
     }
     if (!bound && !module_bound)
         klog("gpu: no engine bound, rendering stays on the CPU compositor");
@@ -311,7 +355,7 @@ void gpu_init(const struct boot_framebuffer *fb)
         klog("gpu: engine drives its own aperture only: another function feeds the console, so output "
              "stays on the CPU");
     else
-        klog("gpu: engine drives the console; solid output rectangles go through the GPU");
+        klog("gpu: engine drives the console; flat output regions are painted by the GPU");
 }
 
 int gpu_device_count(void) { return device_count; }
@@ -388,7 +432,7 @@ int gpu_engine_available(void)
      * the chip and implements nothing made this return 1, and the notice that followed told the user a 2D
      * engine had been verified.  A fill pointer is the difference, and it is the one every drawing path
      * already tests before calling. */
-    if (bound && bound->ops) return 1;
+    if (bound && bound->ops) return bound->ops->fill_rectangle != 0;
     const struct scos_gpu_engine_ops *m = gpu_module_ops();
     return m && m->fill ? 1 : 0;
 }
@@ -459,15 +503,32 @@ int gpu_link_state(int index, unsigned *generation, unsigned *lanes)
 /* ------------------------------------------------------------ reporting ---- */
 
 struct writer {
+    char *start;                       /* the buffer's first byte, so the tail can be measured from it */
     char *at;
     size_t left;
+    size_t dropped;                    /* bytes put() could not write, and therefore has to be reported */
 };
 
 static void put(struct writer *w, const char *text)
 {
-    while (*text && w->left > 1) { *w->at++ = *text++; w->left--; }
+    /* The lost bytes are counted, not swallowed.  Every long report in this tree used to be able to stop
+     * mid-word in silence, and twice now the clause that fell off the end was the one saying what to do next
+     * - so the writer, which is the only place that can see both the text and the space, keeps a tally that
+     * the caller prints as a sentence.  A bounded buffer with a loud edge is a limit; a bounded buffer
+     * without one is a lie about the hardware. */
+    size_t n = 0;
+    while (text[n]) n++;
+    if (n + 1u > w->left) {
+        size_t room = w->left > 1u ? w->left - 1u : 0u;
+        for (size_t i = 0; i < room; i++) *w->at++ = text[i];
+        w->left -= room;
+        w->dropped += n - room;
+    } else {
+        while (*text) { *w->at++ = *text++; w->left--; }
+    }
     *w->at = 0;
 }
+
 
 static void put_number(struct writer *w, unsigned value)
 {
@@ -480,6 +541,24 @@ static void put_number(struct writer *w, unsigned value)
     out[n] = 0;
     put(w, out);
 }
+
+/* Released at the end of every public report: the reservation it spends is why each entry point hands the
+ * writer `capacity - REPORT_NOTE_BYTES' rather than `capacity'. */
+#define REPORT_NOTE_BYTES 448
+
+static void put_note(struct writer *w, size_t capacity)
+{
+    if (!w->dropped) return;
+    w->left = capacity - (size_t)(w->at - w->start);
+    put(w, "\nThe report above needed ");
+    put_number(w, (unsigned)w->dropped);
+    put(w, " more byte(s) than this ");
+    put_number(w, (unsigned)capacity);
+    put(w, "-byte buffer, so it ends here - which is the limit of the buffer and not of what was measured.  "
+           "Everything above was printed from the chip's own replies and the driver's own reads; `graphics fsp' "
+           "prints these paragraphs on their own, and the terminal keeps the whole thing in its scrollback.");
+}
+
 
 static void put_hex(struct writer *w, uint16_t value)
 {
@@ -502,19 +581,64 @@ static void put_line(struct writer *w, const char *text)
     put(w, "\n");
 }
 
+/* A family record's feature string is "name:what; name:absent; ..." and the panel prints the half that
+ * answers, then a count.  Both halves are in the table; only one of them is news to the reader. */
+static void put_entry_points(struct writer *w, const char *features)
+{
+    unsigned present = 0, absent = 0;
+    const char *at = features;
+
+    if (!features) { put(w, "none recorded"); return; }
+    while (*at) {
+        const char *end = at;
+        while (*end && !(*end == ';' )) end++;
+        {
+            const char *colon = at;
+            while (colon < end && *colon != ':') colon++;
+            int is_absent = (size_t)(end - colon) >= 7 && colon < end &&
+                            colon[1] == 'a' && colon[2] == 'b' && colon[3] == 's' &&
+                            colon[4] == 'e' && colon[5] == 'n' && colon[6] == 't';
+            if (is_absent) absent++;
+            else {
+                if (present++) put(w, "; ");
+                {
+                    char token[96];
+                    size_t n = 0;
+                    for (const char *c = at; c < end && n + 1u < sizeof token; c++) token[n++] = *c;
+                    token[n] = 0;
+                    put(w, token);
+                }
+            }
+        }
+        at = *end ? end + 1 : end;
+        while (*at == ' ') at++;
+    }
+    if (!present) put(w, "none implemented");
+    if (absent) {
+        char number[16];
+        put(w, " (+");
+        fmt_u32(number, absent);
+        put(w, number);
+        put(w, " absent)");
+    }
+}
+
 void gpu_report(char *out, size_t capacity)
 {
-    struct writer w = {out, capacity};
+    if (!out || capacity == 0) return;
+    size_t room = capacity > REPORT_NOTE_BYTES ? capacity - REPORT_NOTE_BYTES : capacity;
+    struct writer w = {.start = out, .at = out, .left = room, .dropped = 0};
     char number[24];
 
-    put_line(&w, "GPU detection (exact device matching; no BAR sizing, no modeset)");
-    put(&w, "Families named from upstream tables: ");
+    put_line(&w, "GPU detection");
+    put(&w, "families ");
     put_number(&w, (unsigned)gpu_match_family_count());
-    put(&w, ", device ID rules: ");
+    put(&w, ", id rules ");
     put_number(&w, (unsigned)gpu_match_id_total());
     put_line(&w, "");
     if (!device_count) {
         put_line(&w, "No PCI display function found; firmware scanout retained.");
+        put_note(&w, capacity);
         return;
     }
     for (int i = 0; i < device_count && i < REPORT_DEVICE_LIMIT; i++) {
@@ -549,7 +673,7 @@ void gpu_report(char *out, size_t capacity)
                 fmt_u32(link, lanes);
                 put_line(&w, link);
             } else {
-                put_line(&w, "no PCI Express capability on this function (conventional PCI slot)");
+                put_line(&w, "no PCIe capability (conventional slot)");
             }
         }
         if (!g->match) {
@@ -568,12 +692,15 @@ void gpu_report(char *out, size_t capacity)
         put(&w, g->match->source);
         put_line(&w, "");
         if (g->match->note) {
-            put(&w, "  table note: ");
+            put(&w, "  table: ");
             put(&w, g->match->note);
             put_line(&w, "");
         }
-        put(&w, "  upstream entry points: ");
-        put(&w, g->match->features);
+        /* The entry points that exist, then how many do not.  The table's own string names all nine in
+         * both directions, which is provenance, and a person reading a panel is not served by eight
+         * repetitions of "absent": the list of what answers is the fact, the count is the rest. */
+        put(&w, "  entry points: ");
+        put_entry_points(&w, g->match->features);
         put_line(&w, "");
         put(&w, "  device registers: ");
         switch (g->reg_state) {
@@ -590,7 +717,7 @@ void gpu_report(char *out, size_t capacity)
                  * selector is the chip, [7:4] and [3:0] are the major and minor revision.  Printed
                  * beside the raw dword rather than instead of it, because a decode is a claim and the
                  * word is the measurement. */
-                put(&w, " (NV_PMC_BOOT_0: chip selector 0x");
+                put(&w, " (PMC_BOOT_0: chip 0x");
                 put_hex8(&w, (g->reg_first >> 20) & 0xfff);
                 put(&w, ", architecture 0x");
                 put_hex8(&w, (g->reg_first >> 24) & 0x1f);
@@ -614,49 +741,44 @@ void gpu_report(char *out, size_t capacity)
                 /* Named as the kernel's own reading, so a report cannot be mistaken for a driver's work:
                  * this line is printed when the function matches a driver family and the disk's module for
                  * it never reached memory. */
-                put(&w, " (read by the kernel itself: this function matches a driver family, but no module "
-                        "was staged for it)");
+                put(&w, " (read by the kernel: no module was staged)");
             put_line(&w, "");
             break;
         case 2:
-            put_line(&w, "BAR0 mapped, but every read returned 0xffffffff - the device is not answering");
+            put_line(&w, "BAR0 mapped, every read 0xffffffff");
             break;
         case 3:
-            put_line(&w, "BAR0 is outside the kernel's mapping capacity, so it was not read");
+            put_line(&w, "BAR0 outside the mapping capacity");
             break;
         case 4:
-            put_line(&w, "not read: memory decoding is disabled in this function's command register, "
-                         "and detection does not write configuration space");
+            put_line(&w, "not read: memory decoding disabled");
             break;
         case 5:
-            put_line(&w, "not read: BAR0 is the frame buffer aperture the kernel already maps for scanout");
+            put_line(&w, "not read: BAR0 is the scanout aperture the kernel already maps");
             break;
         default:
             /* The kernel read nothing here, which used to be printed as though nobody had: on a machine
              * whose module had read a hundred-odd registers of that very chip, the line contradicted the
              * paragraph above it.  Say whose reading is absent. */
             if (g->module_ops)
-                put_line(&w, "not read by the kernel: the driver module bound for this function reads the "
-                             "chip itself, and quotes its own read and write counts on the panel above");
+                put_line(&w, "not read by the kernel: the bound module reads it (counts above)");
             else
-                put_line(&w, "not read (a driver module may claim this function, or no BAR0 was reported)");
+                put_line(&w, "not read: no module and no BAR0");
             break;
         }
         const struct gpu_driver *port = gpu_port_for(g->match->family);
-        put(&w, "  SCos port: ");
+        put(&w, "  module: ");
         if (g->module_ops && g->module_ops->fill)
-            put_line(&w, "driver module loaded from storage for this family; engine verified by device "
-                         "readback");
+            put_line(&w, "engine verified by device readback");
         else if (g->module_ops)
-            put_line(&w, "driver module bound for this family reads the chip and describes it; it offers "
-                         "no engine operation, so nothing about drawing has changed");
+            put_line(&w, "bound, describes the chip, offers no engine operations");
         else
-            put_line(&w, port && port->state != GPU_PORT_NONE ? "bound" : "not ported yet");
+            put_line(&w, port && port->state != GPU_PORT_NONE ? "driver in tree, none bound" : "not ported");
         /* The gap text says what was missing before a driver existed.  Once a module is bound for this
          * function it would read as a contradiction, so it is left to the families that really are
          * still waiting. */
         if (port && port->gap && !g->module_ops) {
-            put(&w, "  before GPU work is possible: ");
+            put(&w, "  gap: ");
             put(&w, port->gap);
             put_line(&w, "");
         }
@@ -664,17 +786,13 @@ void gpu_report(char *out, size_t capacity)
          * feed the console is real and verified, but it is not what the user sees, so the line says
          * both halves instead of claiming an acceleration that the display cannot show. */
         if (g->module_ops && !g->module_ops->fill)
-            put_line(&w, "  path in use: the CPU compositor paints this screen; the module read this "
-                         "function's registers and reported them, and asked the chip for nothing else");
+            put_line(&w, "  render path: CPU compositor");
         else if (g->module_ops)
             put_line(&w, gpu_engine_drives_output()
-                ? "  path in use: module engine paints this function's scanout; solid rectangles skip "
-                  "the CPU copy"
-                : "  path in use: module engine verified on this function, but another PCI function "
-                  "feeds the console, so the CPU compositor paints it");
+                ? "  render path: module engine paints this scanout"
+                : "  render path: module engine verified, but another function feeds the console");
         else
-            put_line(&w, g->bound ? "  path in use: bound engine for supported operations"
-                                 : "  path in use: CPU compositor into the firmware scanout");
+            put_line(&w, g->bound ? "  render path: bound engine" : "  render path: CPU compositor");
     }
     if (device_count > REPORT_DEVICE_LIMIT) {
         put(&w, "  (");
@@ -696,7 +814,5 @@ void gpu_report(char *out, size_t capacity)
         if (!engine_px)
             put_line(&w, "  (no GPU drawing yet: the CPU copied every pixel of this boot)");
     }
-    put(&w, "  detection issued ");
-    put_number(&w, (unsigned)gpu_config_writes_during_detect());
-    put_line(&w, " PCI config-space write(s); 0 means nothing was reprogrammed");
+    put_note(&w, capacity);
 }

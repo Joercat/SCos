@@ -413,6 +413,30 @@ static u64 do_draw(u64 cmd, u64 a, u64 b, u64 c, u64 d)
             cost = (u32)strlen(scratch_at(0)) * 128u * sc2 * sc2 + 1u; break;
         }
         case SC_DRAW_ICON:   cost = 4096; break;
+        case SC_DRAW_ELLIPSE: {
+            u32 rx = draw_extent(c >> 32), ry = draw_extent(c);
+            cost = 8u * (rx > ry ? rx : ry) + 8u; break;
+        }
+        case SC_DRAW_ELLIPSE_FILL: {
+            u32 rx = draw_extent(c >> 32), ry = draw_extent(c);
+            cost = 4u * rx * ry + 4u; break;
+        }
+        case SC_DRAW_RRECT: {
+            u32 ww = draw_extent(b >> 32), hh = draw_extent(b);
+            cost = ww * hh + 4u * draw_extent(c); break;
+        }
+        case SC_DRAW_TRIANGLE: {
+            /* The bounding box, which is what the scanline fill can touch at
+             * worst: the charge must not depend on how lucky the shape is. */
+            int ax = draw_coord(a >> 32), ay = draw_coord(a);
+            int bx = draw_coord(b >> 32), by = draw_coord(b);
+            int cx = draw_coord(c >> 32), cy = draw_coord(c);
+            int lx = ax < bx ? (ax < cx ? ax : cx) : (bx < cx ? bx : cx);
+            int hx = ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx);
+            int ly = ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy);
+            int hy = ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy);
+            cost = (u32)(hx - lx + 1) * (u32)(hy - ly + 1) + 1u; break;
+        }
         default: break;
     }
     if (cost > episode_pixels) return deny();
@@ -424,6 +448,16 @@ static u64 do_draw(u64 cmd, u64 a, u64 b, u64 c, u64 d)
         case SC_DRAW_PIXEL:  s_pixel(s, x, y, (u32)c); return 1;
         case SC_DRAW_LINE:
             s_line(s, x, y, draw_coord(c >> 32), draw_coord(c), col); return 1;
+        case SC_DRAW_ELLIPSE:
+            s_ellipse(s, x, y, draw_extent(c >> 32), draw_extent(c), col); return 1;
+        case SC_DRAW_ELLIPSE_FILL:
+            s_ellipse_fill(s, x, y, draw_extent(c >> 32), draw_extent(c), col); return 1;
+        case SC_DRAW_RRECT:
+            s_rrect(s, draw_coord(a >> 32), draw_coord(a), draw_extent(b >> 32),
+                    draw_extent(b), draw_extent(c), col); return 1;
+        case SC_DRAW_TRIANGLE:
+            s_triangle(s, draw_coord(a >> 32), draw_coord(a), draw_coord(b >> 32),
+                       draw_coord(b), draw_coord(c >> 32), draw_coord(c), col); return 1;
         case SC_DRAW_CIRCLE: s_circle(s, x, y, draw_extent(c), col); return 1;
         case SC_DRAW_DISC:   s_disc(s, x, y, draw_extent(c), col); return 1;
         case SC_DRAW_TEXT:   s_text(s, x, y, scratch_at(0), (u32)c); return 1;
@@ -613,6 +647,21 @@ uint64_t user_syscall_dispatch(uint64_t a1, uint64_t a2, uint64_t a3,
                 pid_interval[active_pid] = (u16)a1;
             return 1;
         case SC_NR_TEXT_WIDTH: return (u64)s_text_width(scratch_at(0));
+        case SC_NR_STORAGE: {
+            /* Measured from the app's own directory in the process namespace,
+             * by the same counter the kernel-side host reports: `files',
+             * `bytes', then the two limits. */
+            u32 fields[4] = { 0, 0, APP_STORAGE_MAX_FILES, APP_STORAGE_MAX_BYTES };
+            struct vfs_node *d = vfs_lookup(ns_dir);
+            if (d && d->is_dir)
+                for (struct vfs_node *f = d->child; f; f = f->sibling) {
+                    if (f->is_dir) continue;
+                    fields[0]++;
+                    fields[1] += f->size;
+                }
+            memcpy(sh->scratch, fields, sizeof fields);
+            return 1;
+        }
         case SC_NR_DRAW:       return do_draw(a1, a2, a3, a4, a5);
         case SC_NR_REDRAW:
             if (active_window) wm_redraw(active_window);

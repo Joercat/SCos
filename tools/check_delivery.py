@@ -9,7 +9,8 @@ delivery that has drifted fails the build that made it.
 
 What it checks, in the order the failure modes matter:
 
-  1. the three files exist, the image is 67108864 bytes, and its sha256 is what dist/scos.img.sha256 says;
+  1. the three files exist, the image is the size its record claims (67108864 bytes for a record that predates
+     the field, the size `dist' was for years), and its sha256 is what dist/scos.img.sha256 says;
   2. the record's tree state is `clean` - an experiment is not a delivery;
   3. the record names a commit that is reachable from HEAD, so it describes this branch;
   4. the bytes *inside* the image match the record: KERNEL.ELF and every .MOD are read back out of the
@@ -33,6 +34,9 @@ ROOT = Path(__file__).resolve().parents[1]
 IMAGE = 'dist/scos.img'
 RECORD = 'dist/scos.img.build.json'
 CHECKSUM = 'dist/scos.img.sha256'
+# The size is read from the record, because it now depends on what firmware was staged: the delivered image
+# carries the resource manager (63,571,696 B) and is 69,206,016 bytes, where the pre-firmware delivery was
+# 67,108,864.  This constant is only the fallback for a record written before the field existed.
 IMAGE_BYTES = 67108864
 # Everything that ends up packed into the image.  A change here between the record's commit and HEAD means
 # the artifact on the branch is not the artifact this source would produce.
@@ -65,8 +69,6 @@ def check(root=ROOT, repo=None):
         return problems
 
     blob = image.read_bytes()
-    if len(blob) != IMAGE_BYTES:
-        problems.append('%s is %d bytes, not %d' % (IMAGE, len(blob), IMAGE_BYTES))
     digest = hashlib.sha256(blob).hexdigest()
     wanted = (checksum.read_text().strip().split() or [''])[0]
     if digest != wanted:
@@ -76,6 +78,17 @@ def check(root=ROOT, repo=None):
         meta = json.loads(record.read_text())
     except ValueError as exc:
         return problems + ['%s is not readable JSON: %s' % (RECORD, exc)]
+    wanted_bytes = meta.get('image_bytes')
+    if wanted_bytes is None:
+        # A record without the field is a delivery made before the packer wrote it; it is only trustworthy for
+        # the size the tracked image has always been, and anything else has to be repacked and re-recorded.
+        wanted_bytes = IMAGE_BYTES if len(blob) == IMAGE_BYTES else None
+        if wanted_bytes is None:
+            problems.append('%s is %d bytes and its record does not say what size it should be: repack it with '
+                            'this revision of tools/makedisk.py so the record names the volume it packed'
+                            % (IMAGE, len(blob)))
+    elif len(blob) != wanted_bytes:
+        problems.append('%s is %d bytes, not the %d its record names' % (IMAGE, len(blob), wanted_bytes))
     if meta.get('tree') != 'clean':
         problems.append('the record says tree %r: an image built from an uncommitted tree is an experiment, '
                         'not a delivery' % meta.get('tree'))
@@ -132,6 +145,34 @@ def check(root=ROOT, repo=None):
         elif hashlib.sha256(blob_for_name).hexdigest() != want.get('sha256'):
             problems.append('%s inside the image does not hash to the record value' % name)
 
+    # The firmware, read back the same way.  A driver module the kernel cannot load is a desktop without GPU
+    # acceleration; firmware the stub cannot find is a card that is never started at all, and the second case is
+    # the one a build can lose without noticing - a reset that clears build/gsp leaves the packer with nothing to
+    # stage and no reason to complain.  So the image is asked what it holds, and the FMC is required: of the five
+    # roles it is the one this repository can rebuild from the open driver's own arrays, and without it there is
+    # no handover to send and no rendering to talk about.
+    packed_fw = {}
+    for entry in meta.get('firmware', []):
+        name = entry['name']
+        stem, _, ext = name.partition('.')
+        try:
+            packed_fw[name] = reader.read_named_file(image, stem.upper()[:8], ext.upper())
+        except ValueError as exc:
+            problems.append('the firmware %s could not be read back out of the image: %s' % (name, exc))
+            continue
+        if packed_fw[name] is None:
+            problems.append('%s is listed by the record but absent from the image' % name)
+        elif len(packed_fw[name]) != entry.get('bytes'):
+            problems.append('%s: the image holds %d B, the record says %r B'
+                            % (name, len(packed_fw[name]), entry.get('bytes')))
+        elif hashlib.sha256(packed_fw[name]).hexdigest() != entry.get('sha256'):
+            problems.append('%s inside the image is not the hash the record carries' % name)
+    if 'GSPFMC.BIN' not in packed_fw:
+        problems.append('the image carries no GSPFMC.BIN: without the FMC image the FSP has nothing to be handed, '
+                        'so this stick boots a desktop that can never ask the card to paint it.  `make dist' +
+                        chr(39) + ' now depends on `make gsp-firmware' + chr(39) + '; if that rule could not reach '
+                        'the vendor sources, nothing was staged and the panel will read fw 0/5')
+
     if commit and git('cat-file', '-e', commit + '^{commit}').returncode == 0:
         moved = git('diff', '--name-only', commit + '..HEAD').stdout.split()
         changed = [p for p in moved if p.startswith(IMAGE_INPUTS)]
@@ -154,7 +195,9 @@ def main():
     if not problems:
         meta = json.loads((args.root / RECORD).read_text())
         print('PASS: dist/scos.img, its checksum and its record are one delivery from %s (kernel %d B, %d '
-              'module file(s))' % (meta['commit'], meta['kernel_bytes'], len(meta['modules'])))
+              'module file(s), %d firmware file(s): %s)'
+              % (meta['commit'], meta['kernel_bytes'], len(meta['modules']), len(meta.get('firmware', [])),
+                 ', '.join(f['name'] for f in meta.get('firmware', [])) or 'none'))
         return 0
     print('FAIL: the delivery is not self-consistent:')
     for problem in problems:

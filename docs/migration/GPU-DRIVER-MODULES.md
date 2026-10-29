@@ -136,6 +136,21 @@ GOT-relative references that the linker already resolved, and refuses anything i
 generated table, so `make gpu-modules` fails the build if a module claims a chip the kernel's detection
 would not name for it. `--report` prints the sizes.
 
+A packed module certifies only itself — its header checksum covers its header and its payload CRC covers its
+payload — so a module that was packed from a truncated, stale or half-written object passes every predicate
+above, loads, and does nothing. That is the one failure a boot component must not be allowed to be quiet about,
+and the objects are the only other witness to what a family's driver weighs, so `--verify` also weighs each
+`.mod` against `build/gpu/<family>.o` (the file the Makefile hands the packer), section by section: a block
+smaller than the object's `.text`/`.rodata`/`.data`/`.bss` totals, or larger than those totals plus the 16-byte
+alignment slack the packer is allowed, is a refusal that names both numbers and the `make -B` that settles it.
+`tools/tests/test_module_audit.py` builds the mismatch on purpose and demands those words.
+
+The case it was written for is real: the identification suite swaps in a throwaway Cirrus module, boots it, and
+restores the real one. When the swap-out happened and the repack died before the restore, the 600-byte stub sat
+in `build/gpu/` newer than its object, `make` found nothing to redo, and the next `make dist` would have shipped
+an image whose Cirrus driver was the throwaway. `--verify` now stops that build, and the suite keeps every step
+that can raise inside the `try` that restores, so the tree does not reach that state at all.
+
 ## 6. Verification by readback, and the aperture that is not the console
 
 `engine_self_test()` saves a small rectangle with the CPU, asks the engine to fill it, waits, reads the
@@ -284,14 +299,16 @@ The `ati` module must still load and the decoy must never be mentioned: it is no
 validated, and its bytes are counted only in "never read". Delete it again before shipping.
 
 On physical hardware the same lines are the whole check, plus two more: the `graphics` report should say
-`used for solid output rectangles`, and `module rejected: ...` in a boot log is a bug report rather
+`used for flat output regions`, and `module rejected: ...` in a boot log is a bug report rather
 than a failure - it is the loader saying which predicate the file on the disk failed.
 
 ## 10. What is not here
 
 No 3D, no GSP/RM or vendor-firmware stacks, no mode setting, no page-flipping, no vsync (the measured
 per-family capability table is in `GPU-BASIC-2D-DISPLAY-FEATURES.json`; this chip's family has no vsync
-path upstream either). A VRAM back buffer is offered by the module and deliberately not enabled: the
+path upstream either).  What the compositor does with a bound engine, how much of a real desktop frame
+that is, and why a machine with a working driver still reported 0 engine pixels until this was fixed:
+see [GPU-ACCELERATION.md](GPU-ACCELERATION.md). A VRAM back buffer is offered by the module and deliberately not enabled: the
 compositor's back buffer stays in RAM until the write-combining policy for a driver-owned aperture is
 settled, which is logged rather than hidden. One ported family exists; adding another means porting its
 engine under the same ABI, and nothing about the loader, the disk layout, or the boot stub changes per
@@ -501,12 +518,12 @@ gpu: a driver read the chip and reported it; nothing was asked of the chip, so r
 
 with the panel saying `GPU acceleration: driver module cirrus (family cirrus) read this chip's own registers
 and reports what it found; it offers no engine operation; the CPU compositor still paints every pixel of
-this screen`, the report line `SCos port: driver module bound for this family reads the chip and describes
-it; it offers no engine operation, so nothing about drawing has changed`, and - the number that decides
+this screen`, the report line `SCos port: module bound, description only - no engine operations, so drawing
+is unchanged` and `render path: CPU compositor`, and - the number that decides
 whether any of it was a regression - `pixels painted: 0 by the GPU's 2D engine, 17312532 by the CPU
 compositor`, the same figure the boot before the module carried, plus `Renderer: CPU software compositor,
 driver module read the chip and offers no engine` instead of a sentence that would have called it an engine.
-The per-device line `link: no PCI Express capability on this function (conventional PCI slot)` is QEMU's
+The per-device line `link: no PCIe capability (conventional slot)` is QEMU's
 Cirrus being honest about the slot it is in; on the real card the same field decodes to what the board
 negotiated, which is why it is read from the capability and never from a table.
 
@@ -794,21 +811,427 @@ not be mapped* is reported as this build's bound rather than as a chip that answ
 is only pointed at on a part whose v2 device table decoded, because that address is published for this
 generation and no other.
 
-What this rules out is worth stating as plainly as what it rules in, because it cancels a promise made in the
-previous section.  Staging a firmware image cannot be the next step, and the reason is in the same function:
-the code that releases the lock is the FSP, and the FSP is commanded by the vendor's boot sequence - a signed
-descriptor payload, offsets in system memory, and a doorbell that gb100 publishes as one write-only register
-(`NV_PFSP_MNOC_RX_FIFO_DATA`, `-W-4A`).  A `.bin` on the ESP changes none of that, so the intake was not
-built: it would have been a file, a checksum and a sentence about how far the work got, in front of a card
-that will not answer the door.  The measured ceiling on this generation is therefore that its engines are
-reachable through a resource manager that boots the coprocessor, and that a driver which is not that
-resource manager is told so by an error code.  If a card's `Engine:` line says instead that the LCE block
-*answers*, that conclusion does not hold for that card and the register-level work resumes - the fixture
-carries that case too, with the coprocessor still refusing beside it, so one live target cannot launder
-another's refusal into a mood about the BAR.  The idle-GPU notice was re-worded in the same commit for the
-same reason: it used to point at the panel as if a longer look would find a way in.
+What this rules out, and what it turned out not to.  The paragraph written here before this commit said that
+staging a firmware image could not be the next step, because the lock is released by the FSP and the FSP is
+commanded by a vendor boot sequence, and that the measured ceiling on this generation was "its engines are
+reachable through a resource manager that boots the coprocessor, and a driver which is not that resource
+manager is told so by an error code".  The measurements in it are all still true; the inference is not, and it
+was wrong in the direction that matters, so it is corrected here rather than quietly dropped.
 
-Measured: 122 host checks, 0 failures, five of them the refusal replayed as one machine's answers -
+The inference that failed was *because we cannot do this from a cold register map, nobody can*.  The open stack
+does it on Linux today, on exactly this chip class, with no vendor kernel module: NVK is a conformant Vulkan
+1.4 driver for consumer Blackwell (Mesa's own driver page names the RTX 5000 series, and Zink makes it the
+default OpenGL path for Turing and newer), and NVK runs on the **nouveau kernel driver**, which on those
+generations brings the card up by booting the GSP itself from firmware files.  What was missing here was not a
+secret and not a lock: it was the boot sequence, and the boot sequence is published - in MIT-licensed code in
+`NVIDIA/open-gpu-kernel-modules` (`src/nvidia/src/kernel/gpu/gsp/kernel_gsp*.c`, `gpu/fsp/`) and in the
+GPL `nvkm/subdev/gsp/` tree in Linux.  Those two directories are 20 906 lines counted rather than estimated,
+which is also the honest answer to "why is this not one commit".
+
+So the intake exists now, and it is shaped by what that stack consumes rather than by a format invented here.
+nouveau's `nvkm/subdev/gsp/priv.h` declares the set as
+`nvidia/<chip>/gsp/{gsp,fmc,bootloader,booter_load,booter_unload}-<version>.bin`, `base.c` asks for each part
+under the name `gsp/<name>-<version>`, and `gb202.c` pins the chip in the machine this was written for - GB207 -
+to version **570.144** with signature section `.fwsignature_gb20x`.  A FAT32 ESP cannot carry those paths, so
+`boot/uefi/main.c` reads the five roles from `GSP.BIN`, `GSPFMC.BIN`, `GSPBL.BIN`, `GSPBTL.BIN` and
+`GSPBTU.BIN` in the SCOS directory, and `tools/makedisk.py` copies and names them from an unpacked package
+(`build/gsp/`, searched recursively, with an ambiguous or oversized set refused at image time instead of
+arriving as a mystery on a panel).
+
+What the stub does with them is a *shape* check, and the check is the loader's own.  `r535_gsp.c` takes the
+payload out of the image with `r535_gsp_elf_section()`, which walks the section table from `e_shoff` and
+resolves names through the string table at `e_shstrndx`; the FMC image next to it in the same package is not
+ELF64 at all, and `nvkm/subdev/gsp/gh100.c` validates that one by `memcmp` against a published 52-byte
+ELFCLASS32 template and then by a rule per section - type `SHT_PROGBITS`, flags exactly `0xfff00102`
+beginning after the section-header table, and `sh_info` holding the standard CRC32 of the section's own bytes.
+`boot/uefi/gsp_fw.c` walks either class with its own field offsets, with a bound on every read, and reports the
+section count, the `.fwimage` size and the name an RM image gives its own signature section; it recognises an
+FMC image as a 32-bit container rather than as "not a container", which is what an earlier revision of this
+file asserted and what cost an afternoon of believing a report about a file nobody had misread.  So a file that
+is an HTML login page, a tar member, or a copy interrupted halfway is named as that, on the panel, before
+anything is asked of the card.  It is not a signature check and nothing claims it is: the blobs inside a
+signature section are verified by the hardware, which is the only party able to do that.
+
+The bytes are then kept.  The first version of the intake read a file, described it, and released it, on the
+reasoning that megabytes parked in memory nothing consumes are memory the kernel loses - which was true and
+was also a wall, because nothing can validate an image, hand one to a microcontroller, or prove to a person
+that the copy in RAM is still the file on the disk out of a size and a checksum.  So handoff **v6** appends a
+resident window to the record (asserted at 216 bytes, with the `struct boot_firmware` growing from 200 to 216
+because a `uint64_t` has to start on an eight-byte boundary and pulled the whole structure's alignment with
+it: 408 to 424, measured with a compiled probe rather than arithmetic, and pinned in both
+`kernel/include/boot.h` and `tools/tests/test_pci_scan.py`): the stub allocates one page-aligned region, gives
+each role a window inside it, copies the file into that window and re-checks the copy's CRC32 against the one
+the disk copy earned, and each role's record ends with the offset it was given - `~0u` meaning "read,
+described, not kept", which is what happens when the allocation is refused or the region will not hold the set.
+The cap is 32 MiB rather than the 64 MiB the five files could reach, so that a 128 MiB machine still has room
+for its own heap; a refused copy is a line on a panel, not a failed boot.  The copy happens in a second pass
+over the volume for the same reason: holding every pool and then allocating the region would ask a small VM
+for files plus a copy of them at once.
+
+`kernel/drivers/gpu/gpu_firmware.c` then reads what is there.  It maps nothing new by itself - `memory_init()`
+maps the region read-only and non-executable, refuses to let it overlap the kernel image, the boot arena or the
+framebuffer, and counts its pages as reserved so the memory report adds up - and the parser applies the
+contract above inside each role's own window, so a lying section header in one image cannot make this code read
+its neighbour's bytes and call the result a fact.  What comes out is the panel's third firmware line, verbatim
+from a booted VM whose five files are the synthetic containers `tools/tests/test_gsp_firmware.py` builds (that
+is what they are: sizes 1896 and 1128, not a 570.144 blob):
+
+    GSP firmware image: 5 of 5 held read-only at 0x061e3000 (20480 B); gsp: ELF64 1896 B, 4 sections,
+    .fwimage 1024 B at 0x00000040, .fwsignature_gb20x 512 B at 0x00000440; fmc: ELF32 1128 B, 6 sections, FMC
+    header exact, every section legal and its CRC32 verified, 0 CRC32 mismatch(es); image 512 B at 0x00000268,
+    hash 32, publickey 4, signature 256 B - the four numbers the FSP verify command is given; bootloader:
+    held, not a container either way; ...; every image the boot sequence kept was parsed. Nothing was written
+    to the card: the command that would consume these images is not implemented in this OS, so what this line
+    describes is memory SCos is holding, not a coprocessor that was told anything.
+
+Those last four numbers - hash, publickey, signature and image - are the arguments `nvkm_fsp_verify_gsp_fmc()`
+is handed, and the offsets are what its `boot_gsp_fmc()` pair then copies into the FSP's mailbox.  Having them
+in a record the kernel owns is the point: the next increment is the handover itself, ported from
+`r535_gsp.c:2235` onward and `rm/r570/`, and it cannot be written against a `kfree`'d pool.
+
+What is still not done is the whole of what stands between this and a screen the GPU paints: nothing hands the
+staged image to the coprocessor, and no byte has been written to the card in any build of this OS.  The FSP's
+single read-back register (`NV_PFSP_MNOC_RX_FIFO_DATA`, write-only as gb100 publishes it) and the RPC sequence
+behind it are the increment after this one, ported from the two published trees named above - 20 906 lines,
+counted, which is also the honest answer to "why is this not one commit".
+
+Measured: 122 host checks of the boot stub's examiner (`tools/tests/gsp_fw_host.c`, under ASan and UBSan, five
+of them a second mode that examines the same container the python test builds, and the newest eight of them the
+32-bit class), plus 25 host checks of the kernel's own parser (`tools/tests/gsp_fw_kernel_host.c`, same
+sanitizers, driving `kernel/drivers/gpu/gpu_firmware.c` itself: a header that differs from the published
+template, a section whose CRC32 disagrees, a section reaching outside its image, a string table that is not
+one, an image shorter than a header, a role the stub could not keep, and an RM image whose `.fwimage` runs past
+the end), plus three booted machines - one with a complete staged set held and parsed, one with a text file
+where the payload image belongs, and the tests' own pair of refusal replays.  The report buffer is sized from
+those boots: 4582 bytes with everything staged and parsed against 8192 provided, the size raised this commit
+because the parse paragraph pushed the worst case to 4582 and the test requires room for the longest engine
+inventory (2048 bytes) on top of it; the cost is stack and was measured with `-fstack-usage` (13440 bytes for
+the terminal's command dispatcher, 8768 for the tty's executor, against the 64 KiB the boot stack entry gives
+them).  Before this commit: 114 host checks, the report at 3719 bytes against 5120, and a panel that could
+only say a real FMC image was not a container.
+
+Measured: 114 host checks of the examiner alone (`tools/tests/gsp_fw_host.c`, under ASan and UBSan, six of
+them in a second mode that examines the same container the python test builds - two builders describing
+different shapes cost a debugging session before anybody else would have noticed), plus two booted machines,
+one with a complete staged set and one with a text file where the payload image belongs; and the report buffer
+sized from what those boots measured (3719 bytes with a staged set against 5120 provided, with the test
+requiring room for the longest engine inventory as well, since that is the case a real card is in).  Before
+this commit: 122 host checks, 0 failures, five of them the refusal replayed as one machine's answers -
 `GSP block … refused all five reads`, the unit cross-check, the engine block refusing the same way, the FSP
 refusing, three mappings and no store - and the widest report the format can now produce is 888 bytes
 against a describe field grown from 768 to 1152 for exactly these clauses.
+
+## The door that is open before the lock: the FSP mailbox (r-fsp-mailbox)
+
+Everything in the section above this one ends in the same place: the register block that owns the coprocessor
+answers a cold reader with `0xbadf4100`, and no read this OS performs, and no write it is willing to make in
+someone else's machine, clears that.  What clears it is the card's own Flight Security Processor.  The previous
+section's conclusion - that the path "ended from this side" - is now superseded in one specific respect: the FSP
+has a mailbox of its own, reachable *while the lock is still on*, and this kernel has started talking to it.
+
+`kernel/drivers/gpu/gpu_fsp.c` is that conversation.  Three windows, each its own `device_map` request rather
+than one 14 MiB mapping the kernel would refuse: BAR0+0x20000 for one page (the therm scratch, whose
+`NV_THERM_I2CS_SCRATCH` low byte reads 0xFF once the FSP has finished booting itself), BAR0+0x8f0000 for four
+pages.  That first register is *waited* on - two hundred thousand looks at it, which is tens of milliseconds of
+real device latency, and the count reaches the panel - because a report written inside the window in which the
+FSP has not yet come up would be a measurement of the wrong moment, and because a refusal to answer stops the
+wait immediately rather than spending the whole budget on it.  The reference driver waits up to four seconds at
+the same point; it is also resetting the chip and training the falcon, which this OS does not do (the FSP's own register group: its mailbox at +0x2ac0 from there, its queue pointers at +0x2c00 and
++0x2c80, its ucode version and fuse check at +0x334 and +0x33c), and BAR0+0x110000 for one page (the falcon
+whose capability word has been refusing every reader since the first boot on real hardware).  Four pages for
+the second window, not one, because the queue pointers sit 11 KiB past its base - which is worth recording
+because the file was written with a one-page bound first, and every read of those four pointers was being
+dropped and reported as 0xffffffff by a check that looked entirely reasonable in isolation.  A host model of
+the register file caught it in the same minute it was introduced; on hardware it would have been a week.
+
+The request is the smallest real one there is, chosen because the reference driver itself sends it before it
+has unlocked, reset or configured anything: an `NVDM_TYPE_CAPS_QUERY` whose whole payload is the one byte
+naming which capability to report on (`NVDM_TYPE_CLOCK_BOOST`, which is a question about the clock, not a
+change to it).  Framing is MCTP over the channel, so the packet is twelve bytes - transport dword `0xc0000001`
+(version 1, start and end of the message, no endpoint ids, no tag, no sequence, because there is one packet),
+NVDM dword `0x1610de7e` (vendor-defined PCI, NVIDIA's id, the caps-query type), then the payload padded to a
+dword.  It goes into the channel's data window with auto-increment for writes enabled, the *count* of the
+walk is checked against the number of dwords written, and only then is the queue tail set to the last dword
+written and the head pulled up behind it, because writing the tail is the request.  A reply is waited for by
+watching the message queue's two pointers separate, read back through the same window with auto-increment for
+reads, and acknowledged by pulling the tail to the head.  Refusals at any step are reported as what they are
+and the card is left alone; the panel prints the reason, the number of register writes (nine, on a boot where
+the FSP answered: one control, three data, four pointers, and the ack) and how many of the reads were
+`0xbadf4100`.
+
+The handover that *would* start the coprocessor is assembled, staged and - when the FSP has answered a query cleanly - sent; `r-cot-send` at the end of this file is that part, and this paragraph is about the payload itself.  `NVDM_PAYLOAD_COT` is 860 bytes -
+version and size, the page-aligned physical address of the FMC image, four fields describing the GC6 resume
+store, the 48-byte hash, the 384-byte public key and the 384-byte signature taken out of the FMC container's
+own sections, and the boot-arguments pointer, set to all-ones because there is nothing to reuse - and
+`stage_fmc()` builds it in `fsp_state.payload`, having first copied the FMC image into pages this kernel asked
+the allocator for and CRC32'd the *copy*, since the address handed to a microcontroller has to be one nothing
+else can move.  It stops there on purpose.  Booting the GSP from that payload also needs the write-protected
+region and the resource manager's image in place, and a half-written boot is a machine that comes back to a
+black screen with no log.  Sending the payload without those is exactly what a card can refuse, and the refusal
+is the reason the send is conditioned on an answer rather than on a hope: `kgspImageListCopyToVid` - the GSPRM
+half - is not implemented in this tree, so a handover that the FSP *accepted* would still leave nothing for it
+to be a prelude to.  What the acceptance itself is evidence for is the coprocessor's lock, and that is measured
+before and after, not inferred.
+
+The probe is gated on the vendor.  Every offset above is where an NVIDIA chip decodes it inside an NVIDIA
+function's BAR0, and a machine whose display adapter is somebody else's has three pages at the same distances
+into an aperture that means something entirely different; reading them is a guess and writing them is worse
+than a guess.  So `gpu_fsp_note()` checks `vendor == 0x10de` before it maps anything, and says so on the panel
+in 445 bytes rather than staying quiet - which was measured on a booted QEMU machine, because "the paragraph
+is missing" and "the kernel forgot to look" must not be the same sentence to a reader.  Detection asks it once
+per boot, of the function that owns the screen, from `gpu_init()` rather than from the module loader: a machine
+with no staged module is a machine where the FSP's answer is the *most* useful thing on the panel, not the
+least relevant.
+
+Provenance, because this kernel is its own and the bytes on this wire are somebody else's specification:
+`hopper/gh100/dev_fsp_pri.h` (the mailbox: `NV_PFSP_EMEMC/EMEMD`, the two queue-pointer pairs, the 7:2 offset
+and 15:8 block fields, the 1<<24 and 1<<25 auto-increment bits - the header GB100's abstraction layer includes
+explicitly, which is why the Blackwell port uses these offsets), `blackwell/gb100/dev_fsp_pri.h` and
+`dev_fsp_addendum.h` (the scratch group and the FSP's version and fuse words), `blackwell/gb100/dev_therm.h`
+with its addendum (the boot-complete scratch), `hopper/gh100/dev_falcon_v4.h` (HWCFG2 at +0xf4 in the falcon's
+page), `mctp_format.h` (the two header dwords and the inline that builds them), `fsp_emem_channels.h` (the RM
+channel, its 1 KiB size, the 64-dword block), `fsp_caps_query_rpc.h` and `nvdm_payload_cmd_response.h` (the
+query's payload and the response's task/command/error triple), `kern_fsp_cot_payload.h` (the 860-byte
+handover, field for field) and the behaviour of `kern_fsp.c`, `kern_fsp_gh100.c` and `kern_fsp_gb100.c`.  All
+from NVIDIA's open GPU kernel modules, MIT, read 2026-10-26.  Nothing from that tree is compiled into this
+one: the framing is rebuilt here against a bounded loop and a refusal rather than a thread, a timeout and an
+error model, and the parts that are the vendor's are their register positions and field offsets, which are the
+thing no reimplementation may invent.
+
+Measured: `tools/tests/gpu_fsp_host.c` compiles the kernel file straight in against a model of the register
+file and reports 91 checks, 0 failures, under ASan and UBSan
+(`python3 tools/tests/test_gpu_fsp.py`, which also pins the published offsets and the payload's field positions
+independently of the harness, since a test deriving its constants from the file it tests could only ever prove
+that both are wrong in the same direction).  The model is what found the two real defects in the first draft of
+the port - the one-page bound that dropped every queue-pointer access, and an FMC handover sized against the
+resource manager image's signature field instead of the FMC's own - and it is what asserts the doorbell is the
+*last dword written* rather than the one after it, the order of the two queue writes, and that 1017 bytes of
+payload are refused while 1016 are sent.  A booted QEMU machine carries the FSP paragraph in a report 3667 bytes long with
+nothing staged, 5139 with a complete set of five firmware files, against an 8192-byte buffer - and the test
+requires the difference to leave room for the widest engine inventory a module can produce, because a real card
+is the case that has both.  Neither boot's log mentions the FSP at all, because the probe stopped at the vendor
+gate on a cirrus display function: correctly, and verifiably, since the paragraph that says so is 445 bytes of
+the 3667.
+
+## The FMC boot as the driver that works does it (r-fmc-table)
+
+The instruction was to look at nouveau, since nouveau runs this card.  It had moved: there is no
+`nvkm/subdev/gsp/r535.c` in the current tree any more.  The FSP conversation now lives in its own subdev -
+`nvkm/subdev/fsp/{base,gh100,gb100,gb202}.c` - and the FMC boot sequence in `nvkm/subdev/gsp/gh100.c`
+(`gh100_gsp_oneinit`, `gh100_gsp_init`), which `gb202.c` reuses for GB202 through GB207 with
+`.sig_section = ".fwsignature_gb20x"` and `rm.gpu = &gb20x_gpu`.  All of it is MIT; the values below are
+transcribed from those files as fetched from torvalds/linux on 2026-10-26, and each one replaced something
+this tree had inferred from the vendor's out-of-tree driver.
+
+**The COT parameters are per generation, and Blackwell is not Hopper.**  `struct nvkm_fsp_func.cot` is:
+
+| chip    | version | hash | public key | signature |
+|---------|---------|------|------------|-----------|
+| gh100   | 1       | 48   | 384        | 384       |
+| gb100   | 2       | 48   | **97**     | **96**    |
+| gb202   | 2       | 48   | **97**     | **96**    |
+
+and `gh100_fsp_boot_gsp_fmc()` memcpy's exactly `size_hash`/`size_pkey`/`size_sig` bytes into `hash384[12]`,
+`publicKey[96]` and `signature[96]`: the payload's fields are the same width on every generation while the
+data inside them is not.  This tree had 384/384 written once and applied to everything, which on a GB207 means
+its own `fmc-570.144.bin` - a file with a 97-byte key - gets refused as malformed *before the card is ever
+asked*.  `kernel/drivers/gpu/gpu_fsp.c` now reads the architecture out of `NV_PMC_BOOT_0` (the first dword of
+the aperture, inside the window the submission-surface measurement already maps) and picks the row from that
+table; `tools/tests/test_gpu_fsp.py` pins the table itself, transcribed, so neither side can drift back to one
+comfortable number.  A generation with no row - Turing, Ampere, Ada, which reach their coprocessor through the
+older ACR path - gets no packet at all, not even the read-only capability query, because the page an FSP queue
+would live on is not documented as a queue there.  An aperture that will not answer `NV_PMC_BOOT_0` gets no
+packet either: reason 9 on the panel, "the sizes are unknown", which is not the same sentence as "your file is
+wrong" and is not an invitation to assume.
+
+**The three readiness facts, as `gh100_gsp_init()` reads them.**  `NV_THERM_I2CS_SCRATCH_FSP_BOOT_COMPLETE` is
+compared as a whole dword against `0x000000FF` (FAILED is 0) - not against the low byte, which is what this
+file did and which reads a `0x83` as booted.  The lock is bit 13 of `NV_PFALCON_FALCON_HWCFG2`
+(`RISCV_BR_PRIV_LOCKDOWN`, LOCK=1 UNLOCK=0 in `nvhw/ref/gh100/dev_falcon_v4.h`), not `the word was not zero`:
+a fixture answers `0x2a13` now - readable, and locked - and the old test called that released.  And the
+completion signal is the falcon's own mailbox pair at `+0x40`/`+0x44` (0x110040/0x110044 here): zero means the
+FMC has not answered, and a non-zero pair is *either* the address of the `GSP_FMC_BOOT_PARAMS` block the driver
+allocated *or* an error code, which nouveau can tell apart and this OS cannot, because it has no boot
+arguments to match against.  The pair is read before and after, recorded, and not interpreted.
+
+**Two waits, in the units the working driver states.**  `gh100_fsp_send()` and `gh100_fsp_wait()` allow 1000
+iterations of `usleep_range(1000, 2000)` - about 1500 ms - and both `wait_secure_boot` and the lockdown wait
+allow 4000 ms.  The bounds here were 200000 reads with a 50 ms cycle-counter deadline, which is tens of times
+shorter than the coprocessor is given: on a real card that does not print "slow", it prints "silent", which is
+a false fact about hardware that was still working.  The waits now carry `FSP_WAIT_REPLY_MS`/`FSP_WAIT_BOOT_MS`
+and the panel prints how much of the budget was spent, measured against the PTIMER (32 ns steps) with the
+cycle counter timed against it once per probe - and when there is no PTIMER to read, it says the bound was a
+read count instead of quoting a duration it cannot measure.
+
+**The acknowledge, which is where the second message was going to be lost.**  `gh100_fsp_recv()` answers a
+reply by writing 0 to `NV_PFSP_MSGQ_TAIL` *and* `NV_PFSP_MSGQ_HEAD`.  This driver copied the head back into
+both, which is the other reference implementation's shape and leaves the ring's pointers where the first
+message ended - while the driver reads every reply out of channel offset 0.  One message per boot looked fine;
+the sequence here is two (the capability query, then the handover), so the handover's reply would have been
+read from the wrong end of the channel on the first real attempt.  Both pointers now go to zero.
+
+**What nouveau does that this tree still cannot, and what it caps.**  `gh100_gsp_oneinit()` validates
+`fmc-<ver>.bin` as an ELF32 whose 52-byte header is compared against a fixed table and whose six section
+headers must be SHT_PROGBITS with `SHF_MASKPROC|SHF_MASKOS|SHF_OS_NONCONFORMING|SHF_ALLOC` (plus the string
+table), each with a CRC32 in `sh_info`, holding the sections `hash`, `publickey`, `signature` and `image` -
+which is the container shape `gpu_firmware.c` parses.  Then it loads `image` into memory, keeps the three blobs,
+and calls `nvkm_fsp_boot_gsp_fmc(fsp, args_addr, rsvd_size, resume, img_addr, hash, pkey, sig)`: `args_addr`
+is a `GSP_FMC_BOOT_PARAMS` block (its `bootGspRmParams` carry the offset and size of a `GspFwWprMeta` that
+describes the radix-3 table, the bootloader, the signature and the heaps), and `rsvd_size` places a 1 MiB FRTS
+by an offset back from the end of the frame buffer, aligned to the 128 KiB WPR granularity.  This OS reserves
+no vidmem and has no resource-manager descriptor, so it sends the declined encodings the vendor driver itself
+uses when it has no region - `frts*` 0/0 and `gspBootArgsSysmemOffset = (NvU64)-1` - and says so on the panel.
+An accepted handover with those declined is therefore a verified FMC image with nothing to boot *into*: it is
+the step that proves the mailbox, the sizes and the framing, and it is not rendering.  The next increment is
+the vidmem reservation plus `GspFwWprMeta` plus `GSP_FMC_BOOT_PARAMS`, in that order, and nouveau's
+`gh100_gsp_wpr_meta_init()` is the specification for it.
+
+### Where the image comes from, measured on the driver's own arrays
+
+The four buffers the handover is built from are not only in `/lib/firmware`: the open kernel module carries them
+as generated C arrays, and their declared sizes are the widths this build asks the FSP to verify.  Measured on
+`615.71.10`, chip GB202, in `g_bindata_kgspGetBinArchive*.c`:
+
+| archive | label | bytes | how stored | becomes |
+|---|---|---|---|---|
+| `GspRmFmcGfwProdSigned` | `UCODE_HASH` | 48 | raw | section `hash`, and it is SHA-384 of the image |
+| `GspRmFmcGfwProdSigned` | `UCODE_PKEY` | 97 | raw, in 13 words | section `publickey` |
+| `GspRmFmcGfwProdSigned` | `UCODE_SIG` | 96 | raw | section `signature` |
+| `GspRmFmcGfwProdSigned` | `UCODE_IMAGE` | 287304 | raw | section `image` |
+| `ConcatenatedFMC` | `UCODE_IMAGE_PROD` | 503808 | zlib | FMC RISC-V image + the 287304-byte GFW image |
+| `GspRmBoot` | `UCODE_IMAGE_PROD` / `UCODE_DESC_PROD` | 290816 / 92 | raw / zlib | the RM's own boot pair |
+| `BooterLoadUcode`, `BooterUnloadUcode` | - | - | - | absent for this generation: they stop at AD102 |
+
+Three things follow, and each is a fact rather than an inference.  The public key occupying 104 bytes of array
+for 97 bytes of key is why the extractor bounds an entry by its declared size and not by the array - the word
+padding is not firmware.  The absence of the booter pair for Blackwell is why those two ESP roles are staged and
+named, not held to the FMC contract, by `tools/gspcheck.py`.  And the SHA-384 relation is why
+`tools/gsp-firmware.py` prints it: it is the check that the bytes it put in the container are the bytes the
+driver boots.
+
+**Open defect, measured the day this was written.** A valid FMC image on the boot disk is not inert.  With
+`GSPFMC.BIN` (287869 B) packed into the image, `tools/tests/test_compositor.py` fails in QEMU - a Cirrus
+display, no NVIDIA device present - at its 1.2 s expectation that the window manager has taken the screen; with
+that one file removed from the same image the same suite passes, and given 8 s the desktop appears either way.
+The boot path therefore waits for something after the point where a staged container is accepted, on a machine
+with no coprocessor to answer.  Until the FSP attempt is gated on the device being there, not merely on the
+image being good, `make dist` ships without staged firmware and `make gsp-firmware` writes into `build/gsp/`
+for the checker and for deliberate experiments only.
+
+The big resource-manager image is *not* among these arrays - but it is in `linux-firmware`, so it does not
+have to come off a machine with the driver installed either: `tools/gsp-firmware.py --fetch-driver <version>`
+reads it (and the FMC and bootloader) by partial clone, follows the per-chip symlinks, and verifies the
+container class per role before staging it.  What is here is enough to make the handover real,
+and nothing more.  The update after this paragraph was written: the vidmem WPR2 and FRTS reservation is now
+computed (`kernel/drivers/gpu/gsp_layout.c`, host-tested by `tools/tests/gsp_layout_host.c`), the frame buffer's
+size it needs is read from the chip's own scratch word by `drivers/gpu/nvidia/module.c`, and the radix-3 page
+table and `GSP_FMC_BOOT_PARAMS` were already staged here.  It is still not *sent*, because what remains is not an input but
+code - the GSP's message queue, a channel and a class submission: see the last section of
+`GPU-ACCELERATION.md`.
+
+## What a report is allowed to say about itself
+
+The card's own `Engine:` line - the one a user pastes - is built by the module into `struct inventory::text`
+and then copied by the kernel into `struct gpu_module_state::describe`.  For two revisions both were 1152
+bytes, and a real GB207's report measured **1151**: the field held 1151 characters plus the terminator, the
+copy loop stopped there, and the sentence that fell off the end was `; the window answered but its clock did
+not tick, so nothing was submitted through it`.  The user's paste also ended mid-number at `Display: 1024x7`,
+which is what proved the cut was ours: a terminal that lost a paste would not stop at exactly one byte less
+than a buffer size that appears nowhere on the screen.
+
+Three things follow, and all three are in the tree rather than promised.
+
+* Both fields are 2048 bytes now: twice what a real card produced, because the length of that report is the
+  chip's decision (each block it refuses to answer costs about 130 bytes to say so) and not something a
+  fixture can guess.  The host harness's widest case seeds *every* refusal clause plus the live-window-dead-
+  clock clause and measures 1156 bytes, so the ceiling is asserted against a text longer than any machine has
+  produced; it would have failed at 1152.
+* `DESC_RESERVE` (96 bytes) is held back at the end of the module's field and `put_char` counts what it could
+  not write, so an overrun ends the line with `[+N B of this line would not fit this module's own buffer:
+  report it as truncated]`.  The kernel's copy carries its own notice.  Refusing to write more is a limit;
+  hiding that you refused is the defect, and a report whose tail was eaten silently is the failure class this
+  repository has been argued against everywhere else.
+* The architecture field is named from the published table rather than left as a number: 0x16 Turing, 0x17
+  Ampere, 0x18 Hopper, 0x19 Ada, 0x1A Blackwell's GB10x chips, 0x1B Blackwell's GB2xx chips, 0x1C GR100, from
+  `NV_PMC_BOOT_0_ARCHITECTURE_*` in `src/common/inc/swref/published/nv_ref.h` (open kernel modules, MIT - the
+  same disclosure as the FSP port).  What the *chip* within an architecture is belongs to a second field,
+  `impl`, and the vendor's arch+impl -> chip table (the generated `__nv__arch__`/`__nv__impl__` lists) is not
+  in this tree, so the module prints `impl 0x7` and stops: on this generation that combination separates GB202
+  from GB207, and naming the wrong chip on a panel is worse than naming none.  A number outside the table is
+  still printed as a number and labelled `(arch not in the published table)`.
+
+## The handover goes on the wire: r-cot-send
+
+The previous section stopped at `built, staged and never sent`.  That stopped being true, and the reason it is
+worth the change is that `never sent` was a decision about a *risk nobody had measured*: the payload's contents
+were verified against the published layout by the host model, the FSP's answer vocabulary is published, and the
+half-boot this OS was afraid of producing is a state the card's own security processor reports in one dword.
+
+**The gate.**  `probe_mailbox()` sends the query and, only if the reply is framed as NVIDIA's, contains the
+task/command/error triple, answers the query that was asked, and carries error 0, calls `hand_over_fmc()`.  The
+payload also has to be staged and defect-free (`cot_ready && !cot_defect`), which is the same set of conditions
+that used to be required for the panel to say `staged and ready`.  There is no opt-out file and no timer: a
+channel that has not answered a read is not a channel to write a firmware image into, and that is the whole of
+the policy.
+
+**What the answer is.**  The FSP replies with one of the falcon return values, published as a list of names in
+`flcnretval.h` rather than as anything generic.  `gpu_fsp.c` carries the subset this message can receive and
+`gpu_fsp_flcn_name()` exposes it, so the panel prints `error 0xdf (FLCN_ERR_FMC_BOOT_FROM_INVALID_WPR)` instead
+of a number a reader has to go and look up - and an unnamed code is printed as a number, never as the nearest
+name.  `FLCN_OK` means the FSP accepted the image; `0xdd` means the address in the payload is not something it may
+read from; `0xdb` means the container's own authentication blobs did not survive the trip.
+
+**What is measured around it.**  A reply is a claim, so the two words a boot would change are re-read afterwards
+and printed as a pair: `NV_PGSP_HWCFG2` (BAR0+0x1100f4, the coprocessor's capability word, which is the register
+every reader so far has been refused) and `NV_THERM_FSP_BOOT_COMPLETE` (`NV_THERM_I2CS_SCRATCH`,
+BAR0+0xad00bc - a whole dword whose value is compared against `0xFF`, from the published header for this family).
+This address is a correction, not a retune: the file used to read BAR0+0x200bc, which is not the scratch but a
+byte inside the security processor's mailbox window, and so every boot this driver ran answered "the FSP has not
+reported itself booted" from a register that cannot say so - and, worse, stopped waiting at the first refusal,
+because a refusal had been written down as an answer.  A card pastes the difference: 0xbadf1100 there is what a
+not-yet-unlocked block looks like, so the wait now polls that dword once per millisecond for the four seconds the
+reference driver allows and accepts only 0xFF.  `gsp_released` is that
+comparison and nothing else, and `queues_idle_after` says whether the channel fell idle again - which is what a
+second message would need.  The host model is what makes the pair mean something: it moves `HWCFG2` *only* when
+it has accepted a handover whose payload it checked, so a driver that reported a release without one would be
+caught by the test rather than by a card.
+
+**The clock and the doorbell, measured where this generation puts them.**  Alongside the mailbox, `gpu_fsp.c`
+reads two pages it did not read before, and both are on the panel:
+
+* `NV_PTIMER_TIME_1` then `NV_PTIMER_TIME_0` then `_1` again at BAR0+0x9410/0x9400, the high-low-high rule the
+  published `dev_timer.ref` gives - the GPU's own clock, read twice with a spin between to see whether it moves.
+* `NV_VIRTUAL_FUNCTION_PRIV_CPU_INTR_LEAF(0)`, `_TOP(0)` and `_MAILBOX_SCRATCH(0..3)` at BAR0+0x1000, 0x1600
+  and 0x2100, from `blackwell/gb100/dev_vm.h`, the page whose doorbell `NV_VIRTUAL_FUNCTION_PRIV_DOORBELL`
+  0x2200 lives in.  The doorbell is documented `-W-4R`: write-only.  It is named in the report and neither read
+  nor written here, because reading it is undefined and ringing it for a channel that does not exist is a way to
+  hang a card.
+
+This exists because an earlier build read the *legacy user-mode page* at 0x810000 for both questions and reported
+"clock frozen" from it.  `kern_gpu_tu102.c` says why that page cannot answer: from Turing onwards NVIDIA does not
+use `NV_USERMODE` at all - "going away long term, and doesn't support any of the new remap type features ... we
+will start using the physical registers through NV_VIRTUAL_FUNCTION even on host".  A silent 0x810000 is a fact
+about a deprecated page, and the module now says exactly that, pointing at the timer block instead.
+
+**A refusal is not content.**  `0xbadf5040` was reported as an answer.  It is not: `flcnretval.h` defines the
+family as `FLCN_CSB_PRIV_PRI_ERROR_CODE 0xBADF0000` under `MASK 0xFFFF0000`, and the code in bits 31:8 is one of
+`NV_PPRIV_SYS_PRI_ERROR_CODE`'s names in `gm107/dev_pri_ringstation_sys.h` - `0xBADF50` is `FECS_PRI_CLIENT_ERR`,
+with a low byte the vendor's driver notes "has extra error information" and masks off.  So the family test is
+0xFFFF0000 and the lookup is 0xFFFFFF00, and the module harness fails if those two masks are ever unified:
+the first draft of the fix used the wide mask for both, found no name, and fell through to calling the fault
+content again - which is the same mistake, re-derived, and caught only because the test asserted the sentence.
+`FSP_NOT_CONTENT()` in `gpu_fsp.c` is the family test for the same reason.  One consequence worth stating: while
+the decoupler holds a region, reads return *0*, which is why four zero scratch words are reported as the
+decoupler answering rather than as debug words, and why no host-side unlock is claimed anywhere.
+
+Measured: `tools/tests/gpu_fsp_host.c` reports 91 checks, 0 failures.  The model now takes the *second* packet,
+judges it as a card would (the payload's version and size words, an address naming the copy that was actually
+made, the three authentication blobs at their published offsets) and answers with the falcon code for whichever
+of those failed - so the handover is tested against a card that refuses things, not one that says yes.  It also
+had to become asynchronous: the driver writes the queue tail and then the head, as `_kfspUpdateQueueHeadTail`
+does, and a model that completed the packet between those two writes left the head at the zero the driver had
+just written, which made a second message in one boot impossible *in the model* and hid the fact that this port
+would never have sent one.  Building that card found a stale-window bug in the kernel as well: `map_mailbox_pages`
+did not clear the windows before re-mapping, so a second note in one boot would have read a mapping the first
+note had taken.  `tools/tests/test_gpu_fsp.py` is 6 tests, and the panel's tail is now all-or-nothing against a
+5120-byte floor, with `graphics fsp` as the narrow surface that prints those paragraphs alone.

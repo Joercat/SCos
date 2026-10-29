@@ -441,7 +441,7 @@ int wm_resize_window(struct window *w,int width,int height)
     int cw=width-2,ch=height-WIN_TITLEBAR-1;
     u32 *p=palloc_owned((size_t)cw*ch*4,(uintptr_t)w);if(!p)return 0;
     memset(p,0,(size_t)cw*ch*4);win_free_buf(w);
-    w->w=width;w->h=height;w->surf=(struct surface){p,cw,ch};
+    w->w=width;w->h=height;w->surf=(struct surface){p,cw,ch,0,0,0,0};
     if(w->x+width>screen_w)w->x=screen_w-width;
     if(w->y+height>screen_h-TASKBAR_H)w->y=screen_h-TASKBAR_H-height;
     w->dirty=1;wm_full();return 1;
@@ -1764,7 +1764,9 @@ static void paint_launcher(void)
     s_frame_rect(&screen, px, py, pw, ph, t->main);
     s_text(&screen, px + 10, py + 8, "Apps: type to search / scroll", t->main);
     s_frame_rect(&screen, px + 10, py + 26, pw - 20, 20, t->main);
-    s_text(&screen, px + 14, py + 30, launch.q, t->text);
+    /* The query is whatever the person typed; the panel is 300 pixels.  Left
+     * unclipped it painted out of the panel and across the desktop. */
+    s_clip_text(&screen, px + 14, py + 30, launch.q, t->text, pw - 28);
     if ((tick_count / 50) % 2 == 0)
         s_fill(&screen, px + 14 + s_text_width(launch.q), py + 30, 2, 12, t->main);
     int y = py + 56;
@@ -1798,7 +1800,7 @@ static u32 ov_icon_pixels[24 * 24];
 
 static void draw_icon_scaled(int id, int x, int y, int size, u32 c)
 {
-    struct surface tmp = { ov_icon_pixels, 24, 24 };
+    struct surface tmp = { ov_icon_pixels, 24, 24, 0, 0, 0, 0 };
     if (size <= 24) { s_icon(&screen, id, x + (size - 24) / 2, y, c); return; }
     memset(ov_icon_pixels, 0, sizeof(ov_icon_pixels));
     s_icon(&tmp, id, 0, 0, c);
@@ -1943,8 +1945,8 @@ static void ov_paint(void)
         int cw = tile->w_ - 4, ch = tile->h - OV_STRIP - 4;
         if (w->state == WIN_STATE_MIN || !w->surf.px) {
             s_fill(&screen, tile->x + 2, tile->y + OV_STRIP + 2, cw, ch, t->bg_bot);
-            s_text(&screen, tile->x + 8, tile->y + OV_STRIP + 8,
-                   "Minimised - click to restore", t->text);
+            s_clip_text(&screen, tile->x + 8, tile->y + OV_STRIP + 8,
+                        "Minimised - click to restore", t->text, tile->w_ - 16);
         } else {
             if (w->dirty && w->surf.px && w->app && w->app->paint) {
                 { APP_T0(w); w->app->paint(w); APP_T1(w); }

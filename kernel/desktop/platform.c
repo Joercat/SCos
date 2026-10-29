@@ -50,11 +50,22 @@ _Static_assert(sizeof(GPU_IDLE_NOTICE) - 1 > 300,
 static void gpu_boot_notice(void)
 {
     const struct gpu_module_state *ms = gpu_module_state();
+    /* Whether the coprocessor's firmware is on the disk is the one thing about this machine a person can
+     * change without rebuilding anything, so the outcome is said out loud at boot rather than left inside a
+     * command: staged-and-shaped and staged-but-incomplete read differently, and neither one claims the card
+     * was given the image, because it was not. */
+    {
+        const struct gpu_firmware_state *fw = gpu_firmware_state();
+        if (fw && fw->staged)
+            wm_notify("GSP firmware read from the boot disk",
+                      fw->complete ? "3 of 5 staged, complete for this card. Nothing has been written to "
+                                     "the card yet: run graphics for what was asked of it."
+                                   : "Staged but incomplete. Run graphics for which roles are missing.", 0);
+    }
     if (gpu_engine_drives_output()) {
         wm_notify("GPU 2D engine bound",
-                  ms && ms->bound ? "Driver module loaded from disk and verified by readback; solid "
-                  "output rectangles are drawn by the GPU."
-                  : "Built-in port active; output rectangles are drawn by the GPU.", 0);
+                  ms && ms->bound ? "Module verified by readback; flat regions by the GPU, textured by the CPU."
+                                  : "Built-in port; flat regions by the GPU.", 0);
         return;
     }
     if (gpu_engine_available()) {

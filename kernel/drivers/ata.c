@@ -543,6 +543,11 @@ int fs_image_unlock_apply(void)
     /* The tree deliberately has no protected account entries.  Re-materialize
      * the authoritative account database and audit log from kernel state. */
     security_fs_restore();
+    /* The unlocked tree is the saved one, which predates this boot's bait.  The
+     * decoys are part of what the running system presents, not of what a
+     * previous session saved, so they are planted again here - and, because
+     * planting never overwrites, a decoy the owner edited stays edited. */
+    decoys_plant();
     klog_raw("filesystem: encrypted vault unlocked; header and tree authenticated");
     return 1;
 }

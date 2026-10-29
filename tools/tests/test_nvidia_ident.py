@@ -22,6 +22,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# The capacity the terminal and the TTY hand to graphics_report(), read from the header: asking for less than
+# the machine shows is measuring a buffer nobody uses, and with the writer now saying out loud how many bytes it
+# could not fit, a probe sized to 4096 would spend its last lines on that sentence instead of on the panel it is
+# checking.
+REPORT_CAP = int(re.search(r'#define\s+SCOS_GRAPHICS_REPORT\s+(\d+)',
+                           (ROOT / 'kernel/include/scos.h').read_text()).group(1))
+
 MODULE_CFLAGS = [
     '-m64', '-ffreestanding', '-fno-stack-protector', '-fno-builtin',
     '-fno-asynchronous-unwind-tables', '-mno-red-zone', '-O2',
@@ -204,13 +211,24 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
     real.unlink(missing_ok=True)
     run(['make', 'gpu-modules'])
     shutil.copyfile(real, backup)
-    obj = scratch / 'scratch.o'
-    run(['gcc'] + ['-Ibuild'] + MODULE_FLAGS + ['-Ikernel/include', '-c', str(source), '-o', str(obj)])
-    run(['ld', '-r', '-m', 'elf_x86_64', '-o', str(scratch / 'scratch.linked.o'), str(obj)])
-    run(['python3', 'tools/build_gpu_module.py', '--input', str(scratch / 'scratch.linked.o'),
-         '--family', 'cirrus', '--out', str(real), '--report'])
-    run(['python3', 'tools/makedisk.py', 'build'])
+    # This test repacks the disk image, and a staged build/gsp/ would ride along with it - which would change
+    # the panel it asserts on from `none of the images' to `1 of 5'.  Out of the way for the duration, back
+    # before the last repack, so the tree is left as it was found.
+    from qemu_support import restore_staged, stage_aside
+    held = stage_aside()
+    # Everything that can raise goes inside the try below, because from this line on the build tree holds a
+    # module that is not the family's driver.  When the pack and repack sat outside it, a failure there left
+    # the throwaway 600-byte module in build/gpu/ with a newer timestamp than its object, `make' found nothing
+    # to redo, and the next `make dist' shipped an image whose Cirrus driver was the stub - which its own
+    # header checksum and payload CRC certify as perfect.  `--verify' weighs each module against the objects
+    # now, and this is what keeps the tree from getting into that state in the first place.
     try:
+        obj = scratch / 'scratch.o'
+        run(['gcc'] + ['-Ibuild'] + MODULE_FLAGS + ['-Ikernel/include', '-c', str(source), '-o', str(obj)])
+        run(['ld', '-r', '-m', 'elf_x86_64', '-o', str(scratch / 'scratch.linked.o'), str(obj)])
+        run(['python3', 'tools/build_gpu_module.py', '--input', str(scratch / 'scratch.linked.o'),
+             '--family', 'cirrus', '--out', str(real), '--report'])
+        run(['python3', 'tools/makedisk.py', 'build'])
         with Guest(name='identification', vga='cirrus') as g:
             g.run(1.2)
             lines = [l for l in g.serial().splitlines() if l.startswith('gpu:')]
@@ -227,8 +245,8 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
             assert 'notification: GPU is not rendering' in serial, serial[-1500:]
             assert 'No 2D engine bound' not in serial, \
                    'a bound module that implements no engine is not "nothing was matched": ' + serial[-800:]
-            g.call('graphics_report', g.scratch, 4096)
-            panel = g.string(g.scratch, 4096)
+            g.call('graphics_report', g.scratch, REPORT_CAP)
+            panel = g.string(g.scratch, REPORT_CAP)
             # The first line a user reads has to carry the outcome, not a narrative about registers: this
             # is the state where a module is resident, the chip was read, and nothing was drawn, and a
             # reader should not have to infer "not rendering" from a paragraph.
@@ -242,10 +260,19 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
             # pasted when a machine is being diagnosed.
             assert 'Engine: scratch module: reads nothing, offers no engine' in panel, panel[-1200:]
             # And the boundary is on the same panel, on a booted machine, not only in the source comment: a
-            # reader who sees a coprocessor's registers quoted has to be able to see that nothing was written
-            # to them and that no firmware is involved yet.
-            assert 'GSP path: the clause above quotes' in panel, panel[-1400:]
-            assert 'the door is held by the card' in panel, panel[-1400:]
+            # reader who sees a coprocessor's registers quoted has to be able to see which of the two amounts was
+            # actually put on the wire.  On this disk, with no firmware staged, the panel has to pick the short
+            # of the two branches, and it has to say so in the sentence rather than by omission.
+            # Six characters of heading and one measured clause: what this boot put on the wire.  The
+            # paragraph that used to explain why nobody answered has gone; the finding stays, because a
+            # reader has to be able to tell "nothing was sent" from "something was sent and ignored".
+            assert 'GSP path: nothing written to the card this boot' in panel, panel[-1400:]
+            # Which brings the firmware line onto this panel too.  On a disk that stages nothing it has to say
+            # so and name the five roles, because that is the one thing the person standing at this machine can
+            # change without a rebuild, and this panel is the only place they will read it.
+            assert 'GSP firmware: none on the volume' in panel, panel[-1400:]
+            for esp in ('GSP.BIN', 'GSPFMC.BIN', 'GSPBL.BIN', 'GSPBTL.BIN', 'GSPBTU.BIN'):
+                assert esp in panel, 'the panel never names %s, so nobody can be told to stage it' % esp
             # `Device access: none' on its own was read as "nobody has touched my card" on the one machine
             # where a module had read twenty-odd registers of it.  The line has to name whose access is
             # absent, and it is long enough to have been clipped before the wrap: both halves of that are
@@ -261,13 +288,13 @@ def test_the_kernel_holds_the_identification_state_on_a_device():
                         'a Device access line that says only "none" hides who read the chip: ' + l
             g.call('gpu_report', g.scratch, 4096)
             report = g.string(g.scratch, 4096)
-            assert 'SCos port: driver module bound for this family reads the chip and describes it' \
-                   in report, report[-1600:]
-            assert 'path in use: the CPU compositor paints this screen' in report, report[-1600:]
+            assert 'module: bound, describes the chip' in report, report[-1600:]
+            assert 'render path: CPU compositor' in report, report[-1600:]
             assert 'pixels painted: 0 by the GPU' in report, report[-1600:]
             assert 'link:' in report, 'every device line states the negotiated link, or says there is none'
     finally:
         shutil.copyfile(backup, real)
+        restore_staged(held)
         run(['python3', 'tools/makedisk.py', 'build'])
     print('PASS: a module that offers no engine binds, reports the chip, and leaves the CPU compositor in '
           'charge on a booted machine - measured in the serial log, the graphics panel and the report')

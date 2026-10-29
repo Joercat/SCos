@@ -49,7 +49,7 @@ struct module_record {
     int bound;                   /* init succeeded and the self-test passed */
     char name[24];
     char family[SCOS_GPU_FAMILY_NAME];
-    char describe[1152];              /* mirrors struct gpu_module_state: see the note there */
+    char describe[2048];              /* mirrors struct gpu_module_state: see the note there */
     u64 region, region_bytes;
     u64 file_bytes, load_bytes, image_bytes, resident_bytes;
     u32 header_crc, computed_crc;
@@ -483,6 +483,10 @@ static int engine_self_test(void)
 int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handoff)
 {
     const struct scos_gpu_module_header *header = 0;
+    /* The coprocessor's firmware and the card's security processor are recorded in their own files, by
+     * gpu_init() and before it gets here, because they belong to the machine rather than to this module: a
+     * boot where no module loads still has an FSP to ask, and its answer is the more useful half of the
+     * story on such a boot, not a side effect of a driver being present. */
     record.store_count = handoff->module_store_count;
     measure_store(handoff);
     /* Say what the disk offers and what this machine opened, on every boot whether or not the module
@@ -587,11 +591,15 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
              device->is_scanout ? "console LFB at" : "aperture of this function at",
              (unsigned)(u32)physical, (unsigned)need, info.width, info.height, record.test_stride);
     }
+    /* Zeroed before the call and read after it: a module that writes nothing there has reported
+     * nothing, and a struct whose size does not match this kernel's is ignored rather than
+     * half-read.  Anything it does report is logged, because it becomes an input to a reservation. */
+    struct scos_gpu_device_report report = { .size = (u32)sizeof(report) };
     exports = (struct scos_gpu_exports){
         .size = sizeof(exports), .abi = SCOS_GPU_ABI_VERSION, .device = &info,
         .log = module_log, .map = module_map, .read32 = module_read32,
         .write32 = module_write32, .ticks = module_ticks, .spin = module_spin,
-        .wait_bit = module_wait_bit, .alloc = module_alloc,
+        .wait_bit = module_wait_bit, .alloc = module_alloc, .report = &report,
     };
     scos_gpu_module_init entry = (scos_gpu_module_init)(uintptr_t)(record.region +
                                                                     header->entry_init);
@@ -600,6 +608,13 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
         record.refusal = 15;
         klog(MODULE_LOG_PREFIX "did not take the device: %s", reject_reason(15));
         return -1;
+    }
+    if (report.size >= sizeof(report) && report.vram_bytes) {
+        device->vram_bytes = report.vram_bytes;
+        klog(MODULE_LOG_PREFIX "the module read %u MiB of video memory from 0x%x (unit %u B); that is "
+             "the number a firmware carve-out has to be placed against",
+             (unsigned)(report.vram_bytes >> 20),
+             report.vram_register, report.vram_units);
     }
     if (ops->abi != SCOS_GPU_ABI_VERSION || ops->size > sizeof(*ops) ||
         ops->size < 7u * sizeof(void *)) {   /* must at least reach wait_idle */
@@ -636,10 +651,20 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
         return -1;
     }
     if (ops->describe) {
+        /* Copied with a notice at the end if it runs out, because the last clause of a real card's report was
+         * lost exactly this way: the module's own text reached 1151 bytes, this field held 1152, the loop
+         * ended at its limit and nothing on the panel showed that a sentence had been removed.  A limit that
+         * announces itself is a different thing from a silent cut - and the module reserves room for its own
+         * notice at the same size, so this one should never be the only warning a reader gets. */
+        static const char tail[] = " [clipped by the kernel's copy: report this line as truncated]";
         const char *text = ops->describe(ops->context);
+        unsigned room = (unsigned)sizeof(record.describe) - 1u;
         unsigned n = 0;
-        while (n + 1 < sizeof(record.describe) && text && text[n]) {
-            record.describe[n] = text[n]; n++;
+        while (text && n < room && text[n]) { record.describe[n] = text[n]; n++; }
+        if (text && text[n]) {
+            room -= (unsigned)sizeof(tail) - 1u;
+            while (n > room) n--;
+            for (unsigned i = 0; i + 1u < sizeof(tail); i++) record.describe[n++] = tail[i];
         }
         record.describe[n] = 0;
     }

@@ -384,6 +384,11 @@ void vfs_free_tree(struct vfs_node *n) { if (n) node_free_recursive(n); }
 
 void system_files_init(int have_disk)
 {
+    /* Bait first: the tree the isolation test probes must exist before any
+     * package can be launched, and before the account database is opened (so
+     * these writes are the same plain filesystem writes the factory tree uses,
+     * not a privileged path). */
+    decoys_plant();
     /* Install missing native-Studio project templates, never overwrite edits.
      * Old .lua files remain data; the app loader now accepts only .cat. */
     if(!vfs_lookup("home/apps"))vfs_mkdir("home/apps");

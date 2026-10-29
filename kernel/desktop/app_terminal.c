@@ -11,7 +11,10 @@
  */
 #include "scos.h"
 
-#define TERM_LINES 512
+/* A display limit, stated as one: this is how many lines the scrollback keeps and renders, and nothing a
+ * command prints is dropped for being long - the buffer a response is assembled in is separately bounded and
+ * says so when it fills.  Raising it costs memory per tab and no correctness. */
+#define TERM_LINES 1000
 #define TERM_LINE 256
 #define HIST 16
 #define TERM_MAX_TABS 6
@@ -42,8 +45,15 @@ struct term {
     int hcount, hindex;
     char cwd[128];
     /* typewriter effect */
-    char pending[2048];
+    char *pending;                  /* the typewriter's text, allocated to its exact length - no cap on output */
+    size_t pend_cap;                /* the size palloc_owned was asked for, which pfree must be given back */
     int pend_len, pend_shown, pending_active;
+    /* The reveal is measured in MILLISECONDS since pend_at, not in frames: the
+     * old `pend_shown += 40' per tick ran at whatever rate the compositor
+     * happened to repaint, so the same answer typed in 2 s on one machine and
+     * instantly on another.  It also made the effect untestable. */
+    u32 pend_at;
+    int pend_ms;
     char aliases[8][2][64];
     int nalias;
     int shutting_down;
@@ -62,6 +72,11 @@ struct term {
     int prompt_tries;
     int prompt_choice;
     /* nano-style full screen editor */
+    /* What the last frame actually painted, in rows.  A rendering artefact is a disagreement between what
+     * the layout decided and what the painter did, and neither is visible in a buffer dump - so the numbers
+     * are kept here and the regression suite reads them through term_debug().  They cost four shorts. */
+    short dbg_rows, dbg_pending, dbg_prompt;
+    int dbg_total, dbg_scroll;
     int edit_mode;
     char ed_path[192];
     char ed_buf[128][96];
@@ -135,12 +150,42 @@ static void term_print(struct term *t, const char *s)   /* immediate */
     term_push_line(t, s);
 }
 
+static void term_release(struct term *t)
+{
+    if (!t->pending) return;
+    if (t->win) wm_track_mem(t->win, -(int)allocation_bytes(t->pending));
+    pfree(t->pending, t->pend_cap);
+    t->pending = 0;
+    t->pend_cap = 0;
+    t->pend_shown = t->pend_len = t->pending_active = 0;
+}
+
 static void term_type(struct term *t, const char *s)    /* typewriter */
 {
-    strncpy(t->pending, s, sizeof(t->pending) - 1);
-    t->pending[sizeof(t->pending) - 1] = 0;
-    t->pend_len = (int)strlen(t->pending);
+    /* The text is allocated to its own length, and that is the whole point of this rewrite.  The field used to
+     * be `char pending[2048]' and the copy was a strncpy, so any answer longer than two thousand characters
+     * came back cut at 2047 with nothing printed about it - twice in a row the missing tail was the last
+     * clause of the GPU report, which is where the finding lives.  A display may bound what it keeps (that is
+     * what TERM_LINES is for) and a buffer may bound what it holds, but a limit sitting in the middle of the
+     * path from one to the other, silent, is the bug.  If the allocation fails the text is printed at once:
+     * losing the typing animation is cosmetic, losing bytes is what happened before. */
+    size_t len = strlen(s);
+
+    term_release(t);
+    if (!len) { t->pend_len = t->pend_shown = t->pending_active = 0; return; }
+    t->pending = (char *)palloc_owned(len + 1, HEAP_WM);
+    if (!t->pending) { term_print(t, s); return; }
+    t->pend_cap = len + 1;
+    memcpy(t->pending, s, len + 1);
+    if (t->win) wm_track_mem(t->win, (int)allocation_bytes(t->pending));
+    t->pend_len = (int)len;
     t->pend_shown = 0;
+    t->pend_at = (u32)tick_count;
+    /* About 2600 characters a second, and never longer than 1.5 s however much
+     * a command prints: an animation that outlasts the answer is a delay, not
+     * an effect. */
+    t->pend_ms = 250 + (int)(len / 6);
+    if (t->pend_ms > 1500) t->pend_ms = 1500;
     t->pending_active = 1;
 }
 
@@ -207,7 +252,9 @@ static const char *help_text =
     "appstrt   - Launch an app; its logs stream into this tab\n"
     "apps      - List installed apps and running instances\n"
     "appuninstall <id> - Remove a user app and ERASE its data (tlpdo)\n"
-    "graphics  - Detected GPUs and actual renderer status\n"
+    "graphics [fsp]  - Detected GPUs and actual renderer status; fsp prints only the\n"
+    "                firmware intake and FSP mailbox paragraphs\n"
+    "decoys    - List the planted bait files and whether each is untouched\n"
     "procs     - Process table with real per-task memory\n"
     "kill <pid>- Terminate an app task (see 'procs')\n"
     "tab       - new | close | <n>: terminal tabs (also Ctrl+T)\n"
@@ -462,7 +509,10 @@ static void run_line(struct term *t, const char *command, int skip_confirm)
     if (!nargs) return;
 
     const char *cmd = args[0];
-    char response[2560];   /* holds the GPU detection report, which lists every adapter */
+    /* Static rather than a local: at 32 KiB it does not belong on a task stack, and the terminal's command loop
+     * is one thread at a time, so one buffer per app is honest.  The size is generous on purpose - the whole
+     * report is written out or the writer says what it could not fit; a response is never silently clipped. */
+    static char response[SCOS_GRAPHICS_REPORT];   /* holds the GPU detection report, which lists every adapter */
     response[0] = 0;
     int typed = 1;
 
@@ -865,7 +915,27 @@ static void run_line(struct term *t, const char *command, int skip_confirm)
         if(nargs!=2||!strcmp(args[1],"--help"))strcpy(response,"Usage: tlpdo appuninstall <app-id> (password; erases its data)");
         else app_uninstall(args[1],response,sizeof(response));
     }
-    else if(!strcmp(cmd,"graphics")){if(nargs!=1)strcpy(response,"Usage: graphics");else graphics_report(response,sizeof(response));}
+    else if (!strcmp(cmd, "decoys")) {
+        /* The bait is part of the system, so it is inspectable: a user should
+         * be able to see what was planted and confirm nobody changed it.  This
+         * lists PATHS and a state, never contents - the point of a decoy is
+         * that it is worthless, and reading one proves nothing. */
+        strcpy(response, "Decoy files (planted bait; '+ kept', '!' changed or gone):\n");
+        for (int i = 0; i < decoys_count(); i++) {
+            strcat(response, decoys_present(i) ? "  + " : "  ! ");
+            strcat(response, decoys_path(i));
+            strcat(response, "\n");
+        }
+        strcat(response, "The isolation test app tries to read and change every one of them;\n"
+                         "a sandboxed app that succeeds has escaped.");
+    }
+    else if(!strcmp(cmd,"graphics")){
+        if(nargs>2)strcpy(response,"Usage: graphics | graphics fsp   (fsp: the firmware intake and FSP mailbox "
+                                    "paragraphs, which are the end of the full report and the part a console "
+                                    "paste tends to lose)");
+        else if(nargs==2&&!strcmp(args[1],"fsp"))graphics_fsp_report(response,sizeof(response));
+        else graphics_report(response,sizeof(response));
+    }
     else if (!strcmp(cmd, "appstrt")) {
         lua_apps_refresh();
         /* r27: THE way to launch apps from the terminal. Like running a
@@ -1588,6 +1658,7 @@ static void term_close_tab(struct window *w, int i)
     struct term *t = tw->tabs[i];
     wm_clear_console(t);
     term_prompt_clear(t);                        /* burn any typed secret */
+    term_release(t);            /* the typewriter's text, if any, is the tab's to hand back */
     wm_track_mem(w, -(int)sizeof(struct term));
     pfree(t, sizeof(struct term));
     for (int k = i; k < tw->ntabs - 1; k++) tw->tabs[k] = tw->tabs[k + 1];
@@ -1646,6 +1717,34 @@ static int term_display_rows(struct term *t, struct window *w)
 {
     term_rows_sync(t, term_cols(w));
     return t->total_rows + 1;                 /* +1 for the prompt row, which never wraps */
+}
+
+
+
+/* The same row, drawn with only its first `limit' characters - what a
+ * typewriter needs for the row the cursor is on.  The row is found by walking
+ * the full text, so its start and its break are the ones the finished answer
+ * will have. */
+static void term_paint_row_part(struct surface *s, const char *text, int cols, int index, int limit,
+                                u32 color, int x, int y)
+{
+    char row[TERM_LINE];
+    const char *p = text;
+
+    row[0] = 0;
+    for (int i = 0; i <= index && p; i++) p = s_wrap_row(p, cols, row, sizeof row);
+    if (limit >= 0 && (int)strlen(row) > limit) row[limit] = 0;
+    if (row[0]) s_text(s, x, y, row, color);
+}
+
+/* Typing, or running a command, means the person wants to see what they are doing: put the view back on the
+ * prompt.  A scroll position left over from reading an older part of the scrollback used to stay there while
+ * the input line - and the command's own output - grew off the bottom of the window, so the keys typed with
+ * nothing on screen.  Something that is an interaction resets the view, exactly like it resets the idle timer. */
+static void term_keep_visible(struct term *t)
+{
+    t->follow = 1;
+    t->scroll = 1000000;        /* clamped to the bottom by the next paint */
 }
 
 /* The `index'th wrapped row of `text', painted at (x,y).  Each row is found by walking the line from its
@@ -1794,8 +1893,8 @@ static void term_paint_editor(struct window *w)
     char one[2] = { under, 0 };
     s_text(s, cx, cy, one, th->title_text);
     s_fill(s, 0, s->h - 18, s->w, 18, th->taskbar_bg);
-    s_text(s, 6, s->h - 15, "^O save   ^X exit   arrows move   type to insert",
-           th->text);
+    s_clip_text(s, 6, s->h - 15, "^O save   ^X exit   arrows move   type to insert",
+                th->text, s->w - 12);
 }
 
 static void term_paint_tabstrip(struct window *w)
@@ -1813,7 +1912,10 @@ static void term_paint_tabstrip(struct window *w)
         char lbl[12];
         fmt_u32(lbl, (u32)(i + 1));
         strcat(lbl, ":term");
-        s_text(s, x + 5, 5, lbl, act ? th->main : th->text);
+        /* The tab is 74 pixels wide whatever the app is called and whatever the
+         * strip has left, and the close box owns the last 18 of them: a label
+         * longer than that used to paint over its neighbour's [x]. */
+        s_clip_text(s, x + 5, 5, lbl, act ? th->main : th->text, TAB_BTN_W - 24);
         s_text(s, x + TAB_BTN_W - 16, 5, "x", th->text);
         x += TAB_BTN_W;
     }
@@ -1834,25 +1936,54 @@ static void term_paint(struct window *w)
     term_paint_tabstrip(w);      /* after the background clear */
 
     int rows = term_visible_rows(w);
-    /* pending typewriter text may span several lines */
-    char pbuf[512];
-    int plines = 0;
-    if (t->pending_active) {
-        int n = t->pend_shown;
-        if (n > t->pend_len) n = t->pend_len;
-        if (n > (int)sizeof(pbuf) - 1) n = sizeof(pbuf) - 1;
-        memcpy(pbuf, t->pending, n);
-        pbuf[n] = 0;
-        plines = 1;
-        for (int i = 0; i < n; i++) if (pbuf[i] == '\n') plines++;
-    }
     int cols = term_cols(w);
+    int cols_now = cols;
+    /* Pending typewriter text, laid out on the WHOLE answer and revealed by a
+     * character count.  Three bugs lived in the old version of these ten lines:
+     *
+     *   - it counted newlines while the painter placed rows, so the rows the
+     *     preview had but the model did not fell through to the prompt branch
+     *     and were painted as a column of `root@scos:/$';
+     *   - it re-wrapped its visible prefix every frame, so words hopped between
+     *     rows while they were being typed;
+     *   - it kept the prefix in a fixed buffer, which is a silent clip of a long
+     *     answer by another name.
+     *
+     * Rows are therefore found by walking the full text (their starts cannot
+     * move), and the last, partly-typed row is drawn with only the characters
+     * that have been revealed. */
+    int pfull = 0, ppartial = 0;         /* complete rows, chars typed into the next */
+    if (t->pending_active) {
+        const char *p = t->pending;
+        int len, adv, pos = 0;
+        int shown = t->pend_shown;
+        if (shown > t->pend_len) shown = t->pend_len;
+        while (p && *p && s_wrap_next(p, cols_now, &len, &adv)) {
+            if (pos + len <= shown) { pfull++; pos += adv; }
+            else { ppartial = shown - pos; if (ppartial < 0) ppartial = 0; break; }
+            p += adv;
+            if (!*p) break;
+        }
+    }
+    int plines = pfull + (ppartial > 0 ? 1 : 0);
     term_rows_sync(t, cols);
-    int total = t->total_rows + (t->pending_active ? s_wrap_rows(pbuf, cols) : 0) + 1;
+    /* While an answer is being typed there is no prompt row: a shell does not show a prompt in the middle of
+     * a command's output, and reserving one here left a blank line under the last typed row. */
+    int total = t->total_rows + (t->pending_active ? plines : 1);
+    if (t->pending_active && t->follow) t->scroll = total;
     if (t->scroll < 0 || t->scroll > total - rows) t->scroll = total - rows;
     if (t->scroll < 0) t->scroll = 0;
     t->follow = (t->scroll >= total - rows);
 
+    t->dbg_rows = 0;
+    t->dbg_prompt = 0;
+    t->dbg_pending = (short)(t->pending_active ? plines : 0);
+    t->dbg_total = total;
+    t->dbg_scroll = t->scroll;
+    /* Everything from here down is scrollback: clip it to the text area so a
+     * row that is half scrolled out of the bottom of the window cannot paint
+     * over the window's own frame. */
+    s_clip_set(s, 0, TERM_TAB_H, s->w, s->h - TERM_TAB_H);
     int y = TERM_TAB_H + 4;
     int li = 0, line_base = 0;             /* display row where t->lines[li] begins */
     while (li < t->nlines && line_base + t->lrows[li] <= t->scroll) {
@@ -1860,14 +1991,21 @@ static void term_paint(struct window *w)
         li++;
     }
     for (int r = t->scroll; r < total && r < t->scroll + rows; r++, y += FONT_H + 2) {
+        t->dbg_rows++;
         if (li < t->nlines) {
             term_paint_row(s, t->lines[li], cols, r - line_base, th->text, 6, y);
             if (r + 1 >= line_base + t->lrows[li]) {
                 line_base += t->lrows[li];
                 li++;
             }
-        } else if (t->pending_active && r < t->total_rows + plines) {
-            term_paint_row(s, pbuf, cols, r - t->total_rows, th->main, 6, y);
+        } else if (t->pending_active) {
+            int idx = r - t->total_rows;
+            if (idx < pfull)
+                term_paint_row(s, t->pending, cols, idx, th->main, 6, y);
+            else if (idx == pfull && ppartial > 0)
+                term_paint_row_part(s, t->pending, cols, idx, ppartial, th->main, 6, y);
+            /* an unfinished answer owns its rows; the prompt is painted only
+             * once the answer has landed */
         } else if (t->prompt_kind != TERM_PROMPT_NONE) {
             /* The question is a field of its own: a highlighted bar, the
              * prompt text, then what has been keyed so far (masked for a
@@ -1904,6 +2042,7 @@ static void term_paint(struct window *w)
             char prompt[160];
             prompt_str(t, prompt);
             int prompt_width=s_text_width(prompt),limit=((s->w-80)/2/FONT_W)*FONT_W;if(prompt_width>limit)prompt_width=limit;
+            t->dbg_prompt++;
             s_clip_text(s,6,y,prompt,th->main,prompt_width);
             int px=6+prompt_width;
             int cols = (s->w - px - 8) / FONT_W;
@@ -1915,6 +2054,7 @@ static void term_paint(struct window *w)
                 s_fill(s, cx, y + FONT_H - 2, FONT_W, 2, th->main);
         }
     }
+    s_clip_off(s);
 }
 
 static void term_key(struct window *w, struct key_event *e)
@@ -1946,11 +2086,12 @@ static void term_key(struct window *w, struct key_event *e)
     /* never swallow keystrokes: finish any typewriter output instantly */
     if (t->pending_active) {
         term_push_line(t, t->pending);
-        t->pending_active = 0;
+        term_release(t);
     }
 
     if (e->keycode == '\n') {
         char cmd[TERM_LINE];
+        term_keep_visible(t);
         strcpy(cmd, t->input);
         t->input[0] = 0;
         t->ipos = 0;
@@ -1990,6 +2131,7 @@ static void term_key(struct window *w, struct key_event *e)
         return;
     }
     edit_line(t->input, &t->ipos, sizeof(t->input), e);
+    term_keep_visible(t);       /* typing brings the prompt back into view */
     /* r36 ECHO ROOT FIX: typed characters landed in the line buffer but
      * NOTHING repainted the window - the field saw "text I type is
      * invisible until I press Enter" because Enter was the only path
@@ -2033,10 +2175,15 @@ static void term_tick(struct window *w)
 {
     struct term *t = WT(w);
     if (t->pending_active) {
-        t->pend_shown += 40;                     /* typewriter speed */
-        if (t->pend_shown >= t->pend_len) {
+        u32 elapsed = (u32)tick_count - t->pend_at;
+        int shown = t->pend_ms > 0
+            ? (int)((u64)t->pend_len * elapsed / (u32)t->pend_ms) : t->pend_len;
+        if (shown > t->pend_len) shown = t->pend_len;
+        if (shown < 0) shown = 0;
+        t->pend_shown = shown;
+        if (shown >= t->pend_len || elapsed >= (u32)t->pend_ms) {
             term_push_line(t, t->pending);
-            t->pending_active = 0;
+            term_release(t);
         }
         wm_redraw(w);
     }
@@ -2063,3 +2210,59 @@ struct app app_terminal = {
 };
 
 SCOS_APP(app_terminal, 001);
+
+/* What the last frame really painted.  The terminal's layout and its painter are two pieces of arithmetic
+ * that must agree, and when they disagree the symptom is a picture: a column of prompts under a long answer,
+ * a row that was counted but never drawn.  A screenshot can show that something is wrong but not which
+ * number was wrong, so the numbers themselves are readable from the running kernel and
+ * tools/tests/test_terminal_ui.py asserts on them:
+ *
+ *   0 rows painted as a prompt in the last frame   1 rows painted at all
+ *   2 rows of a still-typing answer                3 total display rows the frame believed in
+ *   4 first visible row                            5 rows the window can show
+ *   6 rows of finished output                      7 lines of scrollback (wrapped lines count once)
+ *   8 characters of the answer typed so far        9 characters of the answer
+ *
+ * This is a diagnostic, not a behaviour: nothing in the kernel calls it, and it exists so the suite can fail
+ * on the arithmetic instead of on a diff of pixels. */
+int term_debug(struct window *w, int which)
+{
+    if (!w || !w->app || w->app != &app_terminal || !w->data) return -1;
+    /* A terminal window owns a STRIP of tabs, not a shell: w->data is the
+     * struct termwin and the shell is the active tab inside it.  Casting it to
+     * struct term made this diagnostic read a quarter of a megabyte past the
+     * allocation, which is a page fault in the kernel - the first version of
+     * this function froze the guest it was meant to describe. */
+    struct termwin *tw = (struct termwin *)w->data;
+    if (tw->active < 0 || tw->active >= TERM_MAX_TABS) return -1;
+    struct term *t = tw->tabs[tw->active];
+    if (!t) return -1;
+    switch (which) {
+    case 0: return t->dbg_prompt;
+    case 1: return t->dbg_rows;
+    case 2: return t->dbg_pending;
+    case 3: return t->dbg_total;
+    case 4: return t->dbg_scroll;
+    case 5: return term_visible_rows(w);
+    case 6: return t->total_rows;
+    case 7: return t->nlines;
+    case 8: return t->pend_shown;
+    case 9: return t->pend_len;
+    default: return -1;
+    }
+}
+
+/* One scrollback line, by index, for the suites that assert on what the
+ * terminal said.  They used to read the buffer at a hand-computed offset -
+ * `tab + 256 + 512 * 256' - which silently turned a passing suite into an empty
+ * transcript the day the scrollback grew from 512 lines to 1000.  A test that
+ * names a field through a function cannot be broken by a field being added. */
+const char *term_line(struct window *w, int index)
+{
+    if (!w || !w->app || w->app != &app_terminal || !w->data) return 0;
+    struct termwin *tw = (struct termwin *)w->data;
+    if (tw->active < 0 || tw->active >= TERM_MAX_TABS) return 0;
+    struct term *t = tw->tabs[tw->active];
+    if (!t || index < 0 || index >= t->nlines) return 0;
+    return t->lines[index];
+}

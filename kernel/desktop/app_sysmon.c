@@ -147,9 +147,9 @@ static void sm_paint(struct window *w)
         if (i < SYS_TASKS) {
             fmt_u32(n, (u32)i);
             s_text(s, 16, y, n, t->text);
-            s_text(s, 60, y, sys_names[i], t->text);
-            s_text(s, 260, y, "system", ((t->main >> 1) & 0x7F7F7F));
-            s_text(s, 360, y, "running", t->text);
+            s_clip_text(s, 60, y, sys_names[i], t->text, 196);
+            s_clip_text(s, 260, y, "system", ((t->main >> 1) & 0x7F7F7F), 96);
+            s_clip_text(s, 360, y, "running", t->text, 100);
             /* measured footprints where attribution is honest:
              * sckern = allocator remainder, scwm = framebuffers,
              * vfsd = live file data; the rest run inside sckern's
@@ -173,7 +173,7 @@ static void sm_paint(struct window *w)
             s_text(s, 16, y, n, t->text);
             s_clip_text(s,60,y,aw->app?aw->app->id:"?",t->text,190);
             s_text(s, 260, y, "app", t->main);
-            s_text(s, 360, y, aw->state == WIN_STATE_MIN ? "minimized" : "running", t->text);
+            s_clip_text(s, 360, y, aw->state == WIN_STATE_MIN ? "minimized" : "running", t->text, 100);
             char mb[24];
             fmt_u64(mb, proc_win_mem_kb(aw));
             strcat(mb, " KB");

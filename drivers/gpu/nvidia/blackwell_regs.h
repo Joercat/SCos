@@ -37,12 +37,25 @@
 #define NV_PMC_BOOT_0_IMPLEMENTATION(v)   (((v) >> 20) & 0xfu)   /* 23:20 */
 #define NV_PMC_BOOT_0_ARCHITECTURE(v)    (((v) >> 24) & 0x1fu)   /* 28:24 */
 
-/* The architecture numbers the newest published manual names.  Anything else - including the number a
- * Blackwell chip answers - is printed as a number rather than translated, since inventing a mapping
- * here would be a guess dressed up as a fact. */
+/* The architecture numbers the published field tables name, from `src/common/inc/swref/published/nv_ref.h`
+ * in the open kernel-modules tree (NV_PMC_BOOT_0_ARCHITECTURE_*), which is the register field read above and
+ * nothing else.  A number outside this list is printed as a number rather than translated, since inventing a
+ * mapping here would be a guess dressed up as a fact.
+ *
+ * What these do NOT settle is which chip inside an architecture a machine has: nv_ref.h splits that into a
+ * second field (`_ARCHITECTURE_1 8:8`, the impl) and the driver's own arch+impl -> chip table turns
+ * 0x1b/impl 7 into GB207, 0x1b/impl 6 into GB206 and so on.  That table is a generated file which is not in
+ * this tree, so this header names the architecture and the module prints the impl as a number.  Guessing a
+ * chip name from a device id would be worse than not naming it: the id is shared by chips in one
+ * architecture, which is the whole reason the engine counts above are read instead of looked up. */
 #define NV_PMC_BOOT_0_ARCHITECTURE_GV100  0x14u   /* Volta   */
-#define NV_PMC_BOOT_0_ARCHITECTURE_TU100  0x16u   /* Turing  */
-#define NV_PMC_BOOT_0_ARCHITECTURE_GA100  0x17u   /* Ampere  */
+#define NV_PMC_BOOT_0_ARCHITECTURE_TU100  0x16u   /* Turing: TU100, TU110 */
+#define NV_PMC_BOOT_0_ARCHITECTURE_GA100  0x17u   /* Ampere: GA100 through GA107 */
+#define NV_PMC_BOOT_0_ARCHITECTURE_GH100  0x18u   /* Hopper: GH100 */
+#define NV_PMC_BOOT_0_ARCHITECTURE_AD100  0x19u   /* Ada: AD102, AD103, AD106, AD107 */
+#define NV_PMC_BOOT_0_ARCHITECTURE_GB100  0x1Au   /* Blackwell, the GB10x chips */
+#define NV_PMC_BOOT_0_ARCHITECTURE_GB200  0x1Bu   /* Blackwell, the GB2xx chips */
+#define NV_PMC_BOOT_0_ARCHITECTURE_GR100  0x1Cu   /* the generation after: GR100, GR102 */
 
 /* ------------------------------------------------------------------------ the GSP ----
  * Blackwell's management processor, and the block a driver talks to it through.  Published in full for
@@ -97,6 +110,31 @@
  */
 #define NV_PRI_ERROR_MASK                  0xffffff00u
 #define NV_PRI_ERROR_TARGET_LOCKED         0xbadf4100u
+
+/* The rest of the family that one constant was standing in for.  The coprocessor's own driver tests a read
+ * against FLCN_CSB_PRIV_PRI_ERROR_CODE 0xBADF0000 under mask 0xFFFF0000 (flcnretval.h) before it believes any
+ * value, and the cause of a fault is then one of the codes in NV_PPRIV_SYS_PRI_ERROR_CODE 31:8, published in
+ * maxwell/gm107/dev_pri_ringstation_sys.h and unchanged through Blackwell, whose low byte the driver notes
+ * "has extra error information" and masks off.  A dword matching 0xBADF.... is therefore never the content of
+ * a register: it is the bus reporting that the read could not be served, which is the difference between "this
+ * block answered" and "this block was refused", and getting it wrong is how a driver ends up certain about a
+ * chip that told it nothing. */
+#define NV_PRI_ERROR_FAMILY                0xbadf0000u
+#define NV_PRI_ERROR_FAMILY_MASK           0xffff0000u
+#define NV_PRI_IS_REFUSAL(v)                    (((v) & NV_PRI_ERROR_FAMILY_MASK) == NV_PRI_ERROR_FAMILY)
+#define NV_PRI_REFUSAL_CODE(v)                  ((v) & NV_PRI_ERROR_MASK)   /* 31:8, the code's own width */
+#define NV_PRI_CODE_FECS_PRI_TIMEOUT         0xbadf1000u
+#define NV_PRI_CODE_FECS_PRI_DECODE          0xbadf1100u
+#define NV_PRI_CODE_FECS_PRI_RESET           0xbadf1200u
+#define NV_PRI_CODE_FECS_PRI_FLOORSWEEP      0xbadf1300u
+#define NV_PRI_CODE_FECS_PRI_STUCK_ACK       0xbadf1400u
+#define NV_PRI_CODE_FECS_PRI_0_EXPECTED_ACK  0xbadf1500u
+#define NV_PRI_CODE_FECS_PRI_FENCE_ERROR     0xbadf1600u
+#define NV_PRI_CODE_FECS_PRI_SUBID_ERROR     0xbadf1700u
+#define NV_PRI_CODE_FECS_PRI_ORPHAN          0xbadf2000u
+#define NV_PRI_CODE_FECS_DEAD_RING           0xbadf3000u
+#define NV_PRI_CODE_FECS_TRAP                0xbadf4000u
+#define NV_PRI_CODE_FECS_PRI_CLIENT_ERR      0xbadf5000u
 #define NV_PRI_IS_ERROR(v)                        (((v) & NV_PRI_ERROR_MASK) == NV_PRI_ERROR_TARGET_LOCKED)
 #define NV_PRI_IS_DEAD(v)                         ((v) == 0xffffffffu) /* no reply at all, our bound or the chip's */
 
@@ -121,6 +159,23 @@
  * of them matches. */
 #define NV_PTOP2_PRI_UNIT(v, shift)                     ((u32)((v) << (shift)))
 #define NV_PTOP2_PRI_UNIT_CANDIDATES              4u      /* <<0, <<4, <<8, <<12 */
+
+/* The legacy user-mode window, kept because a reader with an older manual will look for it and because this
+ * module's answer about it is now load-bearing in the opposite direction: NVIDIA's own driver says from
+ * Turing onwards this page is not what the host uses - "NV_USERMODE is going away long term, and doesn't
+ * support any of the new remap type features ... we will start using the physical registers through
+ * NV_VIRTUAL_FUNCTION even on host" (kern_gpu_tu102.c).  So what follows from a read here is that the page is
+ * or is not answering, and nothing more: the class number is documented for Volta and Turing and not for
+ * Blackwell, and the doorbell below is not where a Blackwell doorbell is.  The virtual-function page's own
+ * addresses are in the block after this one. */
+/* The virtual-function page, as blackwell/gb100/dev_vm.h publishes it: NV_VIRTUAL_FUNCTION_PRIV spans
+ * BAR0+0x00000..0x2FFFF, and inside it the host may read the interrupt tree at CPU_INTR_LEAF(i)=0x1000+i*4
+ * and _TOP(i)=0x1600+i*4 and the sixteen mailbox scratch words at 0x2100+i*4, and write the doorbell at
+ * 0x2200 (`-W-4R', a channel handle in 31:0 with bit 31 asking for a CPU notification).  That page is where a
+ * submission would be rung on this generation; naming it is the whole of what this module does with it. */
+#define NV_VF_DOORBELL                          0x00002200u   /* never read, never written here */
+#define NV_TIMER_TIME_0                         0x00009400u   /* NV_PTIMER_TIME_0, published Maxwell..Hopper */
+#define NV_TIMER_TIME_1                         0x00009410u   /* _1 is read first and last, per dev_timer.ref */
 
 /* The user-mode window: the block a submission is rung through, and the copy of the GPU's own clock that
  * is readable without any privileged setup.  Published for Volta and Turing in

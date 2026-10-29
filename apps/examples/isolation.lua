@@ -9,6 +9,13 @@
 -- or draw outside the paint callback.  A probe is CONTAINED when the call is
 -- refused; it is a BREAKOUT when the call is allowed.
 --
+-- The system also plants BAIT (kernel/desktop/decoys.c): fake keys, a fake
+-- account database, a fake vault key and other people's files, at every layer
+-- from `kernel' to the home directory.  They hold nothing, and nothing reads
+-- them - so the probes below try to read and to EDIT every one of them, and the
+-- suite compares the files byte for byte afterwards.  A decoy that changed is a
+-- sandbox that leaked.
+--
 -- One CAT event is one fresh Lua state, so progress lives in data files: each
 -- event runs a few probes, appends the verdicts to results.txt and advances
 -- cursor.txt.  The aggregated report is written to report.txt for the build's
@@ -146,6 +153,153 @@ probes[#probes + 1] = function()
     return "c_recursion=CONTAINED"
 end
 
+-- ------------------------------------------------------------- bait files ---
+-- The exact list is kernel/desktop/decoys.c; tools/tests/test_escape.py reads
+-- the kernel's own table and fails if these two ever disagree, so a decoy
+-- added to the system cannot quietly go untested here.
+local DECOYS = {
+    "kernel/symbols.map",
+    "kernel/drivers/gsp.key",
+    "system/keys/boot.key",
+    "system/security/accounts.db",
+    "system/security/keys.bin",
+    "vault/volume.key",
+    "home/root-notes.txt",
+    "home/documents/passwords.txt",
+    "home/users/root/backup.key",
+    "home/appdata/root/notepad/notes.txt",
+}
+for i = 1, #DECOYS do
+    local path = DECOYS[i]
+    probes[#probes + 1] = function() return must_refuse("decoy" .. i .. "_read",
+        function() return scos.read(path) end) end
+    probes[#probes + 1] = function() return must_refuse("decoy" .. i .. "_edit",
+        function() return scos.write(path, "pwned by an app") end) end
+    probes[#probes + 1] = function() return must_refuse("decoy" .. i .. "_remove",
+        function() return scos.remove(path) end) end
+    probes[#probes + 1] = function() return must_refuse("decoy" .. i .. "_exists",
+        function() return scos.exists(path) end) end
+end
+probes[#probes + 1] = function()
+    -- Renaming your own file onto a planted one must not replace it.
+    return must_refuse("decoy_rename_over", function()
+        scos.write("own.txt", "rename bait")
+        local r = scos.rename("own.txt", "system/security/accounts.db")
+        pcall(scos.remove, "own.txt")        -- leave no litter behind
+        return r
+    end)
+end
+
+-- --------------------------------------- path spellings of the same escape ---
+-- Every one of these is the same request as an absolute path, written the way a
+-- hostile package would write it to slip past a string comparison: doubled
+-- separators, a separator-encoded dotdot, a trailing dot, the other case, and
+-- the path of the account's own name in the middle of a legal one.
+probes[#probes + 1] = function() return must_refuse("dots_double_slash", function() return scos.read("..//..//home/root-notes.txt") end) end
+probes[#probes + 1] = function() return must_refuse("dots_mid_path", function() return scos.read("home/users/root/../../root-notes.txt") end) end
+probes[#probes + 1] = function() return must_refuse("dots_trailing_slash", function() return scos.read("../") end) end
+probes[#probes + 1] = function() return must_refuse("dots_dot_slash", function() return scos.read("./../kernel/symbols.map") end) end
+probes[#probes + 1] = function() return must_refuse("encoded_dots", function() return scos.read("%2e%2e/%2e%2e/home/root-notes.txt") end) end
+probes[#probes + 1] = function() return must_refuse("case_mismatch", function() return scos.read("HOME/users/ROOT/backup.key") end) end
+probes[#probes + 1] = function() return must_refuse("dot_suffix", function() return scos.read("../kernel/symbols.map.") end) end
+probes[#probes + 1] = function() return must_refuse("own_dir_escape", function() return scos.read("own.txt/../../root-notes.txt") end) end
+probes[#probes + 1] = function() return must_refuse("own_write_escape", function() return scos.write("own.txt/../escape.txt", "x") end) end
+probes[#probes + 1] = function() return must_refuse("rename_escape", function() return scos.rename("own.txt", "own.txt/../../escape.txt") end) end
+probes[#probes + 1] = function() return must_refuse("users_root_listing", function() return scos.exists("home/users") end) end
+probes[#probes + 1] = function() return must_refuse("appdata_root_listing", function() return scos.exists("home/appdata") end) end
+probes[#probes + 1] = function() return must_refuse("protected_suffix", function() return scos.read("system/security/") end) end
+probes[#probes + 1] = function() return must_refuse("absolute_own", function() return scos.read("home/appdata/root/isolation/own.txt") end) end
+probes[#probes + 1] = function() return must_refuse("arg_type_table", function() return scos.read({}) end) end
+probes[#probes + 1] = function() return must_refuse("arg_type_nil", function() return scos.write(nil, "x") end) end
+probes[#probes + 1] = function() return must_refuse("arg_type_number", function() return scos.rename("own.txt", 5) end) end
+
+-- The new app-creation API must behave the same way inside the sandbox: the
+-- shape calls are legal in paint (and cost budget), and the storage reading is
+-- legal at any time because it is about the app's own directory.
+probes[#probes + 1] = function()
+    local ok, st = pcall(scos.storage)
+    if not ok or type(st) ~= "table" or type(st.files) ~= "number" or
+       type(st.limit_files) ~= "number" or st.limit_files < 1 then
+        return "storage_api=BREAKOUT storage() refused or malformed: " .. tostring(st)
+    end
+    if st.files > st.limit_files then return "storage_api=BREAKOUT more files than the limit" end
+    return "storage_api=CONTAINED"
+end
+probes[#probes + 1] = function()
+    local ok, ms = pcall(scos.now_ms)
+    if ok and type(ms) == "number" and ms >= 0 then return "now_ms_api=CONTAINED" end
+    return "now_ms_api=BREAKOUT " .. tostring(ms)
+end
+probes[#probes + 1] = function()
+    local ok, r = pcall(scos.random, 6)
+    if ok and type(r) == "number" and r >= 1 and r <= 6 then return "random_api=CONTAINED" end
+    return "random_api=BREAKOUT " .. tostring(r)
+end
+probes[#probes + 1] = function()
+    if scos.text_rows(80, "a line that is short") >= 1 and scos.text_height() > 0 then
+        return "text_metrics_api=CONTAINED"
+    end
+    return "text_metrics_api=BREAKOUT"
+end
+probes[#probes + 1] = function() return must_refuse("random_zero", function() return scos.random(0) end) end
+probes[#probes + 1] = function() return must_refuse("hsv_range", function() return scos.hsv(400, 50, 50) end) end
+
+-- ------------------------------------------------- the API's own interfaces ---
+-- These are not filesystem escapes but they are ways a package attacks the
+-- interface it was given: a format string where a message goes, a float or a
+-- NaN where an integer does, a write to the API table itself, a resize from
+-- inside paint.  Contained means the package survived and the system's rule
+-- held; a crash here would take the desktop with it.
+probes[#probes + 1] = function()
+    -- Format-string injection: these are legal strings, so they must be
+    -- *accepted* and must not be read as format directives anywhere.
+    local ok = pcall(function()
+        scos.log("%s%n%p%s the log is not a printf")
+        scos.title("%s%s%s")
+        scos.write("fmt.txt", "%s%n%p")
+    end)
+    if not ok then return "format_strings=BREAKOUT log/title refused a legal string" end
+    return "format_strings=CONTAINED"
+end
+probes[#probes + 1] = function()
+    -- The reported version is the kernel's, not a table entry a package edits.
+    local saved = scos.version
+    pcall(function() scos.version = 99 end)
+    local ok, info = pcall(scos.api_info)
+    scos.version = saved
+    if ok and info and info.version == 2 then return "version_spoof=CONTAINED" end
+    return "version_spoof=BREAKOUT api_info reported " .. tostring(ok and info and info.version)
+end
+probes[#probes + 1] = function()
+    local ok = pcall(function() scos.interval(1) end)
+    if ok then return "interval_min=BREAKOUT a 1 ms tick was accepted" end
+    return "interval_min=CONTAINED"
+end
+probes[#probes + 1] = function()
+    local ok = pcall(function() scos.interval(600000) end)
+    if ok then return "interval_max=BREAKOUT a 10-minute tick was accepted" end
+    return "interval_max=CONTAINED"
+end
+probes[#probes + 1] = function()
+    local ok = pcall(function() scos.rgb(1.5, 0, 0) end)
+    if ok then return "fractional_arg=BREAKOUT a float was accepted as a channel" end
+    return "fractional_arg=CONTAINED"
+end
+probes[#probes + 1] = function()
+    local ok = pcall(function() scos.rgb(0 / 0, 0, 0) end)
+    if ok then return "nan_arg=BREAKOUT NaN was accepted as a channel" end
+    return "nan_arg=CONTAINED"
+end
+probes[#probes + 1] = function()
+    local ok = pcall(function() scos.move(0 / 0, 0 / 0) end)
+    if ok then return "nan_move=BREAKOUT NaN was accepted as a coordinate" end
+    return "nan_move=CONTAINED"
+end
+probes[#probes + 1] = function()
+    if scos.version ~= 2 then return "api_version=BREAKOUT version is " .. tostring(scos.version) end
+    return "api_version=CONTAINED"
+end
+
 -- --------------------------------- argument validation / resource limits ---
 probes[#probes + 1] = function() return must_refuse("read_dot", function() return scos.read(".") end) end
 probes[#probes + 1] = function() return must_refuse("read_dotdot", function() return scos.read("..") end) end
@@ -269,6 +423,13 @@ local paint_probes = {
     function() return must_refuse("paint_line_range", function() return scos.line(-99999, 0, 99999, 0, 0) end) end,
     function() return must_refuse("paint_wrap_long", function() return scos.text_wrap(0, 0, 200, 100, string.rep("W", 3000), 0) end) end,
     function() return must_refuse("paint_button_range", function() return scos.button(0, 0, 99999, 99999, "b") end) end,
+    function() return must_refuse("paint_ellipse_range", function() return scos.ellipse(0, 0, 99999, 99999, 0) end) end,
+    function() return must_refuse("paint_ellipse_fill_range", function() return scos.ellipse_fill(0, 0, 99999, 99999, 0) end) end,
+    function() return must_refuse("paint_rounded_range", function() return scos.rounded(0, 0, 99999, 99999, 99999, 0) end) end,
+    function() return must_refuse("paint_triangle_range", function() return scos.triangle(-99999, 0, 99999, 0, 0, 99999, 0) end) end,
+    function() return must_refuse("paint_resize", function() return scos.resize(640, 480) end) end,
+    function() return must_refuse("paint_move", function() return scos.move(0, 0) end) end,
+    function() return must_refuse("paint_message", function() return scos.message("from paint") end) end,
     function()
         local err, accepted = nil, 0
         for _ = 1, 40 do
@@ -322,6 +483,13 @@ local function write_report()
     local text = table.concat(head, "\n") .. "\n"
     for _, line in ipairs(lines) do text = text .. line .. "\n" end
     write_file(REPORT, text)
+    -- The probes deliberately create files (own.txt, fmt.txt, quota fillers).
+    -- A self-test that leaves litter in its own data directory is a self-test
+    -- whose next run starts from a different state.
+    for _, name in ipairs({"own.txt", "fmt.txt", "big.txt", "escape.txt", "renamed.txt"}) do
+        pcall(scos.remove, name)
+    end
+    for i = 1, 20 do pcall(scos.remove, "q" .. i .. ".txt") end
     return contained, breakout
 end
 

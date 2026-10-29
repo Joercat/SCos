@@ -189,7 +189,19 @@ int  mouse_poll(struct mouse_event *out);
 struct surface {
     u32 *px;
     int  w, h;
+    /* Clip rectangle in surface coordinates.  `cw == 0' means "not clipped",
+     * which is what every zeroed surface is, so nothing that existed before
+     * this field changed behaviour.  s_pixel() and s_fill() honour it - those
+     * two are what every glyph, line and shape is made of - so a scrolled panel
+     * can be clipped to its viewport once instead of every caller intersecting
+     * its own rectangles and text, which is how half-drawn rows at a window edge
+     * happened in the first place. */
+    int  cx, cy, cw, ch;
 };
+
+/* Set the clip rectangle (intersected with the current one), and clear it. */
+void s_clip_set(struct surface *s, int x, int y, int w, int h);
+void s_clip_off(struct surface *s);
 
 extern struct surface screen;              /* back buffer, full screen */
 extern int screen_w, screen_h;
@@ -209,6 +221,10 @@ void s_frame_rect(struct surface *s, int x, int y, int w, int h, u32 c);
 void s_line(struct surface *s, int x0, int y0, int x1, int y1, u32 c);
 void s_circle(struct surface *s, int cx, int cy, int r, u32 c);
 void s_disc(struct surface *s, int cx, int cy, int r, u32 c);
+void s_ellipse(struct surface *s, int cx, int cy, int rx, int ry, u32 c);
+void s_ellipse_fill(struct surface *s, int cx, int cy, int rx, int ry, u32 c);
+void s_rrect(struct surface *s, int x, int y, int w, int h, int r, u32 c);
+void s_triangle(struct surface *s, int x0, int y0, int x1, int y1, int x2, int y2, u32 c);
 void s_vgrad(struct surface *s, int x, int y, int w, int h, u32 top, u32 bot);
 
 #include "text.h"
@@ -324,6 +340,16 @@ int  app_storage_check(const char *id, const char *name, u32 bytes);
 int  app_storage_wipe(const char *id, int *files, u32 *bytes);
 int  app_storage_wipe_all(const char *id, int *files, u32 *bytes);
 int  app_storage_owns_path(const char *id, const char *path);
+
+/* Decoy files (kernel/desktop/decoys.c): bait planted on purpose, at every
+ * layer of the tree, so the isolation test has specific paths to be refused
+ * and nothing of the machine's to leak if one ever is not. */
+void decoys_plant(void);
+int  decoys_count(void);
+const char *decoys_path(int i);
+const char *decoys_body(int i);         /* shared buffer; read one at a time */
+int  decoys_present(int i);             /* still byte-identical to the bait */
+int  decoys_describe(char *out, int cap);
 int  app_storage_allowed(const char *path);
 /* Set only while this module creates or removes home/appdata/<account>/. */
 int  app_storage_maintenance(void);
@@ -635,6 +661,40 @@ void wm_notify(const char *title,const char *text,int warning);
 void graphics_init(const struct boot_framebuffer *fb);
 #include "gpu.h"
 void gpu_init(const struct boot_framebuffer *fb);
+/* The buffer every consumer of graphics_report() provides, named because the report outgrew an unnamed one.
+ * The panel carries the detection lines, the whole inventory a driver module read from the chip (up to
+ * 2048 bytes of it, which is the chip's decision and not this file's - 1152 was the number before a real
+ * GB207's report measured 1151 of it and lost its last clause, which is why a copy now states its own
+ * limit), and the paragraph about the
+ * coprocessor's firmware - and with all three present on a booted machine the report measured 2559 bytes
+ * into a 2560 buffer, i.e. it was clipped by one byte of headroom.
+ *
+ * It is 8192 for the measured reason in the test rather than a comfortable-looking one: the longest report
+ * ever printed here was 4582 bytes - a complete firmware set staged, every image held and parsed, the module
+ * inventory and all five adapter listings - and tools/tests/test_gsp_firmware.py requires the buffer to hold
+ * that *plus* the headroom a driver module's own inventory needs (2048 bytes, struct gpu_module_state's
+ * describe), because a card with both is the machine this ships for.  The number below is what leaves both
+ * room, and the cost of it is stack, measured with -fstack-usage: a 13440-byte frame for the terminal's
+ * command dispatcher and 8768 for the tty's command executor, each of which holds one of these buffers,
+ * against the 64 KiB kernel stack entry.S sets up.  The buffers stay
+ * locals rather than statics because six consoles and a window manager share this path, and a static report
+ * buffer would be shared the same way. */
+/* A command's whole response, in one buffer, in both the terminal window and the TTY.  8192 was set from a
+ * measured worst case that has since grown: the panel plus the FSP paragraphs plus the detection list now runs
+ * past it, and what the old size did with the overflow was nothing at all - the tail of the report was simply
+ * not printed, mid-word, with no line saying bytes had been dropped.  Doubled, and the producers are handed the
+ * same constant, so a report that still does not fit is a report that says so from inside the writer that knows
+ * the limit rather than one that stops silently at the edge of a buffer. */
+/* 32 KiB, and deliberately not smaller: the measured report runs to about 10 KiB, and the last time this was
+ * sized from a worst case the report grew past it and the tail vanished mid-word with no notice.  The limit
+ * that matters for reading is TERM_LINES, which bounds what the screen keeps; this one only bounds a buffer,
+ * and the writer says out loud when it has filled it. */
+#define SCOS_GRAPHICS_REPORT 32768
 void graphics_report(char *out,size_t capacity);
+/* The same three paragraphs the panel ends with - firmware intake, the parsed images, and the FSP mailbox -
+ * and nothing else, for a surface that cannot carry the whole panel.  The panel is longer than what a person
+ * can copy out of a console, and the paragraphs at its end are the ones that answer a question, so they get
+ * their own command rather than their own wording: this calls the panel's own report functions. */
+void graphics_fsp_report(char *out,size_t capacity);
 
 #endif /* SCOS_H */

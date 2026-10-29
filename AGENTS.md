@@ -1,66 +1,38 @@
-# SCos conversion rules
+# SCos
 
-On 2026-09-20 the user explicitly chose native x64 UEFI only and confirmed the
-frozen 32-bit image should remain. The BIOS path is removed. Root `make` builds
-an AMD64 PE32+ UEFI application, relocatable ELF64 kernel and GPT/FAT32 image.
-See `docs/migration/BOOT64.md` for contracts, verification and limitations.
+SCos is a native x64 UEFI operating system with its own kernel, desktop and apps.
+It is not Linux and is not going to become Linux.
 
-* Keep the custom SCos kernel and identity. Never replace it with Linux.
-* The user clarified that conversion means adapting the original implementation,
-  not rewriting the OS from scratch. Preserve reusable app/desktop behavior and
-  source; architecture cleanup is not permission to discard unported features.
-  Rework only components whose actual dependencies or correctness require it.
-  Do not use a smaller line count or a clean compile as evidence of equivalence.
-  Keep the user's detailed, thoughtful implementation and verification rule in
-  force for every conversion part, including shared app dependencies.
-* `dist/scos-32bit.img` is now permanently frozen at the verified r43 bytes.
-  Preserve its checksum, provenance and integrity guard. Do not overwrite it
-  with future builds. Historical revisions remain in Git history.
-* The user requested removal of duplicate i386 source/build files on 2026-09-20.
-  `legacy/i386/` and its font generator are removed. Retrieve individual files
-  from commit `6717943f977a7e0f95f0ace5fa48cfe6a564f873` when a port is requested;
-  do not restore the entire obsolete source tree. Preserve the frozen image.
-* Publish x86-64 development images as `dist/scos.img`, with checksum and truthful
-  verification notes. No release/round number until conversion starts on the
-  user's PC, per the latest instruction. Do not prematurely call this r1.
-* No BIOS/CSM, real-mode/protected-mode transitions or 32-bit build target should
-  be restored. `i386pep` is GNU ld's AMD64 PE backend name, not a 32-bit mode.
-  Keep native-width pointers and spec-sized protocol/register fields distinct.
-* The user subsequently authorized apps and their necessary shared desktop
-  dependencies. Reuse/adapt original feature source from `6717943`, not simplified
-  replacements. `kernel/desktop/` is the active x64 port, not a legacy build.
-  The user then authorized integration verification and conversion of the
-  remaining ORIGINAL PCI/xHCI/ATA/ACPI drivers; see DRIVER64.md. New hardware
-  drivers/libraries remain outside that authorization.
-  A bootable test image is NOT a complete OS or physical-PC acceptance.
-* The latest clarification authorizes completion of ALL already-written source,
-  not only driver files. See CONVERSION-AUDIT.md for the full disposition audit.
-  Do not start new drivers until the user verifies behavior and requests them.
-* Conversion approval is OPEN, but follow the user's component-by-component scope.
-  New GPU/NIC/Wi-Fi/browser driver/library integration requires a SEPARATE
-  instruction after conversion. Research is not approved integration.
-* Preserve r41's physically validated packet-sized HID reception and report
-  assembly when porting. No sensitivity guesses or emulator-only shortcuts.
-* Preserve `os.html`. Do not restore v86 or temporary diagnostic guest UI.
-  Retain legitimate host QEMU tools; retire temporary verification harnesses,
-  disposable images and logs after recording results.
-* Run `python3 tools/check_milestone.py` before delivery. Use QEMU snapshots;
-  never attach host physical disks/devices by default. Verify the actual image
-  bytes pushed, not merely the checksum text. Build/emulator success is NOT
-  physical-PC acceptance or proof of bug freedom.
+## What must stay true
 
-* On 2026-09-20 the user accepted the input/compositor fixes and explicitly
-  authorized this first open-source integration: independent app registration
-  and an adapted upstream Lua compiler/runtime for user-created apps. Lua and
-  its necessary freestanding numeric/format support subset are now approved.
-  This does not authorize new hardware drivers, networking, or a browser engine.
-  Keep upstream provenance/license notices and document port restrictions.
+* `dist/scos-32bit.img` is frozen at r43. Do not overwrite it, and keep its
+  checksum/provenance guard intact.
+* `os.html` stays as it is.
+* Native x64 UEFI only. No BIOS/CSM, no 32-bit build target restored.
+* The OS identity - kernel, desktop, apps, look - is the point. Do not replace
+  working SCos code with something else in order to get a feature.
 
-* The user now authorizes an expanded Lua API, custom themes/backgrounds, native
-  C App Studio and validated .cat packages replacing directly launchable .lua
-  files. All built-in apps must be C. Preserve reusable test tools from now on;
-  this supersedes the earlier requirement to delete temporary verification tools.
+## The task
 
-User correction: Counter/Sketch are optional Lua CAT demonstrations under home/demos, not C built-ins or preinstalled apps. Studio clipboard must be bounded; retain reusable regression tests.
+**Make the GPU accelerate SCos.** Everything else is in service of that.
 
-Current display task: repair compositor drag damage and mouse capture, fixed-size app icons, bounded text, confirmed real package installation with shortcuts, and a Windows picker beside the launcher. Do not claim SMP or hardware-vsync from QEMU tests.
+* No size limits. If the firmware, the image or a buffer needs to be bigger, make
+  it bigger. `dist/scos.img` carries whatever the card needs to be started, so the
+  machine that boots it does not have to supply anything.
+* No staged delivery. Fix everything that is in the way and deliver an image that
+  boots on the user's RTX 5050 with the GPU doing work.
+* Write the driver. Networking, a browser engine and other unrelated hardware are
+  still out of scope; the NVIDIA/GSP path is the scope.
+* Real hardware logs from the user are ground truth about the machine. QEMU can
+  never prove a GB207 claim; it proves the code paths around it.
+* Say what was measured and what was not. Do not dress an emulator result up as a
+  hardware result, and do not withhold a working fix behind a verification gate.
+
+## Practical notes
+
+* `make` builds; `make gpu-modules` builds and verifies the driver modules;
+  `make dist` writes `dist/scos.img` + record + checksum; `make ventoy` writes the
+  same bytes to `build/scos-ventoy.img` for a stick.
+* `python3 tools/check_delivery.py` and `python3 tools/check_milestone.py` run
+  before delivery. `python3 tools/tests/test_*.py` is the suite.
+* Use QEMU snapshots. Never attach host physical disks.

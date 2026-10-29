@@ -276,7 +276,8 @@ static void sl_paint(struct window *w)
         int tw = s_text_width(m);
         s_fill(s, (s->w - tw) / 2 - 12, 210, tw + 24, 30, t->win_bg);
         s_frame_rect(s, (s->w - tw) / 2 - 12, 210, tw + 24, 30, t->main);
-        s_text(s, (s->w - tw) / 2, 217, m, t->main);
+        { int tx = (s->w - tw) / 2; if (tx < 4) tx = 4;
+          s_clip_text(s, tx, 217, m, t->main, s->w - 8); }
     }
 }
 

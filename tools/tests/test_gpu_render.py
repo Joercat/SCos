@@ -26,6 +26,7 @@ The second guest in this file is `-vga std`, which is what every other suite boo
 "the GPU is used when it exists" and "nothing breaks when it does not" tied to the same image.
 """
 import os
+import random
 import re
 import struct
 import sys
@@ -109,7 +110,7 @@ def test_engine_paints_the_console():
         assert '800x600 stride 800' in serial, serial[-1500:]
 
         text = report(g)
-        assert "module engine paints this function's scanout" in text, text[-2000:]
+        assert "render path: module engine paints this scanout" in text, text[-2000:]
         assert 'hand-authored id row and capability record' in text, text[-2000:]
 
         assert g.call('gpu_engine_drives_output') == 1, 'engine bound but not driving the console'
@@ -123,7 +124,7 @@ def test_engine_paints_the_console():
         g.call('graphics_report', g.scratch, 4096)
         panel = g.string(g.scratch, 4096)
         assert 'driver module cirrus (family cirrus) loaded from storage and verified by device ' \
-               'readback, 225/225 pixels; used for solid output rectangles' in panel, panel[-1800:]
+               'readback, 225/225 pixels; used for flat output regions' in panel, panel[-1800:]
         # Three files are on the disk now, and the two that are not Cirrus stay unopened.  The expected
         # figure is read out of the packed files themselves rather than written down here, because the
         # number is a property of the disk image and a literal in a test goes stale the moment a module
@@ -187,6 +188,104 @@ def test_engine_paints_the_console():
         assert '(no GPU drawing yet' not in text, text[-1500:]
 
 
+def shadow_device(g, x, y, w, h):
+    """Read the console's own memory for a rectangle and the compositor's shadow of it."""
+    px = g.ptr(g.base + g.symbols['screen'])
+    stride = g.value('screen_w')
+    fbbase = int.from_bytes(g.debug.read(g.base + g.symbols['output'], 8), 'little')
+    fbstride = int.from_bytes(g.debug.read(g.base + g.symbols['output'] + 24, 4), 'little')
+    shadow = b''.join(g.debug.read(px + (y + r) * stride * 4 + x * 4, w * 4) for r in range(h))
+    device = b''.join(g.debug.read(fbbase + (y + r) * fbstride * 4 + x * 4, w * 4) for r in range(h))
+    return shadow, device
+
+
+def paint_into_shadow(g, x, y, w, h, pixels):
+    px = g.ptr(g.base + g.symbols['screen'])
+    stride = g.value('screen_w')
+    for r in range(h):
+        g.debug.write(px + (y + r) * stride * 4 + x * 4, pixels[r * w * 4:(r + 1) * w * 4])
+
+
+def test_engine_paints_flat_regions_of_a_real_rectangle():
+    """The path that matters for a desktop: a damage rectangle that is *not* one colour.
+
+    A window is a flat surround around textured content, a wallpaper is flat around icons, and the old
+    output path offered the engine a rectangle only if every pixel in it was identical - so a machine
+    with a verified engine reported "engine drives the console" and painted 0 pixels through it.  Three
+    things are asserted here, all against the device rather than against what the kernel believes:
+
+    1. most pixels of a structured rectangle are painted by the engine (the counters, and the device);
+    2. the device matches the compositor's shadow byte for byte, including where the engine and the CPU
+       each painted part of the same row - a decomposition bug that shifts a rectangle by one row leaves
+       the shadow correct and the screen wrong, which is exactly what a readback of the shadow cannot see;
+    3. a rectangle too small or too textured to be worth a transfer still lands, entirely on the CPU.
+    """
+    with Guest('gpu-render-regions', vga='cirrus') as g:
+        g.run(0.5)
+        rng = random.Random(11)
+        x, y, w, h = 37, 101, 333, 217
+        # The shape of a window: flat chrome and background around a textured interior, plus one band of
+        # narrow vertical stripes (flat runs wide enough to be worth a transfer, unlike glyph strokes).
+        rows = []
+        for r in range(h):
+            for c in range(w):
+                if 60 <= r < 140 and 80 <= c < 220:
+                    rows.append(rng.getrandbits(24))          # content: the CPU must copy this
+                elif 150 <= r < 175:
+                    rows.append(0x000000ff if (c // 17) % 2 else 0x00ffffff)
+                else:
+                    rows.append(0x00203040 * (1 + (r // 60)))  # flat bands: the engine's work
+        content = struct.pack('<%dI' % (w * h), *rows)
+
+        paint_into_shadow(g, x, y, w, h, content)
+        engine_before, cpu_before = g.value('engine_work_pixels'), g.value('cpu_work_pixels')
+        g.call('fb_flip_rect', x, y, w, h)
+        engine_done = g.value('engine_work_pixels') - engine_before
+        cpu_done = g.value('cpu_work_pixels') - cpu_before
+        assert engine_done + cpu_done == w * h, ('a pixel was neither painted nor copied',
+                                                 engine_done, cpu_done, w * h)
+        assert engine_done > (w * h) // 2, ('the engine painted a fraction of a structured rectangle',
+                                            engine_done, w * h)
+        assert cpu_done > 0, 'a rectangle with a textured interior must still use the CPU for it'
+        shadow, device = shadow_device(g, x, y, w, h)
+        assert shadow == content, 'the shadow the compositor drew into changed under the test'
+        assert device == shadow, ('the console does not match the compositor shadow: a rectangle the '
+                                  'decomposition moved is the one failure this readback cannot see')
+
+        # A textured rectangle with no flat area worth a transfer: nothing for the engine, and it lands.
+        noise = struct.pack('<%dI' % (256 * 64), *[rng.getrandbits(24) for _ in range(256 * 64)])
+        paint_into_shadow(g, 8, 8, 256, 64, noise)
+        engine_before, cpu_before = g.value('engine_work_pixels'), g.value('cpu_work_pixels')
+        g.call('fb_flip_rect', 8, 8, 256, 64)
+        assert g.value('engine_work_pixels') == engine_before, 'the engine took a rectangle it cannot win'
+        assert g.value('cpu_work_pixels') - cpu_before == 256 * 64, 'a textured rectangle was miscounted'
+        shadow, device = shadow_device(g, 8, 8, 256, 64)
+        assert device == shadow == noise, 'the CPU path no longer paints a textured rectangle exactly'
+
+
+def test_a_desktop_repaint_is_mostly_painted_by_the_engine():
+    """The whole desktop, flipped the way the compositor flips it, with windows open."""
+    with Guest('gpu-render-desktop', vga='cirrus') as g:
+        g.run(0.5)
+        for app in ('terminal', 'files', 'settings'):
+            try:
+                g.launch(app)
+            except AssertionError:
+                pass
+        g.run(0.6)
+        for sym in ('engine_work_pixels', 'cpu_work_pixels'):
+            g.debug.write(g.base + g.symbols[sym], b'\0\0\0\0')
+        g.call('fb_flip')
+        engine_done, cpu_done = g.value('engine_work_pixels'), g.value('cpu_work_pixels')
+        total = engine_done + cpu_done
+        assert total == g.value('screen_w') * g.value('screen_h'), (total, 'one frame expected')
+        assert engine_done * 3 > total, ('a desktop frame went mostly through the CPU, which is the state '
+                                         'this test exists to catch', engine_done, cpu_done)
+        text = report(g)
+        painted = re.search(r'pixels painted: (\d+) by the GPU\'s 2D engine, (\d+) by the CPU', text)
+        assert painted and int(painted.group(1)) > 0, text[-1200:]
+
+
 def test_cpu_path_without_an_engine():
     """The same image on a console device with no 2D engine: everything still draws, on the CPU."""
     with Guest('gpu-render-cpu') as g:
@@ -208,7 +307,9 @@ def test_cpu_path_without_an_engine():
 
 if __name__ == '__main__':
     failures = 0
-    for test in (test_engine_paints_the_console, test_cpu_path_without_an_engine):
+    for test in (test_engine_paints_the_console, test_engine_paints_flat_regions_of_a_real_rectangle,
+                 test_a_desktop_repaint_is_mostly_painted_by_the_engine,
+                 test_cpu_path_without_an_engine):
         try:
             test()
             print('PASS:', test.__name__)

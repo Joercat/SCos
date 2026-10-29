@@ -19,7 +19,8 @@ implementations have now been adapted and integration-tested; see
 [driver verification and limitations](docs/migration/DRIVER64.md).
 
 **Still unavailable:** AHCI/NVMe/USB mass-storage persistence, networking/real
-browser engine and accelerated GPU drivers. Files remain RAM-only unless a
+browser engine, and GPU acceleration on Turing-or-later cards that needs vendor firmware.
+Files remain RAM-only unless a
 unique supported ATA SCos-data partition is verified; `save` requires the
 `tlpdo` password and a confirmation.
 ACPI has a manual-power fallback for unsupported firmware. Emulator success is
@@ -152,7 +153,7 @@ Counter and Sketch are optional Lua demonstrations in `/home/demos/*.cat`: open
 them in Files and approve installation. They are not preinstalled. Run `appstrt studio` to edit a project, syntax-check it with
 the real Lua 5.4.9 compiler, build a `.cat` package and launch it with F5.
 Studio supports range selection and Ctrl+C/X/V with a 16 KiB clipboard and
-64 KiB source limit. Raw `.lua` launching is removed. API 2 offers 56 functions for drawing, widgets,
+64 KiB source limit. Raw `.lua` launching is removed. API 2 offers 69 functions for drawing, widgets,
 window control, private data, system queries and confirmed global themes.
 Settings selects four presets or up to eight custom palettes/backgrounds.
 
@@ -227,11 +228,13 @@ python3 tools/run_qemu.py --xhci # x64 EDK2/q35, native USB HID, disposable disk
 make clean
 ```
 
-The packaged `dist/scos.img` is a 64-MiB GPT disk with a FAT32 EFI system partition:
-`EFI/BOOT/BOOTX64.EFI`, `SCOS/KERNEL.ELF`, `SCOS/KERNEL.CRC`, `SCOS/DRVLIST.IDX`,
-`SCOS/BUILD.TXT` and the GPU `.MOD` files. There is no signature file and no
-key material: boot signing was deliberately removed. It is a development
-integration artifact, not a request to flash or physically test the PC now.
+The packaged `dist/scos.img` is a 69,206,016-byte (66 MiB) GPT disk with a FAT32 EFI
+system partition: `EFI/BOOT/BOOTX64.EFI`, `SCOS/KERNEL.ELF`, `SCOS/KERNEL.CRC`, the
+three driver modules, and the coprocessor's own files - `GSPFMC.BIN`, `GSP.BIN`
+(63,571,696 B) and `GSPBL.BIN` - so the image carries everything the card is given
+rather than expecting the machine that boots it to supply any of it. There is no
+signature file and no key material: boot signing was deliberately removed. It is a
+development integration artifact, not a request to flash or physically test the PC now.
 It also contains a separate 128-KiB SCos-data partition. Only the verified ATA
 path can save there, and the saved image is encrypted by default; the q35/AHCI
 guest cannot persist. Neither a USB boot medium nor the xHCI HID driver implies
@@ -295,7 +298,23 @@ Only existing supported ATA persistence is available; no new storage drivers.
 Top-right notifications overlay windows, menus and modals. Click to dismiss;
 normal notices expire after ten seconds. Lua apps can use `scos.notify(text)`.
 
-`graphics` reports read-only PCI display-device discovery and the CPU renderer.
-**GPU acceleration and working hardware-driver selection remain unimplemented.**
-The boot warning explicitly reports CPU fallback. GOP/PAT/write combining are
-not GPU rendering. Browser integration remains deferred.
+`graphics` reports read-only PCI display-device discovery, the renderer and the
+measured split of pixels between the GPU engine and the CPU. Three families have
+driver code (Cirrus CL-GD5446 and ATI Rage128 offer a 2D engine; NVIDIA's module
+for Turing and later identifies the chip and reports its registers but offers no
+engine), and every damaged rectangle is now decomposed into flat regions and
+painted by the engine when one is bound - measured at 74% of a desktop frame on an
+emulated CL-GD5446, against 0% before. **On a Turing-or-later NVIDIA card the GPU
+still renders nothing**: submission there needs GSP firmware and a resource
+manager, which this tree does not have. What that path needs from the card is
+now measured rather than assumed - the module reads the frame buffer's size from
+the chip's own scratch word and the kernel computes the firmware's reservation
+from it, refusing with a reason when the card will not say. The coprocessor's three
+firmware files are fetched and verified by `make gsp-firmware-set` (partial clone of
+linux-firmware, per-role container checks) and packed into the delivered image by
+`make dist`, which sizes the disk for them: `dist/scos.img` is 66 MiB and carries
+`GSP.BIN`, `GSPFMC.BIN` and `GSPBL.BIN`, because a handover built from the FMC alone
+has no resource-manager image to boot into. What is still missing is the code that
+submits work once the coprocessor runs: See
+[why the GPU was not accelerating, and what was fixed](docs/migration/GPU-ACCELERATION.md).
+GOP/PAT/write combining are not GPU rendering. Browser integration remains deferred.

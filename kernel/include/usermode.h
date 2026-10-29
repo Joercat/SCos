@@ -78,7 +78,8 @@ struct window;
 #define SC_NR_INFO        32
 #define SC_NR_SET_ICON    33
 #define SC_NR_FAULT       34
-#define SC_NR_MAX         34
+#define SC_NR_STORAGE     35
+#define SC_NR_MAX         35
 
 /* DRAW subcommands. */
 #define SC_DRAW_CLEAR     1
@@ -97,6 +98,13 @@ struct window;
 #define SC_DRAW_BUTTON    14
 #define SC_DRAW_CHECKBOX  15
 #define SC_DRAW_PROGRESS  16
+/* r44 shapes: an ellipse (outline and fill), a rounded rectangle and a filled
+ * triangle.  Drawing them here rather than from a package's own pixel loop is
+ * what keeps the costs chargeable and identical in both hosts. */
+#define SC_DRAW_ELLIPSE      17
+#define SC_DRAW_ELLIPSE_FILL 18
+#define SC_DRAW_RRECT        19
+#define SC_DRAW_TRIANGLE     20
 
 #define USER_EVENT_OPEN   1
 #define USER_EVENT_PAINT  2

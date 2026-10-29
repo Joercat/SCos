@@ -98,7 +98,7 @@ static void tty_draw(void)
     for (u32 i = 0; i < n; i++) p[i] = TTY_BG;
     char heading[32] = "SCos tty";
     char number[8]; fmt_u32(number,active_console+1); strcat(heading,number);
-    s_text(&screen,6,4,heading,TTY_FG);
+    s_clip_text(&screen,6,4,heading,TTY_FG,screen_w-12);
     int y = 4 + FONT_H + 2;
     int first = tty_nlines - (tty_rows - 2);
     if (first < 0) first = 0;
@@ -305,6 +305,7 @@ static void tty_exec(char *cmd)
             "  appstrt <app>   launch a GUI app (needs wm; binds you back to it)\n"
             "  appuninstall <id>  removal of a user app; ERASES its data (tlpdo)\n"
             "  graphics        detected GPUs and renderer status\n"
+            "  graphics fsp    the firmware intake and FSP mailbox paragraphs alone\n"
             "  wm              return to the desktop / start the WM\n"
             "  dmesg           kernel log ring (USB, input, fb, mm...)\n"
             "  free            memory pool + allocator counters\n"
@@ -677,7 +678,12 @@ static void tty_exec(char *cmd)
         } else tty_print("kill: no such pid");
     }
     else if(!strcmp(args[0],"appuninstall")){char result[256];if(nargs!=2||!strcmp(args[1],"--help"))tty_print("Usage: appuninstall <app-id> (keeps projects/data)");else{app_uninstall(args[1],result,sizeof(result));tty_print(result);}}
-    else if(!strcmp(args[0],"graphics")){char result[2560];if(nargs!=1)tty_print("Usage: graphics");else{graphics_report(result,sizeof(result));tty_print(result);}}
+    else if(!strcmp(args[0],"graphics")){
+        static char result[SCOS_GRAPHICS_REPORT];   /* static: 32 KiB does not belong on the console stack */
+        if(nargs>2)tty_print("Usage: graphics | graphics fsp");
+        else if(nargs==2&&!strcmp(args[1],"fsp")){graphics_fsp_report(result,sizeof(result));tty_print(result);}
+        else{graphics_report(result,sizeof(result));tty_print(result);}
+    }
     else if (!strcmp(args[0], "appstrt")) {
         if (nargs < 2) {
             tty_print("appstrt <app>: about blackjack browser calendar "

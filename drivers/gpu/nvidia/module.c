@@ -30,6 +30,13 @@
 #include "gpu_abi.h"
 #include "blackwell_regs.h"
 
+/* The one register this file reads outside blackwell_regs.h, because it is not a boot or engine
+ * register at all: NV_PGC6_AON_SECURE_SCRATCH_GROUP_42, 0x001183a4, RW-4R, in the always-on scratch
+ * group, published (MIT) in NVIDIA's src/common/inc/swref/published/ampere/ga102/dev_gc6_island.h.
+ * The boot firmware leaves the frame buffer's size in it as a count of MiB; nouveau's
+ * ga102_fb_vidmem_size() reads it the same way.  See probe_vram() for what makes a value usable. */
+#define NV_PGC6_AON_SECURE_SCRATCH_GROUP_42   0x001183a4u
+
 /* A module may not import anything, so it supplies the one memory helper it needs. */
 void *memset(void *pointer, int value, unsigned long bytes)
 {
@@ -39,6 +46,8 @@ void *memset(void *pointer, int value, unsigned long bytes)
 }
 
 static const struct scos_gpu_exports *X;
+
+#define DESC_RESERVE 96u        /* room held back at the end of `text' for the clipping notice */
 
 struct inventory {
     u64 physical, mapped_bytes;         /* where the block is, as the PCI function reports it */
@@ -88,6 +97,16 @@ struct inventory {
     int ce_locked, ce_dead, ce_replies;   /* what the first copy engine's own block answered: the lock,
                                            * nothing at all, or a reply that is content */
     u32 fsp_scratch[4];
+    /* The video-memory size the chip keeps in a scratch word.  Provenance: the register is
+     * NV_PGC6_AON_SECURE_SCRATCH_GROUP_42, 0x001183a4, published (MIT) in NVIDIA's own
+     * src/common/inc/swref/published/ampere/ga102/dev_gc6_island.h, RW-4R; the meaning - a count of
+     * mebibytes - is the one nouveau's ga102_fb_vidmem_size() gives it (`nvkm_rd32(device, 0x1183a4)
+     * << 20`), and that is stated rather than implied because this file otherwise cites only the
+     * register documentation.  It is read, never written: a boot firmware put it there. */
+    u32 vram_word;                      /* the word as read, whatever it said */
+    u32 vram_mib;                       /* its value when it was usable as a size */
+    int vram_state;                     /* 0 not asked, 1 answered, 2 all ones, 3 a refusal, 4 zero/absurd,
+                                         * 5 the register window stops short of the word */
     int fsp_attempted, fsp_error_reads, fsp_locked, fsp_replies;
     int fsp_direct, fsp_unreachable;      /* reached through the register mapping, or not reached at all */
     u64 fsp_handle;                       /* its own page, when 0x8f0000 is past the mapping's cap */
@@ -96,14 +115,16 @@ struct inventory {
     u32 top_engines, top_bus;         /* entries the chip called engines, and the bus blocks it also lists */
     u32 top_ce_raw0, top_ce_raw1, top_ce_raw2;   /* the first copy engine's three rows, as read */
     u32 top_v2_cfg;                   /* the CFG dword of whichever block answered, kept for the report */
-    /* Built once at the end of init, at the kernel's own limit for a description (1152, in
-     * gpu_module_state.describe - and the same number again here, because the shorter of the two is what
-     * decides what a user reads).  The size is asserted by the host harness rather than trusted here: the
-     * fixture seeds the widest report the format can describe and checks the length, which is how 512
-     * became 768 and why 768 became this: every clause that names a target the chip refused costs about a
-     * hundred and thirty bytes, and a clipped tail would drop the very clause the next increment depends
-     * on. */
-    char text[1152];
+    /* Built once at the end of init, sized to the kernel's own limit for a description
+     * (gpu_module_state.describe - and the same number again here, because the shorter of the two decides
+     * what a user reads).  It has gone 512 -> 768 -> 1152 -> 2048, and the last step was not a refactor: a
+     * real GB207's report measured 1151 bytes, one less than the old field, because the clause naming what a
+     * chip refused to answer is longer than any clause a fixture had seeded, and the part that fell off the
+     * end was the part about the submission window's clock.  Every per-target refusal costs about a hundred
+     * and thirty bytes to state and how many there are is the chip's decision, so the field is now twice what
+     * a real card produced, DESC_RESERVE is held back at the end for a notice that says a report was cut, and
+     * both this buffer and the kernel's copy of it announce themselves instead of stopping quietly. */
+    char text[2048];   /* DESC_RESERVE of it is held back for the notice, so 1951 is what a report gets */
 };
 
 static struct inventory inv;
@@ -124,6 +145,30 @@ static u32 window_read(u32 offset)
     inv.reads++;
     if (inv.window_direct) return X->read32(inv.handle, offset);
     return X->read32(inv.window_handle, offset - NV_USERMODE_CFG0);
+}
+
+/* What a read that the bus refused said, in the words the published code list gives for it.  This is a
+ * formatting function over a two-line lookup, and its whole job is that a refusal is never printed as an
+ * answer: an earlier build of this module called 0xbadf5040 "content", which is how a driver reads a fault as
+ * a fact about a block. */
+static const char *pri_refusal_name(u32 value)
+{
+    switch (NV_PRI_REFUSAL_CODE(value)) {
+        case NV_PRI_ERROR_TARGET_LOCKED:        return "the coprocessor's target is locked to this reader";
+        case NV_PRI_CODE_FECS_PRI_TIMEOUT:      return "the front-end channel scheduler timed out on it";
+        case NV_PRI_CODE_FECS_PRI_DECODE:       return "nothing decodes at that address";
+        case NV_PRI_CODE_FECS_PRI_RESET:        return "the block is in reset";
+        case NV_PRI_CODE_FECS_PRI_FLOORSWEEP:   return "the block is floor-swept off";
+        case NV_PRI_CODE_FECS_PRI_STUCK_ACK:    return "an acknowledge never came back";
+        case NV_PRI_CODE_FECS_PRI_0_EXPECTED_ACK: return "no acknowledge was expected and one was owed";
+        case NV_PRI_CODE_FECS_PRI_FENCE_ERROR:  return "a fence faulted";
+        case NV_PRI_CODE_FECS_PRI_SUBID_ERROR:  return "the sub-id was wrong";
+        case NV_PRI_CODE_FECS_PRI_ORPHAN:       return "the request was orphaned";
+        case NV_PRI_CODE_FECS_DEAD_RING:        return "its ring is dead";
+        case NV_PRI_CODE_FECS_TRAP:             return "the block trapped the access";
+        case NV_PRI_CODE_FECS_PRI_CLIENT_ERR:   return "a client error at a target it would not decode";
+        default:                                return 0;
+    }
 }
 
 static u32 reg_read(u32 offset)
@@ -543,6 +588,32 @@ static void probe_targets(void)
  * advancing, the window the Volta and Turing documentation describes is present on this silicon, and the
  * copy-engine work after this is addressable rather than speculative.  If it answers nothing, that is the
  * ceiling, measured.  Both answers are reported; neither is written to. */
+/* The frame buffer's size, from the scratch word the boot firmware leaves it in.  This is the one
+ * input a GSP reservation cannot do without: every region of that reservation is an offset back from
+ * the top of video memory, so a driver that does not know the top has nowhere to place anything - and
+ * the kernel cannot read this word itself, because the register block is the module's window.
+ *
+ * The checks are the same shape as everywhere else in this file: all ones is a block that is not
+ * answering, a PRIV refusal is a block that will not answer *this* reader, and a value of zero or one
+ * larger than any card is not a size.  In each of those cases nothing is reported, because the kernel
+ * treats a reported zero as "not known" and a wrong number as a place to boot firmware into. */
+static void probe_vram(void)
+{
+    u32 value;
+
+    inv.vram_word = inv.vram_mib = 0;
+    /* 5 is this driver's own bound and 4 is the chip's answer: a window that stops short of the
+     * register is not a card that said something wrong, and the two must not read alike. */
+    if (inv.mapping_bytes <= NV_PGC6_AON_SECURE_SCRATCH_GROUP_42) { inv.vram_state = 5; return; }
+    value = reg_read(NV_PGC6_AON_SECURE_SCRATCH_GROUP_42);
+    inv.vram_word = value;
+    if (value == 0xffffffffu) { inv.vram_state = 2; return; }
+    if (NV_PRI_IS_REFUSAL(value)) { inv.vram_state = 3; return; }
+    if (!value || value > (512u << 10)) { inv.vram_state = 4; return; }   /* 512 GiB is not a card */
+    inv.vram_mib = value;
+    inv.vram_state = 1;
+}
+
 static void probe_usermode(void)
 {
     /* The documented page sits at the top of a 16 MiB register BAR, which is past the kernel's per-mapping
@@ -577,11 +648,16 @@ static void probe_usermode(void)
  * formats into its own buffer.  These four helpers are the whole formatting machinery. */
 struct buf {
     char *at, *end;                     /* `end' is one past the last byte that may be written */
+    u32 dropped;                        /* bytes asked for and refused: see the notice build_text writes */
 };
 
+/* A writer with a memory of what it could not write.  Before this, text that did not fit simply stopped, and
+ * a real card's inventory lost its last clause - the one about the submission window's clock - with nothing
+ * on the panel to show a sentence had been removed.  Refusing to write is a limit; hiding it is the bug. */
 static void put_char(struct buf *b, char c)
 {
     if (b->at < b->end) *b->at++ = c;
+    else b->dropped++;
 }
 
 static void put_text(struct buf *b, const char *s)
@@ -612,13 +688,18 @@ static const char *architecture_name(u32 architecture)
     case NV_PMC_BOOT_0_ARCHITECTURE_GV100: return "Volta";
     case NV_PMC_BOOT_0_ARCHITECTURE_TU100: return "Turing";
     case NV_PMC_BOOT_0_ARCHITECTURE_GA100: return "Ampere";
+    case NV_PMC_BOOT_0_ARCHITECTURE_GH100: return "Hopper";
+    case NV_PMC_BOOT_0_ARCHITECTURE_AD100: return "Ada";
+    case NV_PMC_BOOT_0_ARCHITECTURE_GB100: return "Blackwell, GB10x";
+    case NV_PMC_BOOT_0_ARCHITECTURE_GB200: return "Blackwell, GB2xx";
+    case NV_PMC_BOOT_0_ARCHITECTURE_GR100: return "Blackwell-next, GR10x";
     default: return 0;
     }
 }
 
 static void build_text(void)
 {
-    struct buf b = { inv.text, inv.text + sizeof(inv.text) - 1 };
+    struct buf b = { inv.text, inv.text + sizeof(inv.text) - 1 - DESC_RESERVE, 0 };
     u32 architecture = NV_PMC_BOOT_0_ARCHITECTURE(inv.boot0);
     const char *name = architecture_name(architecture);
     static const char major[] = "0123456789ABCDEF";
@@ -634,8 +715,10 @@ static void build_text(void)
     }
     put_text(&b, " arch 0x");
     put_hex(&b, architecture, 2);
-    /* Short on purpose: the kernel keeps 256 characters, and a sentence clipped at the end would hide
-     * the one clause a user most needs - whose screen this is. */
+    /* The name is short because it sits inside one line that a user reads as a whole; the field it is built
+     * in is gpu_module_state's describe, 2048 bytes with 96 held back for a clipping notice, and the number
+     * this line used to be written down to - 256, then 1152 - is how two generations of reports lost their
+     * tail without saying so. */
     put_char(&b, ' ');
     put_text(&b, name ? name : "(arch not in the published table)");
     put_text(&b, ", impl 0x");
@@ -660,7 +743,11 @@ static void build_text(void)
         put_text(&b, "; window ");
         put_text(&b, "class 0x");
         put_hex(&b, inv.usermode_class, 4);
-        put_text(&b, inv.usermode_class == NV_USERMODE_CLASS_ID_VOLTA_TURING ? "=published" : "");
+        /* Only the one class id the register file publishes is claimed: a card that answers something else is
+         * reported as answering something else, because the alternative - deciding which generation a class
+         * number belongs to from memory - is how 0xc461 came to be printed beside a 0x1100 read. */
+        put_text(&b, inv.usermode_class == NV_USERMODE_CLASS_ID_VOLTA_TURING ? "=published"
+                                                                          : " (not the 0xc461 reset value)");
         if (inv.timer_ticking) {
             u64 delta = inv.timer_end - inv.timer_start;
             u32 us = (u32)(delta / 1000u);
@@ -668,7 +755,7 @@ static void build_text(void)
             put_dec(&b, us);
             put_text(&b, "us");
         } else {
-            put_text(&b, " clock frozen");
+            put_text(&b, " clock still");
         }
     }
     /* The inventory the chip itself gave.  It goes at the end of the description, after the identity and
@@ -685,8 +772,7 @@ static void build_text(void)
         put_hex(&b, inv.top_cfg1, 8);
         put_text(&b, " (v0x");
         put_hex(&b, NV_PTOP_CFG_VERSION(inv.top_cfg1), 1);
-        put_text(&b, "); neither block reports the DEVICE_INFO2 format, and the Turing and Ampere arrays "
-                     "at those addresses named no engine either");
+        put_text(&b, ") no DEVICE_INFO2 format");
     } else {
         static const u32 base_of[4] = { NV_PTOP_DEVICE_INFO_AMPERE, NV_PTOP_DEVICE_INFO_ROWS1,
                                         NV_PTOP_DEVICE_INFO_TURING, NV_PTOP_DEVICE_INFO_AMPERE };
@@ -696,15 +782,15 @@ static void build_text(void)
         if (v2) {
             /* The table's own dimensions, as it reported them, plus how many rows were read to answer: a
                "0 engines" from a 353-row scan and from a 4-row scan are not the same finding. */
-            put_text(&b, " v2 (");
+            put_text(&b, " v2 ");
             put_dec(&b, NV_PTOP_CFG_MAX_DEVICES(inv.top_v2_cfg));
-            put_text(&b, " devices x ");
+            put_text(&b, "x");
             put_dec(&b, NV_PTOP_CFG_MAX_ROWS_PER_DEVICE(inv.top_v2_cfg));
-            put_text(&b, " rows of ");
+            put_text(&b, "/");
             put_dec(&b, NV_PTOP_CFG_NUM_ROWS(inv.top_v2_cfg));
-            put_text(&b, ", ");
+            put_text(&b, " rows, ");
             put_dec(&b, inv.top_rows);
-            put_text(&b, " read): LCE ");
+            put_text(&b, " read: LCE ");
         } else put_text(&b, ": LCE ");
         put_dec(&b, inv.top_lce);
         put_text(&b, "/VIC ");    put_dec(&b, inv.top_vic);
@@ -721,8 +807,7 @@ static void build_text(void)
              * claim the chip had called nothing an engine, when in fact it never said either way. */
             put_text(&b, ", ");
             put_dec(&b, inv.top_engines);
-            put_text(&b, inv.top_engines == 1u ? " engine per its own IS_ENGINE, "
-                                                : " engines per its own IS_ENGINE, ");
+            put_text(&b, inv.top_engines == 1u ? " engine (IS_ENGINE), " : " engines (IS_ENGINE), ");
             put_dec(&b, inv.top_bus);
             put_text(&b, " bus");
         }
@@ -766,7 +851,7 @@ static void build_text(void)
      * been careful about from the first line. */
     put_text(&b, "; GSP ");
     if (!inv.gsp_reachable) {
-        put_text(&b, "block at 0x110000 unreachable (engine reads 0x");
+        put_text(&b, "0x110000 unreachable (reads 0x");
         put_hex(&b, inv.gsp_engine, 8);
         put_text(&b, ")");
     } else if (inv.gsp_locked) {
@@ -776,10 +861,9 @@ static void build_text(void)
         /* Compressed on purpose, and the log line below carries the explanation: the panel has to hold the
          * whole report for a card whose identity line is longer than any the fixture seeds, and a clipped
          * tail would cut the clauses after this one. */
-        put_text(&b, "block at 0x110000 refused all five reads (0x");
+        put_text(&b, "0x110000 locked (0x");
         put_hex(&b, inv.gsp_engine, 8);
-        put_text(&b, ": a PRIV target locked against this reader, not a register value, so no field of it "
-                     "is read)");
+        put_text(&b, ")");
     } else {
         /* An all-ones read is no answer, and neither is an error code: the fatal and containment flags are
          * only quoted from registers that actually replied. */
@@ -802,45 +886,67 @@ static void build_text(void)
      * Naming the entry that decided it is the point: it is what separates this number from an assumption
      * about an 18-bit field no manual documents, and anyone holding dev_gsp.h can check it. */
     if (inv.pri_confirmed) {
-        put_text(&b, "; base unit measured on this chip: the GSP entry's field 0x");
+        put_text(&b, "; base unit 0x");
         put_hex(&b, inv.top_gsp_field, 6);
-        put_text(&b, " x ");
-        put_dec(&b, 1u << inv.pri_shift);
-        put_text(&b, " is the published 0x110000");
+        put_text(&b, " x 2^");
+        put_dec(&b, inv.pri_shift);
+        put_text(&b, " = 0x110000");
     } else if (inv.top_gsp_found) {
-        put_text(&b, "; no base unit: the GSP entry's field 0x");
+        put_text(&b, "; no PRI base from field 0x");
         put_hex(&b, inv.top_gsp_field, 6);
-        put_text(&b, " scales to no candidate that reaches the published 0x110000");
+        put_text(&b, "");
     }
     if (inv.ce_attempted) {
-        put_text(&b, "; the first LCE's block at 0x");
+        put_text(&b, "; LCE 0x");
         put_hex(&b, inv.ce_base, 6);
         if (inv.ce_locked) put_text(&b, " refused the same way");
         else if (inv.ce_dead) put_text(&b, " answers nothing");
         else if (inv.ce_replies) {
+            const char *why = NV_PRI_IS_REFUSAL(inv.ce_probe[0]) ? pri_refusal_name(inv.ce_probe[0]) :
+                              (NV_PRI_IS_REFUSAL(inv.ce_probe[1]) ? pri_refusal_name(inv.ce_probe[1]) : 0);
             put_text(&b, " answers 0x"); put_hex(&b, inv.ce_probe[0], 8);
             put_text(&b, "/0x"); put_hex(&b, inv.ce_probe[1], 8);
-            put_text(&b, ", which is content");
+            put_text(&b, why ? " refused: " : ": content");
+            if (why) put_text(&b, why);
         }
     }
     if (inv.fsp_locked) {
-        put_text(&b, "; the FSP scratch at 0x8f0320 refused too, so the microcontroller that releases the");
-        put_text(&b, " lock is out of reach as well");
+        put_text(&b, "; FSP scratch 0x8f0320 refused too");
     } else if (inv.fsp_replies) {
-        put_text(&b, "; the FSP scratch at 0x8f0320 answers 0x");
+        put_text(&b, "; FSP scratch 0x8f0320 = 0x");
         for (unsigned i = 0u; i < NV_PFSP_SCRATCH_GROUP_2_WORDS; i++) {
             if (i) put_text(&b, "/0x");
             put_hex(&b, inv.fsp_scratch[i], 8);
         }
-        put_text(&b, " (its own debug words, uninterpreted here)");
+        put_text(&b, " (decoupled read)");
     } else if (inv.fsp_unreachable) {
-        put_text(&b, "; the FSP page at 0x8f0000 could not be mapped, so nothing is claimed about it");
+        put_text(&b, "; FSP page 0x8f0000 unmapped");
+    }
+    /* The frame buffer's size, in the description and not only in the log: it is the number a GSP
+     * reservation is placed back from, so a reader deciding whether this card can be booted needs it in
+     * the report the panel prints.  A word that is not a size is quoted as what it was. */
+    if (inv.vram_state == 1) {
+        put_text(&b, "; VRAM ");
+        put_dec(&b, inv.vram_mib);
+        put_text(&b, " MiB (0x1183a4)");
+    } else if (inv.vram_state == 2) {
+        put_text(&b, "; VRAM unknown: 0x1183a4 all ones (not decoding)");
+    } else if (inv.vram_state == 3) {
+        put_text(&b, "; VRAM unknown: 0x1183a4 answered 0x");
+        put_hex(&b, inv.vram_word, 8);
+        put_text(&b, " (refused)");
+    } else if (inv.vram_state == 4) {
+        put_text(&b, "; VRAM unknown: 0x1183a4 ");
+        if (inv.vram_word) { put_text(&b, "holds 0x"); put_hex(&b, inv.vram_word, 8); }
+        else put_text(&b, "is zero");
+        put_text(&b, " (not a size)");
+    } else if (inv.vram_state == 5) {
+        put_text(&b, "; VRAM unknown: window stops short of 0x1183a4");
     }
     if (inv.top_lce && !inv.window_live) {
-        put_text(&b, "; engines are register blocks, not channels: no submission window answered, so "
-                     "nothing was submitted");
+        put_text(&b, "; no submission window: nothing submitted");
     } else if (inv.top_lce && inv.window_live && !inv.timer_ticking) {
-        put_text(&b, "; the window answered but its clock did not tick, so nothing was submitted through it");
+        put_text(&b, "; window up but clock still: nothing submitted");
     }
     *b.at = 0;
 }
@@ -931,6 +1037,8 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     inv.ce_locked = inv.ce_dead = inv.ce_replies = 0;
     inv.gsp_error_reads = inv.gsp_locked = 0;
     inv.fsp_scratch[0] = inv.fsp_scratch[1] = inv.fsp_scratch[2] = inv.fsp_scratch[3] = 0;
+    inv.vram_word = inv.vram_mib = 0;
+    inv.vram_state = 0;
     inv.fsp_attempted = inv.fsp_error_reads = inv.fsp_locked = inv.fsp_replies = 0;
     inv.fsp_direct = inv.fsp_unreachable = 0;
     inv.fsp_handle = 0;
@@ -992,6 +1100,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
         }
     }
 
+    probe_vram();
     probe_usermode();
     probe_engines();
     probe_gsp();
@@ -1000,7 +1109,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     /* Wide enough for the whole description plus the prefix: the window clause sits at the end of the
      * text, so a narrow log buffer would cut the one part this increment added. */
     char line[1280];  /* the description plus the log prefix, at the wider budget */
-    struct buf b = { line, line + sizeof(line) - 1 };
+    struct buf b = { line, line + sizeof(line) - 1, 0 };
     put_text(&b, "nvidia: ");
     put_hex(&b, device->vendor, 4);
     put_char(&b, ':');
@@ -1018,11 +1127,14 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
     if (inv.window_live) {
         /* A second line for whoever reads the log to decide what to build next: it states the inference
          * and its limit, rather than leaving a reader to conclude that the doorbell had been tried. */
-        static char second[208];
-        struct buf t = { second, second + sizeof(second) - 1 };
-        put_text(&t, "nvidia: doorbell at BAR0+0x810090 named, not written; ");
-        put_text(&t, inv.timer_ticking ? "with a live clock in that page a channel can be attempted next"
-                                       : "with the clock frozen no submission is attempted");
+        static char second[320];
+        struct buf t = { second, second + sizeof(second) - 1, 0 };
+        put_text(&t, "nvidia: BAR0+0x810090 is the legacy user-mode doorbell and this generation's is "
+                      "NV_VIRTUAL_FUNCTION_PRIV_DOORBELL at 0x2200; neither is written, and the clock in the "
+                      "legacy page read ");
+        put_text(&t, inv.timer_ticking ? "moving"
+                                       : "still, which says nothing about the GPU's own timer at 0x9400 that "
+                                         "the kernel panel measures");
         *t.at = 0;
         note(second);
     }
@@ -1030,7 +1142,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
      * deciding what to build next needs its state, not an inference from the mailbox addresses. */
     {
         static char third[320];
-        struct buf u = { third, third + sizeof(third) - 1 };
+        struct buf u = { third, third + sizeof(third) - 1, 0 };
         put_text(&u, "nvidia: GSP block at BAR0+0x110000 read, nothing written; ");
         if (!inv.gsp_reachable)
             put_text(&u, "the block does not answer, so there is nothing to hand work to yet");
@@ -1058,7 +1170,7 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
      * depends on whether *any* of the aperture answers, and the three answers only mean anything together. */
     if (inv.ce_attempted || inv.fsp_attempted || (inv.top_gsp_found && !inv.pri_confirmed)) {
         static char fourth[448];
-        struct buf w = { fourth, fourth + sizeof(fourth) - 1 };
+        struct buf w = { fourth, fourth + sizeof(fourth) - 1, 0 };
         int said = 0;
         put_text(&w, "nvidia: the other targets in the same aperture: ");
         if (inv.ce_attempted) {
@@ -1092,6 +1204,54 @@ int scos_module_init(const struct scos_gpu_exports *exports, struct scos_gpu_eng
         }
         *w.at = 0;
         note(fourth);
+    }
+
+    /* The frame buffer's size, handed to the kernel rather than only printed: it is the one input a GSP
+     * reservation cannot be computed without, and this is the only driver with a window into the register
+     * that holds it.  A value that failed the checks in probe_vram() is not reported at all, so the kernel's
+     * zero keeps meaning "the chip did not say". */
+    if (X->report && X->report->size >= sizeof(*X->report)) {
+        /* A state that is not a size clears the field rather than leaving a previous load's number in it:
+         * a stale size is a place a firmware reservation would be put. */
+        if (inv.vram_state == 1) {
+            X->report->vram_bytes = (u64)inv.vram_mib << 20;
+            X->report->vram_register = NV_PGC6_AON_SECURE_SCRATCH_GROUP_42;
+            X->report->vram_units = 1024u * 1024u;
+        } else {
+            X->report->vram_bytes = 0;
+            X->report->vram_register = 0;
+            X->report->vram_units = 0;
+        }
+    }
+    {
+        static char fifth[512];
+        struct buf v = { fifth, fifth + sizeof(fifth) - 1, 0 };
+        put_text(&v, "nvidia: video memory ");
+        if (inv.vram_state == 1) {
+            put_dec(&v, inv.vram_mib);
+            put_text(&v, " MiB, read from the scratch word at 0x1183a4 (NV_PGC6_AON_SECURE_SCRATCH_"
+                         "GROUP_42, published): the top of video memory a firmware reservation is "
+                         "placed back from");
+        } else if (inv.vram_state == 2) {
+            put_text(&v, "unknown: the scratch word at 0x1183a4 answers all ones, so the block is not "
+                         "decoding and no size is claimed");
+        } else if (inv.vram_state == 3) {
+            put_text(&v, "unknown: the scratch word at 0x1183a4 answered 0x");
+            put_hex(&v, inv.vram_word, 8);
+            put_text(&v, ", a refusal to this reader and not a size");
+        } else if (inv.vram_state == 4) {
+            put_text(&v, "unknown: the scratch word at 0x1183a4 ");
+            if (inv.vram_word) { put_text(&v, "holds 0x"); put_hex(&v, inv.vram_word, 8); }
+            else put_text(&v, "is zero");
+            put_text(&v, ", which is not a frame-buffer size");
+        } else if (inv.vram_state == 5) {
+            put_text(&v, "unknown: the register window does not reach 0x1183a4, which is this driver's "
+                         "mapping and not an answer from the chip");
+        } else {
+            put_text(&v, "unknown: the scratch word at 0x1183a4 was not read");
+        }
+        *v.at = 0;
+        note(fifth);
     }
 
     *out_ops = &ops;

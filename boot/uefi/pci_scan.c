@@ -54,7 +54,25 @@ static void consider(struct walk *w, uint8_t bus, uint8_t slot, uint8_t function
     w->out->display_functions++;
     uint16_t vendor = (uint16_t)vendev, device = (uint16_t)(vendev >> 16);
     const struct gpu_match *match = gpu_match_device(vendor, device, (uint8_t)cls, 0);
-    if (match && !w->out->match) {
+    if (!match) return;
+    int drivable = !gpu_match_named_only(vendor, device, (uint8_t)cls);
+    /* The winner is a drivable match in preference to one the naming table only recognises, whichever
+     * order the walk met them in: a named-only row can load nothing, so preferring it would replace a
+     * driver with a name.  The full list is kept for the caller, which is the only component that knows
+     * which family the disk can serve. */
+    /* The first drivable match wins over any earlier name-only one; a later name-only match never
+     * displaces a drivable one, and among equals the first seen is kept. */
+    int better = !w->out->found || (!w->out->winner_drivable && drivable);
+    if (w->out->matches < PCI_SCAN_MAX_MATCHES) {
+        struct pci_display_match *c = &w->out->candidates[w->out->matches++];
+        c->bus = bus; c->slot = slot; c->function = function;
+        c->subclass = (uint8_t)cls;
+        c->vendor = vendor; c->device = device;
+        c->match = match;
+        c->drivable = (uint8_t)drivable;
+    }
+    if (better) {
+        w->out->winner_drivable = (uint8_t)drivable;
         w->out->match = match;
         w->out->found = 1;
         w->out->bus = bus;
@@ -66,8 +84,9 @@ static void consider(struct walk *w, uint8_t bus, uint8_t slot, uint8_t function
     }
 }
 
-/* Walk one bus.  Returns 1 as soon as a match is held, because the stub stages exactly one module and a
- * second match would be a decision it must not make silently. */
+/* Walk one bus.  Every function is visited and every match recorded: choosing which family to read a
+ * module for is the caller's decision, taken with the disk's contents in hand, and a walk that stopped
+ * early would make that decision with half the facts. */
 static int walk_bus(struct walk *w, uint8_t bus, unsigned depth)
 {
     if (depth > PCI_SCAN_MAX_DEPTH) return 0;
@@ -103,7 +122,7 @@ static int walk_bus(struct walk *w, uint8_t bus, unsigned depth)
             }
             w->seen[next] = 1u;
             w->visits++;
-            if (walk_bus(w, (uint8_t)next, depth + 1u) && w->out->match) return 1;
+            walk_bus(w, (uint8_t)next, depth + 1u);
         }
     }
     return w->out->match != 0;

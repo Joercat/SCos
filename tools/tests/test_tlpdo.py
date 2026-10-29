@@ -41,13 +41,14 @@ def allowed(g, line):
 
 
 def transcript(g, win, tail=40):
-    """Tail of a terminal tab's own line buffer (lines are 256 bytes each, 512
-    of them, and the count follows them)."""
-    tw = g.ptr(win + 80)
-    tab = g.ptr(tw)
-    n = int.from_bytes(g.debug.read(tab + 256 + 512 * 256, 4), 'little')
-    return [g.debug.read(tab + 256 + 256 * i, 256).split(b'\0')[0].decode(errors='replace')
-            for i in range(max(0, n - tail), n)]
+    """Tail of a terminal tab's own scrollback.
+
+    Read through the terminal's own accessors (`term_debug`/`term_line`), not
+    through offsets into `struct term`: the scrollback is 1000 lines and has
+    already been 512 once, and a hand-computed offset silently returned an
+    empty transcript the day it changed."""
+    n = g.call('term_debug', win, 7)
+    return [g.string(g.call('term_line', win, i)) for i in range(max(0, n - tail), n)]
 
 
 def install(g, app_id):
@@ -146,7 +147,12 @@ def test():
 
         # The shell is usable again after the abort, and Esc cancels the field.
         g.type('help\n')
-        g.run(.3)
+        # The answer types itself onto the screen over about a second; wait for
+        # the terminal to say it has landed rather than for a fixed sleep.
+        for _ in range(60):
+            if any('page 1/' in l for l in transcript(g, term)):
+                break
+            g.run(.1)
         assert any('page 1/' in l for l in transcript(g, term)), transcript(g, term)[-5:]
         g.type('tlpdo appuninstall priv-two\n')
         g.run(.3)

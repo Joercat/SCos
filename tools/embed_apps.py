@@ -34,10 +34,19 @@ applications. They are NOT installed or listed in the launcher on a fresh boot.
 4. Approve to install a copy into /home/apps plus a desktop shortcut.
 5. Later find it in the launcher or use appstrt counter / appstrt sketch.
 
-Isolation is a self-test: it tries about fifty ways out of its own sandbox and
-prints CONTAINED or BREAKOUT for each. Launch it with the right-click
-"Launch isolated" action (or choices app isolation always) and require
-breakout=0. Its full report is also saved as report.txt in its data folder.
+Isolation is a self-test: it tries more than a hundred ways out of its own
+sandbox - traversal, absolute paths, other accounts' and other apps' files,
+the theme and notification capabilities, the VM's escape hatches, argument and
+resource limits, the drawing budget, format strings, and every one of the
+planted decoy files - and prints CONTAINED or BREAKOUT for each. Launch it with
+the right-click "Launch isolated" action (or choices app isolation always) and
+require breakout=0. Its full report is also saved as report.txt in its data
+folder.
+
+The decoys are real files in the real tree (try `decoys' in the Terminal for the
+list and whether each is still untouched). They hold no secrets: they exist so
+that a hostile package has something specific to reach for and this self-test
+has something specific to be refused.
 
 To inspect or modify a demo, open App Studio, choose Open, and enter
 /home/demos/counter.cat (or sketch.cat). Change its ID for your own app.

@@ -185,7 +185,8 @@ static void bj_paint(struct window *w)
         int tw = s_text_width(msg);
         s_fill(s, (s->w - tw) / 2 - 10, 240, tw + 20, 28, t->win_bg);
         s_frame_rect(s, (s->w - tw) / 2 - 10, 240, tw + 20, 28, mc);
-        s_text(s, (s->w - tw) / 2, 246, msg, mc);
+        { int tx = (s->w - tw) / 2; if (tx < 4) tx = 4;
+          s_clip_text(s, tx, 246, msg, mc, s->w - 8); }
     }
 
     for (int i = 0; i < 3; i++) {

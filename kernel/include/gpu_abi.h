@@ -43,7 +43,10 @@ typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
 
-#define SCOS_GPU_ABI_VERSION 1u
+/* 2: scos_gpu_device_report.vram_bytes became 64-bit.  A card with 8 GiB answered a 32-bit field with
+ * 0x200000000, which truncates to zero - "the chip did not say" - and a zero there is what stops a
+ * firmware reservation being placed at all.  The field is now the width of an address space. */
+#define SCOS_GPU_ABI_VERSION 2u
 
 /* "SGPM" in byte order: a file whose first four bytes are not these is not a module. */
 #define SCOS_GPU_MODULE_MAGIC 0x4d504753u
@@ -135,6 +138,21 @@ struct scos_gpu_device_info {
     u32 reserved;
 };
 
+/* What a module may report *back* about the function it was handed, as opposed to what it draws.  The
+ * device info a module receives is read-only, and this is the one place a module's own reading of the
+ * chip crosses to the kernel: a driver that can read the video-memory size says so, and one that cannot
+ * leaves the field zero.  Zero means "the chip did not say", never a size, so a caller that needs the
+ * number has to check it rather than treat it as an extent - which is the mistake that would place a
+ * firmware reservation at offset 0. */
+struct scos_gpu_device_report {
+    u32 size;
+    u32 vram_register;          /* the published register whose value became vram_bytes, 0 for none */
+    u32 vram_units;             /* the register's unit in bytes (1 MiB for the GC6 scratch word) */
+    u32 reserved;
+    u64 vram_bytes;             /* total video memory, 0 if the chip would not say; 64-bit because 8 GiB
+                                 * does not fit a u32 and truncating it would read as "no answer" */
+};
+
 /* The kernel's side of the contract.  Pass-through helpers only: each one exists so the module
  * does not need to touch page tables, port 0xcfc, or an unbounded wait loop of its own. */
 struct scos_gpu_exports {
@@ -155,6 +173,10 @@ struct scos_gpu_exports {
      * enforced by the kernel, so a module cannot hang the machine by spinning here. */
     u32 (*wait_bit)(u64 handle, u32 offset, u32 mask, u32 expect, u64 timeout_ticks);
     u64 (*alloc)(u64 bytes);     /* zeroed memory owned by the module, 0 on failure */
+    /* Filled by the module during init when it can read a fact about the chip that only it can reach.
+     * Always non-NULL; the kernel zeroes it before the call and reads it after, and a module that
+     * writes nothing there has reported nothing. */
+    struct scos_gpu_device_report *report;
 };
 
 /* A drawing surface, in the device's own memory space.  The kernel decides where surfaces live

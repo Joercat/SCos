@@ -46,6 +46,81 @@ static int api_theme_status(lua_State *L){lua_pushstring(L,theme_request.pending
 static int api_message(lua_State *L){cat_global_guard(L,PROC_CAP_IPC);struct lua_window *d=context(L);const char *s=label(L,1);if(strlen(s)>192)return luaL_error(L,"message exceeds 192 bytes");if(d->painting)return luaL_error(L,"messages cannot be requested from paint");if(wm_dialog_active()||(d->message_used&&(u32)(tick_count-d->message_at)<500)){lua_pushboolean(L,0);return 1;}d->message_used=1;d->message_at=tick_count;wm_dialog(d->w->app->title,s,NULL,NULL,NULL);lua_pushboolean(L,wm_dialog_active());return 1;}
 static int api_info(lua_State *L){lua_newtable(L);field(L,"version",2);field(L,"source_limit",CAT_SOURCE_MAX);field(L,"arena_limit",ARENA_SIZE);field(L,"data_limit",SCRIPT_MAX);field(L,"data_files",16);field(L,"theme_permission",!!(context(L)->permissions&CAT_PERMISSION_THEME));lua_pushboolean(L,proc_isolated());lua_setfield(L,-2,"isolated");return 1;}
 
+/* ---------------------------------------------------------------- shapes --- */
+/* The renderer already knows how to draw an ellipse, a rounded box and a
+ * triangle; packages should not have to rasterise them a pixel at a time and
+ * spend the whole drawing budget doing it.  Every one of these is a CALL into
+ * the same primitives the desktop itself uses, so a package's rounded button
+ * and the desktop's are the same figure, and the budget is charged the same
+ * way.  Radii are bounded exactly like `disc' so one call cannot become a CPU
+ * hang on a machine with no GPU to hide behind. */
+static int api_ellipse(lua_State *L){int x=xy(L,1),y=xy(L,2),rx=integer(L,3,0,1024),ry=integer(L,4,0,1024);u32 c=color(L,5);s_ellipse(canvas(L,8u*(u32)(rx>ry?rx:ry)+1),x,y,rx,ry,c);return 0;}
+static int api_ellipse_fill(lua_State *L){int x=xy(L,1),y=xy(L,2),rx=integer(L,3,0,1024),ry=integer(L,4,0,1024);u32 c=color(L,5);s_ellipse_fill(canvas(L,4u*(u32)rx*(u32)ry+1),x,y,rx,ry,c);return 0;}
+static int api_rounded(lua_State *L){int x=xy(L,1),y=xy(L,2),w=extent(L,3),h=extent(L,4),r=integer(L,5,0,1024);u32 c=color(L,6);if(w&&h)s_rrect(canvas(L,(u32)w*h+4u*(u32)r),x,y,w,h,r,c);return 0;}
+static int api_triangle(lua_State *L){
+    int x1=xy(L,1),y1=xy(L,2),x2=xy(L,3),y2=xy(L,4),x3=xy(L,5),y3=xy(L,6);u32 c=color(L,7);
+    int lo=y1<y2?(y1<y3?y1:y3):(y2<y3?y2:y3),hi=y1>y2?(y1>y3?y1:y3):(y2>y3?y2:y3);
+    int lx=x1<x2?(x1<x3?x1:x3):(x2<x3?x2:x3),hx=x1>x2?(x1>x3?x1:x3):(x2>x3?x2:x3);
+    s_triangle(canvas(L,(u32)(hx-lx+1)*(u32)(hi-lo+1)+1),x1,y1,x2,y2,x3,y3,c);return 0;}
+/* Centred and right-aligned single-line text, clipped to the width given: the
+ * two placements every list row, button and header needs, and the one place a
+ * long string could otherwise paint across its neighbour. */
+static int api_text_center(lua_State *L){
+    int x=xy(L,1),y=xy(L,2),w=extent(L,3);const char *s=label(L,4);u32 c=color(L,5);
+    int tw=s_text_width(s),ox=x+(tw<w?(w-tw)/2:0);
+    s_clip_text(canvas(L,(u32)strlen(s)*128+1),ox,y,s,c,w);return 0;}
+static int api_text_right(lua_State *L){
+    int x=xy(L,1),y=xy(L,2),w=extent(L,3);const char *s=label(L,4);u32 c=color(L,5);
+    int tw=s_text_width(s),ox=x+(tw<w?w-tw:0);
+    s_clip_text(canvas(L,(u32)strlen(s)*128+1),ox,y,s,c,w);return 0;}
+static const char *icon_names[];      /* the one icon table, defined below */
+/* How many rows a wrap of `width' takes, by the same character rule
+ * `text_wrap' paints with - so a list can size itself before drawing. */
+static int wrap_rows_of(const char *s,int width){
+    int cols=width/8,rows=0;
+    if(!s||!*s||cols<=0)return 0;
+    if(cols>127)cols=127;
+    for(;;){int n=0;while(*s&&*s!='\n'&&n<cols){s++;n++;}if(*s=='\n')s++;rows++;if(!*s)break;}
+    return rows;}
+static int api_text_rows(lua_State *L){int width=extent(L,1);const char *s=label(L,2);lua_pushinteger(L,wrap_rows_of(s,width));return 1;}
+static int api_text_height(lua_State *L){lua_pushinteger(L,FONT_H);return 1;}
+static int api_icon_id(lua_State *L){const char *s=label(L,1);for(int i=0;i<ICON_COUNT;i++)if(!strcmp(s,icon_names[i])){lua_pushinteger(L,i);return 1;}lua_pushnil(L);return 1;}
+/* HSV, because a package picking accents from one hue wants a wheel, not three
+ * hand-tuned constants.  Integer maths only, same formula in both hosts. */
+static u32 hsv_colour(int h,int s,int v){
+    /* v is a percentage like s, but the channels the API returns are bytes:
+     * scale first, or `scos.hsv(0,100,100)' answers a dark red 0x640000. */
+    int vv=v*255/100;
+    int p=vv*(100-s)/100,q=vv*(100-s*(h%60)/60)/100,t=vv*(100-s*(60-h%60)/60)/100;
+    switch(h/60){
+    default: return ((u32)vv<<16)|((u32)t<<8)|(u32)p;
+    case 1: return ((u32)q<<16)|((u32)vv<<8)|(u32)p;
+    case 2: return ((u32)p<<16)|((u32)vv<<8)|(u32)t;
+    case 3: return ((u32)p<<16)|((u32)q<<8)|(u32)vv;
+    case 4: return ((u32)t<<16)|((u32)p<<8)|(u32)vv;
+    case 5: return ((u32)vv<<16)|((u32)p<<8)|(u32)q;
+    }}
+static int api_hsv(lua_State *L){lua_pushinteger(L,hsv_colour(integer(L,1,0,359),integer(L,2,0,100),integer(L,3,0,100)));return 1;}
+/* Milliseconds since boot.  `time()' is whole seconds, which is too coarse for
+ * an animation or a key-repeat, and `uptime' is the same number. */
+static int api_now_ms(lua_State *L){lua_pushinteger(L,(lua_Integer)((u32)tick_count*10u));return 1;}
+/* A package-visible random number: xorshift, seeded from the clock, refused
+ * outside 1..1000000 so `% n' can never divide by zero.  Not for keys. */
+static u32 random_next(void){
+    static u32 s;
+    if(!s){s=(u32)tick_count*2654435761u^0x9E3779B9u;if(!s)s=1;}
+    s^=s<<13;s^=s>>17;s^=s<<5;return s;}
+static int api_random(lua_State *L){int n=integer(L,1,1,1000000);lua_pushinteger(L,(lua_Integer)(random_next()%(u32)n)+1);return 1;}
+/* The app's own storage, measured: what a package needs to show "12 of 16
+ * files" and to decide to clean up before a write is refused. */
+static int api_storage(lua_State *L){
+    int files=0;u32 bytes=0;
+    app_storage_used(context(L)->w->app->id,&files,&bytes);
+    lua_newtable(L);
+    field(L,"files",files);field(L,"bytes",(lua_Integer)bytes);
+    field(L,"limit_files",APP_STORAGE_MAX_FILES);field(L,"limit_bytes",(lua_Integer)APP_STORAGE_MAX_BYTES);
+    return 1;}
+
 static int api_resize(lua_State *L){struct lua_window *d=context(L);if(d->painting)return luaL_error(L,"resize is not allowed in paint");int w=integer(L,1,320,2048),h=integer(L,2,200,2048);scos_lua_charge(L,(size_t)w*h/16+1);lua_pushboolean(L,wm_resize_window(d->w,w,h));return 1;}
 static int api_move(lua_State *L){struct lua_window *d=context(L);if(d->painting)return luaL_error(L,"move is not allowed in paint");int x=xy(L,1),y=xy(L,2);lua_pushboolean(L,wm_move_window(d->w,x,y));return 1;}
 

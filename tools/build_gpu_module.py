@@ -29,11 +29,25 @@ here cannot pass there), and is what the test suite runs.
 
 import argparse
 import binascii
+import glob
 import os
 import struct
 import sys
 
-ABI_VERSION = 1
+def _abi_version():
+    """Read the ABI number from the header the modules are compiled against, rather than restating it:
+    a packer that carried its own constant kept writing modules the kernel refused, and the refusal
+    ("ABI does not match this kernel") looked like a module bug rather than a stale number here."""
+    import re
+    header = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'kernel', 'include', 'gpu_abi.h')
+    with open(header, encoding='utf-8') as handle:
+        found = re.search(r'#define\s+SCOS_GPU_ABI_VERSION\s+(\d+)u', handle.read())
+    if not found:
+        raise SystemExit('build_gpu_module: no SCOS_GPU_ABI_VERSION in kernel/include/gpu_abi.h')
+    return int(found.group(1))
+
+
+ABI_VERSION = _abi_version()
 MAGIC = 0x4D504753  # "SGPM"
 HEADER_SIZE = 192
 FAMILY_NAME = 16
@@ -325,6 +339,73 @@ def parse(blob):
     return module
 
 
+def object_totals(build_dir, family):
+    """What the family's own objects hold, measured the way the packer measures them: (bytes, blocks) per
+    image region.  Returns None when there is nothing to compare with, so a --verify run against a tree that
+    was not built reports on the modules rather than inventing a second failure.
+
+    This exists because a `.mod' is self-certifying: its header checksum and payload CRC describe its own
+    bytes, so a module packed from a truncated, stale or half-written object passes every predicate the loader
+    applies, loads, and then does nothing - a silently broken driver, which is the one outcome a boot-time
+    component must not be allowed to produce.  The witness is `build/gpu/<family>.o', the object the Makefile
+    hands the packer: the build makes it from this tree's sources, and a stray or interrupted pack cannot make
+    it agree with the module it just wrote.  The per-family compile outputs stand in for a tree arranged
+    otherwise."""
+    linked = os.path.join(build_dir, "gpu", family + ".o")
+    paths = [linked] if os.path.exists(linked) else \
+        sorted(glob.glob(os.path.join(build_dir, "gmod-%s-*.o" % family)))
+    if not paths:
+        return None
+    totals = {RXE: [0, 0], DATA: [0, 0], BSS: [0, 0]}
+    for path in paths:
+        try:
+            with open(path, "rb") as handle:
+                sections = elf_sections(handle.read())
+        except (OSError, Packed, ValueError, struct.error):
+            return None
+        for section in sections:
+            name = section["sname"]
+            if not section["size"] or name.startswith((".rela", ".rel.", ".symtab", ".strtab", ".shstrtab",
+                                                        ".comment")):
+                continue
+            if name.startswith((".text", ".rodata")):
+                kind = RXE
+            elif name.startswith(".data"):
+                kind = DATA
+            elif section["type"] == SHT_NOBITS:
+                kind = BSS
+            else:
+                continue
+            totals[kind][0] += section["size"]
+            totals[kind][1] += 1
+    return {kind: (value, blocks) for kind, (value, blocks) in totals.items()}
+
+
+def audit_against_objects(module, build_dir, target):
+    """Every 16-byte block the packer starts for a section is slack a module is allowed to have; a shortfall,
+    or a surplus bigger than that slack, means the module and the objects disagree."""
+    totals = object_totals(build_dir, module["family"])
+    if totals is None:
+        return []
+    problems = []
+    for kind, what, size in ((RXE, "read/execute", module["rxe_size"]),
+                             (DATA, "writable data", module["data_size"]),
+                             (BSS, "zero-filled", module["bss_size"])):
+        want, blocks = totals[kind]
+        slack = 15 * max(1, blocks)
+        if size < want:
+            problems.append("%s block is %u bytes, and the %s objects in %s hold %u: this .mod was packed "
+                            "from other bytes than this build's objects, so it is stale or truncated (a module "
+                            "certifies itself, so its own CRC cannot see this).  `make -B %s' rebuilds it"
+                            % (what, size, module["family"], build_dir, want, target))
+        elif size - want > slack:
+            problems.append("%s block is %u bytes against %u in the objects, more than the %u bytes of "
+                            "16-byte alignment slack can explain: the module and the object disagree about "
+                            "what this family's driver weighs, and `make -B %s' rebuilds the module from the "
+                            "object to settle it" % (what, size, want, slack, target))
+    return problems
+
+
 def verify(path, table_path):
     blob = open(path, "rb").read()
     module = parse(blob)
@@ -419,6 +500,9 @@ def main():
     parser.add_argument("--report", action="store_true")
     parser.add_argument("--verify", nargs="?", const="", default=None)
     parser.add_argument("--table", default="kernel/drivers/gpu/gpu_ids.h")
+    parser.add_argument("--objects", default="build",
+                        help="where gmod-<family>-*.o live, so each .mod can be weighed against the objects it "
+                             "was linked from")
     args = parser.parse_args()
     if args.verify is not None:
         targets = [args.verify] if args.verify else sorted(
@@ -430,11 +514,15 @@ def main():
         bad = 0
         for target in targets:
             module, problems = verify(target, args.table)
-            print("%s %s: family=%s rxe=%u data=%u bss=%u relocs=%u ids=%u load=%u image=%u"
+            measured = object_totals(args.objects, module["family"])
+            if measured is not None and not problems:
+                problems = audit_against_objects(module, args.objects, target)
+            print("%s %s: family=%s rxe=%u data=%u bss=%u relocs=%u ids=%u load=%u image=%u%s"
                   % ("OK  " if not problems else "FAIL", os.path.basename(target),
                      module["family"], module["rxe_size"], module["data_size"], module["bss_size"],
-                     module["reloc_count"], module["id_count"], module["load_size"],
-                     module["image_size"]))
+                     module["reloc_count"], module["id_count"], module["load_size"], module["image_size"],
+                     "" if measured is None else " objects=%u/%u/%u"
+                     % tuple(totals[0] for _kind, totals in sorted(measured.items()))))
             for problem in problems:
                 print("       %s" % problem, file=sys.stderr)
                 bad += 1

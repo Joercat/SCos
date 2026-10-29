@@ -216,6 +216,98 @@ static int a_progress(lua_State *L)
     }
     return 0;
 }
+/* ---------------------------------------------------------------- shapes --- */
+/* The same primitives, the same argument order and the same ranges as
+ * kernel/desktop/lua_api.inc: a package that draws a rounded button must get
+ * the same figure either way, and the drawing budget must refuse the same
+ * calls, so neither host can be told apart by what appears on screen. */
+static int a_ellipse(lua_State *L)
+{ need_paint(L);
+  DRAW(L, SC_DRAW_ELLIPSE, xy(L,1), xy(L,2), pack2(integer(L,3,0,1024), integer(L,4,0,1024)), color(L,5)); return 0; }
+static int a_ellipse_fill(lua_State *L)
+{ need_paint(L);
+  DRAW(L, SC_DRAW_ELLIPSE_FILL, xy(L,1), xy(L,2), pack2(integer(L,3,0,1024), integer(L,4,0,1024)), color(L,5)); return 0; }
+static int a_rounded(lua_State *L)
+{ need_paint(L);
+  int x = xy(L,1), y = xy(L,2), w = extent(L,3), h = extent(L,4), r = integer(L,5,0,1024);
+  if (w && h) DRAW(L, SC_DRAW_RRECT, pack2(x,y), pack2(w,h), r, color(L,6));
+  return 0; }
+static int a_triangle(lua_State *L)
+{ need_paint(L);
+  DRAW(L, SC_DRAW_TRIANGLE, pack2(xy(L,1),xy(L,2)), pack2(xy(L,3),xy(L,4)),
+       pack2(xy(L,5),xy(L,6)), color(L,7)); return 0; }
+/* Centred and right-aligned text: measured with the kernel's own s_text_width
+ * (one syscall) and then clipped to the width the caller gave, so a long
+ * string cannot paint over its neighbour. */
+static int a_text_center(lua_State *L)
+{ need_paint(L);
+  int x = xy(L,1), y = xy(L,2), w = extent(L,3); const char *s = label(L,4); u32 c = color(L,5);
+  text_put(s);
+  { long tw = C1(SC_NR_TEXT_WIDTH,0); int ox = x + (tw < w ? (int)((w - tw) / 2) : 0);
+    DRAW(L, SC_DRAW_TEXT_CLIP, ox, y, (long)w, c); }
+  return 0; }
+static int a_text_right(lua_State *L)
+{ need_paint(L);
+  int x = xy(L,1), y = xy(L,2), w = extent(L,3); const char *s = label(L,4); u32 c = color(L,5);
+  text_put(s);
+  { long tw = C1(SC_NR_TEXT_WIDTH,0); int ox = x + (tw < w ? (int)(w - tw) : 0);
+    DRAW(L, SC_DRAW_TEXT_CLIP, ox, y, (long)w, c); }
+  return 0; }
+/* Rows a character wrap of `width' needs - the rule a_text_wrap paints with,
+ * so a list can size a row before deciding to draw it. */
+static int a_text_rows(lua_State *L)
+{ int width = extent(L,1); const char *s = label(L,2);
+  int cols = width / 8, rows = 0;
+  if (!*s || cols <= 0) { lua_pushinteger(L,0); return 1; }
+  if (cols > 127) cols = 127;
+  for (;;) {
+      int n = 0;
+      while (*s && *s != '\n' && n < cols) { s++; n++; }
+      if (*s == '\n') s++;
+      rows++;
+      if (!*s) break;
+  }
+  lua_pushinteger(L, rows); return 1; }
+static int a_text_height(lua_State *L) { lua_pushinteger(L,16); return 1; }
+static int a_icon_id(lua_State *L)
+{ static const char *n[]={"folder","terminal","notepad","browser","calendar","settings","info","cards","chart","solitaire"};
+  const char *s = label(L,1);
+  for (int i = 0; i < 10; i++) if (streq(s, n[i])) { lua_pushinteger(L, i); return 1; }
+  lua_pushnil(L); return 1; }
+static long hsv_colour(long h, long s, long v)
+{ /* v is a percentage; the channels are bytes.  Scale first, so both hosts
+   * answer 0xff0000 for scos.hsv(0, 100, 100). */
+  long vv = v * 255 / 100;
+  long p = vv * (100 - s) / 100, q = vv * (100 - s * (h % 60) / 60) / 100,
+       t = vv * (100 - s * (60 - h % 60) / 60) / 100;
+  switch (h / 60) {
+  default: return (vv << 16) | (t << 8) | p;
+  case 1:  return (q << 16) | (vv << 8) | p;
+  case 2:  return (p << 16) | (vv << 8) | t;
+  case 3:  return (p << 16) | (q << 8) | vv;
+  case 4:  return (t << 16) | (p << 8) | vv;
+  case 5:  return (vv << 16) | (p << 8) | q;
+  } }
+static int a_hsv(lua_State *L)
+{ lua_pushinteger(L, hsv_colour(integer(L,1,0,359), integer(L,2,0,100), integer(L,3,0,100))); return 1; }
+static int a_now_ms(lua_State *L) { lua_pushinteger(L, C1(SC_NR_CLOCK,0)); return 1; }
+static int a_random(lua_State *L)
+{ static unsigned long s;
+  long n = integer(L,1,1,1000000);
+  if (!s) { s = (unsigned long)C1(SC_NR_CLOCK,0) * 2654435761UL ^ 0x9E3779B9UL; if (!s) s = 1; }
+  s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+  lua_pushinteger(L, (lua_Integer)(s % (unsigned long)n) + 1); return 1; }
+static int a_storage(lua_State *L)
+{ u32 f[4];
+  if (C1(SC_NR_STORAGE,0) < 0) return luaL_error(L, DISABLED);
+  memcpy(f, u_sh->scratch, sizeof f);
+  lua_newtable(L);
+  lua_pushinteger(L, f[0]); lua_setfield(L, -2, "files");
+  lua_pushinteger(L, f[1]); lua_setfield(L, -2, "bytes");
+  lua_pushinteger(L, f[2]); lua_setfield(L, -2, "limit_files");
+  lua_pushinteger(L, f[3]); lua_setfield(L, -2, "limit_bytes");
+  return 1; }
+
 /* ------------------------------------------------------------- pure helpers --- */
 static int a_rgb(lua_State *L)
 { lua_pushinteger(L, ((long)integer(L,1,0,255) << 16) | ((long)integer(L,2,0,255) << 8) | integer(L,3,0,255)); return 1; }
@@ -359,7 +451,11 @@ static int a_theme_status(lua_State *L)
  * a silently truncated name. */
 static const char *file_name(lua_State *L, int n)
 {
-    unsigned long len; const char *s = luaL_checklstring(L, n, &len);
+    unsigned long len; const char *s;
+    /* Same rule as the kernel-side host: a filename is a string, and a number
+     * is refused rather than coerced to "5". */
+    if (lua_type(L, n) != LUA_TSTRING) luaL_error(L, "invalid data filename");
+    s = luaL_checklstring(L, n, &len);
     if (!len || len >= 64 || strlen(s) != len) luaL_error(L, "invalid data filename");
     if (streq(s, ".") || streq(s, "..")) luaL_error(L, "invalid data filename");
     return s;
@@ -482,6 +578,10 @@ static const luaL_Reg api[] = {
     {"remove",a_remove},{"rename",a_rename},{"files",a_files},
     {"text_scaled",a_text_scaled},{"text_clip",a_text_clip},{"text_wrap",a_text_wrap},
     {"button",a_button},{"checkbox",a_checkbox},{"progress",a_progress},
+    {"ellipse",a_ellipse},{"ellipse_fill",a_ellipse_fill},{"rounded",a_rounded},
+    {"triangle",a_triangle},{"text_center",a_text_center},{"text_right",a_text_right},
+    {"text_rows",a_text_rows},{"text_height",a_text_height},{"icon_id",a_icon_id},
+    {"hsv",a_hsv},{"now_ms",a_now_ms},{"random",a_random},{"storage",a_storage},
     {0,0}
 };
 

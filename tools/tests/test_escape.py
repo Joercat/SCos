@@ -32,7 +32,7 @@ def install(g, app_id, source, title=b'Test App'):
     return s + 128
 
 
-def wait_for_report(g, path, seconds=25):
+def wait_for_report(g, path, seconds=150):
     """Poll until the app has recorded every probe (paint adds the last five)."""
     text = b''
     for _ in range(int(seconds / 0.5)):
@@ -45,6 +45,30 @@ def wait_for_report(g, path, seconds=25):
             if contained + breakout >= total:
                 return text
     return text
+
+
+def test_the_bait_list_is_the_same_in_the_kernel_and_the_app():
+    """One list, two readers.
+
+    The decoys live in kernel/desktop/decoys.c and the probes that must be
+    refused live in apps/examples/isolation.lua.  If those two lists drift, the
+    system grows bait that nothing tests - which is exactly the shape of a
+    security hole nobody notices - so the lists are compared here, at build
+    time, without booting anything.
+    """
+    import re
+    kernel = (ROOT / 'kernel' / 'desktop' / 'decoys.c').read_text()
+    table = kernel.split('decoy_files[] = {', 1)[1].split('};', 1)[0]
+    paths = re.findall(r'\{\s*"([^"]+)"\s*\}', table)
+    assert paths, 'the kernel decoy table was not found'
+    app = (ROOT / 'apps' / 'examples' / 'isolation.lua').read_text()
+    listed = re.findall(r'^\s*"([^"]+\.(?:map|key|db|log|txt))",\s*$', app, re.M)
+    assert listed == paths, ('the escape app probes %r but the kernel plants %r' % (listed, paths))
+    # The shell must be able to show the same list.
+    term = (ROOT / 'kernel' / 'desktop' / 'app_terminal.c').read_text()
+    assert 'decoys_path(i)' in term and 'decoys_present(i)' in term, \
+        'the shell cannot list the planted decoys'
+    print('PASS: %d decoy files, one list in the kernel, the shell and the escape app' % len(paths))
 
 
 def test_the_escape_app_finds_no_way_out():
@@ -61,6 +85,19 @@ def test_the_escape_app_finds_no_way_out():
         assert pid and g.call('proc_pid_isolated', pid) == 1
         assert g.call('user_pid_mapped', pid, 0x600000040000) == 1
 
+        # The bait planted by the kernel, captured BEFORE the app runs: what the
+        # probes must leave untouched.  The paths come from the kernel's own
+        # table, not from this file, so a new decoy is tested without editing
+        # the suite.
+        decoys = []
+        for i in range(g.call('decoys_count')):
+            path = g.string(g.call('decoys_path', i))
+            # decoys_present() is the kernel's own answer and the only one that
+            # works for the decoys planted behind the account guard; a plain
+            # read of system/security/<anything> is refused, as it should be.
+            assert g.call('decoys_present', i) == 1, 'a decoy was never planted: ' + path
+            decoys.append((i, path))
+
         report = wait_for_report(g, 'home/appdata/root/isolation/report.txt')
         assert report, 'the escape app wrote no report'
         text = report.decode('utf-8', 'replace')
@@ -70,7 +107,23 @@ def test_the_escape_app_finds_no_way_out():
         assert 'BREAKOUT' not in text, 'an escape probe SUCCEEDED:\n' + text
         total = int(text.split('total=')[1].split()[0])
         contained = int(text.split('contained=')[1].split()[0])
-        assert total >= 40 and contained == total, (total, contained)
+        assert total >= 100 and contained == total, (total, contained)
+
+        # Every planted decoy, and every way of touching it, was refused ...
+        for i, path in enumerate(decoys, start=1):
+            for op in ('read', 'edit', 'remove', 'exists'):
+                tag = 'decoy%d_%s=' % (i, op)
+                line = [l for l in text.splitlines() if l.startswith(tag)]
+                assert line, 'the escape app never tried %s %s' % (path, op)
+                assert 'BREAKOUT' not in line[0], line[0]
+        assert 'decoy_rename_over=CONTAINED' in text
+
+        # ... and not one byte of the bait changed while it ran.
+        for index, path in decoys:
+            assert g.call('decoys_present', index) == 1, \
+                'the sandbox CHANGED or DELETED a planted decoy: ' + path
+        print('%d planted decoy files were read, edited, removed and renamed at, and none moved'
+              % len(decoys), flush=True)
         assert 'api_info_isolation=CONTAINED' in text, \
             'the API did not report the sandbox it is running in'
 
@@ -135,6 +188,13 @@ add("memory_limit", select(2, scos.memory()))
 add("theme_status", scos.theme_status())
 add("files", type(scos.files()))
 add("uptime", type(scos.uptime()))
+add("now_ms", type(scos.now_ms()))
+add("random", tostring(scos.random(1)))
+add("storage", sorted(scos.storage()))
+add("text_rows", scos.text_rows(80, "two words") .. "/" .. scos.text_rows(80, ""))
+add("text_height", scos.text_height())
+add("icon_id", tostring(scos.icon_id("notepad")) .. "/" .. tostring(scos.icon_id("nope")))
+add("hsv", string.format("%06x", scos.hsv(0, 100, 100)) .. "/" .. string.format("%06x", scos.hsv(210, 0, 50)))
 scos.write("sig.txt", table.concat(out, "\n") .. "\n")
 return {
     open = function() scos.title("Parity") end,

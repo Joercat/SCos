@@ -21,6 +21,7 @@
 #ifndef SCOS_GPU_H
 #define SCOS_GPU_H
 
+#include "gsp_layout.h"   /* the frame-buffer reservation the FSP handover places */
 #include "kernel.h"
 #include "gpu_match.h"
 #include "gpu_abi.h"
@@ -74,6 +75,10 @@ struct gpu_device {
     uint32_t reg_first, reg_second;
     uint8_t reg_state;
     uint8_t reg_kernel_fallback;     /* the kernel read them only because no module was staged */
+    /* Total video memory, as a module read it from the chip; 0 when no module could.  It is the one
+     * number a firmware reservation has to have - a carve-out placed from offset 0 is not a
+     * reservation - so "unknown" is recorded as unknown and never defaulted. */
+    uint64_t vram_bytes;
 };
 
 #define GPU_MAX_DEVICES 8
@@ -118,8 +123,15 @@ struct gpu_module_state {
      * so the number is a ceiling to check against, not a place where text dies quietly.  It went to 1152
      * when the report grew its per-target clauses: each named block a chip refuses to answer costs about a
      * hundred and thirty bytes to say so, and how many blocks that is is the chip's decision, not the
-     * driver's - so the fixture seeds its widest case and asserts the length, rather than this note. */
-    char describe[1152];
+     * driver's - so the fixture seeds its widest case and asserts the length, rather than this note.
+     *
+     * The note was right and the fixture was not: a real GB207's inventory came back measuring 1151 bytes,
+     * which is this field minus one, and the clause it lost was the one about the submission window's clock.
+     * The widest case a fixture can seed is a guess about what a chip will say, so the ceiling has to be
+     * large enough that no driver's whole report reaches it *and* the copy below has to say so when it clips.
+     * 2048 is that: twice the length a real card produced, with room for the per-target clauses a chip with
+     * more engines refused would add. */
+    char describe[2048];
     uint64_t resident_bytes;         /* image in the executable boot-arena region */
     uint64_t file_bytes;             /* bytes read off the disk */
     uint32_t store_count;            /* modules on the disk, including those never opened */
@@ -130,6 +142,251 @@ struct gpu_module_state {
     int refusal;                     /* nonzero predicate code when present == 0 */
     int self_test_pixels, self_test_matches;
 };
+/* The coprocessor's firmware set as the boot volume offered it, passed up from the firmware through
+ * struct boot_firmware.  Every number here is a measurement the kernel is repeating on the boot stub's
+ * word, because the bytes themselves were read and released by the stub - boot/uefi/gsp_fw.h explains why
+ * they are not kept - which is exactly why this struct carries what `gpu_firmware_state' recomputed rather
+ * than what it copied: the counts are re-added from the per-file records here, and a record set whose own
+ * summary disagrees with them is reported as inconsistent instead of quietly believed. */
+#define GPU_FIRMWARE_ROLES BOOT_FIRMWARE_ROLES
+struct gpu_firmware_role {
+    unsigned state;                  /* BOOT_FIRMWARE_STATE_ABSENT / _STAGED / _TOO_BIG / _UNREADABLE */
+    uint32_t bytes;                  /* as the stub read it off the disk */
+    uint32_t crc32;                  /* over those bytes */
+    uint32_t flags;                  /* BOOT_FIRMWARE_ELF64 and friends */
+    uint32_t payload_bytes;          /* .fwimage, the payload the falcon is started from */
+    uint32_t signature_bytes;        /* whatever the image calls its signature section */
+    uint32_t sections;               /* section headers walked: 0 of them is a different fact from "missing one" */
+    uint32_t offset;                 /* where its bytes were copied in the staged region, ~0u when kept=n */
+};
+/* What one staged image turned out to contain, read by this kernel out of the bytes the boot stub kept.
+ * `resident' says the window exists; `checksum_matches' says it is still the file that was on the disk; the
+ * offsets are inside the image, not inside the region, because the boot sequence is handed a physical address
+ * per image and needs the section relative to it. */
+struct gpu_firmware_image {
+    unsigned resident;
+    unsigned checksum_matches;
+    uint32_t offset, bytes;
+    unsigned elf32, elf64;
+    unsigned fmc_template;             /* the first 52 bytes equal the published FMC header */
+    unsigned fmc_sections;             /* type, flags, bounds and CRC32 of every section check out */
+    unsigned fmc_named;                /* image, hash, publickey and signature are all present */
+    unsigned sections;
+    unsigned crc_failures;             /* sections whose sh_info CRC32 disagrees with their bytes */
+    uint32_t section_begin;            /* where the FMC format says the first section's data starts */
+    uint32_t payload_offset, payload_bytes;           /* .fwimage, from the RM image */
+    uint32_t signature_offset, signature_bytes;       /* its .fwsignature_* section */
+    uint32_t image_offset, image_bytes;               /* "image", from the FMC image */
+    uint32_t hash_offset, hash_bytes;                   /* the three authentication sections of an FMC image */
+    uint32_t publickey_offset, publickey_bytes;         /* are offsets too, because a boot sequence is handed */
+    uint32_t fmc_signature_offset, fmc_signature_bytes; /* them physical addresses, not pointers */
+    char signature_name[24];
+};
+struct gpu_firmware_state {
+    int resident;                      /* images whose bytes this kernel can read */
+    unsigned parsed;                   /* gpu_firmware_scan() ran over them */
+    uint32_t resident_bytes;
+    uint64_t address;                  /* where in physical memory, as the stub allocated it */
+    struct gpu_firmware_image image[GPU_FIRMWARE_ROLES];
+    int present;                     /* any role at all was found on the volume */
+    unsigned staged;                 /* roles the stub could open, whatever the outcome */
+    unsigned complete;               /* the three an FSP part boots through are all staged and the first is
+                                      * a 64-bit ELF holding both sections the boot sequence reads - not "all
+                                      * five", because the booter pair is the other path (see boot.h) */
+    unsigned consistent;             /* the stub's summary agrees with the records it came with */
+    uint32_t total_bytes, flags;
+    char signature_name[24];         /* the name the staged image gives its signature section */
+    struct gpu_firmware_role role[GPU_FIRMWARE_ROLES];
+};
+void gpu_firmware_note(const struct boot_handoff *handoff);
+/* The name of one of the falcon return values an FSP answer can carry, or 0 when the code is not in the
+ * published list.  Exposed so the panel can print what the card said rather than a bare number. */
+const char *gpu_fsp_flcn_name(uint32_t code);
+
+/* The same CRC32 the staged images are verified with, exposed because the handover payload the security
+ * processor is given has to be checked over the copy the card will read, not over the copy this kernel read. */
+uint32_t gpu_firmware_crc32(const uint8_t *data, uint32_t length);
+
+#define GPU_FSP_PAYLOAD_BYTES 860              /* one NVDM_PAYLOAD_COT, exactly, padded by the sender
+                                                  * to a whole number of dwords before it is written */
+/* The kernel's only raw access to a device register: `window' is what device_map() returned, `within' a byte
+ * offset inside it.  Two functions and no policy - bounds, counting and the decision to stop belong to the
+ * caller, where they can be tested with the logic that needs them - so that a caller whose registers have
+ * behaviour (this card's channel offset walks as it is read, and its queue pointers move when the firmware
+ * consumes a packet) can be run against a model of the register file instead of against an array.
+ * kernel/drivers/gpu/gpu_io.c is the production pair; tools/tests/gpu_fsp_host.c supplies its own. */
+uint32_t gpu_io_read32(const volatile uint32_t *window, uint64_t within);
+void gpu_io_write32(volatile uint32_t *window, uint64_t within, uint32_t value);
+
+/* One reply, as the message format describes it: the two header dwords' flags and types, and the response
+ * payload's task, the request it answers, and its error code.  `framed' says the packet was NVIDIA's at all;
+ * `readback_ok' says a second pass over the same channel returned the same bytes, which is what makes "these
+ * are distinct offsets of the channel" a measurement rather than a belief about a counter; `complete' says
+ * there were enough bytes for the task/command/error triple to have been read rather than assumed. */
+struct gpu_fsp_reply {
+    uint32_t bytes;
+    uint32_t request_bytes;               /* how big the message this one answers was, as it left us */
+    int som, eom, framed, readback_ok, complete, oversize;
+    int type, kind;                          /* the NVDM type in the header, and the payload's first byte */
+    uint32_t task, command, error;
+};
+
+/* What the card's flight security processor said when this OS asked.  Every field is a register read, a byte
+ * count or a staging decision; nothing here is inferred, and a zero `reads' means the file never got as far as
+ * touching the hardware.  See kernel/drivers/gpu/gpu_fsp.c for what each number is and who published it. */
+/* One store this driver put on the card, kept so the panel can name it: a total number of writes cannot tell
+ * "the doorbell was rung" from "the payload was written and the queue was left alone", which is the difference
+ * between a card that ignored us and a driver that never asked. */
+struct gpu_fsp_store {
+    uint32_t offset;                             /* BAR0-relative, so it can be looked up in the published page */
+    uint32_t value;
+};
+
+#define GPU_FSP_STORE_LOG 8u
+
+struct gpu_fsp_state {
+    int present, attempted;                  /* a display function was there; the probe ran on it */
+    int nvidia;                              /* the vendor is the one whose decode these offsets are */
+    uint16_t vendor;                         /* whose it was, whichever it turned out to be */
+    uint64_t bar0;                           /* the aperture the three pages below are offsets into */
+    int skipped;                             /* 1 no aperture at all, 2 one that cannot be mapped */
+    int mapped, mailbox_readable;            /* the windows exist; the queue registers answer at all */
+    int gsp_readable;                        /* the coprocessor's own block no longer refuses a reader */
+    uint32_t boot_scratch;                   /* 0xFF in the low byte once the FSP has finished booting */
+    int booted, boot_polls;                   /* and how many looks at it the wait took */
+    uint32_t ucode_version;                  /* NV_PFSP_FSP_UCODE_VERSION, 11:0 */
+    uint32_t fuse_check;                     /* the FSP's own fuse-consistency word: 0 means it passed */
+    uint32_t hwcfg2;                         /* the capability word whose refusal was the blocker */
+    uint32_t queue_head, queue_tail, msgq_head, msgq_tail;
+    /* What the queue says after we store to it without being invited.  The reference driver zeroes both head
+     * words on receive and never tests whether it is allowed to read them first; we gated every write on a
+     * readable pair, which is how a card can finish a whole boot with writes 0 because nobody ever tried. */
+    uint32_t reset_head, reset_tail;
+    /* What the GSP boot needs besides the image: the two descriptors the FMC reads back out of sysmem before
+     * it will run, staged in pages of their own and pointed at by the handover payload.  An address of zero
+     * with `params_declined' naming the reason is the honest state; a made-up one is not. */
+    uint64_t wpr_meta_phys, boot_params_phys;
+    uint64_t radix3_phys, radix3_data_phys, signature_phys, bootloader_phys;
+    uint32_t wpr_meta_size, radix3_bytes, radix3_tree_bytes, signature_bytes, bootloader_bytes;
+    unsigned params_staged;                  /* both descriptors are in memory and pointed at */
+    unsigned params_declined;      /* 1 no pages, 2 no FMC image, 3 no RM image on the volume, 4 no tree pages */
+    /* The reservation the handover describes, and the one number it cannot be computed without: the
+     * video memory a module read off the chip.  A plan that was refused leaves every offset zero and
+     * names the reason, which is what makes "no carve-out" a recorded fact and not a silent default. */
+    uint64_t vram_bytes;
+    struct gsp_fb_plan plan;
+    /* Two fields, because GSP_LAYOUT_OK is zero and a struct that has never been asked would otherwise
+     * read as a plan that succeeded - which is how a zero-byte FRTS came to be one edit away from being
+     * sent.  `plan_ready' is the only thing any caller may test. */
+    int plan_ready;
+    int plan_state;                          /* enum gsp_layout_refusal: why not, when not ready */
+    struct gpu_fsp_store stores[GPU_FSP_STORE_LOG];  /* the last writes, oldest first, wrapped */
+    uint32_t store_count;                            /* writes issued, not writes kept: the log is shorter */
+    /* The channel's window is 256 bytes wide and wraps, so a packet is written in bursts and then read back
+     * out of the channel and compared with what was written.  These three are that check: how many bursts the
+     * packet needed, whether it came back byte for byte, and the first dword that did not - which is the number
+     * a reader needs, because "the channel is not holding the packet" and "the packet is wrong" are different
+     * faults and the failing offset tells them apart. */
+    uint32_t send_bursts;
+    int send_readback;
+    uint32_t send_mismatch;
+    int queue_writable;                  /* the value we wrote came back, whatever the read said before */
+    int queried, responded, send_blocked;     /* a request went into the channel, a reply was read back off
+                                               * it, and why a request could not go in */
+    int polled, reply_polls;                  /* how many looks each of the two waits took */
+    uint32_t packet_bytes, doorbell;
+    struct gpu_fsp_reply query, handover;     /* the two requests this file can make, and what came back */
+    uint64_t reads, writes;                  /* register accesses this file made, counted as it went */
+    uint32_t refusal_reads;                  /* how many of the reads were the 0xbadf4100 refusal */
+    int fmc_seen, staged, cot_ready, cot_defect;
+    int handover_polls;                               /* looks at the reply queue while waiting for the handover answer */
+    int handover_attempted, handover_sent, handover_blocked;   /* the COT message: tried, put in the channel,
+                                                                   * and why not, in that order of detail */
+    /* The two things a submission needs on this generation, measured at the addresses the published
+     * Blackwell headers give for them rather than at the legacy user-mode page: the timer block, whose clock
+     * has to be running and readable for anything to be timed against, and the virtual-function page, which
+     * is where the doorbell a channel is rung through now lives.  `*_readable' means this kernel reached the
+     * window at all; `dead' and `answered' are what the chip put back. */
+    int timer_readable, timer_dead, timer_ticking, timer_refused;
+    uint32_t timer_start, timer_end, timer_after;
+    int vf_readable, vf_answered, vf_refusals;
+    uint32_t vf_leaf0, vf_top0, vf_scratch[4];
+    uint32_t hwcfg2_after, boot_scratch_after;                  /* re-read after the attempt: the two words
+                                                                   * that change if the FSP took the image */
+    int gsp_released, queues_idle_after;
+    /* Whether the FSP booted the resource manager, decided the way the driver that does it decides: the falcon
+     * mailbox pair the FMC writes its boot-arguments address - or an error code - into, and the lockdown bit of
+     * the coprocessor's capability word, polled for four seconds.  It is NOT a reply on the channel: the
+     * reference driver never waits for one, and a build that did could call a boot that worked a silence.  The
+     * pair and the word are therefore recorded with a flag each, because a word this kernel never read is not a
+     * zero and must not be printed as one. */
+    int settled;                              /* 1 = the poll reached an answer, 0 = it timed out */
+    uint64_t handover_ms_used;                /* how long that poll took, in milliseconds */
+    int hwcfg2_after_valid, mailbox_after_valid, scratch_after_valid, queue_after_valid;
+    int mbox_error;                           /* a non-zero mailbox pair that is not the boot-args address */
+    uint32_t queue_tail_after, queue_head_after;   /* the reply queue after the doorbell: proves the store */
+    /* Whether the coprocessor *took* the packet, which is a different question from whether it answered: on
+     * this generation the host writes into EMEM at offset 0 and moves QUEUE_TAIL; the FSP moves QUEUE_HEAD up
+     * as it consumes, and only then writes a reply.  A head that never moves says the packet is still sitting
+     * in a channel nobody is reading, which is the one failure a reply-wait cannot distinguish from silence. */
+    int queue_probed;                         /* the write-and-read-back probe actually ran */
+    int submit_valid, submit_consumed;
+    uint32_t submit_head, submit_tail;
+    /* The LibOS argument record the resource manager is told to read: four descriptors, three 64 KiB log
+     * buffers with an address array inside each, and the RM's own argument block.  `libos_declined' is why
+     * there is none, and it is the difference between a handover that can boot an RM and one that cannot. */
+    uint64_t libos_phys, libos_log_phys, libos_rmargs_phys;
+    unsigned libos_staged, libos_declined;    /* 1 no pages */
+    uint32_t libos_log_bytes;
+    /* The shared ring RM is told to talk through: two 0x8000 regions (command and status), a page array, and
+     * the argument block that names them.  `queue_declined' is why there is none. */
+    uint64_t queue_phys, queue_stat_phys;
+    unsigned queue_staged, queue_declined, queue_ptes;
+    uint32_t queue_bytes;
+    /* What RM said over the status queue after the handover, if anything: the first dword of the first entry is
+     * the RPC function number, and a message on that queue is the only proof the resource manager is running
+     * that does not depend on a register this kernel may not be allowed to read. */
+    uint32_t queue_write_ptr, queue_read_ptr;
+    int rpc_seen;
+    uint32_t rpc_function;
+    /* What the channel itself did when it was handed a packet: the control word the arm wrote and what it reads
+     * back as, and the first dwords the data window returns against the ones written.  "differs at dword 0" is
+     * not a diagnosis; the pair of values is. */
+    uint32_t ememc_after, emem_got0, emem_want0;
+    /* The submit queue as it stood when the handover's wait ended.  Kept apart from the query's, which is a
+     * different wait over a different packet, because the handover is the one that matters. */
+    uint32_t handover_head, handover_tail, handover_doorbell;
+    int handover_submit_valid, handover_consumed, handover_retried;
+    /* What the reference driver's own per-chip FSP table decides, read from the chip's architecture field
+     * rather than assumed: nouveau's `nvkm_fsp_func.cot' in nvkm/subdev/fsp/{gh100,gb100,gb202}.c, the driver
+     * that boots this family today.  The sizes are not interchangeable - Hopper's public key and signature are
+     * both 384 bytes while both Blackwell generations want 97 and 96 - so one hard-coded number is how a real
+     * GB207's own firmware file gets refused as malformed by the OS that should have accepted it.  A chip
+     * whose architecture has no entry has no FSP mailbox in that driver either, and says so instead of poking
+     * a page that belongs to something else. */
+    int fsp_supported, arch_unknown;
+    uint32_t arch;                              /* NV_PMC_BOOT_0 28:24, as the chip answered it */
+    uint32_t cot_version, cot_hash_bytes, cot_pkey_bytes, cot_sig_bytes;
+    /* The FSP's completion signal in the form the working driver reads it: the lockdown bit of the
+     * coprocessor's capability word, and the falcon mailbox pair the FMC writes its boot-arguments address -
+     * or an error code - into once it stops being zero. */
+    uint32_t gsp_mailbox0, gsp_mailbox1, gsp_mailbox0_after, gsp_mailbox1_after;
+    int lockdown, lockdown_after;               /* 1 = bit 13 of HWCFG2 set = still locked */
+    /* The two waits in the units the reference driver uses, milliseconds, measured against the device's own
+     * PTIMER (whose rate the cycle counter is timed against once per probe).  A wait bounded by a count of
+     * uncached reads is tens of times too short for a coprocessor that takes four seconds to train, and a
+     * timeout printed as silence is a measurement of the wrong moment. */
+    uint64_t reply_ms, reply_ms_used, boot_ms, boot_ms_used;
+    int wait_clocked;                           /* 0 = no PTIMER, so look counts bounded the waits instead */
+    uint32_t ticks_per_ms;                      /* what the measurement came to, printed so it can be argued */
+    uint64_t image_bytes, image_physical, image_crc32;
+    uint8_t payload[GPU_FSP_PAYLOAD_BYTES];  /* the handover, assembled and never sent */
+};
+void gpu_fsp_note(const struct gpu_device *device, const struct boot_handoff *handoff);
+const struct gpu_fsp_state *gpu_fsp_state(void);
+void gpu_firmware_scan(struct gpu_firmware_state *f, const uint8_t *base, uint32_t total);
+const struct gpu_firmware_state *gpu_firmware_state(void);
+const char *gpu_firmware_role_name(unsigned role);
 const struct gpu_module_state *gpu_module_state(void);
 const struct scos_gpu_engine_ops *gpu_module_ops(void);
 int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handoff);

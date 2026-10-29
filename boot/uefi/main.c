@@ -2,6 +2,7 @@
 #include "boot.h"
 #include "gpu_match.h"
 #include "pci_scan.h"
+#include "gsp_fw.h"
 static struct system_table *system;
 static struct boot_services *bs;
 static struct boot_framebuffer fatal_framebuffer;
@@ -74,6 +75,27 @@ static void family_file_name(const char *family,char16 *out){
  for(unsigned k=0;k<n;k++)out[i++]=(char16)stem[k];
  out[i++]=u'.';out[i++]=u'M';out[i++]=u'O';out[i++]=u'D';out[i]=0;
 }
+/* Whether the driver index on this volume lists a module for a family.  The index is the stub's only way to
+ * learn what the disk offers without opening files, and it decides which family gets its module read: a
+ * machine with two display functions must not have the one whose family has no file chosen over the one
+ * that does.  The format is the packer's (tools/makedisk.py): u32 count, u32 total bytes, then per entry
+ * 8 bytes of 8.3 stem, u32 size, u32 crc32 - all little-endian, which is what this machine is. */
+static int index_lists_family(const void *index,size_t bytes,const char *family){
+ if(!index||bytes<8||!family||!family[0])return 0;
+ const uint8_t *base=(const uint8_t*)index;
+ uint32_t count=0;__builtin_memcpy(&count,base,4);
+ if(!count||count>512u||bytes<8u+(size_t)count*16u)return 0;
+ char stem[9];unsigned n=0;
+ while(n<8u&&family[n]){stem[n]=(char)((family[n]>='a'&&family[n]<='z')?family[n]-32:family[n]);n++;}
+ stem[n]=0;
+ for(uint32_t i=0;i<count;i++){
+  const uint8_t *entry=base+8u+(size_t)i*16u;
+  unsigned k=0;
+  while(k<n&&k<8u&&entry[k]==(uint8_t)stem[k])k++;
+  if(k==n&&(n==8u||entry[n]==0))return 1;
+ }
+ return 0;
+}
 static uint64_t ticks(void){uint32_t a,d;__asm__ volatile("lfence; rdtsc":"=a"(a),"=d"(d)::"memory");return ((uint64_t)d<<32)|a;}
 static uint32_t crc32(const uint8_t *p,size_t n){uint32_t c=~0u;while(n--){c^=*p++;for(unsigned i=0;i<8;i++)c=(c>>1)^(0xedb88320u&-(c&1));}return ~c;}
 /* Read from the loaded image's own filesystem only; never search other disks. */
@@ -81,7 +103,10 @@ static status read_file(struct file *root,const char16 *name,void **data,size_t 
  struct file *f=0;status s=root->open(root,&f,name,1,0);if(FAILED(s))return s;
  uint64_t size=0;s=f->set_position(f,UINT64_MAX);
  if(!FAILED(s))s=f->get_position(f,&size);
- if(!FAILED(s)&&(!size||size>16*1024*1024))s=ERROR(4);
+ /* BOOT_FIRMWARE_FILE_MAX, not a literal: this cap decides which firmware the volume can offer at all, and it
+  * used to be 16 MiB, which is smaller than the resource-manager image this generation needs.  The same bound
+  * applies to the kernel and the modules, which are three orders of magnitude short of it. */
+ if(!FAILED(s)&&(!size||size>BOOT_FIRMWARE_FILE_MAX))s=ERROR(4);
  if(!FAILED(s))s=f->set_position(f,0);
  if(!FAILED(s))s=bs->allocate_pool(2,(size_t)size,data);
  if(!FAILED(s)){
@@ -215,6 +240,22 @@ status EFIAPI efi_main(handle image,struct system_table *table){
   * pool for now and move into the executable boot-arena region once that region exists. */
  void *module_data=0;size_t module_size=0;void *index_data=0;size_t index_size=0;
  uint32_t store_count=0,select_state=0;char selected_family[16];selected_family[0]=0;
+  /* The index is a small fixed table, not a directory walk: it tells the kernel how many modules exist on
+   * the disk without the firmware having opened any of them, and - read here, before the module choice - it
+   * is how the stub knows which families this volume can actually serve. */
+  {void *index=0;size_t bytes=0;status found=read_file(root,(const char16*)u"\\SCOS\\DRVLIST.IDX",&index,&bytes);
+   if(!FAILED(found)&&index&&bytes>=8){
+    if(bytes>BOOT_INDEX_MAX)bytes=BOOT_INDEX_MAX;
+    index_data=index;index_size=bytes;store_count=*(uint32_t*)index;
+   }else if(index)bs->free_pool(index);}
+ /* The coprocessor's firmware set, as this volume offers it.  Read here because this is the only moment a
+  * filesystem exists, and examined rather than copied: the kernel image plus its CRC is what the arena is
+  * sized for, and parking a multi-megabyte firmware blob in it would take that much away from the memory the
+  * kernel reports as usable to itself, on a machine that has nothing else to spend it on yet.  So what
+  * survives is the shape of each file - its size, its checksum, and the sections the boot sequence will ask
+  * it for - which is enough to tell someone standing at this machine whether the disk holds what that
+  * sequence needs.  Nothing here is fatal: an absent set is the normal state of a disk that has no firmware. */
+ struct boot_firmware gsp_fw;memset(&gsp_fw,0,sizeof(gsp_fw));
  unsigned pci_functions_seen=0,pci_buses_scanned=0,pci_display_seen=0;
  {
   struct pci_display_scan scan;
@@ -225,9 +266,32 @@ status EFIAPI efi_main(handle image,struct system_table *table){
   pci_functions_seen=scan.functions_inspected;pci_buses_scanned=scan.buses_scanned;
   pci_display_seen=scan.display_functions;
   const char *family=match?gpu_family_name(match):"";
-  if(match&&!gpu_match_named_only(scan.vendor,scan.device,scan.subclass)){
-   /* A chip the naming table knows but no driver table binds gets no module read at all: firmware
-    * must not hand the kernel bytes for a chip generation nothing can drive. */
+  /* Which family's module to read is chosen here, with two facts the walk cannot see: whether the family is
+   * one a driver's table binds at all (`drivable'), and whether this volume actually lists a module for it.
+   * The rule was once "the first match the walk met", and it fails on the shape a hybrid machine has: a
+   * display function the naming table knows but no driver binds comes first, so the module for the card
+   * behind it - present on the same disk - is never opened, and the machine reports no driver rather than
+   * one whose driver was never read. */
+  int chosen=0;
+  if(index_data&&index_size){
+   for(unsigned i=0;i<scan.matches&&!chosen;i++){
+    const struct pci_display_match *c=&scan.candidates[i];
+    if(!c->drivable)continue;
+    if(!index_lists_family(index_data,index_size,gpu_family_name(c->match)))continue;
+    family=gpu_family_name(c->match);match=c->match;chosen=1;
+   }
+  }
+  if(!chosen)
+   /* Nothing on the disk for any family the tables bind, or no index at all: fall back to a function a
+    * driver table binds, so the report can name the chip whose module is missing rather than saying that
+    * nothing was recognised.  The read below then fails with EFI_NOT_FOUND, which is the honest answer. */
+   for(unsigned i=0;i<scan.matches;i++)
+    if(scan.candidates[i].drivable){family=gpu_family_name(scan.candidates[i].match);
+                                    match=scan.candidates[i].match;chosen=1;break;}
+  if(chosen){
+   /* One file, named from the chosen family, read while the volume handle is still open.  A chip the
+    * naming table knows but no driver table binds never reaches here: it is not a candidate, so firmware
+    * cannot hand the kernel bytes for a generation nothing can drive. */
    unsigned n=0;while(n<15&&family[n]){selected_family[n]=family[n];n++;}selected_family[n]=0;
    char16 path[32];family_file_name(family,path);
    phase="read gpu driver module";s=read_file(root,path,&module_data,&module_size);
@@ -244,14 +308,102 @@ status EFIAPI efi_main(handle image,struct system_table *table){
     select_state=1;
     log("GPU driver module read for this chip\r\n");
    }
-  }else log("No GPU family matched by the generated tables; no module read\r\n");
-  /* The index is a small fixed table, not a directory walk: it lets the kernel report how many
-   * modules exist on the disk without the firmware having opened any of them. */
-  {void *index=0;size_t bytes=0;status found=read_file(root,(const char16*)u"\\SCOS\\DRVLIST.IDX",&index,&bytes);
-   if(!FAILED(found)&&index&&bytes>=8){
-    if(bytes>BOOT_INDEX_MAX)bytes=BOOT_INDEX_MAX;
-    index_data=index;index_size=bytes;store_count=*(uint32_t*)index;
-   }else if(index)bs->free_pool(index);}
+  }else if(scan.matches)
+   log("The display adapter is named but no driver table in this tree binds it; no module read\r\n");
+  else log("No GPU family matched by the generated tables; no module read\r\n");
+  /* The five images, one role at a time.  A role that is not on the disk leaves zeros behind and is
+   * reported as absent; one the firmware could not open is reported as unreadable, because "too big for
+   * the stub to read" and "not there" are different things a person can act on differently. */
+  for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
+   const char *file=gsp_fw_role_file(role);
+   char16 path[24];unsigned i=0;
+   const char16 *prefix=u"\\SCOS\\";while(*prefix)path[i++]=*prefix++;
+   while(i<22&&*file)path[i++]=(char16)*file++;
+   path[i]=0;
+   void *blob=0;size_t bytes=0;
+   status got=read_file(root,path,&blob,&bytes);
+   struct boot_firmware_role *slot=&gsp_fw.role[role];
+   if(FAILED(got)){
+    if((uint64_t)(int64_t)got!=0x800000000000000Eull)slot->state=BOOT_FIRMWARE_STATE_UNREADABLE;
+    continue;
+   }
+   slot->state=BOOT_FIRMWARE_STATE_STAGED;
+   slot->bytes=(uint32_t)bytes;
+   slot->crc32=gsp_fw_crc32((const uint8_t*)blob,bytes);
+   /* The signature-section name is a fact about the payload image, which is role 0: the other four are
+    * passed a null destination, because the examiner clears its output buffer on every call and letting a
+    * signatureless bootloader overwrite the RM image's name is how the panel ended up saying "(name
+    * unreadable)" for a file that said perfectly well what it was called. */
+   gsp_fw_examine(blob,bytes,slot,role==0?gsp_fw.signature_name:0,role==0?sizeof(gsp_fw.signature_name):0);
+   bs->free_pool(blob);
+  }
+  for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
+   const struct boot_firmware_role *e=&gsp_fw.role[role];
+   if(e->state==BOOT_FIRMWARE_STATE_ABSENT)continue;
+   gsp_fw.staged++;gsp_fw.total_bytes+=e->bytes;gsp_fw.flags|=e->flags;
+  }
+  /* Keep the bytes.  The region is sized to what the volume actually holds - the same reasoning that made
+   * the boot arena 2 MiB instead of the 128 MiB it used to reserve - and each image is placed on its own
+   * page boundary, because the boot sequence hands the FSP physical addresses, not offsets in a blob.  The
+   * files are read a second time rather than held in pools between the two allocations: on a small machine
+   * the peak would otherwise be the sum of the files plus the copy of them, which is how a firmware
+   * *report* ends up costing memory nobody can spare. */
+  {
+   uint32_t want=0;
+   for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
+    struct boot_firmware_role *e=&gsp_fw.role[role];
+    e->offset=~0u;
+    if(e->state!=BOOT_FIRMWARE_STATE_STAGED||!e->bytes)continue;
+    e->offset=want;                       /* tentative; revised down below if the region ends up smaller */
+    want+=(e->bytes+4095u)&~4095u;
+   }
+   if(want>BOOT_FIRMWARE_RESIDENT_MAX)want=BOOT_FIRMWARE_RESIDENT_MAX;
+   if(want){
+    uint64_t base=0xffffffff;size_t pages=want/4096;
+    if(!FAILED(bs->allocate_pages(1,2,pages,&base))&&base&&base+want<=0xffffffffull){
+     memset((void*)(uintptr_t)base,0,want);
+     gsp_fw.address=base;gsp_fw.resident_bytes=want;
+     unsigned kept=0;
+     for(unsigned role=0;role<BOOT_FIRMWARE_ROLES;role++){
+      struct boot_firmware_role *e=&gsp_fw.role[role];
+      if(e->state!=BOOT_FIRMWARE_STATE_STAGED||!e->bytes){e->offset=~0u;continue;}
+      if(e->offset+((e->bytes+4095u)&~4095u)>want){e->offset=~0u;continue;}   /* no room left: kept=n */
+      void *blob=0;size_t bytes=0;
+      char16 path[24];unsigned i=0;const char16 *prefix=u"\\SCOS\\";
+      while(*prefix)path[i++]=*prefix++;
+      const char *file=gsp_fw_role_file(role);
+      while(i<22&&*file)path[i++]=(char16)*file++;
+      path[i]=0;
+      if(FAILED(read_file(root,path,&blob,&bytes))||!blob||bytes!=e->bytes){
+       if(blob)bs->free_pool(blob);
+       e->offset=~0u;
+       continue;
+      }
+      memcpy((void*)(uintptr_t)(base+e->offset),blob,bytes);
+      bs->free_pool(blob);
+      /* Re-check the copy against the checksum taken off the disk: a page that came back wrong is a fault
+       * in the copy or the allocation, and it is cheaper to know that now than to read a tampered image
+       * into the card's boot sequence later. */
+      if(crc32((const uint8_t*)(uintptr_t)(base+e->offset),bytes)!=e->crc32){e->offset=~0u;continue;}
+      kept++;
+     }
+     log(kept?"GSP firmware kept in memory for the kernel\r\n":"GSP firmware read; no room to keep it\r\n");
+    }else log("GSP firmware read and checked; no memory to keep it\r\n");
+   }
+  }
+  /* "Complete" is the three-file sequence an FSP part boots through - resource manager, FMC, bootloader -
+   * with the first of them carrying both sections the boot sequence reads out of it.  It is deliberately not
+   * "all five": the booter load/unload pair belongs to the path a part *without* an FSP takes, and this
+   * generation never opens it (see the two-sequences note in kernel/include/boot.h).  The count is still
+   * reported as n of five, because that is what is on the volume; only the verdict is about this path. */
+  {const struct boot_firmware_role *rm=&gsp_fw.role[0];
+   uint32_t wanted=BOOT_FIRMWARE_ELF64|BOOT_FIRMWARE_PAYLOAD|BOOT_FIRMWARE_SIGNATURE;
+   unsigned i,three=1;
+   for(i=0;i<BOOT_FIRMWARE_FSP_ROLES;i++)
+    if(gsp_fw.role[i].state!=BOOT_FIRMWARE_STATE_STAGED)three=0;
+   if(three&&(rm->flags&wanted)==wanted
+      &&!(rm->flags&(BOOT_FIRMWARE_BAD_MAGIC|BOOT_FIRMWARE_TRUNCATED|BOOT_FIRMWARE_NO_STRINGS)))
+    gsp_fw.complete=1;}
  }
  {status close=root->close(root);root=0;if(!FAILED(s)&&FAILED(close)){phase="close boot volume";s=close;}}
  if(FAILED(s))goto fail;
@@ -284,6 +436,15 @@ status EFIAPI efi_main(handle image,struct system_table *table){
   unsigned n=0;while(n<15&&selected_family[n]){h->module_name[n]=selected_family[n];n++;}
   h->module_name[n]=0;
  }else h->module_state=select_state?select_state:0;
+ h->firmware=gsp_fw;
+ if(gsp_fw.staged){
+  if(gsp_fw.complete)
+   log(gsp_fw.staged==BOOT_FIRMWARE_ROLES
+       ?"GSP firmware: all five images staged; the FSP's three and the booter pair\r\n"
+       :"GSP firmware: the three an FSP part boots through are staged (resource manager, FMC, bootloader); "
+        "the booter pair is for a part without one, and this disk does not carry it\r\n");
+  else log("GSP firmware staged, set incomplete for the FSP path; see the kernel report\r\n");
+ }
  if(index_data&&index_size){
   memcpy((void*)(uintptr_t)BOOT_INDEX_ADDRESS(arena),index_data,index_size);
   h->index_address=BOOT_INDEX_ADDRESS(arena);h->module_index_size=(uint32_t)index_size;

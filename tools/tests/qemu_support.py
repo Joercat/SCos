@@ -24,6 +24,31 @@ class Debugger:
             b=data[i:i+1024];assert self.command(f'M{addr+i:x},{len(b):x}:'+b.hex())=='OK'
     def reg(self,i):return int.from_bytes(bytes.fromhex(self.command(f'p{i:x}')),'little')
     def setreg(self,i,v):assert self.command(f'P{i:x}='+v.to_bytes(8 if i<17 else 4,'little').hex())=='OK'
+def stage_aside(root=None, name='gsp'):
+    """Move a staged `build/gsp' out of the way and hand back where it went.
+
+    The suites that pack their own disk image write firmware into that directory, and `make gsp-firmware' may
+    have left real staged firmware there for `make dist' to pack.  A suite that deletes it, or refuses to run
+    beside it, punishes someone for staging files - so the directory is moved aside instead and put back in the
+    same `finally' that tears the fixture down."""
+    base = Path(root) if root else ROOT
+    staged, held = base / 'build' / name, base / 'build' / (name + '.staged-aside')
+    if staged.exists():
+        if held.exists():
+            raise AssertionError('build/%s.staged-aside is left over from a run that did not finish: move it '
+                                 'back to build/%s, then run this again' % (name, name))
+        os.rename(staged, held)
+    return held
+
+
+def restore_staged(held, name='gsp'):
+    """Put back what stage_aside() moved, overwriting the fixture's copy of the directory."""
+    if held and Path(held).exists():
+        final = Path(held).parent / name
+        shutil.rmtree(final, ignore_errors=True)
+        os.rename(held, final)
+
+
 class Guest:
     # `devices` are extra emulated PCI functions added to the run, one spec per entry;
     # the GPU detection test uses them to attach display adapters beside the boot one.

@@ -109,7 +109,7 @@ not the framebuffer address. There is no user close/finalizer callback: closing
 or killing the window releases the entire runtime arena without executing
 additional app code.
 
-## `scos` API — 56 functions, `scos.version == 2`
+## `scos` API — 69 functions, `scos.version == 2`
 
 Drawing functions are **paint-only**. RGB colors are integers `0xRRGGBB`;
 coordinates are -4096..4096, drawing dimensions 0..4096, text ≤1024 bytes.
@@ -153,6 +153,17 @@ clicks in `mouse` and call `hit` yourself. There is no hidden widget state.
 | `theme_status()` | Global latest request: idle/pending/applied/denied/failed, not per-app ownership. |
 | `message(text)` | Native message dialog, ≤192 bytes; boolean indicating whether shown. Not in paint. |
 | `api_info()` | Table: version,source_limit,arena_limit,data_limit,data_files,theme_permission. |
+| `ellipse(x,y,rx,ry,rgb)`, `ellipse_fill(x,y,rx,ry,rgb)` | Outlined/filled ellipse; radii 0..1024. Charge is proportional to the area, like `disc`. |
+| `rounded(x,y,w,h,r,rgb)` | Filled rectangle with circular corners. `r` is clamped to half the shorter side, so an over-large radius makes a pill, not a refusal. |
+| `triangle(x1,y1,x2,y2,x3,y3,rgb)` | Filled triangle, scanline. Charged by its bounding box, which is the worst case it can touch. |
+| `text_center(x,y,width,text,rgb)`, `text_right(x,y,width,text,rgb)` | Single-line text placed inside a box of `width`: centred, or flush right. Clipped with ellipsis at the box edge, so a long string cannot paint over its neighbour. |
+| `text_rows(width,text)` | Rows a `text_wrap` of that width would need, by the same character rule. Size a list row before drawing it. |
+| `text_height()` | Glyph cell height (16). |
+| `icon_id(name)` | Native icon index for a name from `icons()`, or nil. |
+| `hsv(h,s,v)` | Colour from hue 0..359, saturation and value 0..100 — integer maths, both hosts agree. |
+| `now_ms()` | Milliseconds since boot. Use it for animation; `time()` is whole seconds. |
+| `random(n)` | Integer 1..n from the kernel's generator (xorshift seeded from the clock). `n` must be 1..1000000. Not for keys. |
+| `storage()` | This app's own data usage: files, bytes, limit_files (16), limit_bytes (65536). Read it before a write is refused, not after. |
 
 Private files live in `/home/appdata/<account>/<id>/` - one directory per
 signed-in account, so two accounts running the same package never share a file.

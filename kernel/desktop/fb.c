@@ -10,31 +10,193 @@ void desktop_framebuffer(const struct boot_framebuffer *fb){output=*fb;}
 u32 fb_bpp(void){return 32;}
 void fb_init(void){
  screen_w=(int)output.width;screen_h=(int)output.height;
- screen=(struct surface){palloc_owned((size_t)screen_w*screen_h*4,HEAP_WM),screen_w,screen_h};
+ screen=(struct surface){palloc_owned((size_t)screen_w*screen_h*4,HEAP_WM),screen_w,screen_h,0,0,0,0};
  if(!screen.px)panic("desktop framebuffer allocation failed");
 }
 static u32 component(u32 c,u32 mask){unsigned shift=0;while(!(mask&1)){mask>>=1;shift++;}return ((c*mask/255)<<shift);}
-/* A solid rectangle is the common case for the wallpaper, the boot screens, window chrome and any
- * cleared region.  Copying one to the console costs a full pass over uncached device memory, while
- * the engine needs a handful of register writes, so the flip offers the rectangle to the GPU first.
- * The scan that proves the rectangle really is uniform reads the compositor's own RAM and stops at
- * the first differing pixel, so a textured rectangle costs a few rows and then gets copied as before.
- * screen.px stays authoritative either way: this only skips the output copy, never the truth buffer. */
-static int engine_output_fill(int x,int y,int w,int h){
- if(w<64||h<8||!gpu_engine_drives_output())return 0;
- const u32 *src=screen.px+(size_t)y*screen_w+x;
- u32 color=*src;
- for(int r=0;r<h;r++){
-  const u32 *row=src+(size_t)r*screen_w;
-  for(int c=0;c<w;c++)if(row[c]!=color)return 0;
+/* --------------------------------------------------- accelerated output path ----
+ *
+ * The compositor draws every frame into `screen.px` in RAM and then copies the damaged rectangles to
+ * the console.  That copy is the one stage a 2D engine can take over, and until now it was offered to
+ * the engine only as a **single flat colour**: the previous `engine_output_fill()` scanned the whole
+ * rectangle and gave up at the first pixel that differed.  A desktop is almost never one colour - a
+ * window is a flat chrome border around a flat background around text, the wallpaper is flat around
+ * icons - so on a machine whose driver was bound, self-tested and reported as "engine drives the
+ * console", a measured boot with an emulated CL-GD5446 put **0 pixels through the engine and 17,300,000
+ * through the CPU**.  The driver was not the problem; the offer was.
+ *
+ * So a damage rectangle is now decomposed into maximal flat rectangles in one pass over its rows, and
+ * those go to the engine; only the pixels no flat rectangle covers are copied by the CPU.  Both halves
+ * are counted by `gpu_engine_note_work()`, which is what makes "the GPU is accelerating this" a
+ * measurement in the boot report and the test suite rather than an inference from a bound driver.
+ *
+ * Four rules keep this honest:
+ *  - `screen.px` stays the truth buffer.  This decides *how* bytes reach the card, never what they are;
+ *    a rectangle the engine will not take is copied by the same loop that always did it.
+ *  - A flat run narrower than ENGINE_MIN_RUN, or a rectangle under ENGINE_MIN_AREA pixels, stays on the
+ *    CPU: a bitBLT costs a register round trip and a busy-wait, and for a cursor-sized rect that is more
+ *    than the copy it replaces.
+ *  - A rectangle whose flat area is a small part of it (text, icons, a photo) is copied whole instead:
+ *    paying transfers for a few bands and then copying the rest is slower than not asking.
+ *  - A transfer that fails is abandoned for the *whole* damage rectangle, which the CPU then copies from
+ *    the shadow.  Re-writing pixels the engine did land is harmless - identical bytes - while leaving a
+ *    region unpainted is the one outcome this path must never produce.
+ */
+#define ENGINE_MIN_RUN   12      /* a flat run narrower than this is not worth a transfer */
+#define ENGINE_MIN_H     2      /* nor is a rectangle one row tall */
+#define ENGINE_MIN_AREA  2048u   /* pixels; below this the register round trip costs more than the copy */
+#define ENGINE_MIN_SHARE 8u     /* flat area must be at least 1/8 of the rectangle, else the CPU copies */
+#define ENGINE_MAX_RECTS 128    /* flat rectangles one damage rect may decompose into */
+#define ENGINE_MAX_CALLS 16     /* transfers issued per damage rect; the smallest rects are dropped first */
+
+struct engine_rect { int x0,x1,y0,y1; u32 color; };
+struct engine_open { int x0,x1,y0; u32 color; };
+
+static void copy_row_span(int x,int row,int n)
+{
+ if(n<=0)return;
+ const u32 *src=screen.px+(size_t)row*screen_w+x;
+ /* Cast before the arithmetic, not after: `stride' is in pixels, so a void* that had the pixel offset
+  * added to it would write row*stride *bytes* into the aperture - which lands in the first few rows of
+  * the screen and leaves the row it was meant for untouched. */
+ volatile u32 *dst=(volatile u32*)(uintptr_t)output.base+(size_t)row*output.stride+x;
+ size_t count=(size_t)n;
+ __asm__ volatile("rep movsl":"+S"(src),"+D"(dst),"+c"(count)::"memory");
+}
+
+/* End of the run of one colour that starts at `at`, comparing four pixels per iteration while it can.
+ * A flat band is the common case and the scan has to stay cheaper than the copy it replaces; a textured
+ * row falls out of the wide loop on its first check and finishes in the byte loop below. */
+static int run_end(const u32 *row,int at,int w)
+{
+ u32 v=row[at];
+ u64 pair=((u64)v<<32)|(u64)v;
+ int cx=at+1;
+ while(cx+4<=w){
+  u64 a,b;
+  __builtin_memcpy(&a,row+cx,8);
+  __builtin_memcpy(&b,row+cx+2,8);
+  if(a!=pair||b!=pair)break;
+  cx+=4;
  }
- if(gpu_engine_fill_rectangle(x,y,w,h,color)!=0)return 0;
+ while(cx<w&&row[cx]==v)cx++;
+ return cx;
+}
+
+/* Close one run that has stopped growing into a rectangle, if it is worth a transfer.
+ *
+ * A full table is not a failure: it means this region is more fragmented than the bound allows, and the
+ * rectangles that did not fit are simply left to the CPU copy that follows.  The alternative - abandoning
+ * the whole damage rectangle because the *last* run did not fit - is what made a full-screen flip of a
+ * real desktop go entirely to the CPU while the small rectangles inside it went to the engine. */
+static void engine_emit(struct engine_rect *out,int *rects,const struct engine_open *o,int xbase,int y1)
+{
+ int w=o->x1-o->x0,h=y1-o->y0;
+ if(h<ENGINE_MIN_H)return;
+ if((u32)w*(u32)h<ENGINE_MIN_AREA)return;
+ if(*rects>=ENGINE_MAX_RECTS)return;
+ /* The run coordinates are relative to the damage rectangle (the scan starts at column 0 of `row');
+  * everything the caller sees is in scanout space.  Mixing the two is a rectangle painted at the
+  * wrong x - the kind of mistake a readback of the same screen cannot catch, because the shadow is
+  * still correct. */
+ out[(*rects)++]=(struct engine_rect){xbase+o->x0,xbase+o->x1,o->y0,y1,o->color};
+}
+
+/* One pass over the rows of the damage rectangle.  Runs of one colour are carried from row to row; a run
+ * that is still the same at the next row extends its rectangle, and one that is not is closed.  The open
+ * list and the runs of the current row are both ordered by x, so the merge is a walk, not a search.
+ * Saturating the open or output bound only costs coverage, never correctness. */
+static int engine_decompose(int x,int y,int w,int h,struct engine_rect *out)
+{
+ static struct engine_open cur[ENGINE_MAX_RECTS],nxt[ENGINE_MAX_RECTS];
+ int rects=0,opens=0;
+ for(int r=0;r<h;r++){
+  const u32 *row=screen.px+(size_t)(y+r)*screen_w+x;
+  int oi=0,nopen=0,rx=0;
+  while(rx<w){
+   int cx=run_end(row,rx,w);
+   /* Anything still open that begins before this run cannot be extended by it. */
+   while(oi<opens&&cur[oi].x0<rx){
+    engine_emit(out,&rects,&cur[oi],x,y+r);
+    oi++;
+   }
+   int extended=0;
+   if(oi<opens&&cur[oi].x0==rx){
+    if(cur[oi].x1==cx&&cur[oi].color==row[rx]){
+     if(nopen<ENGINE_MAX_RECTS)nxt[nopen++]=cur[oi];
+     extended=1;
+    }else engine_emit(out,&rects,&cur[oi],x,y+r);
+    oi++;
+   }
+   if(!extended&&cx-rx>=ENGINE_MIN_RUN&&nopen<ENGINE_MAX_RECTS)
+    nxt[nopen++]=(struct engine_open){rx,cx,y+r,row[rx]};
+   rx=cx;
+  }
+  while(oi<opens){
+   engine_emit(out,&rects,&cur[oi],x,y+r);
+   oi++;
+  }
+  for(int i=0;i<nopen;i++)cur[i]=nxt[i];
+  opens=nopen;
+ }
+ while(opens>0){
+  opens--;
+  engine_emit(out,&rects,&cur[opens],x,y+h);
+ }
+ return rects;
+}
+
+/* The transfers this rectangle gets are the largest of its flat rectangles, biggest first: a fixed budget
+ * of round trips should go to the bands that save the most pixels, not to whichever closed first. */
+static void sort_by_area(struct engine_rect *r,int count)
+{
+ for(int i=1;i<count;i++){
+  struct engine_rect key=r[i];
+  u32 key_area=(u32)(key.x1-key.x0)*(u32)(key.y1-key.y0);
+  int j=i-1;
+  while(j>=0&&(u32)(r[j].x1-r[j].x0)*(u32)(r[j].y1-r[j].y0)<key_area){
+   r[j+1]=r[j];
+   j--;
+  }
+  r[j+1]=key;
+ }
+}
+
+/* Paint as much of the damage rectangle as the engine will take and copy the remainder, returning the
+ * number of pixels the engine painted (0 means it painted nothing and the caller must copy the whole
+ * rectangle itself). */
+static u32 engine_paint_region(int x,int y,int w,int h){
+ static struct engine_rect rects[ENGINE_MAX_RECTS];
+ int count=engine_decompose(x,y,w,h,rects);
+ if(count<=0)return 0;
+ sort_by_area(rects,count);
+ if(count>ENGINE_MAX_CALLS)count=ENGINE_MAX_CALLS;
+ u32 engine_pixels=0;
+ for(int i=0;i<count;i++)
+  engine_pixels+=(u32)(rects[i].x1-rects[i].x0)*(u32)(rects[i].y1-rects[i].y0);
+ if((u64)engine_pixels*ENGINE_MIN_SHARE<(u64)w*(u64)h)return 0;
+ u32 painted=0;
+ for(int i=0;i<count;i++){
+  const struct engine_rect *r=&rects[i];
+  if(gpu_engine_fill_rectangle(r->x0,r->y0,r->x1-r->x0,r->y1-r->y0,r->color)!=0)return 0;
+  painted+=(u32)(r->x1-r->x0)*(u32)(r->y1-r->y0);
+ }
  if(gpu_engine_wait_idle()!=0)return 0;
- /* Counted per rectangle, not per pixel, from the caller's point of view: the same number is
-  * reported next to the CPU total so "the GPU did the drawing" stays checkable rather than a
-  * claim.  A fill the engine accepted and then failed to retire is not counted as work done. */
- gpu_engine_note_work((u32)w*(u32)h,0);
- return 1;
+ /* What the decomposition left out, one row at a time, so a textured interior costs only the pixels no
+  * rectangle covers instead of the whole band.  `at` never moves backwards, so a rectangle already
+  * inside a copied gap is skipped rather than copied twice. */
+ for(int row=y;row<y+h;row++){
+  int at=x,end=x+w;
+  for(int i=0;i<count;i++){
+   const struct engine_rect *r=&rects[i];
+   if(row<r->y0||row>=r->y1)continue;
+   if(r->x0>at)copy_row_span(at,row,r->x0-at);
+   if(r->x1>at)at=r->x1;
+  }
+  if(at<end)copy_row_span(at,row,end-at);
+ }
+ __asm__ volatile("sfence":::"memory");
+ return painted;
 }
 
 /* One text line of the console is 16 rows by columns*8 pixels of uncached device memory.  On a card
@@ -79,7 +241,16 @@ void fb_flip_rect(int x,int y,int w,int h){
  if(h>screen_h-y)h=screen_h-y;
  volatile u32 *fb=(void*)(uintptr_t)output.base;
  int native=output.red==0xff0000&&output.green==0xff00&&output.blue==0xff;
- if(native&&engine_output_fill(x,y,w,h))return;
+ /* The engine gets first refusal on every damaged rectangle, not just the flat ones: see the note above
+  * engine_paint_region().  When it paints part of a rectangle, the pixels it did not take have already
+  * been copied by that function, so the CPU total stays a measurement of what the CPU actually did. */
+ if(native&&gpu_engine_drives_output()){
+  u32 painted=engine_paint_region(x,y,w,h);
+  if(painted){
+   gpu_engine_note_work(painted,(u32)w*(u32)h-painted);
+   return;
+  }
+ }
  if(native)gpu_engine_note_work(0,(u32)w*(u32)h);
  for(int r=0;r<h;r++){
   const u32 *src=screen.px+(size_t)(y+r)*screen_w+x;
@@ -100,16 +271,48 @@ void fb_clear(u32 color)
 }
 
 /* ------------------------------------------------------------ surface ---- */
+/* A surface's own clip rectangle, if it has one.  Kept as two small static
+ * helpers rather than inline arithmetic at each use so the `cw == 0' rule is
+ * written once. */
+void s_clip_set(struct surface *s, int x, int y, int w, int h)
+{
+    int x1 = x + w, y1 = y + h;
+    if (!s) return;
+    if (!s->cw) { s->cx = x; s->cy = y; s->cw = w; s->ch = h; }
+    else {
+        if (x > s->cx) s->cx = x;
+        if (y > s->cy) s->cy = y;
+        if (x1 < s->cx + s->cw) s->cw = x1 - s->cx;
+        if (y1 < s->cy + s->ch) s->ch = y1 - s->cy;
+    }
+    /* `cw == 0' is this struct's "no clip", so an intersection that closes the
+     * rectangle completely must still be expressible: keep the rectangle and
+     * mark it empty in the second axis. */
+    if (s->cw < 0) s->cw = 0;
+    if (s->ch < 0) s->ch = 0;
+    if (!s->cw || !s->ch) { s->cx = 0; s->cy = 0; s->cw = 1; s->ch = 0; }
+}
+
+void s_clip_off(struct surface *s) { if (s) s->cx = s->cy = s->cw = s->ch = 0; }
+
 void s_pixel(struct surface *s, int x, int y, u32 c)
 {
     if (x < 0 || y < 0 || x >= s->w || y >= s->h) return;
     if(s==&screen&&clip_on&&(x<clip_x||y<clip_y||x>=clip_r||y>=clip_b))return;
+    if ((s->cw || s->ch) && (x < s->cx || y < s->cy || x >= s->cx + s->cw || y >= s->cy + s->ch))
+        return;
     s->px[y * s->w + x] = c;
 }
 
 void s_fill(struct surface *s, int x, int y, int w, int h, u32 c)
 {
     if(s==&screen&&clip_on){if(x<clip_x){w-=clip_x-x;x=clip_x;}if(y<clip_y){h-=clip_y-y;y=clip_y;}if(w>clip_r-x)w=clip_r-x;if(h>clip_b-y)h=clip_b-y;}
+    if (s->cw || s->ch) {
+        if (x < s->cx) { w -= s->cx - x; x = s->cx; }
+        if (y < s->cy) { h -= s->cy - y; y = s->cy; }
+        if (x + w > s->cx + s->cw) w = s->cx + s->cw - x;
+        if (y + h > s->cy + s->ch) h = s->cy + s->ch - y;
+    }
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
     if (x + w > s->w) w = s->w - x;
@@ -164,6 +367,112 @@ void s_disc(struct surface *s, int cx, int cy, int r, u32 c)
     for (int y = -r; y <= r; y++)
         for (int x = -r; x <= r; x++)
             if (x * x + y * y <= r * r) s_pixel(s, cx + x, cy + y, c);
+}
+
+/* Integer square root, used by the filled shapes below.  Newton's method on
+ * integers: no floating point anywhere in the kernel's renderer, so the same
+ * figures come out of a CPU with or without an FPU and the host tests that
+ * compile this file natively see the same pixels as the machine. */
+static unsigned long long isqrt_u64(unsigned long long v)
+{
+    unsigned long long x = v, y = (x + 1) / 2;
+    if (!v) return 0;
+    while (y < x) { x = y; y = (x + v / x) / 2; }
+    return x;
+}
+
+/* Ellipse outline (midpoint algorithm) and fill (per-row spans).  Both take
+ * radii, not a bounding box: a circle is the special case rx == ry, and an
+ * app that wants a rounded button or a gauge should not have to rasterise it
+ * out of a thousand pixels through the drawing budget. */
+void s_ellipse(struct surface *s, int cx, int cy, int rx, int ry, u32 c)
+{
+    long long a2, b2, x, y, fx, fy, p;
+
+    if (rx <= 0 || ry <= 0) { s_pixel(s, cx, cy, c); return; }
+    a2 = (long long)rx * rx;
+    b2 = (long long)ry * ry;
+    x = 0; y = ry; fx = 0; fy = 2 * a2 * y;
+    p = b2 - a2 * ry + a2 / 4;
+    s_pixel(s, cx, cy + (int)y, c); s_pixel(s, cx, cy - (int)y, c);
+    while (fx < fy) {
+        x++; fx += 2 * b2;
+        if (p < 0) p += b2 + fx;
+        else { y--; fy -= 2 * a2; p += b2 + fx - fy; }
+        s_pixel(s, cx + (int)x, cy + (int)y, c); s_pixel(s, cx - (int)x, cy + (int)y, c);
+        s_pixel(s, cx + (int)x, cy - (int)y, c); s_pixel(s, cx - (int)x, cy - (int)y, c);
+    }
+    p = b2 * x * x + a2 * (y - 1) * (y - 1) - a2 * b2;
+    while (y > 0) {
+        y--; fy -= 2 * a2;
+        if (p > 0) p += a2 - fy;
+        else { x++; fx += 2 * b2; p += a2 - fy + fx; }
+        s_pixel(s, cx + (int)x, cy + (int)y, c); s_pixel(s, cx - (int)x, cy + (int)y, c);
+        s_pixel(s, cx + (int)x, cy - (int)y, c); s_pixel(s, cx - (int)x, cy - (int)y, c);
+    }
+}
+
+void s_ellipse_fill(struct surface *s, int cx, int cy, int rx, int ry, u32 c)
+{
+    if (rx <= 0 || ry <= 0) { s_pixel(s, cx, cy, c); return; }
+    for (int dy = -ry; dy <= ry; dy++) {
+        long long t = (long long)ry * ry - (long long)dy * dy;
+        if (t < 0) continue;
+        int span = (int)isqrt_u64((unsigned long long)((long long)rx * rx * t) /
+                                  (unsigned long long)((long long)ry * ry));
+        s_fill(s, cx - span, cy + dy, 2 * span + 1, 1, c);
+    }
+}
+
+/* Filled rectangle with circular corners: every row is inset by its distance
+ * from the corner arc, so the straight middle costs one fill and the corners
+ * cost one square root each.  `r' larger than half the box is clamped rather
+ * than refused - a caller asking for a pill-shaped button should get a pill. */
+void s_rrect(struct surface *s, int x, int y, int w, int h, int r, u32 c)
+{
+    if (w <= 0 || h <= 0) return;
+    int max = (w < h ? w : h) / 2;
+    if (r < 0) r = 0;
+    if (r > max) r = max;
+    if (!r) { s_fill(s, x, y, w, h, c); return; }
+    for (int j = 0; j < h; j++) {
+        int inset = 0;
+        int dy = j < r ? r - 1 - j : (j >= h - r ? j - (h - r) : -1);
+        if (dy >= 0) {
+            long long t = (long long)r * r - (long long)dy * dy;
+            inset = r - (int)isqrt_u64((unsigned long long)(t > 0 ? t : 0));
+        }
+        s_fill(s, x + inset, y + j, w - 2 * inset, 1, c);
+    }
+}
+
+/* Filled triangle, scanline with fixed-point edge stepping: the same answer on
+ * every row as a barycentric test, at a cost proportional to the area covered
+ * rather than to the bounding box. */
+void s_triangle(struct surface *s, int x0, int y0, int x1, int y1, int x2, int y2, u32 c)
+{
+    int ymin = y0 < y1 ? y0 : y1, ymax = y0 > y1 ? y0 : y1;
+    if (y2 < ymin) ymin = y2;
+    if (y2 > ymax) ymax = y2;
+    for (int y = ymin; y <= ymax; y++) {
+        int xs[8], n = 0;
+        int px[3] = { x0, x1, x2 }, py[3] = { y0, y1, y2 };
+        for (int e = 0; e < 3; e++) {
+            int ax = px[e], ay = py[e], bx = px[(e + 1) % 3], by = py[(e + 1) % 3];
+            if (ay == by) {
+                if (y == ay && n + 2 <= 8) { xs[n++] = ax; xs[n++] = bx; }
+                continue;
+            }
+            if ((y < ay && y < by) || (y > ay && y > by)) continue;
+            if (n >= 8) break;
+            long long num = (long long)(bx - ax) * (y - ay);
+            xs[n++] = ax + (int)(num / (by - ay));
+        }
+        if (n < 2) continue;
+        int lo = xs[0], hi = xs[0];
+        for (int i = 1; i < n; i++) { if (xs[i] < lo) lo = xs[i]; if (xs[i] > hi) hi = xs[i]; }
+        s_fill(s, lo, y, hi - lo + 1, 1, c);
+    }
 }
 
 static u32 blend(u32 a, u32 b, int t)      /* t 0..255 */

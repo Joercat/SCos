@@ -26,11 +26,32 @@ struct pci_config_reader {
     void *context;
 };
 
+/* Every display function the tables claim, up to a bound.  The walk reports all of them because the stub
+ * needs a fact the walk cannot see - which of these families the boot disk can actually serve - and a
+ * walk that stopped at the first match could only ever hand over one.  That mattered on real hardware:
+ * a machine whose firmware exposes an Intel display function that *no* driver in this tree binds, with
+ * the discrete card behind it, came back as "no GPU family matched" and the one module on the disk was
+ * never read. */
+#define PCI_SCAN_MAX_MATCHES 4u
+struct pci_display_match {
+    uint8_t bus, slot, function, subclass;
+    uint16_t vendor, device;
+    const struct gpu_match *match;
+    uint8_t drivable;        /* a driver's own binding table claims it; not merely the naming table */
+};
+
 struct pci_display_scan {
     int found;                                /* a class-0 function that the binding table claims */
     uint8_t bus, slot, function, subclass;    /* where it is */
     uint16_t vendor, device;
     const struct gpu_match *match;
+
+    /* The same information for every match the walk saw, in the order it saw them, including those whose
+     * family the naming table merely recognises (`drivable` is 0 there).  The fields above describe the
+     * preferred one: a drivable match in preference to a name-only match, whichever came first. */
+    struct pci_display_match candidates[PCI_SCAN_MAX_MATCHES];
+    unsigned matches;
+    uint8_t winner_drivable;
 
     /* What the walk cost, and what it refused to do.  These are not diagnostics for their own sake: a
      * report that says "no module staged" cannot distinguish a disk without the file from a bus that was

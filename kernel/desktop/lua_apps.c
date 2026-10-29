@@ -151,6 +151,11 @@ static int api_clock(lua_State *L){lua_pushnumber(L,(lua_Number)tick_count/100.0
  * path - it names a file, and the id comes from the kernel-held registration,
  * never from the script. */
 static void data_path(lua_State *L,char *out) {
+    /* A filename is a STRING.  Lua converts a number for luaL_checklstring, so
+     * `scos.rename("own.txt", 5)' used to succeed by renaming the file to "5" -
+     * harmless, but it means the API accepted an argument the documentation
+     * says it refuses, and the CPL3 host had to be told the same rule. */
+    if (lua_type(L,1)!=LUA_TSTRING) luaL_error(L,"invalid data filename");
     size_t n;const char *name=luaL_checklstring(L,1,&n);
     const char *id=context(L)->w->app->id;
     if(strlen(name)!=n)luaL_error(L,"invalid data filename");
@@ -196,7 +201,12 @@ static const luaL_Reg api[]={
     {"exists",api_exists},{"file_size",api_file_size},{"remove",api_remove},{"rename",api_rename},{"files",api_files},
     {"theme",api_theme},{"themes",api_themes},{"theme_apply",api_theme_apply},{"theme_custom",api_theme_custom},
     {"notify",api_notify},{"icon_size",api_icon_size},{"icons",api_icons},{"set_icon",api_set_icon},{"text_clip",api_text_clip},{"text_wrap",api_text_wrap},{"focused",api_focused},{"minimize",api_minimize},
-    {"theme_status",api_theme_status},{"message",api_message},{"api_info",api_info},{NULL,NULL}
+    {"theme_status",api_theme_status},{"message",api_message},{"api_info",api_info},
+    {"ellipse",api_ellipse},{"ellipse_fill",api_ellipse_fill},{"rounded",api_rounded},
+    {"triangle",api_triangle},{"text_center",api_text_center},{"text_right",api_text_right},
+    {"text_rows",api_text_rows},{"text_height",api_text_height},{"icon_id",api_icon_id},
+    {"hsv",api_hsv},{"now_ms",api_now_ms},{"random",api_random},{"storage",api_storage},
+    {NULL,NULL}
 };
 static int initialize(lua_State *L) {
     luaL_requiref(L,"_G",luaopen_base,1);lua_pop(L,1);

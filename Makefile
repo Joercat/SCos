@@ -21,7 +21,7 @@ DRIVER_OBJECTS := $(patsubst kernel/drivers/%.c,$(BUILD)/driver-%.o,$(DRIVER_SOU
 # engine code running, and a ported family is added per file rather than in one blob.
 GPU_SOURCES := $(wildcard kernel/drivers/gpu/*.c)
 GPU_OBJECTS := $(patsubst kernel/drivers/gpu/%.c,$(BUILD)/gpu-%.o,$(GPU_SOURCES))
-.PHONY: all clean milestone-check gpu-modules stamp FORCE dist
+.PHONY: all clean milestone-check gpu-modules stamp FORCE dist gsp-firmware
 # The stamp rule runs on every make.  tools/buildinfo.py rewrites the header only when the repository
 # state actually moved, so nothing but the file that reads it is recompiled, and a link of unchanged
 # objects reproduces the same image bytes.  buildinfo.o is deliberately rebuilt every time: it is the
@@ -42,10 +42,54 @@ milestone-check:
 	python3 tools/check_milestone.py
 # A delivery is the image, its checksum and its build record together; shipping one of the three
 # alone is how a stick ends up carrying something nobody can date.
-dist: all
-	cp $(BUILD)/scos.img dist/scos.img
+# Staged in this order on purpose: `gpu-modules' and `gsp-firmware' fill the directories the packer reads, and
+# `all' writes the image.  Reversed, a clean build/ produced an image with no drivers and no firmware, which is
+# the delivery that arrived on the last flash and reported fw 0/5.
+# A Ventoy-ready image: the same bytes `dist' delivers, also left in build/ under its own name for a stick.
+# Where the coprocessor's images come from, best first: the set `make gsp-firmware-set' fetched and verified
+# from linux-firmware, then an installed driver's own directory.  Both are required now: `dist/scos.img' is
+# the image people download, so it has to carry the resource-manager image itself rather than expect the
+# machine that boots it to find one.  A 63,571,696-byte RM image is why the delivered volume is 66 MiB and not
+# the 64 MiB it used to be - and the size is the only visible sign, so `make dist' refuses rather than shrink.
+GSP_SET ?= build/gsp-set
+VENTOY_FIRMWARE ?= $(firstword $(wildcard $(GSP_SET)) $(wildcard /lib/firmware/nvidia/*/gsp))
+VENTOY_SIZE = $(shell python3 tools/makedisk.py build --min-size \
+	$(if $(VENTOY_FIRMWARE),--firmware $(VENTOY_FIRMWARE)) | cut -f1)
+ventoy: gpu-modules gsp-firmware all
+	@echo "firmware staged from $(if $(VENTOY_FIRMWARE),$(VENTOY_FIRMWARE),$(BUILD)/gsp (no gsp-set: only the FMC will be packed))"
+	python3 tools/makedisk.py build $(if $(VENTOY_FIRMWARE),--firmware $(VENTOY_FIRMWARE) ,)--size $(VENTOY_SIZE) \
+		--out $(BUILD)/scos-ventoy.img
+	@if [ -f "$(VENTOY_FIRMWARE)/GSP.BIN" ]; then \
+		python3 tools/verify-stick.py $(BUILD)/scos-ventoy.img | grep -q 'GSP.BIN (' || { \
+			echo "REFUSED: $(VENTOY_FIRMWARE)/GSP.BIN is staged but the image does not carry it."; \
+			echo "  A stick without the resource-manager image cannot start the coprocessor past the FMC,"; \
+			echo "  and the panel would say fw 1/5 on a card that has nothing wrong with it."; exit 1; }; \
+	fi
+	sha256sum $(BUILD)/scos-ventoy.img > $(BUILD)/scos-ventoy.img.sha256
+	@echo "copy $(BUILD)/scos-ventoy.img onto the Ventoy partition and pick it in the menu"
+	@echo "or run tools/flash.sh --ventoy /run/media/\$$USER/Ventoy, which packs, copies and reads it back"
+
+# The delivered image carries the firmware, and that is a change of rule rather than of taste: `dist/scos.img`
+# used to be a 64 MiB volume holding the kernel, the three modules and the FMC alone - which is an image that
+# boots a desktop and cannot start the coprocessor at all, because the FMC it hands over has no resource-manager
+# image to boot into.  The panel said `fw 1/5` on a card that had nothing wrong with it, twice, and both times
+# the file on the branch was 64 MiB while a correct one is 66.  So `make dist' now packs the staged set and
+# refuses to write a delivery without GSP.BIN in it.
+dist: gpu-modules gsp-firmware all
+	@if [ ! -f "$(VENTOY_FIRMWARE)/GSP.BIN" ] || [ ! -f "$(VENTOY_FIRMWARE)/GSPFMC.BIN" ]; then \
+		echo "REFUSED: no complete firmware set at $(if $(VENTOY_FIRMWARE),$(VENTOY_FIRMWARE),build/gsp-set)."; \
+		echo "  This image must carry the resource-manager image: the FMC boots *it*, and an image with the"; \
+		echo "  FMC alone reports fw 1/5 and hands over nothing that can run.  Run:"; \
+		echo "    make gsp-firmware-set    # fetches the matched 570.144 set (needs github.com)"; \
+		exit 1; \
+	fi
+	python3 tools/makedisk.py build --firmware $(VENTOY_FIRMWARE) --size $(VENTOY_SIZE) --out dist/scos.img
 	cp $(BUILD)/build.json dist/scos.img.build.json
 	sha256sum dist/scos.img > dist/scos.img.sha256
+# `dist' depends on the modules and the coprocessor firmware, not merely on `all': both are packed into the
+# image, and an image packed while either build directory was empty is a delivery that cannot render - which is
+# exactly what happened once, after a workspace reset cleared build/, when the packer silently wrote a volume
+# with no GSPFMC.BIN and the panel reported fw 0/5 on the machine it was flashed into.
 # The three files are only a delivery if they agree with each other and with the packed bytes, so the last
 # thing `make dist` does is read the record back out of the image it just wrote.  A delivery that drifted
 # fails here rather than on someone's machine a boot cycle later.
@@ -65,7 +109,7 @@ $(BUILD)/usermode.o: kernel/x86_64/usermode.S | $(BUILD)
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
 $(BUILD)/kernel.elf: $(GPU_OBJECTS) $(DRIVER_OBJECTS) $(DESKTOP_OBJECTS) $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o $(BUILD)/usermode.o kernel/x86_64/linker.ld Makefile $(BUILD)/userland_image.h
 	$(LD) -m elf_x86_64 -pie --no-dynamic-linker -Bsymbolic --build-id=none -z noexecstack -z max-page-size=0x1000 -T kernel/x86_64/linker.ld -o $@ $(BUILD)/entry.o $(OBJECTS) $(BUILD)/vectors.o $(BUILD)/usermode.o $(DESKTOP_OBJECTS) $(DRIVER_OBJECTS) $(GPU_OBJECTS) $(BUILD)/lua-runtime.o
-$(BUILD)/efi-main.o: boot/uefi/main.c boot/uefi/efi.h kernel/include/boot.h Makefile | $(BUILD)
+$(BUILD)/efi-main.o: boot/uefi/main.c boot/uefi/efi.h kernel/include/boot.h boot/uefi/gsp_fw.h Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
 $(BUILD)/efi-font.o: kernel/src/font.c Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -c $< -o $@
@@ -77,11 +121,13 @@ $(BUILD)/efi-gpu_match.o: kernel/drivers/gpu/gpu_match.c kernel/drivers/gpu/gpu_
 # The PCI walk is a unit of its own so that a fixture config space can exercise the bus ranges a real
 # machine has: a GPU behind a root port sits on a secondary bus, and that is exactly where a scan of bus 0
 # or an exclusive bus range loses it.  Same source, same flags, linked into the stub.
+$(BUILD)/efi-gsp_fw.o: boot/uefi/gsp_fw.c boot/uefi/gsp_fw.h kernel/include/boot.h Makefile | $(BUILD)
+	$(CC) $(EFI_CFLAGS) -c $< -o $@
 $(BUILD)/efi-pci_scan.o: boot/uefi/pci_scan.c boot/uefi/pci_scan.h kernel/include/gpu_match.h \
                          kernel/drivers/gpu/gpu_ids.h $(BUILD)/scosbuild.h Makefile | $(BUILD)
 	$(CC) $(EFI_CFLAGS) -Ikernel/drivers/gpu -c $< -o $@
-$(BUILD)/BOOTX64.EFI: $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o
-	$(LD) -mi386pep --subsystem 10 --entry efi_main --image-base 0 --no-insert-timestamp --enable-reloc-section -o $@ $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o
+$(BUILD)/BOOTX64.EFI: $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o $(BUILD)/efi-gsp_fw.o
+	$(LD) -mi386pep --subsystem 10 --entry efi_main --image-base 0 --no-insert-timestamp --enable-reloc-section -o $@ $(BUILD)/efi-main.o $(BUILD)/efi-font.o $(BUILD)/efi-gpu_match.o $(BUILD)/efi-pci_scan.o $(BUILD)/efi-gsp_fw.o
 $(BUILD)/scos.img: $(BUILD)/BOOTX64.EFI $(BUILD)/kernel.elf tools/makedisk.py
 	python3 tools/makedisk.py $(BUILD)
 
@@ -116,8 +162,31 @@ $(foreach family,$(MODULE_FAMILIES),$(eval $(call MODULE_rules,$(family))))
 
 $(MODULE_DIR):
 	mkdir -p $@
+# The driver's own three firmware files, fetched from linux-firmware and checked before anything is packed.
+# Network at this step and only at this step: `dist' must stay reproducible offline.
+GSP_VERSION ?= 570.144
+GSP_CHIP ?= gb202
+.PHONY: gsp-firmware-set
+gsp-firmware-set:
+	python3 tools/gsp-firmware.py --fetch-driver $(GSP_VERSION) --chip $(GSP_CHIP) --set-out $(GSP_SET)
+	python3 tools/gspcheck.py $(GSP_SET)
+
 gpu-modules: $(GPU_MODULE_FILES)
 	python3 tools/build_gpu_module.py --verify
+
+# The FMC image the handover is built from, rebuilt from the arrays the open kernel module itself ships
+# (src/nvidia/generated/g_bindata_kgspGetBinArchive*.c, MIT), so a stick can carry the vendor's genuine
+# signed image without anyone mounting an ESP.  Deliberately not part of `all': it reaches github.com, and a
+# build with nothing staged still boots and says `fw 0/5' rather than pretending.
+GSP_DRIVER_VERSION ?= 615.71.10
+GSP_CHIP ?= GB202
+# The container itself is the target, so a build directory that already holds one is not refetched: the
+# download reaches github.com, and re-running it to prove a point costs a minute of every build.
+GSP_FMC_IMAGE := $(BUILD)/gsp/fmc-$(GSP_DRIVER_VERSION).bin
+gsp-firmware: $(GSP_FMC_IMAGE)
+	@python3 tools/gspcheck.py $(BUILD)/gsp
+$(GSP_FMC_IMAGE): | $(BUILD)
+	python3 tools/gsp-firmware.py --fetch $(GSP_DRIVER_VERSION) --chip $(GSP_CHIP) --out $(BUILD)/gsp
 clean:
 	rm -rf $(BUILD)
 

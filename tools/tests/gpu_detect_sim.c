@@ -227,9 +227,28 @@ static struct boot_framebuffer fake_fb = {
     .red = 0x00ff0000u, .green = 0x0000ff00u, .blue = 0x000000ffu,
 };
 
+/* The firmware record and the card's security processor, both of which detection now asks about on its own
+ * account rather than as a side effect of a module being loaded.  Neither is what this fixture is for - the
+ * bus topology and the tables are - so both are noted and nothing is answered; what *is* worth asserting is
+ * that detection asked, once, and of the function that turned out to own the screen. */
+static int firmware_notes, fsp_asks;
+static uint16_t fsp_vendor, fsp_device_id;
+void gpu_firmware_note(const struct boot_handoff *handoff) { (void)handoff; firmware_notes++; }
+const struct gpu_firmware_state *gpu_firmware_state(void) { return 0; }
+void gpu_fsp_note(const struct gpu_device *device, const struct boot_handoff *handoff)
+{
+    (void)handoff;
+    fsp_asks++;
+    fsp_vendor = device->vendor;
+    fsp_device_id = device->device;
+}
+const struct gpu_fsp_state *gpu_fsp_state(void) { return 0; }
+
 static int run_with(struct sim_device *devices, int count)
 {
     sim_reset();
+    firmware_notes = fsp_asks = 0;
+    fsp_vendor = fsp_device_id = 0;
     for (int i = 0; i < count; i++) sim_add(devices[i]);
     gpu_init(&fake_fb);
     return gpu_device_count();
@@ -268,6 +287,8 @@ int gpu_module_bind(struct gpu_device *device, const struct boot_handoff *handof
     return -1;
 }
 const struct scos_gpu_engine_ops *gpu_module_ops(void) { return 0; }
+
+
 void gpu_module_report(char *out, size_t capacity, const struct boot_handoff *handoff)
 {
     (void)handoff;
@@ -517,6 +538,10 @@ int main(void)
         expect(owner && owner->vendor == 0x10de && owner->device == 0x2d83,
                "a 64-bit BAR above 4 GiB still names the scanout owner");
         expect(owner && owner->bar[1] == high_half, "the upper config word is folded into the BAR");
+        expect(fsp_asks == 1 && fsp_vendor == 0x10de && fsp_device_id == 0x2d83,
+               "detection asked the security processor of the card driving the screen, and of nobody else");
+        expect(firmware_notes == 1,
+               "and it noted the coprocessor's firmware on the same pass, whether or not a module was staged");
         /* This is the state the user's machine is in: the chip is bound to a family by a row SCos
          * authored, and a module is offered for it, so the kernel's own register probe stands down and
          * leaves the read to drivers/gpu/nvidia - mapping the same aperture twice to ask the same
@@ -544,7 +569,7 @@ int main(void)
             gpu_report(text, sizeof(text));
             expect(find_substring(text, "link: PCIe gen4 x16") != NULL,
                    "the report prints the negotiated link for the card that has one");
-            expect(find_substring(text, "no PCI Express capability on this function") != NULL,
+            expect(find_substring(text, "no PCIe capability (conventional slot)") != NULL,
                    "and says so plainly for the one that does not");
         }
         expect(owner && owner->reg_state == 0, "the kernel does not map a BAR the module was staged for");
@@ -565,8 +590,7 @@ int main(void)
         {
             char text[4096];
             gpu_report(text, sizeof(text));
-            expect(find_substring(text, "read by the kernel itself: this function matches a driver family, "
-                                        "but no module was staged for it") != NULL,
+            expect(find_substring(text, "(read by the kernel: no module was staged)") != NULL,
                    "the report says so in as many words, so the number cannot be mistaken for a driver's");
         }
         sim_maps = 0;
@@ -590,7 +614,7 @@ int main(void)
             gpu_report(text, sizeof(text));
             expect(find_substring(text, "device registers: BAR0 at 0x00000000e0100000 read: first dword 0x2b0000a1") != NULL,
                    "the report quotes the address and the value that were read");
-            expect(find_substring(text, "chip selector 0x000002b0, architecture 0x0000000b, "
+            expect(find_substring(text, "PMC_BOOT_0: chip 0x000002b0, architecture 0x0000000b, "
                                         "implementation 0x00000000, revision A.1") != NULL,
                    "the NVIDIA fields are decoded where NVIDIA documents them: selector [31:20], "
                    "architecture [28:24], implementation [23:20], revision [7:4].[3:0]");
@@ -604,7 +628,7 @@ int main(void)
         {
             char text[4096];
             gpu_report(text, sizeof(text));
-            expect(find_substring(text, "BAR0 mapped, but every read returned 0xffffffff") != NULL,
+            expect(find_substring(text, "BAR0 mapped, every read 0xffffffff") != NULL,
                    "a dead function is described as not answering, not as a chip id");
             expect(find_substring(text, "first dword 0xffffffff") == NULL,
                    "an unreachable device is never reported as if the all-ones value were an id");

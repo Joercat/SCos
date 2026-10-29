@@ -81,8 +81,13 @@ and USB device descriptors. The exact GPU/VBIOS and motherboard firmware revisio
 have not been established in this session. Do not infer physical acceptance from
 the CPU name or from the emulator matrix.
 
-1. **Back up the USB stick.** Flash `dist/scos.img` as a raw disk image using a
-   reputable image writer. Merely copying the `.img` file onto a formatted stick
+1. **Get the image onto a stick.** A stick that already runs **Ventoy** needs only the file: `make ventoy`
+   (or `tools/flash.sh --ventoy <mount>`) writes `build/scos-ventoy.img`, and Ventoy boots an image file by
+   presenting it to the firmware as a block device - no extraction, and the file may be fragmented. Copy it in
+   beside the ISOs and pick it from the menu; nothing on the stick is rewritten. Any other stick takes a raw
+   write: flash `dist/scos.img` as a whole disk image using a reputable image writer (or
+   `tools/flash.sh --device /dev/sdX`, which refuses a disk that carries a Ventoy filesystem, because that
+   would erase it to install one OS). Merely copying the `.img` file onto a *plain* formatted stick
    will not create this boot medium. Flashing erases/replaces its partition table
    and data; carefully identify the USB device, never an internal system disk.
    The image assumes 512-byte logical disk sectors.
@@ -270,3 +275,283 @@ the microcontroller whose release the lock waits for.
 
 Paste the `Engine:` line whole, these clauses included: the window answer, the coprocessor's state and the
 engine block's reply are three different facts, and the next move depends on which of them this machine gave.
+
+The firmware lines are the one part of this report you can change without rebuilding anything, and they are
+worth changing on a machine whose panel says the coprocessor refused.  The five images the open path loads go
+in the SCOS directory at the root of the ESP, named `GSP.BIN`, `GSPFMC.BIN`, `GSPBL.BIN`, `GSPBTL.BIN` and
+`GSPBTU.BIN`; upstream they are `nvidia/gb207/gsp/{gsp,fmc,bootloader,booter_load,booter_unload}-570.144.bin`,
+and running `python3 tools/makedisk.py build` with those files (or that whole tree) under `build/gsp/` names
+them for you.  `GSP firmware: none of the images the open driver loads` is therefore a statement about the disk
+and not a refusal.
+
+The shorter route, and the one worth trying first, is the checker this repo ships.  It reads the blobs where
+the open driver left them and applies this kernel's own rules to each: the byte-exact 52-byte FMC header, the
+four sections the coprocessor asks for by name and their per-generation widths, the CRC32 each section carries
+in `sh_info`, the `.fwimage` and signature pair in the resource-manager image, and the 8 MiB the boot stub will
+copy.  With `--install` it also renames them, writes them into the directory you point at, and reads every byte
+back before it reports:
+
+    python3 tools/gspcheck.py /lib/firmware/nvidia/gb207/gsp --install /mnt/esp/SCOS
+
+A file it refuses never reaches the disk, and every refusal is a sentence about the one thing wrong with it -
+`the publickey section is 384 bytes and architecture 0x1b asks its FSP for 97`, not `invalid` - because telling
+a wrong file apart from a right file checked against the wrong generation is the difference between hunting for
+another download and passing `--arch`.  It ends by printing what the panel will then say (`fw 2/5`, and whether
+a handover can be built at all), so the paste and the check can be compared without guessing.  Its constants are
+pinned against `kernel/drivers/gpu/gpu_firmware.c`, `gpu_fsp.c` and `boot.h` by `tools/tests/test_gspcheck.py`:
+the checker refuses what the kernel would refuse, and nothing else.
+
+By hand, the same three files come off a machine where the open driver already works - the names come from
+`NVKM_GSP_FIRMWARE_FMC(gb207, 570.144)` and `nvkm_firmware_get()` in the kernel's nouveau driver, which is
+where this OS's intake contract came from:
+
+    sudo mkdir -p /mnt/esp/SCOS
+    sudo cp /lib/firmware/nvidia/gb207/gsp/fmc-570.144.bin        /mnt/esp/SCOS/GSPFMC.BIN
+    # or, without a machine that has the driver installed:
+    make gsp-firmware-set GSP_CHIP=gb202 && sudo cp build/gsp-set/GSP*.BIN /mnt/esp/SCOS/
+    # Copy the whole set, never a mixture: the resource manager, the FMC and the bootloader are three files of
+    # one driver release, and an FMC from another release will verify against a resource manager that is not
+    # the one it was built with.  `make ventoy' packs exactly the set in build/gsp-set.
+    # and with an installed driver, the three files by name:
+    sudo cp /lib/firmware/nvidia/gb207/gsp/gsp-570.144.bin         /mnt/esp/SCOS/GSP.BIN
+    sudo cp /lib/firmware/nvidia/gb207/gsp/bootloader-570.144.bin  /mnt/esp/SCOS/GSPBL.BIN
+
+The third route needs no driver install at all, because the open kernel module ships the image itself.
+`make gsp-firmware` takes `src/nvidia/generated/g_bindata_kgspGetBinArchiveGspRmFmcGfwProdSigned_GB202.c` (a
+GB207 is served by the GB202 arrays, exactly as it is by `nvkm/subdev/gsp/gb202.c`), lifts the four pieces out
+of the generated arrays, and writes `build/gsp/fmc-615.71.10.bin` in the container this kernel reads.  Run on
+the real thing it said this, which is the first measurement of its kind in this repository:
+
+    hash            48 B  crc32 0x77ed3815  UCODE_HASH
+    image       287304 B  crc32 0x3bbbe37c  UCODE_IMAGE
+    publickey       97 B  crc32 0x8fb251b4  UCODE_PKEY
+    signature       96 B  crc32 0x71cc5283  UCODE_SIG
+    container   287869 B  crc32 0xaeaa97e7 -> build/gsp/fmc-615.71.10.bin
+    the hash section is sha384 of the image section, byte for byte
+
+Those four sizes are the driver's own confirmation of what the handover is built to - 48, 97 and 96 for
+architectures 0x1a and 0x1b, 48, 384 and 384 for Hopper - so they are no longer a reading of a reference
+driver's source but the width of NVIDIA's signed image.  The last line is the one that says the extraction was
+faithful: a single wrong byte would stop the digest matching.  `make dist` would then pack the file as `GSPFMC.BIN` and the panel would say `fw 1/5`.  This build does not do
+that yet, and the measurements taken while deciding say more than the earlier note did.
+
+Putting a valid FMC image on the disk costs the desktop: with the file in the QEMU image `test_compositor` fails
+its 1.2 s expectation of the window manager - the window state reads `none` - and the same image minus that one
+file passes.  The boot stub's share of that cost is not the problem.  Measured with a build that reads each
+firmware file once instead of twice, boot to `wm: entering main loop` is 5.23 s with no firmware on the disk and
+5.26 s with the FMC image on it: 0.03 s.  Adding a 12582912-byte file to the same image took it to 5.91 s, so
+pre-boot reading runs at roughly 20 MB/s, and their 63571696-byte `gsp-570.144.bin` would cost about three
+seconds of boot time once, read twice as it is today.  The compositor's failure did not move when the reading did,
+so what remains is past the main loop, in the kernel's own firmware path, on a machine with a Cirrus display and no
+NVIDIA device: the suspect is the FSP's boot and reply waits (1500 ms and 4000 ms, taken from the reference
+driver) being entered because a staged file says the path is worth trying.  That is a gate to put on the *device*,
+not on the file, and until it is in, `make dist` ships without staged firmware while `make gsp-firmware` leaves
+the result in `build/gsp/` for the checker and for your own experiment.
+
+This build **does** ship the staged FMC image: `make dist` packs `GSPFMC.BIN` (287,869 B, the vendor's own
+bytes with the container rebuilt here), the panel says `fw 1/5`, and a handover is built from it - which is what
+the measurements above price at 0.03 s of boot and what the two desktop suites needed before they could agree.
+`test_compositor` and `test_affordances` both ask the compositor who owns a point on the screen and expect the
+answer `desktop`, and both were single-shot reads with no patience in them: with a firmware image staged, the
+desktop registers as a drop target a moment later and they read `none`.  They now poll for up to 8 s and name the
+last thing they saw, so a first paint that arrives late is a number in the failure rather than a mystery, and all
+19 suites pass with the real container on the disk.  What was NOT the cause is worth stating because it was the
+suspect: the FSP's 1500 ms and 4000 ms wait budgets are not being burned on a QEMU boot - `gpu_fsp_note()`
+returns at the vendor check for anything that is not 0x10de, before a single MMIO read - so the time went into
+the boot volume's own work, not into asking a coprocessor that is not there.  On your machine the picture differs
+in the only way that matters: the vendor check passes, so the waits become reachable, and a card that answers
+nothing costs up to 5.5 s before the desktop settles.  That is the price of attempting the handover, and the
+panel names each wait in milliseconds so it can be told apart from a hang.
+
+Two facts about the stub came out of the same measurements, and they are the reason for a commit and its revert.
+The firmware reader caps one file at 16 MiB and the resident region at 32 MiB, so the resource-manager image a
+working Linux install carries is four times the file limit and cannot be read or kept at any price - it arrives
+as an I/O failure rather than as what it is.  Raising those to 72 MiB and 96 MiB, and reading each file once
+straight into the region instead of twice (the second pass existed to verify a copy the new design does not make),
+is `687acf7`; it compiles, it produced the three timings above, and `tools/tests/test_gsp_firmware.py` does not
+boot with it - the guest lands in the UEFI shell instead of the OS loader - so it is reverted in `f2a0e6b` and the
+reason is open.  A firmware file must not be able to cost a boot option, and that is the sentence the fix has to
+answer.  The disk image is also still 64 MiB, which cannot hold a 60 MB file whatever reads it: growing it moves a
+size about ten suites pin, so it is a change to make deliberately, next.
+
+`python3 tools/gspcheck.py build/gsp --install /mnt/esp/SCOS` puts genuine bytes on the stick, and
+`python3 tools/gsp-firmware.py --fetch 615.71.10 --chip GB202 --version 615.71.10 --out build/gsp` does the whole
+extraction from the driver tag with nothing installed.  That fetch path had a real bug, found by running it: it
+handed a str to `base64 -d`, which raised a TypeError, and it read the contents API, which answers a request for
+a file above about a megabyte with empty content and exit status 0 - so it now asks for the object id and then the
+object, and passes bytes.  `python3 tools/gsp-firmware.py --notice` prints the provenance
+sentence, and the image bytes are the vendor's, unmodified, with only the container around them built here.
+
+What this does not do is worth stating before a flash: a genuine FMC image makes the handover real, and the
+boot arguments are now a real LibOS record (three 64 KiB logs and a 4 KiB RM argument block) instead of the FMC
+image's own address, but the message queue the RM speaks over is still empty, so the card may boot RM and still
+does not render.  The falcon's lockdown bit and mailbox pair are what the panel now reports as the boot's
+outcome.  What changes is what the next measurement can be - the falcon's own error word and the FSP's answer to
+a real container, instead of a refusal to accept a stub.
+
+`GSPFMC.BIN` is the one this build assembles a handover from, and it needs `GSP.BIN` beside it to have anything
+to boot into: an image carrying the FMC alone reports `fw 1/5` and builds a handover that points at no resource
+manager.  `make ventoy` now stages the matched 570.144 set from linux-firmware (component `make
+gsp-firmware-set`) and refuses to leave `GSP.BIN` out when the set has it - the last two images were the same
+size as each other and one of them did not carry it, which is a difference nobody can see from a file listing.
+Take the FMC and the resource-manager image from the *same* driver release: the FMC is what verifies the RM
+image, so a pair from two versions is a pair whose signature will not check.  Say so rather than let `fw 3/5` imply more -
+and equally, do not read `fw 3/5` as a missing file: on a chip with an FSP, three of five is the whole set
+(`complete for this machine`), and the two absent names are the booter pair that belongs to the other path.
+
+Once files are there the panel answers in three paragraphs, and each one is a different question.
+`GSP firmware:` is the disk: per image, its size, its CRC32 as read, whether it is an ELF64 image (with
+`.fwimage` and the name it gives its signature section) or an ELF32 FMC image (which has neither, and is not
+asked for either), and whether the set of five is complete.  `GSP firmware intake:` is what this build does
+with them - it says plainly that nothing is handed to the card.  `GSP firmware image:` is memory: the address
+of the region the boot stub kept the copies in, and for each image held, what this kernel read out of the bytes
+themselves - which section is where, whether every section's own CRC32 still matches, and the four lengths the
+coprocessor's verify command is given.  Measured on a test VM whose five files are the containers the suite
+builds (so: sizes 1896 and 1128, not a real 570.144 blob), the third paragraph reads
+
+    GSP firmware image: 5 of 5 held read-only at 0x061e3000 (20480 B); gsp: ELF64 1896 B, 4 sections,
+    .fwimage 1024 B at 0x00000040, .fwsignature_gb20x 512 B at 0x00000440; fmc: ELF32 1128 B, 6 sections,
+    FMC header exact, every section legal and its CRC32 verified, 0 CRC32 mismatch(es); image 512 B at
+    0x00000268, hash 32, publickey 4, signature 256 B - the four numbers the FSP verify command is given;
+    bootloader: held, not a container either way; ...
+
+The endings to look for are as informative as the success.  `no container` on a role means the file is not one
+of the two ELF images the driver names - a text file, an HTML download page, a copy interrupted halfway.
+`the bytes in memory do not hash to the checksum the disk copy carried` means the file was fine and the copy
+was not, which is a different bug and is reported as such.  `N more on the disk than the boot allocation could
+keep`, or no third paragraph at all, means the region was refused: the cap is 32 MiB and the boot allocation is
+what says no, not this OS choosing to forget.  `unreadable` means the firmware could not open the file at all.
+Paste all three paragraphs, plus the `Engine:` line, when reporting a machine: the first says what the stick
+holds, the second what this build does with it, the third what is in RAM right now, and those are three
+different questions a reader has to be able to tell apart.
+
+### The FSP paragraph, and what to paste from it (r-fsp-panel)
+
+The Graphics report now has a paragraph starting `FSP mailbox:` - the card's own security processor, which is
+the thing that has to answer before any part of this GPU can be driven.  It is read on every boot.  One thing is
+written, and only after the read has come back clean: a capability query goes into the mailbox, and if the FSP
+answers it with a well-formed reply and no error, the FMC image this build was given is handed over (see
+`r-cot-send` below).  Anything that has not answered a query is never handed an image.  The panel reports facts, one clause each; it no longer explains itself at length.  What to look for:
+
+* `FSP: not asked: this display function is vendor 0xNNNN, and every offset on this path is NVIDIA's.` - this
+  machine's display function is not an NVIDIA one, so nothing of that card was touched.  On a QEMU boot it reads
+  `0x00001013` and that is correct.
+* `FSP: cot 48/97/96 v2, boot 0x000000ff booted, mailbox answers, query written, no reply, ...` - the first line
+  carries the whole decision in clauses: the generation's container widths, the boot-complete scratch, whether
+  the mailbox took a packet, what came back, the handover's fate, the lock bit, the clock, the VF page, the
+  firmware count and the card's own read/write tally.
+* `FSP mailbox: BAR0 0x..., 5 windows, N writes / M reads (K refused 0xbadf4100).` and then
+  `  arch 0x...: cot 48/97/96 v2` - which offsets were used, and how the chip answered them.
+* `  boot scratch 0xad00bc = 0x... (not booted; waited 4000 of 4000 ms)` - the FSP has not reported itself up.
+  This is the expected answer on a card whose own firmware never got going, and it is a measurement.
+* `   query: reply 28 B, type 0x15, command 0x0, error 0x0.` / `query: sent, no reply after N looks` - the
+  mailbox is alive or it is not.  `not sent, the queue never fell idle` is a third, different state.
+* ` reply queue: wrote 0/0, read back 0x0/0x0 (store lands). request: 868 B in 4 windows, read back: identical`
+  - the request is in the channel as written.
+* `read back: differs from the packet at dword N (ring-anyway: this window does not read back what it takes)` -
+  measured on GB207 at dword 0, on packets the card then answers.  The doorbell is rung regardless; whether the
+  packet arrived is the card's answer, not this kernel's inference.
+* `GSP handover: 868 B for the NNNNNN B FMC image at 0x... (CRC32 0x...), answered in 28 B, error 0x.. (FLCN_...)`
+  - the card took the image.  `0xdf` (`..._FMC_BOOT_FROM_INVALID_WPR`) and `0xdd` (`..._INVALID_DMA_TARGET`) are
+  ordinary answers and each points at a different missing piece; `FLCN_OK` with `hwcfg2 ... -> ... (lock
+  released)` is the one that means something started.
+* `GSP handover: not sent, refused(3).` and `not attempted: the queue registers refused.` - the two ways this
+  side stops before the card sees anything.
+* `GSP path: nothing written to the card this boot.` on the whole panel - one line, and it is the sentence to
+  quote when the question is "did it even try".
+
+**How to report it without losing the end of it.**  The panel is longer than what a console paste carries, and
+the last three reports came back cut off inside the detection list - which is upstream of the two paragraphs
+above.  Two things changed because of that.  The first line of `graphics` is now a single `FSP:` line that
+carries the whole decision - boot scratch, mailbox, query error code, handover outcome, lock, clock, VF page,
+firmware count, read/write totals - so a paste that stops early still says what happened and why.  And the cut
+itself was found to be ours rather than the terminal's: one report's `Engine:` line measured 1151 bytes, which
+is the size of the buffer the module builds that line in, so the sentence ended mid-word and the panel's last
+line stopped at `Display: 1024x7`.  That line is now built in a field twice as large, with 96 bytes held back
+at the end so that if a report ever overruns again it ends with `[+N B of this line dropped by this module's own
+buffer: report it as truncated]` instead of stopping in the middle of a clause, and the kernel's copy of the
+field says the same thing about itself.  To see the clipped text either way, run:
+
+    graphics fsp
+
+in the terminal or on the TTY.  It prints *only* the firmware intake, the parsed images and the FSP mailbox
+paragraphs - the same text the panel prints, from the same code - and nothing else, so it fits.  If the panel
+itself prints `Firmware intake and FSP mailbox: not printed`, the buffer did not have room for them and `graphics
+fsp` is the only way to see them; that notice says how many bytes were left, because a limit that states itself is
+not the same thing as a loss.  Paste all of that output, plus the `Engine:` line and the `Scanout owner` line, and if any of them ends in a
+bracketed notice about its own length, paste that too - it is the one part of the report that says a fact was
+removed rather than a fact withheld.
+The numbers in them - the boot scratch value, the refusal count, each reply's error code, and the before/after
+pair around a handover - are what a follow-up change gets argued against, and every one is a register read or a
+count the kernel kept while doing it.  Two of those numbers arrived because the working driver was read instead
+of guessed at: the first line now names the row of the FSP's table this chip is measured against (`cot
+48/97/96 v2` on a GB2xx, `48/384/384 v1` on a GH100 - a container is judged against *its* generation's widths,
+which is why a real GB207 file that is fine can now be accepted rather than refused as malformed), and the lock
+is reported as `bit13=1 locked` or `bit13=0 released`, which is the bit the driver reads rather than whether a
+register looked non-zero.  Waits are printed in milliseconds against the reference driver's own budgets (1500
+ms for a reply, 4000 ms for the FSP's boot) because a wait counted in reads was tens of times shorter than the
+chip needs, and a too-short wait shows up on a panel as "silent" - the most misleading thing a report can say.
+
+`gspcheck` refused the vendor's own signed file, and the reason was my transcription
+--------------------------------------------------------------------------------------------
+
+`python3 tools/gspcheck.py /lib/firmware/nvidia/gb207/gsp` on their box - read-only, no root, one paste - came
+back REFUSED, and the file was fine. Three facts came out of it, and two of them are bugs in this repository.
+
+| fact, as measured on their machine | value |
+| --- | --- |
+| `fmc-570.144.bin` | 199820 bytes, 52-byte header accepted, six sections |
+| its sections | `hash` 48, `image` 199240, `publickey` 97, `signature` 96 |
+| its section flags | `0xfff00102` on all four |
+| its `sh_info` values | `0x5f963b4f`, `0x7ed85d13`, `0x704dae4b`, `0x877bdef9` |
+| the CRC32 of those same bytes | `0xa069c4b0`, `0x8127a2ec`, `0x8fb251b4`, `0x78842106` |
+| `gsp-570.144.bin` | 63571696 bytes, ELF64 with `.fwimage` and `.fwsignature_gb20x`, accepted |
+| `bootloader-570.144.bin` | 200812 bytes, flat, accepted as a Falcon image; 1572 bytes longer than the `image` section of the FMC file, which the FMC file itself leaves 580 bytes of container around |
+| `booter_*.bin` | absent |
+
+The first bug is the section flags. The kernel and both tools required `0xff00000a`, in a comment naming
+`SHF_MASKPROC | SHF_MASKOS | SHF_OS_NONCONFORMING | SHF_ALLOC`; that sum is `0xfff00102`, and the mask values had
+been dropped from the total while their names were kept. Their file reports `0xfff00102` on every section, so the
+constant is now `0xfff00102` in `kernel/drivers/gpu/gpu_firmware.c`, `tools/gspcheck.py`, `tools/gsp-firmware.py`
+and both host harnesses, with a test that reads the value in each of them: a rule kept in four places is only
+fixed when all four are checked.
+
+The second is the `sh_info` rule. The reference driver refuses a container whose recorded CRC does not match the
+section's bytes, and a genuine signed file fails that test on all four sections - while the CRC of its public key
+is `0x8fb251b4`, which is the CRC of the key extracted from the driver's own GB202 arrays, so the bytes are read
+correctly and the field is packaging, not integrity. The kernel counts the mismatches and builds the handover
+regardless, and `gspcheck` says each one as a note instead of a refusal. What authenticates the image is the
+signature over the hash, and the coprocessor - which has the key, the hash and the signature - is the one that
+checks it; refusing a signed file here would hide the card's answer behind a header field. Divergence from the
+reference driver, stated in both files, with the reason. `tools/tests/test_gspcheck.py` now carries their file's
+measurements as a fixture, so accepting the genuine thing is a tested property.
+
+The third fact is a design limit, not a mistake: their resource-manager image is 63571696 bytes, this OS caps one
+staged image at 8 MiB and the whole disk at 64 MiB, so `GSP.BIN` cannot be carried on the stick as designed. The
+FMC image - the file the handover is built from - is 199820 bytes and fits with room to spare, so the next
+card-facing step is unaffected; putting the resource manager's image somewhere the boot can read it needs a
+decision about the volume before it is implemented. Their kernel module is 615.71.10 and the firmware its package
+installed is 570.144, so both version strings are in the intake path and nothing may assume they match.
+
+For any other machine, `python3 tools/gspcheck.py <dir> --dump` prints each file's own header hex and every
+section row as the file states it - name, type, flags, offset, size, `sh_info`, and the first sixteen bytes of
+each section - which is the difference between a corrupt file and a file read wrongly, in one paste.
+
+A staged `build/gsp` makes the suites that build their own disk image unbootable
+-------------------------------------------------------------------------------
+
+`tools/makedisk.py` derives the firmware it packs from the build directory it is handed (`firmware_blobs()` reads
+`<directory>/gsp`, recursively, so a per-chip layout works), which is how `make dist` gets `GSPFMC.BIN` onto the
+stick without a flag.  It also means every *test* image built from `build/` gets the same firmware whether or not
+the test asked for it - and a fixture image sized for one behaviour cannot hold a real 287 kB container next to
+the kernel, so it comes out unbootable and QEMU drops into the UEFI shell instead of the OS.
+
+That cost a wrong conclusion once already: a one-pass rewrite of the stub's firmware intake was reverted because
+`test_gsp_firmware`, `test_compositor` and `test_gpu_detect` all failed with the shell while the same build booted
+in five seconds when the image was packed by hand.  The suites were the problem, not the stub.  `test_gsp_firmware`
+and `test_nvidia_ident` move `build/gsp` aside for their run (`stage_aside()` in `tools/tests/qemu_support.py`) and
+put it back afterwards, which is why they survive it; `test_compositor` and `test_gpu_detect` do not, so they pass
+only while nothing is staged.  The open fix is to make the firmware source an argument a caller passes rather than
+a directory makedisk guesses - and to have makedisk refuse with the file's name and the free space when the payload
+it was handed cannot fit, instead of writing a disk that cannot boot.  Until then, `mv build/gsp build/gsp.off` is
+the workaround, and a suite failure that reads as a boot failure should be checked against it first.

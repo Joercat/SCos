@@ -156,11 +156,11 @@ static void st_paint(struct window *w)
     char val[24];
     s_text(s, 16, sy + 26, "Mouse speed:", t->text);
     fmt_u32(val, (u32)pf->mouse_sens);
-    s_text(s, 250, sy + 26, val, t->main);
+    s_clip_text(s, 250, sy + 26, val, t->main, s->w - 266);
     s_text(s, 16, sy + 56, "Double-click:", t->text);
     fmt_u32(val, (u32)pf->dbl_ms);
     strcat(val, " ms");
-    s_text(s, 250, sy + 56, val, t->main);
+    s_clip_text(s, 250, sy + 56, val, t->main, s->w - 266);
     for (int id = 0; id < 4; id++) {
         int x, y, ww, hh;
         st_pref_rect(id, sy, &x, &y, &ww, &hh);
@@ -176,8 +176,8 @@ static void st_paint(struct window *w)
         u32 bg = ui->hover_pref == 4 ? t->main : color_blend(t->win_bg,t->main,15);
         s_fill(s, x, y, ww, hh, bg);
         s_frame_rect(s, x, y, ww, hh, t->main);
-        s_text(s, x + 10, y + 5, "Restore desktop icons",
-               ui->hover_pref == 4 ? t->title_text : t->main);
+        s_clip_text(s, x + 10, y + 5, "Restore desktop icons",
+               ui->hover_pref == 4 ? t->title_text : t->main, ww - 20);
     }
 
     int wy = wm_section_y(sy + ui->scroll) - ui->scroll;
@@ -190,7 +190,7 @@ static void st_paint(struct window *w)
         if (wm_keys[r] == WMP_BAR_HEIGHT || wm_keys[r] == WMP_ICON_SIZE) {
             fmt_u32(txt, (u32)v); strcat(txt, " px");
         } else strcpy(txt, v ? "On" : "Off");
-        s_text(s, 250, rowy + 4, txt, t->main);
+        s_clip_text(s, 250, rowy + 4, txt, t->main, s->w - 266);
         for (int k = 0; k < 2; k++) {
             int id = WM_FIRST_ID + r * 2 + k;
             int x, y, ww, hh;
@@ -208,7 +208,7 @@ static void st_paint(struct window *w)
     s_text(s, 16, iy, "System Information", t->main);
     char line[96];
     strcpy(line, "OS Version: unnumbered x64 development");
-    s_text(s, 16, iy + 22, line, t->text);
+    s_clip_text(s, 16, iy + 22, line, t->text, s->w - 32);
     char sz[32];
     u32 used = vfs_usage_bytes();
     if (used < 1024) { fmt_u32(sz, used); strcat(sz, " bytes"); }
@@ -235,7 +235,7 @@ static void st_paint(struct window *w)
             if (!v) strcpy(txt, "Off");
             else { fmt_u32(txt, (u32)v); strcat(txt, " min"); }
         } else strcpy(txt, v ? "On" : "Off");
-        s_text(s, 250, rowy + 4, txt, t->main);
+        s_clip_text(s, 250, rowy + 4, txt, t->main, s->w - 266);
         for (int k = 0; k < 2; k++) {
             int id = SEC_FIRST_ID + r * 2 + k;
             int x, yy, ww, hh;
