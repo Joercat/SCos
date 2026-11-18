@@ -1411,6 +1411,16 @@ void net_timers(void)
 {
     uint64_t now = net_now_ms();
 
+    /* A cable is plugged in after the desktop is up more often than before it, and a PHY that has just been
+     * reset takes a second or two to report a link.  net_start() is called once at boot, so without this the
+     * machine that boots with the cable out never gets an address, no matter how long it is left.  The address
+     * is asked for as soon as the link appears; an attempt that already failed is retried on the same slow
+     * clock the attempt itself used, so a machine with no server is not flooding the segment. */
+    if (iface && iface->link && !local_ip && !dhcp.active && dhcp.lease != NET_LEASE_BOUND) {
+        uint64_t wait = dhcp.lease == NET_LEASE_FAILED ? DHCP_RETRY_MS * 4u : DHCP_RETRY_MS;
+        if (dhcp.sent > now || now - dhcp.sent >= wait) net_dhcp_renew();
+    }
+
     if (dhcp.active) {
         if (dhcp.lease == NET_LEASE_OFFER && now - dhcp.sent > DHCP_RETRY_MS) {
             (void)dhcp_send(3, dhcp.offered);                       /* REQUEST again */

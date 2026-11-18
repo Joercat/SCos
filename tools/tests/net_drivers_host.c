@@ -266,6 +266,16 @@ static void reset_model(void)
 static u32 reg(u16 offset) { return mock_bar[offset / 4]; }
 static u8 bar_byte(u16 offset) { return ((const u8 *)mock_bar)[offset]; }
 static void set_reg(u16 offset, u32 value) { mock_bar[offset / 4] = value; }
+/* 0x3a is not word aligned: the card's write pointer is a 16-bit register at an odd half of a word, which is
+ * exactly why the driver accesses it as a 16-bit load and store rather than as a whole word.  The 8168 model
+ * does not need it, because that card's registers are all word- or dword-sized. */
+#ifdef SCOS_TEST_RTL8139
+static void set_reg16(u16 offset, u16 value)
+{
+    ((u8 *)mock_bar)[offset] = (u8)value;
+    ((u8 *)mock_bar)[offset + 1] = (u8)(value >> 8);
+}
+#endif
 
 static void mac_from(const char *text)
 {
@@ -339,13 +349,22 @@ static void test_a_8139_is_programmed_from_reset_to_receiving(void)
                                                 adapter.tx_phys[1] != adapter.tx_phys[2]);
 }
 
-static void test_a_8139c_plus_is_refused_rather_than_driven_wrongly(void)
+static void test_a_8139c_plus_is_driven_in_c_mode(void)
 {
+    /* Revision 0x20 and later is the 8139C+.  C+ mode is opt-in through the C+ command register at 0xe0, so a
+     * part left alone runs the C-mode register set and the C-mode receive buffer this driver programs - which
+     * is the only way a card that reports that revision can be used at all.  What must never happen is a write
+     * to 0xe0, because that is what would turn the same chip into a descriptor-ring device reading this
+     * driver's ring addresses as descriptors. */
+    unsigned i;
+
     reset_model();
-    present(0x10ec, 0x8139, 0x20);          /* the C+ revision has descriptor rings, not this register file */
+    present(0x10ec, 0x8139, 0x20);
     mac_from("52:54:00:aa:bb:cc");
-    check("a 8139C+ is not claimed by the ring-mode driver", rtl8139_probe() == 0);
-    check("and nothing reached the stack", mock_registered == NULL);
+    check("a 8139C+ is claimed and driven in C mode", rtl8139_probe() == 1);
+    check("and the stack was told about it", mock_registered != NULL);
+    for (i = 0; i < 8; i++)
+        check("the C+ command register is never written", mock_bar[(0xe0 / 4) + i] == 0);
 }
 
 static void test_the_card_that_never_leaves_reset_fails_loudly(void)
@@ -417,9 +436,10 @@ static void put_rx_frame(const uint8_t *payload, size_t len, uint16_t status)
     at[4 + len + 1] = 0xad;
     at[4 + len + 2] = 0xbe;
     at[4 + len + 3] = 0xef;
-    /* The card's pointer stands where the next frame would start: the 4-byte header, the length the field
-     * declares (which includes the FCS) and the 4-byte alignment. */
-    set_reg(REG_RXBUFPTR, (u32)(adapter.rx_cur + ((4u + wire + 3u) & ~3u)));
+    /* The card's own write pointer (0x3a) stands where the next frame would start: past the 4-byte header,
+     * the length the field declares (which includes the FCS) and the 4-byte alignment.  0x38 is the driver's
+     * read offset (CAPR) and is not the model's to write. */
+    set_reg16(REG_RXBUFADDR, (u16)(adapter.rx_cur + ((4u + wire + 3u) & ~3u)));
 }
 
 static void test_a_received_frame_reaches_the_stack_and_the_ring_advances(void)
@@ -454,7 +474,9 @@ static void test_a_damaged_frame_never_reaches_the_stack(void)
     check("the poll consumes the descriptor", mock_registered->poll(mock_registered) == 1);
     check("the stack never saw the frame", mock_rx_calls == 0);
     check("the damage was counted", adapter.rx_errors == 1);
-    set_reg(REG_RXBUFPTR, 0x100);
+    /* A receiver that has been restarted begins writing at the start of the ring again. */
+    adapter.rx_cur = 0;
+    set_reg16(REG_RXBUFADDR, 0);
     put_rx_frame(frame, sizeof frame, 0);   /* not the "OK" bit at all */
     (void)mock_registered->poll(mock_registered);
     check("a header without the OK bit is an error too", adapter.rx_errors == 2);
@@ -680,7 +702,7 @@ int main(void)
 #if defined(SCOS_TEST_RTL8139)
     test_absent_card_claims_nothing();
     test_a_8139_is_programmed_from_reset_to_receiving();
-    test_a_8139c_plus_is_refused_rather_than_driven_wrongly();
+    test_a_8139c_plus_is_driven_in_c_mode();
     test_the_card_that_never_leaves_reset_fails_loudly();
     test_transmit_copies_the_frame_and_rings_the_doorbell();
     test_a_short_frame_is_padded_and_a_busy_slot_is_not_rewritten();

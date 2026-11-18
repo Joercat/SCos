@@ -29,6 +29,7 @@
 #define RTL_RX_ALIGN        0x8000u                 /* the ring's base is aligned to its own size */
 #define RTL_TX_SLOTS        4
 #define RTL_TX_BUF          2048u                   /* one maximum Ethernet frame fits with room to spare */
+#define RTL_RX_MAX_FRAME    1600u                   /* the largest frame the card will hold, FCS included */
 
 /* Register map (8139too.c, enum RTL8139_registers). */
 #define REG_IDR0            0x00
@@ -36,7 +37,8 @@
 #define REG_TXADDR0         0x20
 #define REG_RXBUF           0x30
 #define REG_CHIPCMD         0x37
-#define REG_RXBUFPTR        0x38
+#define REG_RXBUFPTR        0x38        /* CAPR: this side's read offset, written by this side */
+#define REG_RXBUFADDR       0x3a        /* CBR: the card's write offset, written by the card */
 #define REG_INTRMASK        0x3c
 #define REG_INTRSTATUS      0x3e
 #define REG_TXCONFIG        0x40
@@ -56,6 +58,7 @@
 #define CMD_RESET           0x10
 #define CMD_RXENB           0x08
 #define CMD_TXENB           0x04
+#define CMD_RX_EMPTY        0x01        /* the card has nothing written into the receive buffer */
 /* Cfg9346: the config registers are write-protected until this byte is 0xc0. */
 #define CFG_UNLOCK          0xc0
 #define CFG_LOCK            0x00
@@ -121,18 +124,20 @@ static u16 r16(struct rtl8139 *d, u16 reg)
     u16 v;
 
     if (d->io) return inw((u16)(d->port + reg));
-    /* The 8- and 16-bit registers are byte lanes of a 32-bit word on a memory BAR; reading them as
-     * bytes keeps this correct regardless of the lane's alignment inside that word. */
-    v = d->mmio[reg];
-    v |= (u16)(d->mmio[reg + 1] << 8);
+    /* A register has a width, and the width is not decoration: the card decodes the byte enables of an
+     * access, and a 32-bit register written as four byte stores leaves the card with whatever the last
+     * store put in the low lane.  RxConfig read back as 0x8a after 0x1788a was written - only the accept
+     * bits, because they are the low byte - is exactly that failure, and it is how a card ends up in the
+     * wrong ring size with the wrong DMA burst.  Every access below is therefore the register's own width,
+     * which on x86 also means an unaligned load is legal. */
+    v = *(const volatile u16 *)(d->mmio + reg);
     return v;
 }
 
 static u32 r32(struct rtl8139 *d, u16 reg)
 {
     if (d->io) return inl((u16)(d->port + reg));
-    return ((u32)d->mmio[reg]) | ((u32)d->mmio[reg + 1] << 8) |
-           ((u32)d->mmio[reg + 2] << 16) | ((u32)d->mmio[reg + 3] << 24);
+    return *(const volatile u32 *)(d->mmio + reg);
 }
 
 static void w8(struct rtl8139 *d, u16 reg, u8 v)
@@ -144,17 +149,13 @@ static void w8(struct rtl8139 *d, u16 reg, u8 v)
 static void w16(struct rtl8139 *d, u16 reg, u16 v)
 {
     if (d->io) { outw((u16)(d->port + reg), v); return; }
-    d->mmio[reg] = (u8)v;
-    d->mmio[reg + 1] = (u8)(v >> 8);
+    *(volatile u16 *)(d->mmio + reg) = v;
 }
 
 static void w32(struct rtl8139 *d, u16 reg, u32 v)
 {
     if (d->io) { outl((u16)(d->port + reg), v); return; }
-    d->mmio[reg] = (u8)v;
-    d->mmio[reg + 1] = (u8)(v >> 8);
-    d->mmio[reg + 2] = (u8)(v >> 16);
-    d->mmio[reg + 3] = (u8)(v >> 24);
+    *(volatile u32 *)(d->mmio + reg) = v;
 }
 
 
@@ -333,39 +334,53 @@ static int start_chip(struct rtl8139 *d)
 static int rtl8139_poll(struct net_nic *nic)
 {
     struct rtl8139 *d = nic->priv;
-    u16 hw, status, length;
+    u16 status, length;
     u8 *frame;
-    size_t frame_len;
 
     if (!d) return 0;
     link_read(d);
-    /* A no-wrap ring never splits a frame, so a frame can only start where at least a maximum-sized one
-     * would fit; when the next start would not fit, the card's pointer has already wrapped and ours has
-     * to follow. */
-    if ((u32)d->rx_cur + 4u + 1600u > RTL_RX_RING) d->rx_cur = 0;
-    hw = (u16)(r16(d, REG_RXBUFPTR) & (RTL_RX_RING - 1u));
-    if (hw == d->rx_cur) return 0;
+    /* "Is the ring empty" is the card's answer, not ours: ChipCmd bit 0 is the card saying it has nothing
+     * written.  The receive buffer address register (0x3a) is the card's write pointer; the pointer at 0x38
+     * is the driver's own read pointer (CAPR), which the card never writes - reading 0x38 to find out whether
+     * a frame arrived is reading back the value this side last stored there, and a ring polled that way
+     * re-parses whatever sits at the read offset forever. */
+    if ((r8(d, REG_CHIPCMD) & CMD_RX_EMPTY) || r16(d, REG_RXBUFADDR) == d->rx_cur) return 0;
+
+    /* A no-wrap ring never splits a frame, so a frame can only start where a maximum-sized one would fit;
+     * when the next start would not fit, the card has wrapped and the header it left at the end of the buffer
+     * is a marker, not a frame. */
+    if ((u32)d->rx_cur + 4u + RTL_RX_MAX_FRAME > RTL_RX_RING) {
+        d->rx_cur = 0;
+        w16(d, REG_RXBUFPTR, (u16)(RTL_RX_RING - 16u));
+        return 1;
+    }
 
     frame = d->rx + d->rx_cur;
     status = (u16)(frame[0] | (frame[1] << 8));
     length = (u16)(frame[2] | (frame[3] << 8));
     if (!(status & RX_STATUS_OK) || (status & (RX_STATUS_RUNT | RX_STATUS_TOO_LONG |
-                                              RX_STATUS_CRC | RX_STATUS_BAD_ALIGN))) {
-        d->rx_errors++;
-        d->rx_cur = 0;              /* a damaged header leaves no trustworthy next offset */
-        return 1;
-    }
-    if (length < 4u + 14u || length > RTL_RX_RING - 4u || d->rx_cur + 4u + length > RTL_RX_RING) {
+                                              RX_STATUS_CRC | RX_STATUS_BAD_ALIGN)) ||
+        length < 4u + 14u || length > RTL_RX_MAX_FRAME + 4u ||
+        d->rx_cur + 4u + length > RTL_RX_RING) {
+        /* Lost in the ring: the header cannot be trusted to say where the next one starts, so the receiver is
+         * restarted from zero, which is what the reference driver does with a bad header rather than walking
+         * off the end of its own buffer. */
         d->rx_errors++;
         d->rx_cur = 0;
+        w8(d, REG_CHIPCMD, (u8)(r8(d, REG_CHIPCMD) & ~CMD_RXENB));
+        w8(d, REG_CHIPCMD, (u8)(CMD_RXENB | CMD_TXENB));
+        w16(d, REG_RXBUFPTR, (u16)(RTL_RX_RING - 16u));
         return 1;
     }
     /* The length field counts the 4-byte FCS the card appended; the stack is given the frame without it. */
-    frame_len = (size_t)length - 4u;
     d->rx_frames++;
-    net_rx_frame(frame + 4, frame_len);
+    net_rx_frame(frame + 4, (size_t)length - 4u);
     d->rx_cur = (u16)((d->rx_cur + 4u + length + 3u) & ~3u);
     if (d->rx_cur >= RTL_RX_RING) d->rx_cur = 0;
+    /* Releasing the space: the card will not write past CAPR, so a driver that never updates it fills the ring
+     * once and then receives nothing while still reporting a link.  The card's own convention, sixteen bytes
+     * behind the read offset, is the reference driver's (RxBufPtr = cur_rx - 16). */
+    w16(d, REG_RXBUFPTR, (u16)(d->rx_cur >= 16u ? d->rx_cur - 16u : RTL_RX_RING - 16u));
     return 1;
 }
 
@@ -486,15 +501,16 @@ int rtl8139_probe(void)
         u16 device = pci_read16(bus[i], dev[i], fn[i], 2);
         u8 revision = pci_read8(bus[i], dev[i], fn[i], 8);
         if (vendor != RTL_VENDOR || device != RTL_DEV_8139) continue;
-        /* Revision 0x20 and later is the 8139C+, a descriptor-ring part with a different register
-         * layout entirely: driving it from this file would write descriptors into what it reads as a
-         * receive buffer.  The 8168 driver's ring format is not it either, so it is reported, not
-         * claimed. */
-        if (revision >= 0x20) {
-            klog("rtl8139: %u:%u.%u is a 8139C+ (rev %x) and uses descriptor rings", bus[i], dev[i], fn[i],
-                 revision);
-            continue;
-        }
+        /* Revision 0x20 and later is the 8139C+, which can be driven two ways: the C mode this file
+         * programs, or the C+ mode with descriptor rings at 0xe0 and a C+ command register.  C+ mode is
+         * opt-in - it is entered by writing CpCmd (0xe0), a register this file never touches - so a C+
+         * part left alone runs the C-mode register set and the C-mode receive buffer exactly as an
+         * 8139C does, which is why the revision is reported and not refused.  The receive-buffer and
+         * transmit paths below are the C-mode ones and stay that way: a chip in C+ mode would read the
+         * ring addresses this file writes to RxBuf as descriptor addresses, so the mode is a decision,
+         * not a fallback. */
+        if (revision >= 0x20)
+            klog("rtl8139: %u:%u.%u is a 8139C+ (rev %x) driven in C mode", bus[i], dev[i], fn[i], revision);
         if (init_one(bus[i], dev[i], fn[i])) return 1;
     }
     return 0;

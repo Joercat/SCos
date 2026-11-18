@@ -20,6 +20,10 @@ def main():
                     help="boot via emulated USB storage, with xHCI keyboard/mouse; native saves remain unsupported on USB")
     ap.add_argument("--xhci", action="store_true", help="add emulated USB keyboard/mouse")
     ap.add_argument("--vnc", action="store_true", help="VNC on a private Unix socket, never a TCP listener")
+    ap.add_argument("--nic", choices=["none", "rtl8139"], default="none",
+                    help="attach a Realtek RTL8139 to QEMU's user-mode network, which serves DHCP and "
+                         "answers an echo to its gateway: the one way this suite runs the network driver "
+                         "against emulated hardware instead of against a model of it")
     ap.add_argument("--device", action="append", default=[], metavar="SPEC",
                     help="extra -device argument, repeatable; used by the GPU detection "
                          "test to attach emulated PCI display functions next to the boot one")
@@ -60,6 +64,10 @@ def main():
                "-vga", args.vga, "-nic", "none", "-display", "none",
                "-serial", f"file:{run / 'serial.log'}",
                "-qmp", f"unix:{escape(run / 'qmp.sock')},server=on,wait=off", "-no-reboot"]
+    if args.nic != "none":
+        # User-mode networking: a DHCP server, a gateway that answers echo requests, and a resolver, all
+        # inside QEMU.  Nothing here reaches the host's network any further than the gateway does.
+        command += ["-netdev", "user,id=net0", "-device", f"{args.nic},netdev=net0"]
     if args.xhci or args.usb_boot:
         command += ["-device", "qemu-xhci,id=xhci", "-device", "usb-kbd,bus=xhci.0",
                     "-device", "usb-mouse,bus=xhci.0"]
@@ -79,7 +87,9 @@ def main():
     if args.vnc:
         command += ["-vnc", f"unix:{run / 'vnc.sock'}"]
     print(f"QMP / serial log directory: {run}", flush=True)
-    print("Disposable snapshot: original image unchanged; no guest networking or device passthrough.", flush=True)
+    print("Disposable snapshot: original image unchanged; "
+          + ("guest networking is QEMU's own user-mode stack, " if args.nic != "none" else "")
+          + "no device passthrough.", flush=True)
     print(shlex.join(command), flush=True)
     if not args.dry_run:
         os.execv(command[0], command)

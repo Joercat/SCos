@@ -134,26 +134,24 @@ static int claimed;
 
 static u8 r8(struct rtl8168 *d, u16 reg) { return d->regs[reg]; }
 
+/* Width-correct accesses: the card decodes byte enables, so a 32-bit register written as four byte stores
+ * keeps only the low lane (RxConfig read back as 0x8a after 0x1788a is that, and it is how a card ends up in
+ * the wrong ring size), and a 16-bit status register read a byte at a time returns nothing at all. */
 static u32 r32(struct rtl8168 *d, u16 reg)
 {
-    return ((u32)d->regs[reg]) | ((u32)d->regs[reg + 1] << 8) |
-           ((u32)d->regs[reg + 2] << 16) | ((u32)d->regs[reg + 3] << 24);
+    return *(const volatile u32 *)(d->regs + reg);
 }
 
 static void w8(struct rtl8168 *d, u16 reg, u8 v) { d->regs[reg] = v; }
 
 static void w16(struct rtl8168 *d, u16 reg, u16 v)
 {
-    d->regs[reg] = (u8)v;
-    d->regs[reg + 1] = (u8)(v >> 8);
+    *(volatile u16 *)(d->regs + reg) = v;
 }
 
 static void w32(struct rtl8168 *d, u16 reg, u32 v)
 {
-    d->regs[reg] = (u8)v;
-    d->regs[reg + 1] = (u8)(v >> 8);
-    d->regs[reg + 2] = (u8)(v >> 16);
-    d->regs[reg + 3] = (u8)(v >> 24);
+    *(volatile u32 *)(d->regs + reg) = v;
 }
 
 /* Two places here depend on the card changing a register by itself - the reset bit clearing, and the PHY

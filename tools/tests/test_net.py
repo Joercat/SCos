@@ -9,14 +9,18 @@ carries the driver objects, and a machine with no supported card says so without
 """
 
 import re
+import struct
 import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 NET_CHECKS = 79                 # the model of the wire, pinned: a dropped scenario is a silent loosening
-DRIVER_CHECKS = {'rtl8139': 57, 'rtl8168': 58}   # the model of the two cards, pinned for the same reason
+DRIVER_CHECKS = {'rtl8139': 65, 'rtl8168': 58}   # the model of the two cards, pinned for the same reason
 
 GCC = ['gcc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-ffreestanding', '-fno-builtin',
        '-fno-stack-protector', '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
@@ -169,12 +173,60 @@ def test_a_machine_with_no_supported_card_still_boots_and_says_so():
         assert needle in rtl8, 'the RTL8168 driver no longer does %r' % needle
 
 
+# struct net_info, by offset: the harness reads it out of the guest's own memory, so the numbers below are the
+# stack's own counters and not a log line paraphrasing them.
+NET_INFO = {'state': 4, 'link': 40, 'lease': 48, 'ip': 52, 'mask': 56, 'gateway': 60, 'dns': 64,
+            'rx': 76, 'tx': 80, 'arp_requests': 96, 'arp_replies': 100, 'icmp': 104, 'tcp': 112}
+
+
+def _net_info(g):
+    g.call('net_get_info', g.scratch)
+    raw = g.debug.read(g.scratch, 132)
+    return {name: struct.unpack_from('<I', raw, offset)[0] for name, offset in NET_INFO.items()}
+
+
+def test_the_stack_runs_on_emulated_hardware_and_gets_a_lease_from_its_dhcp_server():
+    """The model of the wire proves the stack's parsing; it cannot prove the driver, and the model of the card
+    proves the registers; it cannot prove the two together.  QEMU's RTL8139 with its user-mode network is the
+    one place both run against something that behaves like hardware: the card DMAs real frames, the DHCP server
+    is a real DHCP server, and the gateway answers an echo request.  This test boots that machine and reads the
+    stack's own counters out of its memory."""
+    if not (ROOT / '.tools' / 'qemu' / 'bin' / 'qemu-system-x86_64').exists():
+        raise AssertionError('QEMU bundle missing; run tools/setup_qemu.py before this suite')
+    from qemu_support import Guest
+    with Guest('net-hw', nic='rtl8139') as g:
+        deadline = time.time() + 30
+        info = _net_info(g)
+        while not info['ip'] and time.time() < deadline:
+            time.sleep(1)
+            info = _net_info(g)
+        assert info['ip'] == 0x0a00020f, 'no lease from the emulated DHCP server: %r' % info
+        assert info['gateway'] == 0x0a000202 and info['dns'] == 0x0a000203, info
+        assert info['link'] == 1 and info['lease'] == 2 and info['state'] == 4, info
+        # Two frames out and two in is the whole of a lease: the DISCOVER, the OFFER, the REQUEST and the ACK.
+        # A driver that reads the wrong pointer in its own receive ring keeps re-reading the same buffer, and
+        # the counter that shows it is the frame count, not the lease.
+        assert info['rx'] <= 8 and info['tx'] <= 8, 'the receive ring is being re-read: %r' % info
+        # An echo to the gateway: ARP for 10.0.2.2, its reply, then ICMP in both directions.  Typed into the
+        # terminal, because the debugger calls functions with interrupts masked, and this stack measures time
+        # with the tick.
+        g.launch('terminal')
+        time.sleep(1)
+        g.type('ping 10.0.2.2\n')
+        g.run(4)
+        after = _net_info(g)
+        assert after['icmp'] >= 1, 'the echo was never answered over the emulated card: %r' % after
+        assert after['arp_requests'] == 1 and after['arp_replies'] == 1, after
+        assert after['rx'] <= 12 and after['tx'] <= 12, 'the counters grew by more than the exchange: %r' % after
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith('test_') and callable(f)]
     for name, fn in tests:
         fn()
     print('PASS: the stack against the modelled wire (%d checks), the adapter contract the Realtek drivers '
-          'implement, the kernel tick it runs on, and the window and taskbar that report it' % NET_CHECKS)
+          'implement, the stack and a driver together on QEMU\'s emulated RTL8139 and its DHCP server, the '
+          'kernel tick it runs on, and the window and taskbar that report it' % NET_CHECKS)
 
 
 if __name__ == '__main__':
