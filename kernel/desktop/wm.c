@@ -7,6 +7,7 @@
  * is mouse- and keyboard-driven through the PS/2 drivers.
  */
 #include "scos.h"
+#include "net.h"
 
 #define MAX_WINDOWS 48
 #define TASKBAR_H 40
@@ -95,7 +96,9 @@ static int icon_hover = -1;
 /* ---- taskbar layout: scrollable app buttons + power button + clock ---- */
 #define TB_CLOCK_W 68
 #define TB_POWER_W 34
+#define TB_NET_W 30
 static int power_hover;
+static int net_hover;
 static int picker_ids[MAX_WINDOWS];
 static char picker_labels[MAX_WINDOWS][80];
 static const char *picker_items[MAX_WINDOWS];
@@ -205,6 +208,17 @@ static void tb_power_rect(int *x, int *y, int *w, int *h)
     *x = screen_w - TB_CLOCK_W - TB_POWER_W - 16;
     *y = screen_h - TASKBAR_H + 6;
     *w = TB_POWER_W;
+    *h = TASKBAR_H - 12;
+}
+
+/* The network indicator sits between the pinned applications and the power button: it is a button, not
+ * decoration - one click opens the Network window, which is where the address, the counters and the probes
+ * are. */
+static void tb_net_rect(int *x, int *y, int *w, int *h)
+{
+    *x = screen_w - TB_CLOCK_W - TB_POWER_W - 16 - TB_NET_W - 4;
+    *y = screen_h - TASKBAR_H + 6;
+    *w = TB_NET_W;
     *h = TASKBAR_H - 12;
 }
 
@@ -1262,6 +1276,19 @@ static void paint_taskbar(void)
         /* Dimmer when every window of that application is put away - the bar is the only place left
          * that can say so, and double-clicking the entry is how it gets undone. */
         s_fill(&screen,x,y+6,34,TASKBAR_H-12,blend(t->taskbar_bg,t->main,wm_app_minimized(task_pins[i])==1?7:20));s_frame_rect(&screen,x,y+6,34,TASKBAR_H-12,t->main);s_icon(&screen,a->icon,x+5,y+8,t->text);}
+    /* network state, as a button that opens the Network window.  Full colour when a card has a link, dimmed
+     * while it is down, and dimmer still when the machine has no supported adapter: the tray is where a
+     * person looks first, so "no card" and "no cable" may not look the same. */
+    { struct net_info ni; net_get_info(&ni);
+      int nx, ny, nw2, nh2;
+      tb_net_rect(&nx, &ny, &nw2, &nh2);
+      net_hover = in_rect(mx, my, nx, ny, nw2, nh2) && !drag_win && !resize_win &&
+                  desk_drag < 0 && !band_active && !menu.active && !modal_w && !dnd.active;
+      u32 icon_c = !ni.present ? blend(t->taskbar_bg, t->main, 16)
+                 : ni.link ? t->main : blend(t->taskbar_bg, t->main, 40);
+      if (net_hover) s_fill(&screen, nx, ny, nw2, nh2, blend(t->taskbar_bg, t->main, 30));
+      s_icon(&screen, ICON_NET, nx + 3, ny + 2, icon_c); }
+
     /* power button */
     int px, py, pw, ph;
     tb_power_rect(&px, &py, &pw, &ph);
@@ -1861,6 +1888,8 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
             int x, y, w, h;
             tb_power_rect(&x, &y, &w, &h);
             tbz = in_rect(mx, my, x, y, w, h);
+            tb_net_rect(&x, &y, &w, &h);
+            if (in_rect(mx, my, x, y, w, h)) tbz = 2;
         } else if (!hw) {
             for (int i = 0; i < nitems; i++) {
                 if (items[i].hidden) continue;
@@ -2171,6 +2200,13 @@ static __attribute__((noinline)) void handle_mouse(struct mouse_event *e)
             }
             else if(e->button==MBTN_LEFT){wm_full();return;}
         }
+        int nx, ny, nw2, nh2;
+        tb_net_rect(&nx, &ny, &nw2, &nh2);
+        if (in_rect(mx, my, nx, ny, nw2, nh2) && e->button == MBTN_LEFT && e->down) {
+            wm_open_app("net", NULL);
+            wm_full();
+            return;
+        }
         int px, py, pw, ph;
         tb_power_rect(&px, &py, &pw, &ph);
         if (in_rect(mx, my, px, py, pw, ph)) {
@@ -2385,6 +2421,7 @@ void wm_run(void)
         if (err_pending()) err_show_pending();
         interrupt_poll();
         usb_poll(); /* foreground only: never drive USB from SIMD-free IRQs */
+        net_poll(); /* one burst of frames per frame, and the network timers */
         struct mouse_event me;
         while (mouse_poll(&me)) handle_mouse(&me);
         resize_flush(0);           /* r36: once-per-frame resize apply */

@@ -520,6 +520,14 @@ void s_icon(struct surface *s, int id, int x, int y, u32 c)
         s_fill(s, x + 10, y + 8, 3, 10, c);
         s_fill(s, x + 15, y + 5, 3, 13, c);
         break;
+    case ICON_NET:
+        /* A signal-strength glyph rather than the wireless arc a ported shell would have drawn: this
+         * kernel has no wireless stack, so the icon reports the wired link this tree actually has, and
+         * the four bars read at 24 px where an arc pair does not. */
+        for (int i = 0; i < 4; i++)
+            s_fill(s, x + 3 + i * 5, y + 19 - i * 4, 4, 3 + i * 4, c);
+        s_fill(s, x + 2, y + 20, 20, 2, c);
+        break;
     case ICON_CARDS:
         s_fill(s, x + 8, y + 2, 14, 18, c);
         s_frame_rect(s, x + 8, y + 2, 14, 18, c);

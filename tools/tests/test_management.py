@@ -115,10 +115,10 @@ def test():
         g.save('home/apps/reuse.cat',package('return {}',id='reuse'))
         assert callstr(g,'lua_app_install','home/apps/reuse.cat')
         assert g.call('app_uninstall',stringarg(g,'reuse'),g.scratch+256,256)
-      # Eleven native apps, two internal WM clients and the installed CAT packages - and no manager,
+      # Twelve native apps, two internal WM clients and the installed CAT packages - and no manager,
       # which is why uninstalling must be reachable from the icon and the terminal rather than from a
       # window that lists everything.
-      assert g.call('app_count')==13
+      assert g.call('app_count')==14
       assert not g.call('app_uninstall',stringarg(g,'settings'),g.scratch+256,256)
       # Long Notepad lines keep the insertion point visible and accept body clicks.
       g.save('home/documents/long.txt','a'*500)

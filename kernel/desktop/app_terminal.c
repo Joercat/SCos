@@ -10,6 +10,7 @@
  * stack instead of inventing latency.
  */
 #include "scos.h"
+#include "net.h"
 
 /* A display limit, stated as one: this is how many lines the scrollback keeps and renders, and nothing a
  * command prints is dropped for being long - the buffer a response is assembled in is separately bounded and
@@ -234,7 +235,12 @@ static const char *help_text =
     "tty [1-6] - Switch to a text console; Ctrl+Alt+F7 returns to desktop\n"
     "theme     - List or switch themes\n"
     "calc      - Perform basic arithmetic\n"
-    "ping      - Network status (TCP/IP unavailable)\n"
+    "net       - Network status: adapter, link, address, lease, counters\n"
+    "net renew - Ask DHCP for a lease now\n"
+    "net set <ip> <mask> <gateway> [dns] - Configure a static address\n"
+    "ping <host> - ICMP echo, resolving a name through DNS if it is not an address\n"
+    "nslookup <name> - Resolve a name through the configured resolver\n"
+    "httpget <url> - Fetch http://host/path over TCP and print the response\n"
     "scinfo    - Display system information\n"
     "alias     - Create command aliases\n"
     "history   - Show command history\n"
@@ -670,9 +676,89 @@ static void run_command(struct term *t, const char *command)
             }
         }
     }
+    else if (!strcmp(cmd, "net") || !strcmp(cmd, "ifconfig") || !strcmp(cmd, "ip")) {
+        if (nargs > 1 && !strcmp(args[1], "renew")) {
+            net_dhcp_renew();
+            strcpy(response, "net: lease request sent; the answer arrives as the desktop polls the card.\n");
+            net_format_status(response + strlen(response), 512);
+        } else if (nargs > 4 && !strcmp(args[1], "set")) {
+            u32 ip = 0, mask = 0, gw = 0, dns = 0;
+            int ok = net_parse_ip(args[2], &ip) && net_parse_ip(args[3], &mask) && net_parse_ip(args[4], &gw);
+            if (ok && nargs > 5) ok = net_parse_ip(args[5], &dns);
+            if (!ok || !net_set_static(ip, mask, gw, dns))
+                strcpy(response, "net: usage: net set <ip> <mask> <gateway> [dns]\n");
+            else
+                strcpy(response, "net: static address configured\n");
+        } else if (nargs > 1) {
+            strcpy(response, "net: usage: net | net renew | net set <ip> <mask> <gateway> [dns]\n");
+        }
+        if (!response[0] || (nargs == 1 && !strcmp(cmd, "net"))) {
+            net_format_status(response, 512);
+            strcat(response, "\n");
+        }
+    }
     else if (!strcmp(cmd, "ping")) {
-        strcpy(response, "ping: this kernel has no TCP/IP stack - network unreachable.\n"
-                         "No network interface driver is present (see 'disks'/'cpu' for real hardware).");
+        if (nargs < 2) {
+            strcpy(response, "ping: usage: ping <address or name>\n");
+        } else {
+            u32 target = 0;
+            char name[64];
+            strncpy(name, args[1], sizeof name - 1);
+            name[sizeof name - 1] = 0;
+            if (!net_parse_ip(name, &target) && !net_dns_lookup(name, &target, 3000)) target = 0;
+            if (!target) {
+                strcpy(response, "ping: cannot resolve ");
+                strcat(response, name);
+                strcat(response, "\n");
+            } else {
+                u32 rtt = 0;
+                char ip[20], ms[16];
+                net_format_ip(ip, sizeof ip, target);
+                if (net_ping(target, 2000, &rtt)) {
+                    strcpy(response, "reply from ");
+                    strcat(response, ip);
+                    strcat(response, " in ");
+                    fmt_u32(ms, rtt);
+                    strcat(response, ms);
+                    strcat(response, " ms\n");
+                } else {
+                    strcpy(response, "no reply from ");
+                    strcat(response, ip);
+                    strcat(response, " within 2000 ms\n");
+                }
+            }
+        }
+    }
+    else if (!strcmp(cmd, "nslookup")) {
+        if (nargs < 2) {
+            strcpy(response, "nslookup: usage: nslookup <name>\n");
+        } else {
+            u32 ip = 0;
+            char text[20];
+            if (net_dns_lookup(args[1], &ip, 3000)) {
+                net_format_ip(text, sizeof text, ip);
+                strcpy(response, args[1]);
+                strcat(response, " is ");
+                strcat(response, text);
+                strcat(response, "\n");
+            } else {
+                strcpy(response, "nslookup: no answer for ");
+                strcat(response, args[1]);
+                strcat(response, "; the resolver is reported by 'net'\n");
+            }
+        }
+    }
+    else if (!strcmp(cmd, "httpget") || !strcmp(cmd, "wget")) {
+        if (nargs < 2) {
+            strcpy(response, "httpget: usage: httpget http://host/path\n");
+        } else {
+            size_t got = 0;
+            if (!net_http_get(args[1], response, 2048, &got)) {
+                strcpy(response, "httpget: the fetch failed; 'net' reports the counters and the address\n");
+            } else {
+                response[got < 2047 ? got : 2047] = 0;
+            }
+        }
     }
     else if (!strcmp(cmd, "scinfo") || !strcmp(cmd, "sysinfo")) {
         char a[32], b[32];

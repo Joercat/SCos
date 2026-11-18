@@ -47,7 +47,7 @@ static int api_resize(lua_State *L){struct lua_window *d=context(L);if(d->painti
 static int api_move(lua_State *L){struct lua_window *d=context(L);if(d->painting)return luaL_error(L,"move is not allowed in paint");int x=xy(L,1),y=xy(L,2);lua_pushboolean(L,wm_move_window(d->w,x,y));return 1;}
 
 /* Icons are always native 24x24 pixels; scripts cannot request a scaled icon. */
-static const char *icon_names[]={"folder","terminal","notepad","browser","calendar","settings","info","cards","chart","solitaire"};
+static const char *icon_names[]={"folder","terminal","notepad","browser","calendar","settings","info","cards","chart","solitaire","network"};
 static int api_icon_size(lua_State *L){lua_pushinteger(L,24);lua_pushinteger(L,24);return 2;}
 static int api_icons(lua_State *L){lua_newtable(L);for(int i=0;i<ICON_COUNT;i++)field(L,icon_names[i],i);return 1;}
 static int api_set_icon(lua_State *L){struct lua_window *d=context(L);if(d->painting)return luaL_error(L,"set_icon is not allowed in paint");int id=integer(L,1,0,ICON_COUNT-1);if(d->w->app->icon!=id){d->w->app->icon=id;wm_request_full();}return 0;}

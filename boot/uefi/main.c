@@ -168,6 +168,36 @@ static status load_kernel(const void *buffer,size_t size,uint64_t *base_out,uint
  }
  *base_out=base;*end=base+high;*entry=base+h->entry;return 0;
 }
+/* How much RAM the machine actually has, read out of the firmware's own memory map.  The mode chosen below has
+ * to fit a limited machine as well as a large one: the desktop keeps two full-screen buffers (the drawing
+ * surface and the wallpaper cache), so a mode nobody can afford is a machine that boots and then has no memory
+ * for a window.  Only descriptor types that become the kernel's own free memory are counted. */
+struct memory_descriptor {uint32_t type;uint32_t pad;uint64_t physical,virtual_offset;uint64_t pages;uint64_t attributes;};
+static uint64_t usable_ram=0;
+static void measure_ram(void){
+ size_t bytes=32*1024,key=0,stride=0;uint32_t version=0;void *map=0;
+ if(FAILED(bs->allocate_pool(2,bytes,&map))||!map)return;
+ status s=bs->get_memory_map(&bytes,map,&key,&stride,&version);
+ if(FAILED(s)||!stride||bytes%stride||stride<sizeof(struct memory_descriptor)){bs->free_pool(map);return;}
+ for(size_t at=0;at<bytes;at+=stride){
+  const struct memory_descriptor *d=(const void*)((const uint8_t*)map+at);
+  if(!d->type)break;
+  /* 1..4 are loader and boot-services memory and 7 is conventional: all of it is free after ExitBootServices. */
+  if(d->type<=4||d->type==7){uint64_t span=d->pages<<12;if(usable_ram+span>=usable_ram)usable_ram+=span;}
+ }
+ bs->free_pool(map);
+}
+/* One full-screen buffer, at a thirty-second of what the machine has - a sixteenth for the pair of them, the
+ * drawing surface and the wallpaper cache: 128 MiB target -> 4 MiB, which is 1280x720; 8 GiB -> 256 MiB, so a 4K
+ * mode is chosen without thinking about it.  A floor keeps a machine with very little RAM on a mode that still
+ * shows a desktop, and a ceiling stops the arithmetic from making the choice meaningless on a machine far larger
+ * than any panel. */
+static uint64_t screen_budget(void){
+ uint64_t budget=usable_ram/32;
+ if(budget<4u*1024u*1024u)budget=4u*1024u*1024u;
+ if(budget>64u*1024u*1024u)budget=64u*1024u*1024u;
+ return budget;
+}
 static int channel(uint32_t m){if(!m)return 0;while(!(m&1))m>>=1;return !(m&(m+1))&&m<=1023;}
 static int mode_valid(const struct mode_info *m){
  if(m->width<640||m->height<400||m->width>4096||m->height>2160||m->stride<m->width||m->stride>16384)return 0;
@@ -178,21 +208,42 @@ static status graphics(struct boot_framebuffer *f){
  struct gop *g=0;status s=bs->handle_protocol(system->output_handle,&gop_guid,(void**)&g);
  if(FAILED(s))s=bs->locate_protocol(&gop_guid,0,(void**)&g);
  if(FAILED(s))return s;
- uint32_t skipped[6];size_t skipped_count=0;
+ uint32_t skipped[16];size_t skipped_count=0;
  /* A mode list describes what the firmware can *describe*, not what the device can *hold*.  EDK2's
   * Cirrus GOP advertises 1024x768 while reporting a frame buffer only large enough for 800x600, and
   * a real card's list routinely carries sizes whose stride does not fit the reserved aperture.
   * Picking the most preferred mode and then refusing to boot over its aperture would leave a machine
   * with a perfectly usable smaller mode on a black screen, so the fit is checked after the mode is
   * actually set, and a mode that cannot hold its own screen is skipped rather than fatal. */
+ uint64_t budget=screen_budget();
  for(;;){
-  uint32_t selected=UINT32_MAX;uint64_t best=UINT64_MAX;
+  uint32_t selected=UINT32_MAX,fitting=UINT32_MAX;uint64_t best_pixels=0,best_fitting_pixels=0;
+  uint32_t best_stride=UINT32_MAX,best_fitting_stride=UINT32_MAX;
   for(uint32_t i=0;i<g->mode->max_mode&&i<4096;i++){
    int tried=0;for(size_t k=0;k<skipped_count;k++)if(skipped[k]==i)tried=1;
    if(tried)continue;
    size_t n=0;struct mode_info *m=0;s=g->query(g,i,&n,&m);
-   if(!FAILED(s)&&m){if(n>=sizeof(*m)&&mode_valid(m)){uint64_t pixels=(uint64_t)m->width*m->height;uint64_t score=pixels>=1024*768?pixels-1024*768:(1ULL<<32)+1024*768-pixels;if(score<best){best=score;selected=i;}}bs->free_pool(m);}
+   if(!FAILED(s)&&m){
+    if(n>=sizeof(*m)&&mode_valid(m)){
+     /* The largest mode the panel will take, not the one nearest a preferred size: the screen is what the
+      * user looks at, and every mode this picks is then checked against the aperture the firmware actually
+      * reserved (stride*height*4 <= mode->size) before it is accepted.  A larger mode that does not fit is
+      * skipped and the next largest is tried, so a card whose list advertises more than its aperture holds
+      * still ends up with the best of what it can display.  Equal areas are broken by the shorter stride,
+      * which is the cheaper scan-out and wastes less memory. */
+     uint64_t pixels=(uint64_t)m->width*m->height;
+     if(pixels>best_pixels||(pixels==best_pixels&&m->stride<best_stride)){best_pixels=pixels;best_stride=m->stride;selected=i;}
+     /* The largest mode the machine can pay for, which is the mode actually taken when there is one.  On a
+      * desktop with gigabytes of RAM this is every mode on the list and the choice is simply the largest; on a
+      * small machine it is the difference between a screen and no memory left to draw on it. */
+     if((uint64_t)m->stride*m->height*4<=budget&&
+        (pixels>best_fitting_pixels||(pixels==best_fitting_pixels&&m->stride<best_fitting_stride))){
+      best_fitting_pixels=pixels;best_fitting_stride=m->stride;fitting=i;}
+    }
+    bs->free_pool(m);
+   }
   }
+  if(fitting!=UINT32_MAX)selected=fitting;
   if(selected==UINT32_MAX)return skipped_count?ERROR(3):s;
   s=g->set(g,selected);
   const struct mode_info *m=g->mode->info;
@@ -410,6 +461,7 @@ status EFIAPI efi_main(handle image,struct system_table *table){
  if(checksum_size!=4||crc32(elf,elf_size)!=*(uint32_t*)checksum){log("Kernel file CRC mismatch\r\n");s=ERROR(27);goto fail;}
  phase="validate/load ELF";s=load_kernel(elf,elf_size,&kernel_base,&end,&entry);if(FAILED(s))goto fail;
  bs->free_pool(elf);elf=0;bs->free_pool(checksum);checksum=0;
+ phase="measure memory";measure_ram();
  phase="GOP framebuffer";struct boot_framebuffer fb;s=graphics(&fb);if(FAILED(s))goto fail;
  fatal_framebuffer=fb;
  phase="allocate boot arena";arena=0xffffffff;s=bs->allocate_pages(1,2,BOOT_ARENA_SIZE/4096,&arena);if(FAILED(s))goto fail;

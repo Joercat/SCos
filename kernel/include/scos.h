@@ -245,7 +245,8 @@ void fmt_pad2(char *out, u32 v);
 
 /* icon drawing (procedural, 24x24 logical box at x,y) */
 enum { ICON_FOLDER, ICON_TERMINAL, ICON_NOTEPAD, ICON_BROWSER,
-       ICON_CALENDAR, ICON_SETTINGS, ICON_INFO, ICON_CARDS, ICON_CHART, ICON_SOL, ICON_COUNT };
+       ICON_CALENDAR, ICON_SETTINGS, ICON_INFO, ICON_CARDS, ICON_CHART, ICON_SOL, ICON_NET,
+       ICON_COUNT };
 void s_icon(struct surface *s, int id, int x, int y, u32 c);
 u32  color_blend(u32 a, u32 b, int t);
 int  card_w(void);

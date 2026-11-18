@@ -17,9 +17,9 @@ def check(g,source,error=None,flags=0):
 def test():
   for ide in [False,True]:
     with Guest('cat-ide' if ide else 'cat-usb',ide=ide) as g:
-      # 11 visible native applications, 2 internal WM clients, and no application manager: the
+      # 12 visible native applications, 2 internal WM clients, and no application manager: the
       # functions that hub window used to gather belong to the surfaces they act on.
-      assert g.call('app_count')==13
+      assert g.call('app_count')==14
       # Raw source and project files are never launchable applications.
       g.save('home/apps/raw.lua','return {}');g.debug.write(g.scratch,b'home/apps/raw.lua\0');assert not g.call('lua_app_install',g.scratch)
       good=package('return {}')

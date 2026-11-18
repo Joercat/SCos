@@ -1,6 +1,7 @@
 /* Native startup/order boundary for the reused apps and original drivers.
  * Unsupported controllers retain explicit unavailable/fallback behavior. */
 #include "scos.h"
+#include "net.h"
 u64 cpu_tsc_hz;
 void cpu_hlt(void){
     uintptr_t flags;__asm__ volatile("pushfq;popq %0;cli":"=r"(flags)::"memory");
@@ -128,6 +129,12 @@ void desktop_start(const struct boot_framebuffer *fb){
     int loaded=fs_image_load();system_files_init(fs_image_available());
     boot_screen_step(loaded?"fs: verified saved tree loaded":fs_image_available()?"fs: defaults active; verified save target available":"fs: RAM-only; no supported verified save target",62);
     kbd_init();mouse_init();usb_init();
+    /* The cards are brought up after the buses they sit on are enumerated, and the address comes up last:
+     * net_start() is the policy decision (DHCP unless a static address was set), not the driver's. */
+    net_hardware_init();net_start();
+    { struct net_info ni; net_get_info(&ni);
+      if(ni.present) klog("net: %s present, %s, %u Mb/s link", ni.driver, ni.link ? "up" : "no", ni.speed_mbps);
+      else klog("net: no supported adapter on the PCI bus"); }
     input_status(line,sizeof(line));boot_screen_step(line,75);
     struct rtc_time rtc;rtc_read(&rtc);
     strcpy(line,"rtc: ");fmt_u32(number,rtc.year);strcat(line,number);strcat(line,"-");fmt_pad2(number,rtc.mon);strcat(line,number);strcat(line,"-");fmt_pad2(number,rtc.day);strcat(line,number);
